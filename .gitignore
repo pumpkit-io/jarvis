@@ -1,0 +1,4 @@
+.env
+.claude/worktrees/
+.sdlc/
+.DS_Store
