@@ -11,4 +11,4 @@ while [[ -L "$src" ]]; do
 done
 cd "$(cd "$(dirname "$src")" && pwd)"
 
-exec claude --dangerously-skip-permissions --model opus "$@" "/voicemode:converse"
+exec claude --dangerously-skip-permissions --model opus "/voicemode:converse" "$@"
