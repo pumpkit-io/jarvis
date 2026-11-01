@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Starts Jarvis in a voice conversation. Extra arguments go to claude, e.g. ./jarvis --continue.
+set -euo pipefail
+
+# Follow symlinks such as ~/.local/bin/jarvis so the session opens in this repo.
+src="${BASH_SOURCE[0]}"
+while [[ -L "$src" ]]; do
+  dir="$(cd "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ "$src" == /* ]] || src="$dir/$src"
+done
+cd "$(cd "$(dirname "$src")" && pwd)"
+
+exec claude --dangerously-skip-permissions --model opus "/voicemode:converse" "$@"
