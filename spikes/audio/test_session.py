@@ -396,6 +396,41 @@ def test_the_headphones_run_is_analysed_only_when_it_was_recorded():
     assert any(cmd[:2] == ["bench_aec.py", "analyse"] and cmd[2].endswith("headphones-run") for cmd in session.benches(recordings))
 
 
+class FakePortAudio:
+    """sounddevice as PortAudio sees it: the device list is read once per initialisation."""
+
+    def __init__(self, *device_lists):
+        self.lists, self.now = list(device_lists), device_lists[0]
+
+    def _terminate(self):
+        pass
+
+    def _initialize(self):
+        self.now = self.lists.pop(1) if len(self.lists) > 1 else self.now
+
+    def query_devices(self, kind=None):
+        if kind == "output":
+            return self.now[self.now["default_output"]]
+        return [d for k, d in self.now.items() if k != "default_output"]
+
+
+def device(index: int, name: str, inputs: int, outputs: int) -> dict:
+    return {"index": index, "name": name, "max_input_channels": inputs, "max_output_channels": outputs}
+
+
+def test_headphones_connected_after_start_are_found_and_played_to():
+    at_start = {0: device(0, "MacBook Pro Microphone", 1, 0), 1: device(1, "MacBook Pro Speakers", 0, 2), "default_output": 1}
+    plugged = {0: device(0, "AirPods Pro", 1, 2), 1: device(1, "MacBook Pro Microphone", 1, 0),
+               2: device(2, "MacBook Pro Speakers", 0, 2), "default_output": 0}
+    saved = session.sd
+    try:
+        session.sd = FakePortAudio(at_start, at_start, plugged)
+        assert session.headphones_devices() is None
+        assert session.headphones_devices() == (1, 0)
+    finally:
+        session.sd = saved
+
+
 def test_report_replaces_its_block_instead_of_adding_another():
     notes = "# Notes\n\n## Audio\n\nText.\n\n## Next\n\nMore.\n"
     once = report.place(notes, "### Results (day 1)\n\nold")
