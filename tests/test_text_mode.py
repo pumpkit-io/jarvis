@@ -279,7 +279,7 @@ async def test_speak_says_the_startup_line_then_every_reply_and_ends_once_they_h
     config = settings(tmp_path)
 
     stdout, stderr = await converse(
-        backend, io.StringIO("Good evening\nTutto bene?\n"), config=config, voice=Voice(FakeTts(), player)
+        backend, io.StringIO("Good evening\nTutto bene?\n"), config=config, voice=Voice(FakeTts(), lambda rate: player)
     )
 
     assert stdout == "› Good evening\nGood evening, sir. All quiet.\n› Tutto bene?\nBene, signore.\n"
@@ -294,4 +294,19 @@ async def test_speak_says_the_startup_line_then_every_reply_and_ends_once_they_h
     rows = [json.loads(line) for line in (config.runtime_dir / "metrics.jsonl").read_text().splitlines()]
     assert [(r["kind"], r.get("lang")) for r in rows if r["kind"] == "speech"] == [("speech", "en"), ("speech", "it")]
     assert [r["load_ms"] for r in rows if r["kind"] == "voice_loaded"] == [0]
+
+
+
+async def test_speak_with_no_audio_output_goes_on_in_text(tmp_path: Path) -> None:
+    backend = FakeBackend(FakeClock(), [[Text("Good evening, sir.")]])
+
+    def no_device(rate: int) -> RecordingPlayer:
+        raise OSError("no output device")
+
+    stdout, stderr = await converse(
+        backend, io.StringIO("Good evening\n"), config=settings(tmp_path), voice=Voice(FakeTts(), no_device)
+    )
+
+    assert stdout == "› Good evening\nGood evening, sir.\n"
+    assert stderr == "[hub] Speech is off: no audio output: OSError: no output device\n"
 

@@ -10,7 +10,7 @@ import shutil
 import sys
 import threading
 import time
-from collections.abc import AsyncIterator, MutableMapping
+from collections.abc import AsyncIterator, Callable, MutableMapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,10 +53,10 @@ class MonotonicClock:
 
 @dataclass(frozen=True)
 class Voice:
-    """What `--speak` adds: a synthesiser and the player for the default output."""
+    """What `--speak` adds: a synthesiser, and how to open a player at its sample rate."""
 
     tts: Synthesizer
-    player: Player
+    open_player: Callable[[int], Player]
 
 
 class JsonlMetrics:
@@ -178,12 +178,18 @@ async def text_mode(
     interactive = stdin.isatty()
     output = TerminalOutput(stdout, stderr, prompt=interactive, show_log=settings.runtime_dir / "show.log")
     metrics = JsonlMetrics(settings.runtime_dir / "metrics.jsonl")
+    talker, orchestrator = talker_spec(settings), orchestrator_spec(settings)
     speech = None
     if voice is not None:
-        speech = Speech(voice.tts, voice.player, clock, metrics=metrics, notice=output.notice)
+        try:
+            player = voice.open_player(voice.tts.sample_rate)
+        except Exception as e:
+            output.notice(f"Speech is off: no audio output: {type(e).__name__}: {e}")
+        else:
+            speech = Speech(voice.tts, player, clock, metrics=metrics, notice=output.notice)
     hub = Hub(
-        talker=talker_spec(settings),
-        orchestrator=orchestrator_spec(settings),
+        talker=talker,
+        orchestrator=orchestrator,
         backend=backend,
         clock=clock,
         output=output,
@@ -203,9 +209,11 @@ async def text_mode(
         if speech is not None:
             await speech.idle()
     finally:
-        await hub.close()
-        if speech is not None:
-            await speech.close()
+        try:
+            await hub.close()
+        finally:
+            if speech is not None:
+                await speech.close()
 
 
 def main() -> None:
@@ -216,10 +224,7 @@ def main() -> None:
 
     if not args.text:
         sys.exit("jarvis-hub: only text mode exists so far; run `jarvis-hub --text`.")
-    voice = None
-    if args.speak:
-        tts = KokoroSynthesizer()
-        voice = Voice(tts, SoundPlayer(tts.sample_rate))
+    voice = Voice(KokoroSynthesizer(), SoundPlayer) if args.speak else None
     cli = shutil.which("claude")
     if cli is None:
         sys.exit("jarvis-hub: the claude CLI is not on PATH; install Claude Code and log in with your Max plan.")
