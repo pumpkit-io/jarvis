@@ -10,6 +10,8 @@ from typing import Literal, TypeGuard, get_args
 DEFAULT_ORG = "pumpkit-io"
 
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
+# Lowest first, so a level's index orders it.
+EFFORTS: tuple[Effort, ...] = get_args(Effort)
 
 _ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
 _QUOTED = re.compile(r"^\"([^\"]*)\"|^'([^']*)'")
@@ -35,6 +37,9 @@ class Settings:
     runtime_dir: Path
     talker: RoleModel
     orchestrator: RoleModel
+    # No Subagent runs above this effort, whatever the User or the Orchestrator asks.
+    max_effort: Effort = "max"
+    max_subagents: int = 3
 
 
 def parse_env(data: bytes) -> dict[str, str]:
@@ -61,7 +66,7 @@ def parse_env(data: bytes) -> dict[str, str]:
     return values
 
 
-def _is_effort(value: str) -> TypeGuard[Effort]:
+def is_effort(value: str) -> TypeGuard[Effort]:
     return value in get_args(Effort)
 
 
@@ -92,9 +97,15 @@ def load_settings(repo_dir: Path, environ: Mapping[str, str]) -> Settings:
 
     def effort(name: str, default: Effort) -> Effort:
         value = get(name, default)
-        if not _is_effort(value):
+        if not is_effort(value):
             raise ConfigError(f"{name}={value!r} is not one of {', '.join(get_args(Effort))}")
         return value
+
+    def count(name: str, default: int) -> int:
+        value = get(name, str(default))
+        if not value.isdigit() or int(value) < 1:
+            raise ConfigError(f"{name}={value!r} is not a whole number of at least 1")
+        return int(value)
 
     return Settings(
         user_name=values.get("JARVIS_USER_NAME") or None,
@@ -110,4 +121,6 @@ def load_settings(repo_dir: Path, environ: Mapping[str, str]) -> Settings:
             # Left to the model: the Orchestrator judges results, and its latency is not heard.
             thinking=True,
         ),
+        max_effort=effort("JARVIS_MAX_EFFORT", "max"),
+        max_subagents=count("JARVIS_MAX_SUBAGENTS", 3),
     )

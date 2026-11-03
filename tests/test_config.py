@@ -157,3 +157,30 @@ def test_unknown_effort_is_refused(checkout: Path) -> None:
     (checkout / ".env").write_text("JARVIS_ORCHESTRATOR_EFFORT=extreme\n")
     with pytest.raises(ConfigError, match="JARVIS_ORCHESTRATOR_EFFORT"):
         load_settings(checkout, environ={})
+
+
+def test_subagent_limits_default_to_max_effort_and_three_at_once(checkout: Path) -> None:
+    settings = load_settings(checkout, environ={})
+    assert (settings.max_effort, settings.max_subagents) == ("max", 3)
+
+
+def test_subagent_limits_come_from_dotenv(checkout: Path) -> None:
+    (checkout / ".env").write_text("JARVIS_MAX_EFFORT=high\nJARVIS_MAX_SUBAGENTS=2\n")
+    settings = load_settings(checkout, environ={})
+    assert (settings.max_effort, settings.max_subagents) == ("high", 2)
+
+
+@pytest.mark.parametrize(
+    ("line", "name"),
+    [
+        ("JARVIS_MAX_EFFORT=ultra", "JARVIS_MAX_EFFORT"),
+        ("JARVIS_MAX_SUBAGENTS=0", "JARVIS_MAX_SUBAGENTS"),
+        ("JARVIS_MAX_SUBAGENTS=two", "JARVIS_MAX_SUBAGENTS"),
+        ("JARVIS_MAX_SUBAGENTS=-1", "JARVIS_MAX_SUBAGENTS"),
+    ],
+    ids=["unknown effort", "zero Subagents", "a word", "negative"],
+)
+def test_bad_subagent_limits_are_refused(checkout: Path, line: str, name: str) -> None:
+    (checkout / ".env").write_text(line + "\n")
+    with pytest.raises(ConfigError, match=name):
+        load_settings(checkout, environ={})
