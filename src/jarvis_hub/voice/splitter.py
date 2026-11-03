@@ -2,10 +2,15 @@
 
 import re
 
-_SENTENCE_END = re.compile(r"[.?!…]+[\"'”’)\]]*(?=\s)")
-_SENTENCE_END_AT_END = re.compile(r"[.?!…]+[\"'”’)\]]*$")
+# Closing quotes, brackets and markdown emphasis may follow the mark: "**Done.** Next".
+_SENTENCE_END = re.compile(r"[.?!…]+[\"'”’)\]*_]*(?=\s)")
+_SENTENCE_END_AT_END = re.compile(r"[.?!…]+[\"'”’)\]*_]*$")
 _CLAUSE_END = re.compile(r"[,;:](?=\s)")
 _LAST_WORD = re.compile(r"(\S+)$")
+# Such as "a.m.", "U.S.": a sentence end only when the next word starts with a capital.
+_DOTTED = re.compile(r"(?:[a-z]\.)+[a-z]")
+# A word holding one of these before its final dot may be a URL, address or path the next delta continues.
+_LINKISH = re.compile(r"[/@:_\\=?#&~.]")
 
 # Compared without the final dot and in lower case; a single letter counts too, as an initial.
 # Left out: words that also end English sentences, such as "on." and "art."
@@ -25,9 +30,8 @@ CLAUSE_WORDS = 6
 
 
 class SentenceSplitter:
-    """One per reply. A sentence ends at `.?!` and a space, or at the end of a text block; the reply's
-    first clause ends early at `,;:` and a space once it has six words. Numbers, abbreviations, URLs and
-    code in backticks are never cut."""
+    """One per reply. A sentence ends at `.?!` and a space, or at a block's end; the first clause, at `,;:` and a space
+    once it has six words. Numbers, abbreviations, URLs and code are never cut, and a piece with no word is dropped."""
 
     def __init__(self) -> None:
         self._buffer = ""
@@ -43,23 +47,26 @@ class SentenceSplitter:
     def at_sentence_end(self) -> bool:
         """Whether the text so far ends on what reads as a sentence end, though no space has followed yet.
 
-        A digit before the dot never does, so "3." then "5" stays one number.
+        Neither a digit before the dot ("3." then "5") nor a word with a link's marks ("github.com/x." then "y") does.
         """
         match = _SENTENCE_END_AT_END.search(self._buffer)
         if match is None or not self._ends_sentence(match.start(), match.end()):
             return False
-        return not (self._buffer[match.start()] == "." and self._buffer[: match.start()][-1:].isdigit())
+        if self._buffer[match.start()] != ".":
+            return True
+        word = _LAST_WORD.search(self._buffer[: match.start()])
+        return word is not None and not word.group(1)[-1].isdigit() and not _LINKISH.search(word.group(1))
 
     def end_block(self) -> list[str]:
-        """Text either side of a tool call arrives with no space between, so a block's end is a sentence end."""
-        return self._take(len(self._buffer))
+        """The rest of the text, at the end of a text block or of the reply.
 
-    def flush(self) -> list[str]:
+        Text either side of a tool call arrives with no space between, so a block's end is a sentence end.
+        """
         return self._take(len(self._buffer))
 
     def _take(self, cut: int) -> list[str]:
         chunk, self._buffer = self._buffer[:cut].strip(), self._buffer[cut:]
-        if not chunk:
+        if not any(c.isalnum() for c in chunk):
             return []
         self._emitted += 1
         return [chunk]
@@ -81,8 +88,13 @@ class SentenceSplitter:
         word = _LAST_WORD.search(before)
         if word is None:
             return True
-        word_text = word.group(1).lstrip("(\"'“‘").lower()
-        return not (word_text in ABBREVIATIONS or (len(word_text) == 1 and word_text.isalpha()))
+        word_text = word.group(1).lstrip("(\"'“‘*_").lower()
+        if word_text in ABBREVIATIONS or (len(word_text) == 1 and word_text.isalpha()):
+            return False
+        if _DOTTED.fullmatch(word_text):
+            following = self._buffer[end:].lstrip()
+            return following[:1].isupper()
+        return True
 
     def _ends_first_clause(self, end: int) -> bool:
         return not self._in_code(end) and len(self._buffer[:end].split()) >= CLAUSE_WORDS

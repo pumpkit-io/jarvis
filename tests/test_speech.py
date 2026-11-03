@@ -449,3 +449,16 @@ async def test_a_delta_that_follows_quickly_is_not_cut_off(
     await speech.idle()
 
     assert player.texts == ["Visit pumpkit.io today, sir."]
+
+
+async def test_a_link_cut_between_slow_deltas_stays_whole(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, speech: Speech, player: RecordingPlayer
+) -> None:
+    backend = FakeBackend(clock, [[Text("It is on github.com/pumpkit."), Wait(0.5), Text("io today, sir.")]])
+    hub = speaking_hub(backend, output, metrics, speech)
+
+    await hub.start()
+    await hub.run(lines(clock, "Where?"))
+    await speech.idle()
+
+    assert player.texts == ["It is on github.com/pumpkit.io today, sir."]

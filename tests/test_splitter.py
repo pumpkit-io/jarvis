@@ -11,7 +11,7 @@ def split(*pieces: object) -> list[str]:
     out: list[str] = []
     for piece in pieces:
         out += splitter.end_block() if piece is BLOCK else splitter.feed(str(piece))
-    return out + splitter.flush()
+    return out + splitter.end_block()
 
 
 @pytest.mark.parametrize(
@@ -36,6 +36,16 @@ def split(*pieces: object) -> list[str]:
         (["Carry on. Fine art. Next."], ["Carry on.", "Fine art.", "Next."]),
         (["1. Open the PR. 2. Merge it."], ["1. Open the PR.", "2. Merge it."]),
         (["The meeting is at 10:30. Fine."], ["The meeting is at 10:30.", "Fine."]),
+        (["It is on pumpkit.", "io/docs. Have a look."], ["It is on pumpkit.io/docs.", "Have a look."]),
+        (["See https://github.", "com/pumpkit-io/", "jarvis. Done."], ["See https://github.com/pumpkit-io/jarvis.", "Done."]),
+        (["We meet at 10 a.m. tomorrow. Fine."], ["We meet at 10 a.m. tomorrow.", "Fine."]),
+        (["We meet at 10 a.m. ", "Then lunch."], ["We meet at 10 a.m.", "Then lunch."]),
+        (["Back by 5 p.m. sharp, sir."], ["Back by 5 p.m. sharp, sir."]),
+        (["The U.S. team is online. Good."], ["The U.S. team is online.", "Good."]),
+        (["**Done.** Next, the deploy."], ["**Done.**", "Next, the deploy."]),
+        # Nothing to say aloud in an emoji.
+        (["Done, sir. 👍"], ["Done, sir."]),
+        (["🎉", BLOCK, "Merged."], ["Merged."]),
         (["Right away, sir.", BLOCK, "The task is queued."], ["Right away, sir.", "The task is queued."]),
         (["Right away, sir", BLOCK, BLOCK, "Done"], ["Right away, sir", "Done"]),
         (["   ", BLOCK, "Hi. "], ["Hi."]),
@@ -82,7 +92,14 @@ def test_a_number_cut_between_deltas_is_not_a_sentence_end() -> None:
 
     assert splitter.feed("It costs 3.") == []
     assert splitter.feed("5 dollars") == []
-    assert splitter.flush() == ["It costs 3.5 dollars"]
+    assert splitter.end_block() == ["It costs 3.5 dollars"]
+
+
+def test_a_dotted_abbreviation_waits_for_the_next_word() -> None:
+    splitter = SentenceSplitter()
+
+    assert splitter.feed("We meet at 10 a.m. ") == []
+    assert splitter.feed("Then") == ["We meet at 10 a.m."]
 
 
 def test_the_end_of_a_text_block_ends_a_sentence() -> None:
@@ -107,6 +124,13 @@ def test_the_end_of_a_text_block_ends_a_sentence() -> None:
         ("Chieda al Dott.", False),
         ("Run `uv sync.", False),
         ("1.", False),
+        ("It is on github.com/pumpkit.", False),
+        ("Visit www.pumpkit.", False),
+        ("See docs/notes/phase-0-spikes.", False),
+        ("Write to ada@pumpkit.", False),
+        ("We meet at 10 a.m.", False),
+        ("The U.S.", False),
+        ("**Done.**", True),
         ("Good evening, sir. ", False),
         ("Good evening", False),
         ("", False),

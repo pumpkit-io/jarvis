@@ -157,7 +157,7 @@ class Speech:
         if reply is None:
             return
         self._cancel_settle()
-        self._say(reply.splitter.flush())
+        self._say(reply.splitter.end_block())
         self._cancel_holding_line()
         self._queue.put_nowait(_End(reply))
         self._reply = None
