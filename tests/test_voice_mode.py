@@ -693,3 +693,26 @@ async def test_news_after_the_input_ends_while_idle_is_all_shown_and_the_hub_sto
 
     await until(lambda: rig.running.done())
     assert [r for r in rig.output.replies if r in (NEWS, DOCS)] == [NEWS, DOCS]
+
+
+async def test_a_wake_word_queued_as_news_claims_the_voice_interrupts_the_news(rig_for: MakeRig) -> None:
+    rig, [arrival] = await news_rig(rig_for, [Text(NEWS), AwaitInterrupt()], [Text("Green, sir.")])
+    announce = rig.voice.announce
+
+    def wake_then_announce() -> bool:
+        rig.audio.wake()
+        return announce()
+
+    rig.voice.announce = wake_then_announce  # type: ignore[method-assign]
+    rig.clock.advance(1)
+    await arrive(rig, arrival)
+    await until(lambda: rig.state == "listening")
+    rig.voice.announce = announce  # type: ignore[method-assign]
+    rig.audio.say("Is the CI green?")
+    await until(lambda: "Green, sir." in rig.player.texts and rig.state == "follow_up")
+    await rig.advance(7)
+
+    assert talker_kinds(rig)[-2:] == ["event", "user"]
+    assert NEWS not in rig.player.texts
+    assert rig.states()[-7:-4] == ["idle", "announce", "listening"]
+    assert "stop" in rig.player.events
