@@ -2,6 +2,8 @@
 
     uv run bench_stt.py --source synthetic            # every engine, one subprocess each
     uv run bench_stt.py --source recordings --engine parakeet
+
+:2023 is measured only as the server whose pid --turbo-pid names, so a stray listener never becomes the turbo row.
 """
 
 import argparse
@@ -25,6 +27,7 @@ ENGINES = ["parakeet", "mlx-whisper", "server-2022", "server-2023"]
 SERVER_PORTS = {"server-2022": 2022, "server-2023": 2023}
 SNIPPETS_S = [0.4, 0.6, 0.8]
 RUNS = 3
+SKIPPED_EXIT = 3  # a child exits with this when the engine the session expected was skipped
 
 
 class Parakeet:
@@ -75,9 +78,8 @@ class WhisperServer:
         match = re.search(r"--model (\S+)", cmd)
         return match.group(1).rsplit("/", 1)[-1] if match else "?"
 
-    def pid(self) -> int:
-        out = subprocess.run(["lsof", "-t", f"-iTCP:{self.port}", "-sTCP:LISTEN"], capture_output=True, text=True).stdout
-        return int(out.split()[0])
+    def pid(self) -> int | None:
+        return listener_pid(self.port)
 
     def __call__(self, audio: np.ndarray) -> tuple[str, str | None]:
         buf = io.BytesIO()
@@ -183,27 +185,70 @@ def run_engine(engine: str, source: str) -> dict:
     }
 
 
+def listener_pid(port: int) -> int | None:
+    out = subprocess.run(["lsof", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"], capture_output=True, text=True).stdout.split()
+    return int(out[0]) if out else None
+
+
+def server_skip(engine: str, listener_pid: int | None, turbo_pid: int | None) -> str | None:
+    """Why a server engine is not measured, or None when it is."""
+    port = SERVER_PORTS[engine]
+    if listener_pid is None:
+        return f"nothing listening on :{port}"
+    if engine != "server-2023":
+        return None
+    if turbo_pid is None:
+        return f"pid {listener_pid} on :{port} was not started by the session (no --turbo-pid), so it is not the turbo row"
+    if listener_pid != turbo_pid:
+        return f"pid {listener_pid} on :{port} is not the turbo server the session started (pid {turbo_pid})"
+    return None
+
+
+def expected_but_skipped(engine: str, skipped: dict, turbo_pid: int | None) -> bool:
+    """The session started a turbo server for this run, so leaving its row out is a failure, not a quiet skip."""
+    return engine == "server-2023" and turbo_pid is not None and bool(skipped.get(engine))
+
+
+def loud(text: str) -> None:
+    bar = "!" * 72
+    print(f"\n{bar}\n{text}\n{bar}\n", flush=True)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", choices=["synthetic", "recordings"], default="synthetic")
     ap.add_argument("--engine", choices=ENGINES)
+    ap.add_argument("--turbo-pid", type=int, help="pid of the whisper.cpp turbo server on :2023 to measure")
     args = ap.parse_args()
+    skipped = {e: server_skip(e, listener_pid(SERVER_PORTS[e]), args.turbo_pid)
+               for e in ([args.engine] if args.engine else ENGINES) if e in SERVER_PORTS}
+    for engine, reason in skipped.items():
+        if reason:
+            loud(f"skip {engine}: {reason}")
     if args.engine:
+        if skipped.get(args.engine):
+            if expected_but_skipped(args.engine, skipped, args.turbo_pid):
+                sys.exit(SKIPPED_EXIT)
+            return
         result = run_engine(args.engine, args.source)
         path = write_result(f"stt-{args.engine}-{args.source}", result)
         print(json.dumps({k: v for k, v in result.items() if k != "clips"}, indent=2, ensure_ascii=False))
         print(f"-> {path}")
         return
-    crashed = []
+    missing = []
     for engine in ENGINES:
-        if engine.startswith("server") and subprocess.run(["lsof", "-t", f"-iTCP:{SERVER_PORTS[engine]}", "-sTCP:LISTEN"], capture_output=True).returncode:
-            print(f"skip {engine}: nothing listening")
+        if skipped.get(engine):
+            if expected_but_skipped(engine, skipped, args.turbo_pid):
+                missing.append(f"{engine} (skipped)")
             continue
-        code = subprocess.run([sys.executable, str(HERE / "bench_stt.py"), "--source", args.source, "--engine", engine]).returncode
+        cmd = [sys.executable, str(HERE / "bench_stt.py"), "--source", args.source, "--engine", engine]
+        if engine == "server-2023" and args.turbo_pid is not None:
+            cmd += ["--turbo-pid", str(args.turbo_pid)]
+        code = subprocess.run(cmd).returncode
         if code:
-            crashed.append(f"{engine} (exit {code})")
-    if crashed:
-        sys.exit(f"STT engines that crashed, so their rows are missing: {', '.join(crashed)}")
+            missing.append(f"{engine} ({'skipped' if code == SKIPPED_EXIT else f'exit {code}'})")
+    if missing:
+        sys.exit(f"STT engines that crashed or were skipped, so their rows are missing: {', '.join(missing)}")
 
 
 if __name__ == "__main__":
