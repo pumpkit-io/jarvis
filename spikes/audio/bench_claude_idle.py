@@ -38,15 +38,44 @@ def drain(fd: int, stop: threading.Event) -> None:
                 return
 
 
+def signal_group(pid: int, sig: int) -> None:
+    try:
+        os.killpg(pid, sig)
+    except ProcessLookupError:
+        pass
+
+
 def end(pid: int) -> None:
-    """Stop a session: SIGTERM first, SIGKILL if it is still there five seconds later."""
-    os.kill(pid, signal.SIGTERM)
+    """Stop a session and every process it started: SIGTERM first, SIGKILL for whatever is left five seconds later.
+
+    pty.fork makes each session the leader of its own process group, which its MCP servers join.
+    """
+    signal_group(pid, signal.SIGTERM)
     for _ in range(50):
         if os.waitpid(pid, os.WNOHANG)[0]:
-            return
+            break
         time.sleep(0.1)
-    os.kill(pid, signal.SIGKILL)
-    os.waitpid(pid, 0)
+    else:
+        signal_group(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+    signal_group(pid, signal.SIGKILL)
+
+
+def idle_footprints(cwd: Path, settle_s: int) -> list[dict]:
+    """Start SESSIONS sessions in `cwd`, leave them at the prompt for `settle_s` seconds and measure each one."""
+    stop = threading.Event()
+    sessions = []
+    try:
+        for _ in range(SESSIONS):
+            sessions.append(spawn(cwd))
+            threading.Thread(target=drain, args=(sessions[-1][1], stop), daemon=True).start()
+        time.sleep(settle_s)
+        return [{"footprint": footprint_mb(pid), "rss": round(rss_mb(pid))} for pid, _ in sessions]
+    finally:
+        # Draining continues until every session has exited: an exiting session blocks on a full pty.
+        for pid, _ in sessions:
+            end(pid)
+        stop.set()
 
 
 def main() -> None:
@@ -54,18 +83,7 @@ def main() -> None:
     ap.add_argument("--cwd", type=Path, required=True, help="a folder Claude Code already trusts")
     ap.add_argument("--settle-s", type=int, default=60)
     args = ap.parse_args()
-    stop = threading.Event()
-    sessions = [spawn(args.cwd.resolve()) for _ in range(SESSIONS)]
-    for _, fd in sessions:
-        threading.Thread(target=drain, args=(fd, stop), daemon=True).start()
-    try:
-        time.sleep(args.settle_s)
-        procs = [{"footprint": footprint_mb(pid), "rss": round(rss_mb(pid))} for pid, _ in sessions]
-    finally:
-        # Draining continues until every session has exited: an exiting session blocks on a full pty.
-        for pid, _ in sessions:
-            end(pid)
-        stop.set()
+    procs = idle_footprints(args.cwd.resolve(), args.settle_s)
     feet = [p["footprint"] for p in procs if p["footprint"]]
     result = {
         "claude_version": subprocess.run(["claude", "--version"], capture_output=True, text=True).stdout.strip(),

@@ -89,6 +89,5 @@
   "audio_stack_footprint_mb": 2424.0,
   "budget_mb": 4096,
   "within_budget": true,
-  "audio_plus_three_claude_mb": 3302,
   "machine_total_mb": 18432
 }
