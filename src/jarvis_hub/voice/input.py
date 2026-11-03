@@ -367,6 +367,9 @@ class Capture:
                 continue
             with self._backlog_lock:
                 self._backlog -= 1
+                # Caught up: a later backlog gets its own notice.
+                if self._backlog == 0:
+                    self._behind = False
             silent = silent + 1 if not item[0].any() else 0
             if silent == round(SILENT_MIC_S * 100):
                 self._on_loop(

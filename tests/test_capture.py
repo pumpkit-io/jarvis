@@ -141,6 +141,26 @@ async def test_a_capture_thread_that_falls_behind_drops_audio_rather_than_queuei
     capture.close()
 
 
+async def test_falling_behind_again_after_catching_up_is_reported_again() -> None:
+    notices, source, wake = list[str](), Source(), BlockingWake()
+    capture = Capture(
+        lambda: engines(CountingEcho(), wake), Listening(), lambda row: None, notices.append, source=source, backlog_s=0.5
+    )
+    capture.start()
+    await asyncio.to_thread(capture.ready.wait, 5)
+
+    source.frames(500, value=3)
+    await until(lambda: any("falling behind" in n for n in notices))
+    wake.release.set()
+    await asyncio.sleep(0.2)
+    wake.release.clear()
+    source.frames(500, value=3, start=5.0)
+    await until(lambda: len([n for n in notices if "falling behind" in n]) == 2)
+    wake.release.set()
+
+    capture.close()
+
+
 def test_the_echo_reference_keeps_only_the_latest_audio() -> None:
     buffer = ReferenceBuffer(max_s=1.0)
     for i in range(30):
