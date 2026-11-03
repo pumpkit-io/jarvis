@@ -195,6 +195,7 @@ async def text_mode(
         output=output,
         metrics=metrics,
         speech=speech,
+        talker_restart_at=settings.talker_restart_at,
     )
     try:
         await hub.start()

@@ -1,5 +1,6 @@
 """Settings from `.env` in the main checkout, with the process environment taking precedence."""
 
+import math
 import re
 import subprocess
 from collections.abc import Mapping
@@ -8,6 +9,8 @@ from pathlib import Path
 from typing import Literal, TypeGuard, get_args
 
 DEFAULT_ORG = "pumpkit-io"
+# Of the Talker's context window: a long conversation keeps its speed by restarting well before it fills.
+DEFAULT_TALKER_RESTART_AT = 0.40
 
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 
@@ -35,6 +38,7 @@ class Settings:
     runtime_dir: Path
     talker: RoleModel
     orchestrator: RoleModel
+    talker_restart_at: float = DEFAULT_TALKER_RESTART_AT
 
 
 def parse_env(data: bytes) -> dict[str, str]:
@@ -96,6 +100,16 @@ def load_settings(repo_dir: Path, environ: Mapping[str, str]) -> Settings:
             raise ConfigError(f"{name}={value!r} is not one of {', '.join(get_args(Effort))}")
         return value
 
+    def fraction(name: str, default: float) -> float:
+        raw = get(name, str(default))
+        try:
+            value = float(raw)
+        except ValueError:
+            value = math.nan
+        if not 0 < value <= 1:
+            raise ConfigError(f"{name}={raw!r} is not a fraction of the window above 0 and up to 1")
+        return value
+
     return Settings(
         user_name=values.get("JARVIS_USER_NAME") or None,
         org=get("JARVIS_GITHUB_ORG", DEFAULT_ORG),
@@ -110,4 +124,5 @@ def load_settings(repo_dir: Path, environ: Mapping[str, str]) -> Settings:
             # Left to the model: the Orchestrator judges results, and its latency is not heard.
             thinking=True,
         ),
+        talker_restart_at=fraction("JARVIS_TALKER_RESTART_AT", DEFAULT_TALKER_RESTART_AT),
     )

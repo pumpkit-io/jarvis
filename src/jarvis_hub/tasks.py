@@ -1,5 +1,6 @@
 """The Hub's record of every Task this launch: what the Talker asks about, answered without a model call."""
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -74,13 +75,22 @@ class Tasks:
         """One line per Task, newest first, for the Talker to read out of."""
         if not self._tasks:
             return "No Tasks this session."
+        return "\n".join(self._lines(reversed(self._tasks.values()), now))
+
+    def open_status(self, now: float) -> str:
+        """Like `status`, for the Tasks not yet finished (a cancelled one with a message still queued counts)."""
+        open_tasks = [t for t in self._tasks.values() if t.state not in FINISHED or (t.waiting and not t.cancelled)]
+        return "\n".join(self._lines(reversed(open_tasks), now)) if open_tasks else "No open Tasks."
+
+    @staticmethod
+    def _lines(tasks: Iterable[Task], now: float) -> list[str]:
         lines: list[str] = []
-        for task in reversed(self._tasks.values()):
+        for task in tasks:
             line = f"{task.id} {task.state.replace('_', ' ')}, started {_ago(now - task.created)} ago: {task.request}"
             if task.last_report:
                 line += f" | Last report: {task.last_report}"
             lines.append(line)
-        return "\n".join(lines)
+        return lines
 
 
 def no_task(task_id: object) -> str:

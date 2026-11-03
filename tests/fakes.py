@@ -11,6 +11,7 @@ import numpy as np
 
 from jarvis_hub.agents.backend import (
     AgentEvent,
+    Context,
     SessionSpec,
     TextDelta,
     TextEnd,
@@ -100,7 +101,7 @@ class Abort:
     """Ends the turn as interrupted although nobody called interrupt(), as when the CLI aborts on its own."""
 
 
-Step = Wait | Text | Tool | AwaitInterrupt | Gate | Set | Fail | Raise | Abort | Usage
+Step = Wait | Text | Tool | AwaitInterrupt | Gate | Set | Fail | Raise | Abort | Usage | Context
 
 
 @dataclass(frozen=True)
@@ -133,7 +134,7 @@ class FakeSession:
             self._sending = False
 
     async def _play(self, script: Sequence[Step]) -> AsyncIterator[AgentEvent]:
-        usage, in_text = Usage(), False
+        usage, context, in_text = Usage(), None, False
         for step in script:
             await asyncio.sleep(0)
             if isinstance(step, Text):
@@ -160,16 +161,18 @@ class FakeSession:
                 case Raise(error):
                     raise error
                 case Fail(error):
-                    yield TurnEnd("failed", usage, error)
+                    yield TurnEnd("failed", usage, error, context)
                     return
                 case Abort():
-                    yield TurnEnd("interrupted", usage)
+                    yield TurnEnd("interrupted", usage, context=context)
                     return
                 case Usage():
                     usage = step
+                case Context():
+                    context = step
         if in_text:
             yield TextEnd()
-        yield TurnEnd("interrupted" if self._interrupted.is_set() else "completed", usage)
+        yield TurnEnd("interrupted" if self._interrupted.is_set() else "completed", usage, context=context)
 
     async def interrupt(self) -> None:
         # Like the CLI: the interrupt lands on whatever turn runs when it arrives, or on none.
@@ -185,7 +188,8 @@ class FakeSession:
 
 
 class FakeBackend:
-    """Plays one script per message, in order, per role; `warm_up` answers the Talker's warm-up message.
+    """Plays one script per message, in order, per role; `warm_up` answers the Talker's warm-up message and
+    `seed_reply` the seed a restarted Talker starts with.
 
     An Orchestrator with no script left ends its turn without a report.
     """
@@ -195,6 +199,8 @@ class FakeBackend:
         clock: FakeClock,
         scripts: Iterable[Sequence[Step]] = (),
         warm_up: Sequence[Step] = (Text("Ready."),),
+        seed_reply: Sequence[Step] = (Text("Ready."),),
+        restart_error: Exception | None = None,
         open_error: Exception | None = None,
         orchestrator: Iterable[Sequence[Step]] = (),
         orchestrator_open_error: Exception | None = None,
@@ -205,6 +211,8 @@ class FakeBackend:
         self.scripts = list(scripts)
         self.orchestrator_scripts = list(orchestrator)
         self.warm_up = warm_up
+        self.seed_reply = seed_reply
+        self.restart_error = restart_error
         self.open_error = open_error
         self.orchestrator_open_error = orchestrator_open_error
         self.interrupt_gate = interrupt_gate
@@ -213,6 +221,8 @@ class FakeBackend:
 
     async def open(self, spec: SessionSpec) -> FakeSession:
         error = self.orchestrator_open_error if spec.role == "orchestrator" else self.open_error
+        if spec.role == "talker" and self.all_sessions("talker"):
+            error = self.restart_error
         if error is not None:
             raise error
         session = FakeSession(self, spec)
@@ -230,6 +240,8 @@ class FakeBackend:
             return self.orchestrator_scripts.pop(0) if self.orchestrator_scripts else ()
         if message == WARM_UP:
             return self.warm_up
+        if message.startswith("<event source=\"hub\" reason=\"restart\""):
+            return self.seed_reply
         return self.scripts.pop(0) if self.scripts else (Text("Very good, sir."),)
 
 

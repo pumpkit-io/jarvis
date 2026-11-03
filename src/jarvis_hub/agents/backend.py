@@ -67,6 +67,18 @@ class Usage:
 
 
 @dataclass(frozen=True)
+class Context:
+    """How full a session's context was at its last request: prompt tokens against the model's window."""
+
+    tokens: int
+    window: int
+
+    @property
+    def used(self) -> float:
+        return self.tokens / self.window if self.window else 0.0
+
+
+@dataclass(frozen=True)
 class TextDelta:
     text: str
 
@@ -87,6 +99,8 @@ class TurnEnd:
     outcome: Literal["completed", "interrupted", "failed"]
     usage: Usage = Usage()
     error: str | None = None
+    # Left out when the backend could not tell, which never triggers a restart.
+    context: Context | None = None
 
 
 AgentEvent = TextDelta | TextEnd | ToolCall | TurnEnd

@@ -30,6 +30,7 @@ from claude_agent_sdk.types import (
 from jarvis_hub.agents.backend import (
     AgentEvent,
     BashGuard,
+    Context,
     HubTool,
     Refused,
     SessionSpec,
@@ -116,7 +117,29 @@ def options_for(spec: SessionSpec, cli_path: str, stderr: Callable[[str], None] 
     )
 
 
-def turn_end(result: ResultMessage) -> TurnEnd:
+def _prompt_tokens(usage: dict[str, Any]) -> int:
+    return sum(usage.get(k, 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+
+
+def _window(result: ResultMessage, model: str) -> int:
+    """The context window of the session's model, from the CLI's per-model report.
+
+    That report also lists the CLI's own Haiku requests, so the entry is found by the model's name, and failing
+    that is the one that took the most tokens.
+    """
+    models = result.model_usage or {}
+    if not models:
+        return 0
+    named = [u for name, u in models.items() if model in name]
+    busiest = max(models.values(), key=lambda u: u["inputTokens"] + u["cacheReadInputTokens"] + u["cacheCreationInputTokens"])
+    return (named[0] if named else busiest)["contextWindow"]
+
+
+def turn_end(result: ResultMessage, model: str = "", last_request: dict[str, Any] | None = None) -> TurnEnd:
+    """`last_request` is the usage of the turn's final model request: the context as that request saw it.
+
+    The result's own usage adds up every request of the turn, which would count the prompt once per tool round.
+    """
     raw: dict[str, Any] = result.usage or {}
     usage = Usage(
         input_tokens=raw.get("input_tokens", 0),
@@ -124,30 +147,36 @@ def turn_end(result: ResultMessage) -> TurnEnd:
         cache_read_tokens=raw.get("cache_read_input_tokens", 0),
         cache_creation_tokens=raw.get("cache_creation_input_tokens", 0),
     )
+    window = _window(result, model)
+    context = Context(_prompt_tokens(last_request), window) if last_request and window else None
     if result.terminal_reason in INTERRUPTED_REASONS:
-        return TurnEnd("interrupted", usage)
+        return TurnEnd("interrupted", usage, context=context)
     if result.is_error:
         detail = "; ".join(result.errors or []) or result.result or result.subtype
         if result.api_error_status:
             detail = f"HTTP {result.api_error_status}: {detail}"
-        return TurnEnd("failed", usage, detail)
-    return TurnEnd("completed", usage)
+        return TurnEnd("failed", usage, detail, context)
+    return TurnEnd("completed", usage, context=context)
 
 
 class SdkSession:
-    def __init__(self, client: ClaudeSDKClient) -> None:
+    def __init__(self, client: ClaudeSDKClient, model: str = "") -> None:
         self._client = client
+        self._model = model
 
     async def send(self, message: str) -> AsyncIterator[AgentEvent]:
         blocks: dict[int, dict[str, Any]] = {}
+        last_request: dict[str, Any] | None = None
         try:
             await self._client.query(message)
             async for m in self._client.receive_response():
                 if isinstance(m, ResultMessage):
-                    yield turn_end(m)
+                    yield turn_end(m, self._model, last_request)
                     return
                 if not isinstance(m, StreamEvent) or m.parent_tool_use_id is not None:
                     continue
+                if m.event.get("type") == "message_start":
+                    last_request = m.event.get("message", {}).get("usage") or last_request
                 for event in _translate(m.event, blocks):
                     yield event
         except ClaudeSDKError as e:
@@ -196,4 +225,4 @@ class SdkBackend:
     async def open(self, spec: SessionSpec) -> SdkSession:
         client = ClaudeSDKClient(options_for(spec, self._cli_path, self._stderr))
         await client.connect()
-        return SdkSession(client)
+        return SdkSession(client, spec.model)

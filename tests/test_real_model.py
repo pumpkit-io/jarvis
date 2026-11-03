@@ -221,3 +221,14 @@ async def test_max_turns_caps_each_message_not_the_whole_session() -> None:
     finally:
         await session.close()
     assert outcomes == ["completed", "completed", "completed"]
+
+
+async def test_a_turn_reports_the_context_it_filled_against_the_models_window() -> None:
+    session = await open_session(spec("Answer in one short sentence."))
+    try:
+        events = await collect(session, "Say hello.")
+    finally:
+        await session.close()
+    end = events[-1]
+    assert isinstance(end, TurnEnd) and end.context is not None
+    assert 0 < end.context.tokens < end.context.window

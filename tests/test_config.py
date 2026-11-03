@@ -157,3 +157,20 @@ def test_unknown_effort_is_refused(checkout: Path) -> None:
     (checkout / ".env").write_text("JARVIS_ORCHESTRATOR_EFFORT=extreme\n")
     with pytest.raises(ConfigError, match="JARVIS_ORCHESTRATOR_EFFORT"):
         load_settings(checkout, environ={})
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(None, 0.40), ("0.5", 0.5), ("0.25", 0.25), ("1", 1.0), (" 0.6 ", 0.6), ("", 0.40)],
+    ids=["default", "half", "a quarter", "the whole window", "spaces trimmed", "empty falls back"],
+)
+def test_talker_restart_threshold(checkout: Path, value: str | None, expected: float) -> None:
+    environ = {} if value is None else {"JARVIS_TALKER_RESTART_AT": value}
+    assert load_settings(checkout, environ=environ).talker_restart_at == expected
+
+
+@pytest.mark.parametrize("value", ["0", "-0.2", "1.5", "40%", "abc", "nan", "inf"])
+def test_talker_restart_threshold_must_be_a_fraction_of_the_window(checkout: Path, value: str) -> None:
+    (checkout / ".env").write_text(f"JARVIS_TALKER_RESTART_AT={value}\n")
+    with pytest.raises(ConfigError, match="JARVIS_TALKER_RESTART_AT"):
+        load_settings(checkout, environ={})

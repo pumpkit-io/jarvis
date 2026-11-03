@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import json
 import re
+from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import asdict, dataclass, replace
 from html import escape
@@ -17,12 +18,14 @@ from jarvis_hub.agents.backend import (
     AgentBackend,
     AgentEvent,
     AgentSession,
+    Context,
     SessionSpec,
     TextDelta,
     TextEnd,
     ToolCall,
     TurnEnd,
 )
+from jarvis_hub.config import DEFAULT_TALKER_RESTART_AT
 from jarvis_hub.orchestrator import orchestrator_tools
 from jarvis_hub.talker import talker_tools
 from jarvis_hub.tasks import Task, Tasks, no_task
@@ -106,7 +109,10 @@ WARM_UP = '<event source="hub">Session start. Reply with one word.</event>'
 # The Phase 0 definition, kept so Hub numbers compare with the spike's: the end of a delta counts too.
 _SENTENCE_END = re.compile(r"[.?!](\s|$)")
 
-TalkerKind = Literal["warm_up", "user", "event"]
+TalkerKind = Literal["warm_up", "restart", "user", "event"]
+
+# How many of the latest exchanges a restarted Talker is told about.
+RECENT_EXCHANGES = 6
 
 # An Orchestrator turn is a look-up of a few commands; one running this long is stuck.
 ORCHESTRATOR_TIMEOUT = 600.0
@@ -123,6 +129,22 @@ def event_message(source: str, text: str, task: str, *, needs_user: bool = False
     on_screen = ' details="on screen"' if details else ""
     flag = "true" if needs_user else "false"
     return f'<event source="{source}" task="{task}" needs_user="{flag}"{on_screen}>{escape(text, quote=False)}</event>'
+
+
+def restart_message(open_tasks: str, exchanges: "deque[tuple[str, str]]") -> str:
+    """The seed of a fresh Talker, written from the Hub's own records. The exchanges reuse the messages as sent."""
+    recent = "\n".join(
+        f"<exchange>\n{message}\n<you>{escape(reply, quote=False)}</you>\n</exchange>" for message, reply in exchanges
+    )
+    return (
+        '<event source="hub" reason="restart">\n'
+        "Your session was restarted to keep it fast, and what you said before it is gone. This is context for you, "
+        "not the User speaking: do not answer it. Carry on from it in the User's next message.\n"
+        f"<open_tasks>\n{open_tasks}\n</open_tasks>\n"
+        f"<recent_exchanges>\n{recent or 'None yet.'}\n</recent_exchanges>\n"
+        "Reply with one word.\n"
+        "</event>"
+    )
 
 
 def task_message(task: Task, request: str, context: str, *, continues: bool) -> str:
@@ -182,6 +204,7 @@ class Hub:
         metrics: Metrics,
         orchestrator_timeout: float = ORCHESTRATOR_TIMEOUT,
         speech: Speech | None = None,
+        talker_restart_at: float = DEFAULT_TALKER_RESTART_AT,
     ) -> None:
         tools = talker_tools(
             delegate=self._delegate,
@@ -198,6 +221,10 @@ class Hub:
         self._metrics = metrics
         self._orchestrator_timeout = orchestrator_timeout
         self._speech: Speech = speech if speech is not None else _Silent()
+        self._restart_at = talker_restart_at
+        # The Talker's context at its latest request, and the exchanges a restarted one is seeded with.
+        self._context: Context | None = None
+        self._exchanges: deque[tuple[str, str]] = deque(maxlen=RECENT_EXCHANGES)
         # The language of the latest line read, and of the latest User turn the Talker took: replies follow it.
         self._read_lang: Lang = "en"
         self._lang: Lang = "en"
@@ -278,7 +305,8 @@ class Hub:
     async def _talk(self) -> None:
         try:
             self._talker = await self._backend.open(self._talker_spec)
-            await self._turn(WARM_UP, kind="warm_up", arrived=self._clock.now())
+            end = await self._turn(WARM_UP, kind="warm_up", arrived=self._clock.now())
+            self._context = end.context
         except Exception as e:
             self._output.notice(f"The Talker could not start: {e}")
             return
@@ -292,15 +320,52 @@ class Hub:
                     self._output.heard(item.heard)
                 if item.details:
                     self._output.show(item.details)
-                await self._turn(item.message, kind=item.kind, arrived=item.arrived)
+                end = await self._turn(item.message, kind=item.kind, arrived=item.arrived)
+                self._context = end.context or self._context
             finally:
                 self._handled()
+            await self._restart_if_full()
 
-    async def _turn(self, message: str, *, kind: TalkerKind, arrived: float) -> None:
-        assert self._talker is not None
+    async def _restart_if_full(self) -> None:
+        """Between turns, swap in a fresh Talker once the context passes the threshold (ADR 0006's warm-up, again).
+
+        The new session reads the seed in the background like the launch warm-up, so a line typed meanwhile waits
+        for it in the inbox. Whatever fails leaves the old session talking, and the next turn tries again.
+        """
+        context = self._context
+        if context is None or context.used < self._restart_at:
+            return
+        old = self._talker
+        try:
+            session = await self._backend.open(self._talker_spec)
+        except Exception as e:
+            self._output.notice(f"The Talker could not restart, so the old session goes on: {e}")
+            return
+        try:
+            seed = restart_message(self._tasks.open_status(self._clock.now()), self._exchanges)
+            end = await self._turn(seed, kind="restart", arrived=self._clock.now(), session=session)
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await session.close()
+            raise
+        if end.outcome != "completed":
+            with contextlib.suppress(Exception):
+                await session.close()
+            self._output.notice("The Talker could not restart, so the old session goes on.")
+            return
+        self._talker, self._context = session, end.context
+        if old is not None:
+            with contextlib.suppress(Exception):
+                await old.close()
+
+    async def _turn(
+        self, message: str, *, kind: TalkerKind, arrived: float, session: AgentSession | None = None
+    ) -> TurnEnd:
+        session = session or self._talker
+        assert session is not None
         self._turn_count += 1
         turn = self._turn_count
-        show = kind != "warm_up"
+        show = kind in ("user", "event")
         t0 = self._clock.now()
         shown, block = "", ""
         first_delta: float | None = None
@@ -313,7 +378,7 @@ class Hub:
         speech = self._speech if show else _Silent()
         speech.begin(self._lang, turn=turn, heard_at=arrived if kind == "user" else None)
         try:
-            async for event in self._guarded(self._talker.send(message)):
+            async for event in self._guarded(session.send(message)):
                 match event:
                     case TextDelta(text):
                         if self._interrupted_turn == turn:
@@ -351,6 +416,8 @@ class Hub:
             self._output.reply_end()
         if end.outcome == "failed":
             self._output.notice(f"The Talker failed: {end.error}")
+        if show and (shown.strip() or end.outcome != "failed"):
+            self._exchanges.append((message, shown))
 
         def ms(t: float | None) -> int | None:
             return None if t is None else round((t - arrived) * 1000)
@@ -365,7 +432,9 @@ class Hub:
             first_sentence_ms=ms(first_sentence),
             total_ms=ms(self._clock.now()),
             tool_before_text=tool_before_text,
+            **({"context_tokens": end.context.tokens, "context_window": end.context.window} if end.context else {}),
         )
+        return end
 
     async def _orchestrate(self) -> None:
         while True:
