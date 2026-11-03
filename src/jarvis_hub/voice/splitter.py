@@ -3,6 +3,7 @@
 import re
 
 _SENTENCE_END = re.compile(r"[.?!…]+[\"'”’)\]]*(?=\s)")
+_SENTENCE_END_AT_END = re.compile(r"[.?!…]+[\"'”’)\]]*$")
 _CLAUSE_END = re.compile(r"[,;:](?=\s)")
 _LAST_WORD = re.compile(r"(\S+)$")
 
@@ -38,6 +39,16 @@ class SentenceSplitter:
         while (cut := self._next_cut()) is not None:
             out += self._take(cut)
         return out
+
+    def at_sentence_end(self) -> bool:
+        """Whether the text so far ends on what reads as a sentence end, though no space has followed yet.
+
+        A digit before the dot never does, so "3." then "5" stays one number.
+        """
+        match = _SENTENCE_END_AT_END.search(self._buffer)
+        if match is None or not self._ends_sentence(match.start(), match.end()):
+            return False
+        return not (self._buffer[match.start()] == "." and self._buffer[: match.start()][-1:].isdigit())
 
     def end_block(self) -> list[str]:
         """Text either side of a tool call arrives with no space between, so a block's end is a sentence end."""

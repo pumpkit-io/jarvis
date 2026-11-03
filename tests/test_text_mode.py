@@ -293,4 +293,5 @@ async def test_speak_says_the_startup_line_then_every_reply_and_ends_once_they_h
     assert player.closed
     rows = [json.loads(line) for line in (config.runtime_dir / "metrics.jsonl").read_text().splitlines()]
     assert [(r["kind"], r.get("lang")) for r in rows if r["kind"] == "speech"] == [("speech", "en"), ("speech", "it")]
+    assert [r["load_ms"] for r in rows if r["kind"] == "voice_loaded"] == [0]
 

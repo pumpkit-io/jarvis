@@ -32,6 +32,9 @@ LINES: dict[ClipName, dict[Lang, str]] = {
 # 1.2 s, the plan's figure, would cut in on about half the turns; 1.5 s catches the slow tail.
 FILLER_AFTER = 1.5
 
+# A delta ending on "sir." may wait half a second for the next one; this long without one, the sentence goes.
+SETTLE = 0.1
+
 
 class SpeechClock(Protocol):
     def now(self) -> float: ...
@@ -65,6 +68,7 @@ class _Reply:
     first_audio: float | None = None
     filler: bool = False
     gaps: int = 0
+    audio_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -115,6 +119,7 @@ class Speech:
         self._generation = 0
         self._synthesising = False
         self._filler: asyncio.Task[None] | None = None
+        self._settle: asyncio.Task[None] | None = None
         self._worker: asyncio.Task[None] | None = None
         self._loading: asyncio.Future[None] | None = None
 
@@ -136,10 +141,16 @@ class Speech:
             self._filler = asyncio.create_task(self._fill_silence(self._reply, heard_at))
 
     def feed(self, text: str) -> None:
-        if self._reply is not None:
-            self._say(self._reply.splitter.feed(text))
+        reply = self._reply
+        if reply is None:
+            return
+        self._cancel_settle()
+        self._say(reply.splitter.feed(text))
+        if reply.splitter.at_sentence_end():
+            self._settle = asyncio.create_task(self._cut_when_settled(reply))
 
     def block_end(self) -> None:
+        self._cancel_settle()
         if self._reply is not None:
             self._say(self._reply.splitter.end_block())
 
@@ -147,6 +158,7 @@ class Speech:
         reply = self._reply
         if reply is None:
             return
+        self._cancel_settle()
         self._say(reply.splitter.flush())
         self._cancel_filler()
         self._queue.put_nowait(_End(reply))
@@ -156,6 +168,7 @@ class Speech:
         """Drop the reply and everything queued or playing."""
         self._generation += 1
         self._cancel_filler()
+        self._cancel_settle()
         self._reply = None
         while not self._queue.empty():
             self._queue.get_nowait()
@@ -176,6 +189,7 @@ class Speech:
 
     async def close(self) -> None:
         self._cancel_filler()
+        self._cancel_settle()
         if self._worker is not None:
             self._worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -204,9 +218,11 @@ class Speech:
             self._cache["chime", lang] = Clip("", "chime", tone, self._tts.sample_rate)
 
     async def _work(self, loading: "asyncio.Future[None]") -> None:
+        began = self._clock.now()
         try:
             await loading
             ready = True
+            self._record({"kind": "voice_loaded", "load_ms": round((self._clock.now() - began) * 1000)})
         except Exception as e:
             self._notice(f"Speech is off: the voice could not load: {type(e).__name__}: {e}")
             ready = False
@@ -237,7 +253,7 @@ class Speech:
             case _Cached(name, lang, reply):
                 self._play(self._cache[name, lang], reply, sentence=False)
             case _End(reply):
-                self._record(reply)
+                self._record_reply(reply)
 
     def _play(self, clip: Clip, reply: _Reply | None, *, sentence: bool) -> None:
         starts = self._clock.now() + self._player.pending()
@@ -248,6 +264,7 @@ class Speech:
                 reply.first_chunk_audio = starts
             elif sentence and self._player.pending() == 0:
                 reply.gaps += 1
+            reply.audio_s += clip.seconds
         self._player.play(clip)
 
     async def _fill_silence(self, reply: _Reply, heard_at: float) -> None:
@@ -257,12 +274,22 @@ class Speech:
             reply.filler = True
             self._queue.put_nowait(_Cached("filler", reply.lang, reply))
 
+    async def _cut_when_settled(self, reply: _Reply) -> None:
+        await self._clock.sleep(SETTLE)
+        if self._reply is reply:
+            self._say(reply.splitter.end_block())
+
+    def _cancel_settle(self) -> None:
+        if self._settle is not None:
+            self._settle.cancel()
+            self._settle = None
+
     def _cancel_filler(self) -> None:
         if self._filler is not None:
             self._filler.cancel()
             self._filler = None
 
-    def _record(self, reply: _Reply) -> None:
+    def _record_reply(self, reply: _Reply) -> None:
         start = reply.heard_at if reply.heard_at is not None else reply.began
 
         def ms(t: float | None) -> int | None:
@@ -282,7 +309,11 @@ class Speech:
             "first_audio_ms": ms(reply.first_audio),
             "chunk_to_audio_ms": chunk_to_audio,
             "gaps": reply.gaps,
+            "audio_s": round(reply.audio_s, 2),
         }
+        self._record(entry)
+
+    def _record(self, entry: dict[str, Any]) -> None:
         try:
             self._metrics.record(entry)
         except Exception as e:

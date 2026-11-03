@@ -318,6 +318,7 @@ async def test_the_first_clause_and_its_audio_are_timed(
     assert row["first_audio_ms"] == 700
     assert row["chunk_to_audio_ms"] == 0
     assert row["chunks"] == 2
+    assert row["audio_s"] == 2.35
     assert row["lang"] == "en"
 
 
@@ -399,3 +400,52 @@ async def test_a_turn_typed_while_the_voice_loads_is_spoken_once_it_has(
     await speech.close()
 
     assert player.texts == ["At your service, sir.", "Evening, sir."]
+
+
+async def test_a_sentence_at_the_end_of_a_delta_is_spoken_once_the_stream_pauses(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, speech: Speech, player: RecordingPlayer
+) -> None:
+    release = asyncio.Event()
+    backend = FakeBackend(clock, [[Text("Good evening, sir."), Wait(0.5), Gate(release), Text(" All quiet.")]])
+    hub = speaking_hub(backend, output, metrics, speech)
+
+    await hub.start()
+    running = asyncio.create_task(hub.run(lines(clock, "Hello")))
+    await until(lambda: player.texts == ["Good evening, sir."])
+    release.set()
+    await running
+    await speech.idle()
+
+    assert player.texts == ["Good evening, sir.", "All quiet."]
+
+
+async def test_a_number_cut_between_deltas_waits_for_the_rest(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, speech: Speech, player: RecordingPlayer
+) -> None:
+    release = asyncio.Event()
+    backend = FakeBackend(clock, [[Text("It costs 3."), Wait(0.5), Gate(release), Text("5 dollars, sir.")]])
+    hub = speaking_hub(backend, output, metrics, speech)
+
+    await hub.start()
+    running = asyncio.create_task(hub.run(lines(clock, "How much?")))
+    await until(lambda: backend.clock.now() >= 1000.5)
+    await asyncio.sleep(0.01)
+    assert player.texts == []
+    release.set()
+    await running
+    await speech.idle()
+
+    assert player.texts == ["It costs 3.5 dollars, sir."]
+
+
+async def test_a_delta_that_follows_quickly_is_not_cut_off(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, speech: Speech, player: RecordingPlayer
+) -> None:
+    backend = FakeBackend(clock, [[Text("Visit pumpkit."), Wait(0.02), Text("io today, sir.")]])
+    hub = speaking_hub(backend, output, metrics, speech)
+
+    await hub.start()
+    await hub.run(lines(clock, "Where?"))
+    await speech.idle()
+
+    assert player.texts == ["Visit pumpkit.io today, sir."]
