@@ -1,0 +1,66 @@
+{
+  "sentences": {
+    "en": "I have opened the pull request on pumpkit and checks are running.",
+    "it": "Ho aperto la pull request su pumpkit e i controlli sono partiti."
+  },
+  "speed": 1.0,
+  "server": {
+    "engine": "VoiceMode Kokoro-FastAPI server :8880 (streamed pcm)",
+    "voices_present": {
+      "am_liam": true,
+      "im_nicola": true
+    },
+    "per_lang": {
+      "en": {
+        "voice": "am_liam",
+        "first_audio_ms_p50": 357.8,
+        "first_request_ms": 895.4,
+        "full_ms_p50": 358.3,
+        "audio_seconds": 3.45
+      },
+      "it": {
+        "voice": "im_nicola",
+        "first_audio_ms_p50": 370.9,
+        "first_request_ms": 827.4,
+        "full_ms_p50": 371.3,
+        "audio_seconds": 4.14
+      }
+    },
+    "memory_mb": {
+      "rss": 631,
+      "footprint": 2043.0,
+      "note": "server process"
+    },
+    "requests_made": 13
+  },
+  "inprocess": {
+    "engine": "kokoro-mlx 0.1.4 in-process (generate_stream)",
+    "load_ms": 625,
+    "voices_present": {
+      "am_liam": true,
+      "im_nicola": true
+    },
+    "per_lang": {
+      "en": {
+        "voice": "am_liam",
+        "first_audio_ms_p50": 222.2,
+        "full_ms_p50": 222.2,
+        "audio_seconds": 3.88,
+        "chunks": 1
+      },
+      "it": {
+        "voice": "im_nicola",
+        "first_audio_ms_p50": 240.3,
+        "full_ms_p50": 240.3,
+        "audio_seconds": 4.55,
+        "chunks": 1
+      }
+    },
+    "memory_mb": {
+      "rss": 202,
+      "footprint": 4813.0,
+      "mlx_active": 313,
+      "mlx_peak": 1555
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "files": 2703,
+  "hours": 5.39,
+  "realtime_factor_no_vad": 0.0377,
+  "false_accepts_per_hour": {
+    "vad_threshold=0.0": {
+      "@0.3": 0.0,
+      "@0.5": 0.0,
+      "@0.7": 0.0
+    },
+    "vad_threshold=0.5": {
+      "@0.3": 0.0,
+      "@0.5": 0.0,
+      "@0.7": 0.0
+    }
+  },
+  "false_accepts_total": {
+    "vad_threshold=0.0": {
+      "0.3": 0,
+      "0.5": 0,
+      "0.7": 0
+    },
+    "vad_threshold=0.5": {
+      "0.3": 0,
+      "0.5": 0,
+      "0.7": 0
+    }
+  },
+  "examples_at_0.5": {}
+}
