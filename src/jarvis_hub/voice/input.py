@@ -63,7 +63,9 @@ class TurnDetector(Protocol):
 
 
 class Transcriber(Protocol):
-    def transcribe(self, audio: Samples) -> str: ...
+    def transcribe(self, audio: Samples, *, after: float = 0.0) -> str:
+        """The words that end later than `after` seconds into `audio`."""
+        ...
 
 
 class SpeakerGate(Protocol):
@@ -202,9 +204,11 @@ class InputPipeline:
         self._onset = None
         audio = self._audio(turn)
         text, stt_ms = "", 0.0
+        # STT mishears the wake phrase ("A Jarvis", "Hey George"), so it is cut by time: it ended before the hit.
+        after = self._last_wake - turn.start if turn.start < self._last_wake <= at else 0.0
         if self._e.gate.admits(audio):
             began = time.perf_counter()
-            text = self._e.stt.transcribe(audio).strip()
+            text = self._e.stt.transcribe(audio, after=after).strip()
             stt_ms = (time.perf_counter() - began) * 1000
         self._record(
             {

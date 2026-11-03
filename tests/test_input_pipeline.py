@@ -57,9 +57,11 @@ class ScriptedTurn:
 class ScriptedStt:
     text: str = "Open a PR"
     heard: list[Samples] = field(default_factory=lambda: [])
+    after: list[float] = field(default_factory=lambda: [])
 
-    def transcribe(self, audio: Samples) -> str:
+    def transcribe(self, audio: Samples, *, after: float = 0.0) -> str:
         self.heard.append(audio)
+        self.after.append(after)
         return self.text
 
 
@@ -236,3 +238,29 @@ def test_each_turn_is_recorded_without_its_words() -> None:
     assert row["words"] == 3
     assert set(row) >= {"speech_s", "end_wait_ms", "smart_turn", "smart_turn_ms", "stt_ms"}
     assert "Open" not in str(row)
+
+
+def test_words_before_the_wake_word_hit_are_left_out_of_the_turn() -> None:
+    r = rig()
+    r.feed("silence", 1.0)
+    r.feed("speech", 0.6)
+    r.feed("wake", 0.1)
+    r.pipeline.capture(True)
+    r.feed("speech", 0.8)
+    r.feed("silence", 0.6)
+
+    [wake] = [e for e in r.events if isinstance(e, WakeWord)]
+    # The turn starts at 0.8 s; the hit, 0.88 s later, closes the wake phrase whatever STT makes of it.
+    assert wake.at - T0 == pytest.approx(1.68, abs=0.01)  # pyright: ignore[reportUnknownMemberType]
+    assert r.stt.after == [pytest.approx(0.88, abs=0.02)]  # pyright: ignore[reportUnknownMemberType]
+
+
+def test_a_turn_without_the_wake_word_is_transcribed_whole() -> None:
+    r = rig()
+    r.feed("wake", 0.1)
+    r.feed("silence", 3.0)
+    r.pipeline.capture(True)
+    r.feed("speech", 1.0)
+    r.feed("silence", 0.6)
+
+    assert r.stt.after == [0.0]

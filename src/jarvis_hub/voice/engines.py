@@ -22,6 +22,9 @@ SMART_TURN_FILE = "smart-turn-v3.2-cpu.onnx"
 # CC BY-NC-SA 4.0, non-commercial; the code around it is Apache-2.0.
 WAKE_MODEL = "hey_jarvis"
 
+# Parakeet's timestamps come in 80 ms steps, so the wake phrase's last word can seem to end just after the hit.
+WORD_END_SLACK_S = 0.08
+
 AecMode = Literal["webrtc", "off"]
 WakeEngine = Literal["openwakeword"]
 SttEngine = Literal["parakeet"]
@@ -141,11 +144,26 @@ class Parakeet:
         self._get_logmel: Any = get_logmel
         self._model: Any = from_pretrained(PARAKEET_MODEL)
 
-    def transcribe(self, audio: Samples) -> str:
+    def transcribe(self, audio: Samples, *, after: float = 0.0) -> str:
         if len(audio) < SAMPLE_RATE // 10:
             return ""
         mel = self._get_logmel(self._mx.array(audio), self._model.preprocessor_config)
-        return str(self._model.generate(mel)[0].text).strip()
+        result = self._model.generate(mel)[0]
+        if after <= 0:
+            return str(result.text).strip()
+        return words_after(result.tokens, after)
+
+
+def words_after(tokens: Any, after: float) -> str:
+    """The text of the words ending later than `after`; a token opening with a space starts a word."""
+    words: list[list[Any]] = []
+    for token in tokens:
+        if token.text.startswith(" ") or not words:
+            words.append([token])
+        else:
+            words[-1].append(token)
+    kept = [w for w in words if w[-1].end > after + WORD_END_SLACK_S]
+    return "".join(t.text for w in kept for t in w).strip().lstrip(",.;:!? ")
 
 
 def load_engines(choice: EngineChoice) -> Engines:
