@@ -21,6 +21,7 @@ os.environ["JARVIS_AUDIO_RESULTS"] = str(SCRATCH / "results")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import bench_aec  # noqa: E402
+import bench_claude_idle  # noqa: E402
 import bench_smart_turn  # noqa: E402
 import bench_stt  # noqa: E402
 import bench_wake  # noqa: E402
@@ -399,6 +400,40 @@ def test_a_bench_that_hangs_is_stopped_with_everything_it_started():
     assert subprocess.run(["kill", "-0", str(pid)], capture_output=True).returncode != 0, "the bench's child survived"
     with open(SCRATCH / "bench.log", "w") as log:
         assert session.run_bench([sys.executable, "-c", "raise SystemExit(4)"], log, timeout_s=10) == 4
+
+
+def test_a_failed_claude_spawn_still_ends_the_sessions_already_started_with_their_children():
+    bin_dir, child = SCRATCH / "claude-bin", SCRATCH / "claude-child.pid"
+    bin_dir.mkdir()
+    # Stands in for `claude` and an MCP server it starts, one that ignores the hangup when the session's pty closes.
+    (bin_dir / "claude").write_text(f"#!/bin/sh\ntrap '' HUP\nsleep 60 &\necho $! > {child}\nexec sleep 60\n")
+    (bin_dir / "claude").chmod(0o755)
+    real_spawn, spawned = bench_claude_idle.spawn, []
+
+    def spawn_once(cwd):
+        if spawned:
+            raise OSError("out of ptys")
+        spawned.append(real_spawn(cwd))
+        deadline = time.monotonic() + 10
+        while not child.exists() or not child.read_text().strip():
+            assert time.monotonic() < deadline, "the stub session never started its child"
+            time.sleep(0.05)
+        return spawned[0]
+
+    saved = os.environ["PATH"]
+    try:
+        os.environ["PATH"] = f"{bin_dir}:{saved}"
+        bench_claude_idle.spawn = spawn_once
+        bench_claude_idle.idle_footprints(SCRATCH, settle_s=0)
+    except OSError:
+        pass
+    else:
+        raise AssertionError("expected the failed spawn to propagate")
+    finally:
+        bench_claude_idle.spawn, os.environ["PATH"] = real_spawn, saved
+    time.sleep(0.2)
+    for pid in (spawned[0][0], int(child.read_text())):
+        assert subprocess.run(["kill", "-0", str(pid)], capture_output=True).returncode != 0, f"{pid} still running"
 
 
 def test_the_headphones_run_is_analysed_only_when_it_was_recorded():
