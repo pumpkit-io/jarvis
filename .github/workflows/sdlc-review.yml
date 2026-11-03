@@ -1,0 +1,76 @@
+# sdlc checks on every pull request, written by the sdlc setup-sdlc skill.
+# comment-slop: the code-comments patterns a regex can catch, in the lines the PR adds. Needs no secrets.
+# review: the review-changes skill, run by Claude Code with your Claude subscription. It posts the
+# report as one PR comment and fails when the verdict is blocking (a standards breach, a missing or
+# wrong spec requirement, or a likely bug). It needs the CLAUDE_CODE_OAUTH_TOKEN secret (create it
+# with `claude setup-token`) and skips draft PRs and PRs from forks, so nobody outside the repo can
+# spend your usage. Make both jobs required checks in branch protection to block merges on them.
+name: sdlc review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: sdlc-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  comment-slop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: git clone --depth 1 https://github.com/pumpkit-io/sdlc "$RUNNER_TEMP/sdlc"
+      - name: Check the comments this PR adds
+        run: git diff -U0 "$BASE_SHA...$HEAD_SHA" | perl "$RUNNER_TEMP/sdlc/hooks/comment-slop.pl"
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+  review:
+    if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # The CI checkout is a main checkout, where the sdlc plugin's guard would block writing the report.
+          SDLC_ALLOW_MAIN_CHECKOUT: "1"
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          plugin_marketplaces: https://github.com/pumpkit-io/sdlc.git
+          plugins: sdlc@pumpkit-io
+          prompt: |
+            Load the review-changes skill and review pull request #${{ github.event.pull_request.number }}. This is a CI job, so nobody can answer questions.
+
+            - Fixed point: ${{ github.event.pull_request.base.sha }}. HEAD is the pull request's head commit.
+            - Spec: the issues the pull request body or its commit messages reference. Read the body with `gh pr view ${{ github.event.pull_request.number }}`. With no reference, skip the Spec axis.
+            - Change no tracked file. Write the final report, in Markdown, to `.sdlc-review.md` at the repo root, under the heading `## sdlc review of ${{ github.event.pull_request.head.sha }}`, ending with the skill's verdict line.
+          claude_args: |
+            --model sonnet
+            --allowedTools "Read,Glob,Grep,Write,Task,Agent,Skill,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git rev-parse:*),Bash(git merge-base:*),Bash(gh pr view:*),Bash(gh issue view:*)"
+      - uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: sdlc-review
+          path: .sdlc-review.md
+      - name: Fail on a blocking verdict
+        run: |
+          verdict="$(grep -E '^Verdict: ' .sdlc-review.md | tail -n 1)"
+          echo "${verdict:-No verdict line in the report}"
+          [ "$verdict" = "Verdict: pass" ]
