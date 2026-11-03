@@ -84,6 +84,10 @@ _Avoid_: notification, alert, ping
 A state the User sets in which Announcements wait until the next Wake word, except those that need the User.
 _Avoid_: do not disturb, mute
 
+**Holding line**:
+The short line, "One moment, sir.", that Jarvis says when its reply to the User is slow to start, so the silence does not read as not having heard.
+_Avoid_: filler, stall
+
 **Barge-in**:
 The User speaking while Jarvis is speaking. Jarvis pauses, then either resumes after a Backchannel or stops and listens after an Interruption.
 _Avoid_: overlap, talk-over

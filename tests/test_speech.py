@@ -236,7 +236,7 @@ async def test_one_moment_plays_when_no_sentence_is_ready_shortly_after_the_turn
     assert player.texts == ["One moment, sir.", "Here you are, sir."]
     assert tts.calls.count(("One moment, sir.", "am_liam")) == 1
     [row] = speech_rows(metrics)
-    assert row["filler"] is True
+    assert row["holding_line"] is True
 
 
 async def test_one_moment_is_said_in_italian_after_an_italian_turn(
@@ -252,7 +252,7 @@ async def test_one_moment_is_said_in_italian_after_an_italian_turn(
     assert player.texts == ["Un momento, signore.", "Ecco, signore."]
 
 
-async def test_no_filler_when_the_first_sentence_comes_in_time(
+async def test_no_holding_line_when_the_first_sentence_comes_in_time(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, speech: Speech, player: RecordingPlayer
 ) -> None:
     backend = FakeBackend(clock, [[Wait(1.0), Text("Quick, sir. "), Wait(3.0), Text("And slow.")]])
@@ -264,10 +264,10 @@ async def test_no_filler_when_the_first_sentence_comes_in_time(
 
     assert player.texts == ["Quick, sir.", "And slow."]
     [row] = speech_rows(metrics)
-    assert row["filler"] is False
+    assert row["holding_line"] is False
 
 
-async def test_no_filler_before_relaying_news(
+async def test_no_holding_line_before_relaying_news(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, speech: Speech, player: RecordingPlayer
 ) -> None:
     backend = FakeBackend(
@@ -284,7 +284,7 @@ async def test_no_filler_before_relaying_news(
     assert player.texts == ["Right away, sir.", "Two open PRs, sir."]
 
 
-async def test_no_filler_while_the_previous_reply_is_still_playing(
+async def test_no_holding_line_while_the_previous_reply_is_still_playing(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, tts: FakeTts
 ) -> None:
     player = RecordingPlayer(hold=True)

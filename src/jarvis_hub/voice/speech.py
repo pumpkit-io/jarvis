@@ -18,19 +18,18 @@ from jarvis_hub.voice.player import Clip, Player, Samples
 from jarvis_hub.voice.splitter import SentenceSplitter
 from jarvis_hub.voice.tts import Synthesizer
 
-ClipName = Literal["chime", "filler", "startup", "very_good", "usage_limit"]
+ClipName = Literal["chime", "holding_line", "startup", "very_good", "usage_limit"]
 
 LINES: dict[ClipName, dict[Lang, str]] = {
     "startup": {"en": "At your service, sir.", "it": "Ai suoi ordini, signore."},
-    "filler": {"en": "One moment, sir.", "it": "Un momento, signore."},
+    "holding_line": {"en": "One moment, sir.", "it": "Un momento, signore."},
     "very_good": {"en": "Very good, sir.", "it": "Molto bene, signore."},
     # The reset time is not known at startup; the usage-limit ticket says it after this line.
     "usage_limit": {"en": "I've reached the usage limit, sir.", "it": "Ho raggiunto il limite di utilizzo, signore."},
 }
 
-# The Talker's first sentence takes 1.1-1.2 s at p50 (docs/notes/phase-0-spikes.md), so a filler at
-# 1.2 s, the plan's figure, would cut in on about half the turns; 1.5 s catches the slow tail.
-FILLER_AFTER = 1.5
+# Later than the Talker's first sentence at p90, 1.32 s (docs/notes/phase-0-spikes.md), so it covers only the slow tail.
+HOLDING_LINE_AFTER = 1.5
 
 # A delta ending on "sir." may wait half a second for the next one; this long without one, the sentence goes.
 SETTLE = 0.1
@@ -66,7 +65,7 @@ class _Reply:
     first_chunk: float | None = None
     first_chunk_audio: float | None = None
     first_audio: float | None = None
-    filler: bool = False
+    holding_line: bool = False
     gaps: int = 0
     audio_s: float = 0.0
 
@@ -102,14 +101,14 @@ class Speech:
         *,
         metrics: Metrics,
         notice: Callable[[str], None],
-        filler_after: float = FILLER_AFTER,
+        holding_line_after: float = HOLDING_LINE_AFTER,
     ) -> None:
         self._tts = tts
         self._player = player
         self._clock = clock
         self._metrics = metrics
         self._notice = notice
-        self._filler_after = filler_after
+        self._holding_line_after = holding_line_after
         # One thread: MLX ties its streams to the thread that loaded the model.
         self._thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts")
         self._queue: asyncio.Queue[_Say | _Cached | _End] = asyncio.Queue()
@@ -118,7 +117,7 @@ class Speech:
         self._reply: _Reply | None = None
         self._generation = 0
         self._synthesising = False
-        self._filler: asyncio.Task[None] | None = None
+        self._holding_line: asyncio.Task[None] | None = None
         self._settle: asyncio.Task[None] | None = None
         self._worker: asyncio.Task[None] | None = None
         self._loading: asyncio.Future[None] | None = None
@@ -133,12 +132,12 @@ class Speech:
         self._queue.put_nowait(_Cached(name, self._lang))
 
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None) -> None:
-        """A new reply in `lang`. `heard_at` is when the User's turn ended; with it, a filler covers a slow start."""
-        self._cancel_filler()
+        """A new reply in `lang`. With `heard_at`, when the User's turn ended, the holding line covers a slow start."""
+        self._cancel_holding_line()
         self._lang = lang
         self._reply = _Reply(turn, lang, self._clock.now(), heard_at)
         if heard_at is not None:
-            self._filler = asyncio.create_task(self._fill_silence(self._reply, heard_at))
+            self._holding_line = asyncio.create_task(self._hold_the_line(self._reply, heard_at))
 
     def feed(self, text: str) -> None:
         reply = self._reply
@@ -160,14 +159,14 @@ class Speech:
             return
         self._cancel_settle()
         self._say(reply.splitter.flush())
-        self._cancel_filler()
+        self._cancel_holding_line()
         self._queue.put_nowait(_End(reply))
         self._reply = None
 
     def stop(self) -> None:
         """Drop the reply and everything queued or playing."""
         self._generation += 1
-        self._cancel_filler()
+        self._cancel_holding_line()
         self._cancel_settle()
         self._reply = None
         while not self._queue.empty():
@@ -188,7 +187,7 @@ class Speech:
             await asyncio.sleep(0.05)
 
     async def close(self) -> None:
-        self._cancel_filler()
+        self._cancel_holding_line()
         self._cancel_settle()
         if self._worker is not None:
             self._worker.cancel()
@@ -203,7 +202,7 @@ class Speech:
         for chunk in chunks:
             if reply.first_chunk is None:
                 reply.first_chunk = self._clock.now()
-                self._cancel_filler()
+                self._cancel_holding_line()
             reply.chunks += 1
             self._queue.put_nowait(_Say(reply, chunk))
 
@@ -267,12 +266,12 @@ class Speech:
             reply.audio_s += clip.seconds
         self._player.play(clip)
 
-    async def _fill_silence(self, reply: _Reply, heard_at: float) -> None:
-        await self._clock.sleep(max(0.0, heard_at + self._filler_after - self._clock.now()))
+    async def _hold_the_line(self, reply: _Reply, heard_at: float) -> None:
+        await self._clock.sleep(max(0.0, heard_at + self._holding_line_after - self._clock.now()))
         quiet = self._queue.empty() and not self._synthesising and self._player.pending() == 0
         if self._reply is reply and reply.first_chunk is None and quiet:
-            reply.filler = True
-            self._queue.put_nowait(_Cached("filler", reply.lang, reply))
+            reply.holding_line = True
+            self._queue.put_nowait(_Cached("holding_line", reply.lang, reply))
 
     async def _cut_when_settled(self, reply: _Reply) -> None:
         await self._clock.sleep(SETTLE)
@@ -284,10 +283,10 @@ class Speech:
             self._settle.cancel()
             self._settle = None
 
-    def _cancel_filler(self) -> None:
-        if self._filler is not None:
-            self._filler.cancel()
-            self._filler = None
+    def _cancel_holding_line(self) -> None:
+        if self._holding_line is not None:
+            self._holding_line.cancel()
+            self._holding_line = None
 
     def _record_reply(self, reply: _Reply) -> None:
         start = reply.heard_at if reply.heard_at is not None else reply.began
@@ -304,7 +303,7 @@ class Speech:
             "lang": reply.lang,
             "voice": voice_for(reply.lang),
             "chunks": reply.chunks,
-            "filler": reply.filler,
+            "holding_line": reply.holding_line,
             "first_chunk_ms": ms(reply.first_chunk),
             "first_audio_ms": ms(reply.first_audio),
             "chunk_to_audio_ms": chunk_to_audio,
