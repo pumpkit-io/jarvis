@@ -17,6 +17,7 @@ from jarvis_hub.voice.state import (
     CAPTURING,
     Action,
     Chime,
+    ChimeStarted,
     EndConversation,
     Event,
     Heard,
@@ -55,6 +56,8 @@ class _ObservedSpeech:
         self._speech = speech
         self._done = done
         self._replies = 0
+        # Replies up to this one were stopped: their playback ending is not a reply done.
+        self._stopped = 0
         self._waits: set[asyncio.Task[None]] = set()
 
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None) -> None:
@@ -74,12 +77,13 @@ class _ObservedSpeech:
         wait.add_done_callback(self._waits.discard)
 
     def stop(self) -> None:
+        self._stopped = self._replies
         self._speech.stop()
 
     async def _played(self, reply: int) -> None:
         await self._speech.idle()
         # A reply begun since has the floor; its own end reports.
-        if reply == self._replies:
+        if reply == self._replies and reply > self._stopped:
             await self._done()
 
 
@@ -107,7 +111,9 @@ class VoiceMode:
         self._idle.set()
         self._events: asyncio.Queue[Event] = asyncio.Queue()
         self._lines: asyncio.Queue[Line] = asyncio.Queue()
-        self._speech = Speech(tts, player, clock, metrics=metrics, notice=notice, on_reply_audio=self._reply_audio)
+        self._speech = Speech(
+            tts, player, clock, metrics=metrics, notice=notice, on_reply_audio=self._reply_audio, on_chime=self._chime_started
+        )
         self.speech = _ObservedSpeech(self._speech, self._reply_done)
 
     @property
@@ -149,6 +155,9 @@ class VoiceMode:
 
     def _reply_audio(self) -> None:
         self._events.put_nowait(ReplyAudio(self._clock.now()))
+
+    def _chime_started(self, at: float) -> None:
+        self._events.put_nowait(ChimeStarted(at))
 
     async def _reply_done(self) -> None:
         self._events.put_nowait(ReplyDone(self._clock.now()))

@@ -543,3 +543,21 @@ async def test_a_voice_still_loading_never_keeps_the_process_from_exiting(
     synthesis = [t for t in threading.enumerate() if t.name.startswith("tts")]
     assert synthesis and all(t.daemon for t in synthesis)
     tts.hold.set()
+
+
+async def test_the_chime_reports_when_it_starts_playing(
+    clock: FakeClock, tts: FakeTts, metrics: RecordingMetrics, output: RecordingOutput
+) -> None:
+    player = RecordingPlayer(hold=True)
+    starts: list[float] = []
+    speech = Speech(tts, player, clock, metrics=metrics, notice=output.notice, on_chime=starts.append)
+    speech.start()
+    try:
+        speech.say("startup", "en")
+        speech.say("chime", "en")
+        await until(lambda: len(player.clips) == 2)
+
+        # After the startup line still queued ahead of it.
+        assert starts == [pytest.approx(clock.now() + player.clips[0].seconds)]  # pyright: ignore[reportUnknownMemberType]
+    finally:
+        await speech.close()

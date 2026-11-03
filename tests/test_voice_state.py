@@ -5,6 +5,7 @@ import pytest
 from jarvis_hub.voice.language import Lang
 from jarvis_hub.voice.state import (
     Chime,
+    ChimeStarted,
     EndConversation,
     Event,
     Heard,
@@ -126,13 +127,15 @@ def test_empty_or_noise_only_transcripts_are_dropped_and_listening_goes_on(text:
         ("Ehi Jarvis, apri una issue.", "apri una issue."),
         ("Jarvis, what's up?", "what's up?"),
         ("hey, jarvis. What's up?", "What's up?"),
-        ("Okay so hey Jarvis, status please", "status please"),
+        ("Okay, hey Jarvis, status please", "status please"),
+        ("So I told her hey Jarvis would do it", "So I told her hey Jarvis would do it"),
         ("Tell Jarvis's tests to run", "Tell Jarvis's tests to run"),
         ("What did Jarvis say?", "What did Jarvis say?"),
         ("Harvis. Open a PR for the typo fix.", "Open a PR for the typo fix."),
         ("Jarvid, show me the open issues.", "show me the open issues."),
         ("Jorvis! Sì, procedi pure.", "Sì, procedi pure."),
         ("Travis said the build is red", "Travis said the build is red"),
+        ("Hey Jarvis, Jervis needs the deploy log", "Jervis needs the deploy log"),
     ],
 )
 def test_the_wake_phrase_said_in_one_breath_is_cut_from_the_turn(heard: str, turn: str) -> None:
@@ -251,3 +254,40 @@ def test_a_turn_heard_while_jarvis_replies_is_dropped() -> None:
 def test_the_language_of_the_turn_carries_through_unknown() -> None:
     _, actions = run(WakeWord(10.0), Heard("Apri una issue", None, 11.0))
     assert actions[-1] == SendTurn("Apri una issue", None, 11.0)
+
+
+def test_end_conversation_during_an_announcement_idles_once_it_has_played() -> None:
+    voice, _ = run(ReplyAudio(10.0), EndConversation(10.5), ReplyDone(12.0))
+    assert voice.state == "idle"
+    # The User's next exchange gets its Follow-up window.
+    voice, _ = run(WakeWord(30.0), Heard("Hi", "en", 31.0), ReplyDone(32.0), start=voice)
+    assert voice.state == "follow_up"
+
+
+def test_end_conversation_with_no_spoken_reply_in_progress_changes_nothing() -> None:
+    voice, _ = run(WakeWord(10.0), Heard("Hi", "en", 11.0), ReplyDone(12.0), EndConversation(13.0))
+    assert voice.state == "follow_up"
+    voice, _ = run(Heard("And the CI?", "en", 14.0), ReplyDone(15.0), start=voice)
+    assert voice.state == "follow_up"
+
+
+def test_a_wake_word_while_the_user_speaks_does_not_cut_the_turn_short() -> None:
+    voice, actions = run(WakeWord(10.0), SpeechStarted(10.5), WakeWord(13.0), Tick(19.5))
+    assert voice.state == "listening"
+    voice, actions = run(Heard("Tell Ada that Jarvis will handle the deploy", "en", 20.0), start=voice)
+    assert voice.state == "thinking"
+    assert actions == [SendTurn("Tell Ada that Jarvis will handle the deploy", "en", 20.0)]
+
+
+def test_a_noise_only_turn_in_the_follow_up_window_keeps_the_time_left() -> None:
+    voice, _ = run(WakeWord(10.0), Heard("Hi", "en", 11.0), ReplyDone(12.0), SpeechStarted(14.0), Heard("Hmm", None, 15.0))
+    # 4 s of the window were left when the noise began.
+    assert voice.state == "follow_up"
+    assert run(Tick(18.9), start=voice)[0].state == "follow_up"
+    assert run(Tick(19.0), start=voice)[0].state == "idle"
+
+
+def test_the_chime_guard_counts_from_when_the_chime_starts_playing() -> None:
+    voice, _ = run(WakeWord(10.0), ChimeStarted(11.0), WakeWord(11.4))
+    # The hit at 11.4 s is the late chime's echo: it does not restart the wait.
+    assert run(Tick(16.0), start=voice)[0].state == "idle"

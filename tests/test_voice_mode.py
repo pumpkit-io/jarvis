@@ -355,3 +355,64 @@ async def test_a_spoken_ask_for_max_effort_reaches_the_subagent_and_its_end_is_a
     [subagent] = rig.backend.all_sessions("subagent")
     assert subagent.spec.effort == "max"
     assert rig.states()[-3:] == ["idle", "announce", "follow_up"]
+
+
+async def test_end_conversation_on_a_typed_line_leaves_the_spoken_exchange_its_follow_up_window(
+    rig_for: MakeRig,
+) -> None:
+    typed_done = asyncio.Event()
+    rig: Rig = await rig_for(
+        [Gate(typed_done), Text("Very well, sir."), Tool("end_conversation")], [Text("Green, sir.")]
+    )
+
+    rig.typist.type("That's all for the logs")
+    await rig.settle()
+    rig.audio.wake()
+    rig.audio.say("Is the CI green?")
+    await until(lambda: rig.state == "thinking")
+    typed_done.set()
+    await until(lambda: "Green, sir." in rig.player.texts)
+    await until(lambda: rig.state != "speaking")
+
+    assert rig.state == "follow_up"
+
+
+async def test_the_wake_word_does_not_stop_a_typed_reply(rig_for: MakeRig) -> None:
+    typed_done = asyncio.Event()
+    rig: Rig = await rig_for([Gate(typed_done), Text("Typed answer, sir.")], [Text("Spoken answer, sir.")])
+
+    rig.typist.type("Summarise the logs")
+    await rig.settle()
+    rig.audio.wake()
+    rig.audio.say("Is the CI green?")
+    await until(lambda: rig.state == "thinking")
+    rig.clock.advance(1)
+    rig.audio.wake()
+    await rig.settle()
+    typed_done.set()
+    await until(lambda: len(rig.output.replies) == 2)
+
+    assert rig.output.replies[0] == "Typed answer, sir."
+
+
+async def test_a_reply_stopped_by_the_wake_word_does_not_end_the_next_turn(rig_for: MakeRig) -> None:
+    typed_done = asyncio.Event()
+    rig: Rig = await rig_for(
+        [Text("Once upon a time, sir.")], [Gate(typed_done), Text("Typed answer, sir.")], [Text("Green, sir.")]
+    )
+    rig.player.hold = True
+
+    rig.audio.wake()
+    rig.audio.say("Tell me a story")
+    await until(lambda: rig.state == "speaking" and len(rig.output.replies) == 1)
+    rig.typist.type("Summarise the logs")
+    await rig.settle()
+    rig.clock.advance(1)
+    rig.audio.wake()
+    rig.audio.say("Is the CI green?")
+    await until(lambda: rig.state == "thinking")
+    rig.player.finish()
+    await rig.advance(0.1)
+
+    # The story's playback ended with the stop; the CI question is still waiting for its reply.
+    assert rig.state == "thinking"

@@ -140,6 +140,7 @@ class Speech:
         notice: Callable[[str], None],
         holding_line_after: float = HOLDING_LINE_AFTER,
         on_reply_audio: Callable[[], None] | None = None,
+        on_chime: Callable[[float], None] | None = None,
     ) -> None:
         self._tts = tts
         self._player = player
@@ -148,6 +149,8 @@ class Speech:
         self._notice = notice
         self._holding_line_after = holding_line_after
         self._on_reply_audio = on_reply_audio
+        # Called with the time the chime starts playing, behind whatever is queued ahead of it.
+        self._on_chime = on_chime
         # One thread: MLX ties its streams to the thread that loaded the model.
         self._thread = _DaemonThread("tts")
         self._queue: asyncio.Queue[_Say | _Cached | _End] = asyncio.Queue()
@@ -294,11 +297,14 @@ class Speech:
                 if generation == self._generation:
                     self._play(Clip(text, voice, samples, self._tts.sample_rate), reply, sentence=True)
             case _Cached(name, lang, reply):
-                self._play(self._cache[name, lang], reply, sentence=False)
+                starts = self._play(self._cache[name, lang], reply, sentence=False)
+                if name == "chime" and self._on_chime is not None:
+                    self._on_chime(starts)
             case _End(reply):
                 self._record_reply(reply)
 
-    def _play(self, clip: Clip, reply: _Reply | None, *, sentence: bool) -> None:
+    def _play(self, clip: Clip, reply: _Reply | None, *, sentence: bool) -> float:
+        """Plays `clip` after what is queued; returns when it starts."""
         starts = self._clock.now() + self._player.pending()
         starts_reply = reply is not None and reply.first_audio is None
         if reply is not None:
@@ -312,6 +318,7 @@ class Speech:
         self._player.play(clip, starts_reply=starts_reply)
         if starts_reply and self._on_reply_audio is not None:
             self._on_reply_audio()
+        return starts
 
     async def _hold_the_line(self, reply: _Reply) -> None:
         await self._clock.sleep(self._holding_line_after)

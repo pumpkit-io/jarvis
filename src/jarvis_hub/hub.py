@@ -271,6 +271,8 @@ class Hub:
         self._settled.set()
         self._turn_count = 0
         self._talker_gate = _TurnGate()
+        # Whether the Talker turn under way is heard: only a spoken turn's reply is interrupted or ends the conversation.
+        self._turn_spoken = False
         self._interrupted_turn: int | None = None
         self._orchestrator_gate = _TurnGate()
         self._orchestrating: str | None = None
@@ -305,10 +307,11 @@ class Hub:
         settling.cancel()
 
     async def interrupt(self) -> bool:
-        """Stop the reply in progress and whatever is still being said. Returns whether a Talker turn was running."""
+        """Stop whatever is being said, and the Talker turn under way if its reply is spoken; a typed line's reply
+        goes on. Returns whether a Talker turn was interrupted."""
         self._speech.stop()
         turn = self._talker_gate.turn
-        if turn is None or self._talker is None:
+        if turn is None or self._talker is None or not self._turn_spoken:
             return False
         self._interrupted_turn = turn
         return await self._talker_gate.interrupt(self._talker, turn)
@@ -469,7 +472,8 @@ class Hub:
         after_block = False
         end = TurnEnd("failed", error="the session ended without a result")
         self._talker_gate.turn = turn if show else None
-        speech = self._speech if show and spoken else _Silent()
+        self._turn_spoken = show and spoken
+        speech = self._speech if self._turn_spoken else _Silent()
         speech.begin(self._lang, turn=turn, heard_at=arrived if kind == "user" else None)
         try:
             async for event in self._guarded(session.send(message)):
@@ -502,6 +506,7 @@ class Hub:
                         end = event
         finally:
             self._talker_gate.turn = None
+            self._turn_spoken = False
             if self._interrupted_turn != turn:
                 speech.end()
         if end.outcome == "interrupted" and self._interrupted_turn != turn:
@@ -704,8 +709,8 @@ class Hub:
         return "Shown on screen."
 
     async def _end_conversation(self, args: dict[str, Any]) -> str:
-        # Text mode has no listening to stop, so there the Hub only acknowledges it.
-        if self._on_end_conversation is not None:
+        # Text mode, or a typed line in voice mode, has no listening to stop, so there the Hub only acknowledges it.
+        if self._on_end_conversation is not None and self._turn_spoken:
             self._on_end_conversation()
         return "The conversation ends after this reply."
 
