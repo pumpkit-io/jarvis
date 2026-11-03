@@ -279,12 +279,27 @@ def test_a_wake_word_while_the_user_speaks_does_not_cut_the_turn_short() -> None
     assert actions == [SendTurn("Tell Ada that Jarvis will handle the deploy", "en", 20.0)]
 
 
-def test_a_noise_only_turn_in_the_follow_up_window_keeps_the_time_left() -> None:
+def test_noise_in_the_follow_up_window_does_not_hold_it_open() -> None:
     voice, _ = run(WakeWord(10.0), Heard("Hi", "en", 11.0), ReplyDone(12.0, 11.0), SpeechStarted(14.0), Heard("Hmm", None, 15.0))
-    # 4 s of the window were left when the noise began.
+    # The window opened at 12 s runs on through the noise.
     assert voice.state == "follow_up"
-    assert run(Tick(18.9), start=voice)[0].state == "follow_up"
-    assert run(Tick(19.0), start=voice)[0].state == "idle"
+    assert run(Tick(17.9), start=voice)[0].state == "follow_up"
+    assert run(Tick(18.0), start=voice)[0].state == "idle"
+
+
+def test_steady_noise_lets_the_follow_up_window_run_down() -> None:
+    voice, _ = run(WakeWord(10.0), Heard("Hi", "en", 11.0), ReplyDone(12.0, 11.0))
+    for t in (13.0, 15.0, 17.0):
+        voice, _ = run(SpeechStarted(t), Heard("", None, t + 1.5), start=voice)
+    assert voice.state == "follow_up"
+    assert run(Tick(18.5), start=voice)[0].state == "idle"
+
+
+def test_the_wake_phrase_alone_in_the_follow_up_window_listens_as_after_the_wake_word() -> None:
+    voice, _ = run(WakeWord(10.0), Heard("Hi", "en", 11.0), ReplyDone(12.0, 11.0), SpeechStarted(17.0), Heard("Hey Jarvis.", "en", 18.5))
+    assert voice.state == "listening"
+    assert run(Tick(24.4), start=voice)[0].state == "listening"
+    assert run(Tick(24.5), start=voice)[0].state == "idle"
 
 
 def test_the_chime_guard_counts_from_when_the_chime_starts_playing() -> None:

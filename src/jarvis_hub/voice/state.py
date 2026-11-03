@@ -127,8 +127,8 @@ class Voice:
     ending: bool = False
     # The User has started a turn that is not yet heard.
     in_turn: bool = False
-    # Of the Follow-up window, the time left when that turn started; a turn of noise gets it back.
-    window_left: float | None = None
+    # When the Follow-up window the turn started in ends; it runs on through a turn of noise.
+    window_ends: float | None = None
     # The `at` of the spoken turn sent and not yet answered: only its reply moves `thinking` on.
     awaiting: float | None = None
 
@@ -196,8 +196,8 @@ def step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Action
             return replace(voice, chime_until=max(voice.chime_until, at + timing.chime_s)), []
         case SpeechStarted(at):
             if voice.state in CAPTURING and not voice.in_turn:
-                left = voice.deadline - at if voice.state == "follow_up" and voice.deadline is not None else None
-                return replace(voice, state="listening", deadline=None, in_turn=True, window_left=left), []
+                ends = voice.deadline if voice.state == "follow_up" else None
+                return replace(voice, state="listening", deadline=None, in_turn=True, window_ends=ends), []
             return voice, []
         case Heard(text, lang, at):
             return _heard(voice, text, lang, at, timing)
@@ -243,11 +243,12 @@ def _wake(voice: Voice, at: float, timing: Timing) -> tuple[Voice, list[Action]]
 def _heard(voice: Voice, text: str, lang: Lang | None, at: float, timing: Timing) -> tuple[Voice, list[Action]]:
     if voice.state not in CAPTURING:
         return voice, []
-    heard = replace(voice, in_turn=False, window_left=None)
+    heard = replace(voice, in_turn=False, window_ends=None)
     turn = without_wake_phrase(text)
     if _is_noise(turn):
-        if voice.window_left is not None:
-            return replace(heard, state="follow_up", deadline=at + voice.window_left), []
+        # Only the wake phrase, said in the window, waits for the request as the Wake word would.
+        if voice.window_ends is not None and _is_noise(text):
+            return replace(heard, state="follow_up", deadline=voice.window_ends), []
         return replace(heard, state="listening", deadline=at + timing.listen_s), []
     if (stop_lang := stop_phrase(turn)) is not None:
         return replace(heard, state="idle", deadline=None, ending=False), [Say("very_good", stop_lang)]
