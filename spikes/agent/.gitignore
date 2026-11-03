@@ -1,0 +1,3 @@
+.venv/
+baseline/hooks.jsonl
+__pycache__/

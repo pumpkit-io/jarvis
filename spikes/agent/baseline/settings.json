@@ -1,0 +1,40 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -f \"$JARVIS_BASELINE_DIR/hook.py\" ]; then python3 \"$JARVIS_BASELINE_DIR/hook.py\"; else echo \"baseline hook skipped: set JARVIS_BASELINE_DIR to the baseline folder\" >&2; fi; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -f \"$JARVIS_BASELINE_DIR/hook.py\" ]; then python3 \"$JARVIS_BASELINE_DIR/hook.py\"; else echo \"baseline hook skipped: set JARVIS_BASELINE_DIR to the baseline folder\" >&2; fi; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -f \"$JARVIS_BASELINE_DIR/hook.py\" ]; then python3 \"$JARVIS_BASELINE_DIR/hook.py\"; else echo \"baseline hook skipped: set JARVIS_BASELINE_DIR to the baseline folder\" >&2; fi; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

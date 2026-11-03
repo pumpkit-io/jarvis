@@ -71,9 +71,9 @@ def preflight() -> None:
 
 
 def baseline() -> None:
-    say("Baseline (Ticket #4). PLACEHOLDER: this step belongs to Ticket #4's hook-based harness on branch\n"
-        "voice-hub-t4, spikes/agent/baseline/. Its steps live in that branch's docs/notes/phase-0-spikes.md,\n"
-        "## Agent SDK > Baseline. In short, in another terminal from that worktree:\n"
+    say("Baseline (Ticket #4). This step runs Ticket #4's hook-based harness in spikes/agent/baseline/ of this\n"
+        "checkout. Its steps are in docs/notes/phase-0-spikes.md, ## Agent SDK > Baseline. In short, in another\n"
+        "terminal from the repo root:\n"
         "  ./jarvis --settings spikes/agent/baseline/settings.json   # about 10 turns, EN and IT, no repo work\n"
         "  python3 spikes/agent/baseline/analyze.py                  # prints p50 and p90")
     wait_enter("Press Enter when it is done, or type s and Enter to skip.")
