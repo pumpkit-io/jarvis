@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from common import SYNTHETIC, load_16k, save_16k
-from corpus import CLIPS, TAKES_PER_PHRASING, WAKE_PHRASINGS
+from corpus import CLIPS, PAUSE, PAUSE_TAKES, TAKES_PER_PHRASING, WAKE_PHRASINGS
 
 CLIP_VOICE = {"en": "Samantha", "it": "Alice"}
 EN_VOICES = ["Samantha", "Reed (English (US))", "Shelley (English (US))", "Eddy (English (US))", "Flo (English (US))",
@@ -50,8 +50,12 @@ def main() -> None:
         for take in range(TAKES_PER_PHRASING):
             audio = say(phrase, voices[take % len(voices)], rate=int(rng.integers(150, 220)))
             save_16k(SYNTHETIC / "wake" / f"{key}_{take + 1:02d}.wav", pad(audio, 1.0, 1.0, rng))
+    for take in PAUSE_TAKES:
+        # `say` reads [[slnc ms]] as a silence of that length.
+        audio = say(take.text.replace(PAUSE, " [[slnc 900]] "), CLIP_VOICE[take.lang])
+        save_16k(SYNTHETIC / "pauses" / f"{take.id}.wav", pad(audio, 0.2, 0.2, rng))
     (SYNTHETIC / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
-    print(f"wrote {len(CLIPS)} clips and {len(WAKE_PHRASINGS) * TAKES_PER_PHRASING} wake takes to {SYNTHETIC}")
+    print(f"wrote {len(CLIPS)} clips, {len(WAKE_PHRASINGS) * TAKES_PER_PHRASING} wake takes and {len(PAUSE_TAKES)} pause takes to {SYNTHETIC}")
 
 
 if __name__ == "__main__":

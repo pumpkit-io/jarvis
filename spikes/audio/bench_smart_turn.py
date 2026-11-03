@@ -4,6 +4,7 @@
 
 A complete turn ends at the clip's end. A cut-off turn is a long clip cut at the
 quietest word gap near its middle, which is what a mid-sentence pause looks like to VAD.
+The pause takes (`PAUSE_TAKES`) add real pauses: each is cut 200 ms into its pause.
 """
 
 import argparse
@@ -16,8 +17,8 @@ import onnxruntime as ort
 from huggingface_hub import snapshot_download
 from transformers import WhisperFeatureExtractor
 
-from common import SR, clips_dir, load_16k, p50, rss_mb, write_result
-from corpus import CLIPS
+from common import SR, clips_dir, find_pause, load_16k, p50, rss_mb, write_result
+from corpus import CLIPS, PAUSE_TAKES
 
 MODELS = ["smart-turn-v3.2-cpu.onnx", "smart-turn-v3.0.onnx"]
 VAD_SILENCE_MS = 500
@@ -60,6 +61,23 @@ def cut_mid_sentence(audio: np.ndarray) -> np.ndarray:
     return audio[: gap * 160]
 
 
+def pause_turns(folder: Path) -> tuple[dict, dict, dict]:
+    """Cuts at each real pause, the whole pause takes as complete turns, and every pause's length."""
+    cut, complete, pauses = {}, {}, {}
+    for take in PAUSE_TAKES:
+        path = folder / f"{take.id}.wav"
+        if not path.exists():
+            continue
+        audio = load_16k(path)
+        complete[take.id] = np.concatenate([trim_tail(audio), np.zeros(int(0.2 * SR), np.float32)])
+        if take.paused:
+            pause = find_pause(audio)
+            pauses[take.id] = None if pause is None else round(pause[1] - pause[0], 2)
+            if pause:
+                cut[take.id] = audio[: int((pause[0] + 0.2) * SR)]
+    return cut, complete, pauses
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", choices=["synthetic", "recordings"], default="synthetic")
@@ -71,7 +89,8 @@ def main() -> None:
     cut = {c.id: np.concatenate([cut_mid_sentence(trim_tail(load_16k(folder / f"{c.id}.wav"))), silence])
            for c in clips if c.kind == "long"}
 
-    result = {"source": args.source, "models": {}}
+    pause_cut, pause_complete, pauses = pause_turns(clips_dir(args.source) / "pauses")
+    result = {"source": args.source, "models": {}, "pause_s": pauses}
     for filename in MODELS:
         model = SmartTurn(filename)
         model(complete[clips[0].id])
@@ -94,6 +113,14 @@ def main() -> None:
             "saved_ms_vs_fixed_silence": {t: round(t - VAD_SILENCE_MS - infer) for t in FIXED_THRESHOLDS_MS},
             "p_complete": p_complete, "p_cut": p_cut,
         }
+        if pause_cut or pause_complete:
+            p_pause = {k: round(model(a), 3) for k, a in pause_cut.items()}
+            p_whole = {k: round(model(a), 3) for k, a in pause_complete.items()}
+            result["models"][filename] |= {
+                "real_pause_judged_incomplete": f"{sum(p <= 0.5 for p in p_pause.values())}/{len(p_pause)}",
+                "pause_takes_judged_complete": f"{sum(p > 0.5 for p in p_whole.values())}/{len(p_whole)}",
+                "p_real_pause": p_pause, "p_pause_take_complete": p_whole,
+            }
     result["rss_mb_with_both_models"] = round(rss_mb())
     print(json.dumps({k: ({m: {kk: vv for kk, vv in v.items() if not kk.startswith("p_")} for m, v in r.items()}
                           if k == "models" else r) for k, r in result.items()}, indent=2))

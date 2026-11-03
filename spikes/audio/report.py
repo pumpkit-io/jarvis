@@ -1,17 +1,23 @@
-"""Append the recording session's numbers to docs/notes/phase-0-spikes.md, at the end of ## Audio.
+"""Write the recording session's numbers into docs/notes/phase-0-spikes.md, at the end of ## Audio.
 
-    uv run report.py            # from data/results/*recordings*.json and the speaker run
+    uv run report.py            # from results/*recordings*.json and the speaker run
     uv run report.py --print    # show the block without writing it
+
+The block sits between two HTML comments, so a rerun replaces it instead of adding another.
 """
 
 import argparse
 import datetime
 import json
+import os
 import re
+from pathlib import Path
 
 from common import HERE, RESULTS
 
-NOTES = HERE.parent.parent / "docs" / "notes" / "phase-0-spikes.md"
+NOTES = Path(os.environ.get("JARVIS_AUDIO_NOTES", HERE.parent.parent / "docs" / "notes" / "phase-0-spikes.md"))
+START = "<!-- recording-session results: start (written by spikes/audio/report.py) -->"
+END = "<!-- recording-session results: end -->"
 
 
 def load(name: str) -> dict | None:
@@ -61,13 +67,15 @@ def aec_block() -> list[str]:
     rows = ["| Path | Barge-in triggers on Jarvis alone (per min) | User Barge-ins detected |", "|---|---|---|"]
 
     def row(name, s):
+        if "failed" in s:
+            rows.append(f"| {name} | failed: {s['failed']} | - |")
+            return
         rows.append(f"| {name} | {s['jarvis_only']['triggers']} ({s['jarvis_only']['per_minute']}) | {s.get('user_barge_ins_detected', '-')} |")
 
     row("raw mic", r["raw_mic"])
     for delay, s in r["webrtc"].items():
         row(f"WebRTC APM {delay}", s)
-    if "macos_vpio" in r:
-        row("macOS Voice Processing I/O", r["macos_vpio"])
+    row("macOS Voice Processing I/O", r.get("macos_vpio", {"failed": "not recorded"}))
     return rows
 
 
@@ -75,16 +83,28 @@ def smart_turn_block() -> list[str]:
     r = load("smart-turn-recordings")
     if not r:
         return ["No Smart Turn results on recordings."]
-    return [f"- `{m}`: {v['inference_ms_p50']} ms p50; complete turns judged complete {v['complete_judged_complete']}, "
-            f"cut-off turns judged incomplete {v['cut_judged_incomplete']}." for m, v in r["models"].items()]
+    out = []
+    for m, v in r["models"].items():
+        line = (f"- `{m}`: {v['inference_ms_p50']} ms p50 ({v['inference_ms_max']} ms max); complete turns judged complete "
+                f"{v['complete_judged_complete']}, synthetic cuts of long clips judged incomplete {v['cut_judged_incomplete']}")
+        if "real_pause_judged_incomplete" in v:
+            line += (f"; cut at a real pause judged incomplete {v['real_pause_judged_incomplete']}, "
+                     f"whole pause takes judged complete {v['pause_takes_judged_complete']}")
+        out.append(line + ".")
+    pauses = [p for p in r.get("pause_s", {}).values() if p is not None]
+    if r.get("pause_s"):
+        out.append(f"- Pauses found in {len(pauses)}/{len(r['pause_s'])} pause takes"
+                   + (f", {min(pauses)} to {max(pauses)} s long." if pauses else "."))
+    return out
 
 
 def block() -> str:
     today = datetime.date.today().isoformat()
     lines = [f"### Recording session results ({today})", "",
-             "Measured by `spikes/audio/session.py` on the User's own recordings. Raw JSON: `spikes/audio/data/results/` (local).",
+             "Measured by `spikes/audio/session.py` on the User's own recordings. Numbers: `spikes/audio/results/*-recordings.json`, "
+             "`aec-speaker-run.json` and `wake-false-accepts-video.json`; transcripts stay in `spikes/audio/data/results/` (local).",
              "", "**STT**", "", *stt_block(), *lang_block(), "", "**Wake word** (openWakeWord `hey_jarvis`, takes detected)", "", *wake_block(),
-             "", "**Echo cancellation** (built-in speakers)", "", *aec_block(), "", "**Smart Turn v3** (User's clips)", "",
+             "", "**Echo cancellation** (built-in speakers)", "", *aec_block(), "", "**Smart Turn v3** (User's clips and pause takes)", "",
              *smart_turn_block(), "",
              "Next: update the verdict table above with the chosen STT, TTS, echo cancellation and Wake word.", ""]
     return "\n".join(lines)
@@ -98,13 +118,21 @@ def main() -> None:
     if args.print:
         print(text)
         return
-    notes = NOTES.read_text()
+    NOTES.write_text(place(NOTES.read_text(), text))
+    print(f"wrote the results block into {NOTES}")
+
+
+def place(notes: str, text: str) -> str:
+    """Put the block between its markers, replacing an earlier one, or at the end of ## Audio."""
+    marked = f"{START}\n{text.rstrip()}\n{END}\n"
+    if START in notes and END in notes:
+        a, b = notes.index(START), notes.index(END) + len(END)
+        return notes[:a] + marked.rstrip("\n") + notes[b:]
     start = re.search(r"^## Audio$", notes, re.M).start()
     nxt = notes.find("\n## ", start + 1)
     end = len(notes) if nxt == -1 else nxt + 1
     head, tail = notes[:end].rstrip("\n") + "\n\n", notes[end:]
-    NOTES.write_text(head + text + ("\n" + tail if tail else ""))
-    print(f"appended to {NOTES}")
+    return head + marked + ("\n" + tail if tail else "")
 
 
 if __name__ == "__main__":

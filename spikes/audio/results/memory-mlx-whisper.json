@@ -1,0 +1,94 @@
+{
+  "stt": "mlx-whisper",
+  "mlx_cache_limit_mb": 256,
+  "stages": [
+    {
+      "stage": "python + mlx",
+      "rss": 46,
+      "footprint": 28.0,
+      "mlx_active": 0,
+      "mlx_cache": 0
+    },
+    {
+      "stage": "+ STT (mlx-whisper whisper-large-v3-turbo)",
+      "rss": 1306,
+      "footprint": 2061.0,
+      "mlx_active": 1543,
+      "mlx_cache": 256
+    },
+    {
+      "stage": "+ TTS (kokoro-mlx, en + it voices)",
+      "rss": 691,
+      "footprint": 2764.0,
+      "mlx_active": 1857,
+      "mlx_cache": 265
+    },
+    {
+      "stage": "+ openWakeWord hey_jarvis + Silero VAD",
+      "rss": 795,
+      "footprint": 2745.0,
+      "mlx_active": 1857,
+      "mlx_cache": 265
+    },
+    {
+      "stage": "+ Smart Turn v3.2 cpu",
+      "rss": 836,
+      "footprint": 2775.0,
+      "mlx_active": 1857,
+      "mlx_cache": 265
+    },
+    {
+      "stage": "+ WebRTC APM (livekit)",
+      "rss": 856,
+      "footprint": 2781.0,
+      "mlx_active": 1857,
+      "mlx_cache": 265
+    },
+    {
+      "stage": "after warm reuse",
+      "rss": 853,
+      "footprint": 2778.0,
+      "mlx_active": 1857,
+      "mlx_cache": 260
+    }
+  ],
+  "mlx_peak_mb": 3098,
+  "claude_processes_seen": [
+    {
+      "pid": 46020,
+      "footprint": 273.0,
+      "rss": 64
+    },
+    {
+      "pid": 53654,
+      "footprint": 273.0,
+      "rss": 148
+    },
+    {
+      "pid": 63144,
+      "footprint": 362.0,
+      "rss": 317
+    },
+    {
+      "pid": 72114,
+      "footprint": 285.0,
+      "rss": 92
+    },
+    {
+      "pid": 80646,
+      "footprint": 296.0,
+      "rss": 115
+    },
+    {
+      "pid": 91071,
+      "footprint": 394.0,
+      "rss": 349
+    }
+  ],
+  "claude_median_footprint_mb": 290.5,
+  "audio_stack_footprint_mb": 2778.0,
+  "budget_mb": 4096,
+  "within_budget": true,
+  "audio_plus_three_claude_mb": 3650,
+  "machine_total_mb": 18432
+}

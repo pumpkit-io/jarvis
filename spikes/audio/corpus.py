@@ -70,3 +70,30 @@ TTS_SENTENCES: dict[str, str] = {
     "en": "I have opened the pull request on pumpkit and checks are running.",
     "it": "Ho aperto la pull request su pumpkit e i controlli sono partiti.",
 }
+
+PAUSE = " … "
+
+
+@dataclass(frozen=True)
+class PauseTake:
+    id: str
+    lang: str
+    text: str  # PAUSE marks where the User stops for about a second before finishing
+    paused: bool
+
+
+# Real mid-sentence pauses for Smart Turn: a cut at the pause must read as incomplete.
+PAUSE_TAKES: list[PauseTake] = [
+    PauseTake("p_en01", "en", f"Open an issue in pumpkit{PAUSE}about the scheduler skipping posts.", True),
+    PauseTake("p_en02", "en", f"Ask a subagent to{PAUSE}review the motion studio pull request.", True),
+    PauseTake("p_en03", "en", f"When the deploy finishes,{PAUSE}check the error rate in PostHog.", True),
+    PauseTake("p_en04", "en", f"Write a summary of{PAUSE}what changed in the sdlc skills this week.", True),
+    PauseTake("p_it01", "it", f"Apri una issue su pumpkit{PAUSE}per i post che saltano.", True),
+    PauseTake("p_it02", "it", f"Chiedi a un subagente di{PAUSE}rivedere la pull request su motion studio.", True),
+    PauseTake("p_it03", "it", f"Quando finisce il deploy,{PAUSE}controlla il tasso di errori.", True),
+    PauseTake("p_it04", "it", f"Scrivi un riassunto di{PAUSE}cosa è cambiato questa settimana.", True),
+    PauseTake("c_en01", "en", "Hmm, let me think about that and get back to you.", False),
+    PauseTake("c_en02", "en", "Put the list of open pull requests on screen.", False),
+    PauseTake("c_it01", "it", "Fammi pensare, poi ti dico.", False),
+    PauseTake("c_it02", "it", "Mostrami le pull request aperte.", False),
+]
