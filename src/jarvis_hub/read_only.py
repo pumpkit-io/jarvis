@@ -1,7 +1,10 @@
 """The Orchestrator's Bash check (ADR 0007): a command is parsed into words, the words are checked against a list
-of gh and git reads, and only those words run, re-quoted, so no shell can read the command another way."""
+of gh and git reads, and only those words run, re-quoted, so no shell can read the command another way, with an
+environment that holds no secret and nothing that steers gh or git."""
 
+import os
 import unicodedata
+from collections.abc import Mapping
 
 from jarvis_hub.agents.backend import Refused
 
@@ -28,8 +31,19 @@ GIT_BRANCH_FLAGS = {"-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", 
 # Refused with every abbreviation git's option parser would accept for them.
 GIT_REFUSED_OPTIONS = ("--output", "--ext-diff", "--textconv")
 GIT_REAL_OPTIONS = {"--text"}
-# Prepended to every git call: no index writes, and no fsmonitor program from the repo's config.
-GIT_GLOBALS: Argv = ("--no-optional-locks", "-c", "core.fsmonitor=false")
+# git's well-known empty tree: attributes read from it name no filter driver.
+EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+# Prepended to every git call: no index writes, no fsmonitor program from the repo's config, no bare repo found by
+# walking up from a folder (one committed inside a clone brings its own config), and no clean or smudge filter
+# named by a .gitattributes in the work tree.
+GIT_GLOBALS: Argv = (
+    "--no-optional-locks",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "safe.bareRepository=explicit",
+    f"--attr-source={EMPTY_TREE}",
+)
 # Inserted after the subcommand, so a diff driver or textconv program in the repo's config never runs.
 GIT_NO_PROGRAMS: dict[str, Argv] = {
     "diff": ("--no-ext-diff", "--no-textconv"),
@@ -37,6 +51,24 @@ GIT_NO_PROGRAMS: dict[str, Argv] = {
     "show": ("--no-ext-diff", "--no-textconv"),
     "blame": ("--no-textconv",),
 }
+
+# gh and git run under `env -i` with only these from the Hub's environment. The rest carries tokens and keys a
+# `--jq 'env'` filter would print, and GH_*, GIT_*, PAGER, EDITOR and BROWSER variables that steer what gh and git do.
+# gh finds its login through HOME or GH_CONFIG_DIR and the system keyring (on Linux through the D-Bus session),
+# so it needs no token from the environment.
+RUN_ENV = (
+    "PATH",
+    "HOME",
+    "LANG",
+    "TERM",
+    "TMPDIR",
+    "XDG_CONFIG_HOME",
+    "GH_CONFIG_DIR",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+)
+# Absolute, so a shell function or alias named env in the User's profile is not what runs; env finds gh or git on PATH.
+ENV = "/usr/bin/env"
 
 # Unquoted, these are shell syntax (operators, substitution, globs, comments); refused rather than guessed at.
 UNQUOTED_SYNTAX = set(";&|<>()$`\\#*?[]{}!")
@@ -48,8 +80,28 @@ GH_ONLY = "Only gh commands that read run here (pr, issue, run, repo, release, w
 GIT_ONLY = "Only git commands that read run here (status, log, diff, show, branch listing and similar)."
 
 
-def check(command: str) -> Argv | Refused:
-    """The words to run for a read-only gh or git command, or why it may not run."""
+def check(command: str, environ: Mapping[str, str] = os.environ) -> Argv | Refused:
+    """The words to run for a read-only gh or git command, in an environment cut down from `environ`, or why it may
+    not run."""
+    words = _checked(command)
+    if isinstance(words, Refused):
+        return words
+    kept = [f"{k}={v}" for k, v in environ.items() if k in RUN_ENV or k.startswith("LC_")]
+    return (ENV, "-i", *kept, *words)
+
+
+def describe_reads() -> str:
+    """The reads `check` allows, worded for a prompt, so the prompt and the check share one list."""
+    gh = "; ".join(f"`gh {group}` {', '.join(f'`{s}`' for s in sorted(subs))}" for group, subs in GH_READ.items())
+    git = ", ".join(f"`{s}`" for s in sorted(GIT_READ))
+    return (
+        f"{gh}; and `gh status`, without `--web` or `--watch`. "
+        f"`git` (optionally `-C <repo>` first): {git}, plus branch listings, `worktree list`, `stash list` "
+        "and `remote -v`/`get-url`."
+    )
+
+
+def _checked(command: str) -> Argv | Refused:
     words = _words(command)
     if isinstance(words, Refused):
         return words
@@ -63,17 +115,6 @@ def check(command: str) -> Argv | Refused:
             return _git(words[1:])
         case _:
             return Refused("Only read-only gh and git commands run here; use Read, Grep and Glob for files.")
-
-
-def describe_reads() -> str:
-    """The reads `check` allows, worded for a prompt, so the prompt and the check share one list."""
-    gh = "; ".join(f"`gh {group}` {', '.join(f'`{s}`' for s in sorted(subs))}" for group, subs in GH_READ.items())
-    git = ", ".join(f"`{s}`" for s in sorted(GIT_READ))
-    return (
-        f"{gh}; and `gh status`, without `--web` or `--watch`. "
-        f"`git` (optionally `-C <repo>` first): {git}, plus branch listings, `worktree list`, `stash list` "
-        "and `remote -v`/`get-url`."
-    )
 
 
 def _words(command: str) -> list[str] | Refused:

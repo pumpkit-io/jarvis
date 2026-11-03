@@ -1,6 +1,7 @@
 import shlex
 import subprocess
 from dataclasses import replace
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -192,7 +193,9 @@ def test_anything_else_is_refused_with_a_reason(command: str) -> None:
 
 
 def test_what_runs_is_exactly_the_checked_command() -> None:
-    assert check("gh pr list -R pumpkit-io/pumpkit --jq '.[] | .number'") == (
+    assert check("gh pr list -R pumpkit-io/pumpkit --jq '.[] | .number'", {}) == (
+        "/usr/bin/env",
+        "-i",
         "gh",
         "pr",
         "list",
@@ -204,15 +207,25 @@ def test_what_runs_is_exactly_the_checked_command() -> None:
 
 
 def test_a_lookalike_dash_reaches_gh_as_an_argument_not_a_flag() -> None:
-    assert check("gh pr view 42 \u2014web") == ("gh", "pr", "view", "42", "\u2014web")
+    assert check("gh pr view 42 \u2014web", {}) == ("/usr/bin/env", "-i", "gh", "pr", "view", "42", "\u2014web")
+
+
+GIT_SWITCHES = (
+    "--no-optional-locks",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "safe.bareRepository=explicit",
+    "--attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+)
 
 
 def test_git_runs_with_repo_configured_programs_and_index_writes_switched_off() -> None:
-    assert check("git -C pumpkit diff main --stat") == (
+    assert check("git -C pumpkit diff main --stat", {}) == (
+        "/usr/bin/env",
+        "-i",
         "git",
-        "--no-optional-locks",
-        "-c",
-        "core.fsmonitor=false",
+        *GIT_SWITCHES,
         "-C",
         "pumpkit",
         "diff",
@@ -221,16 +234,112 @@ def test_git_runs_with_repo_configured_programs_and_index_writes_switched_off() 
         "main",
         "--stat",
     )
-    assert check("git log -1") == (
+    assert check("git log -1", {}) == (
+        "/usr/bin/env",
+        "-i",
         "git",
-        "--no-optional-locks",
-        "-c",
-        "core.fsmonitor=false",
+        *GIT_SWITCHES,
         "log",
         "--no-ext-diff",
         "--no-textconv",
         "-1",
     )
+
+
+HUB_ENVIRON = {
+    "PATH": "/opt/homebrew/bin:/usr/bin:/bin",
+    "HOME": "/Users/ada",
+    "LANG": "en_US.UTF-8",
+    "LC_ALL": "en_US.UTF-8",
+    "TERM": "xterm-256color",
+    "GH_CONFIG_DIR": "/Users/ada/.config/gh",
+    "GH_TOKEN": "ghp_secret",
+    "GITHUB_TOKEN": "ghp_secret",
+    "GH_ENTERPRISE_TOKEN": "ghp_secret",
+    "ANTHROPIC_API_KEY": "sk-ant-secret",
+    "AWS_SECRET_ACCESS_KEY": "secret",
+    "GH_HOST": "evil.example",
+    "GH_REPO": "evil/repo",
+    "GH_PAGER": "touch /tmp/pwn",
+    "GH_BROWSER": "touch /tmp/pwn",
+    "GIT_DIR": "/tmp/evil",
+    "GIT_CONFIG_PARAMETERS": "'core.pager'='touch /tmp/pwn'",
+    "GIT_CONFIG_GLOBAL": "/tmp/evil.gitconfig",
+    "GIT_EXTERNAL_DIFF": "touch /tmp/pwn",
+    "GIT_PAGER": "touch /tmp/pwn",
+    "PAGER": "touch /tmp/pwn",
+    "EDITOR": "touch /tmp/pwn",
+    "BROWSER": "touch /tmp/pwn",
+}
+KEPT = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GH_CONFIG_DIR")
+
+
+@pytest.mark.parametrize("command", ["gh issue list --json number --jq 'env|keys'", "git -C pumpkit log -1"])
+def test_gh_and_git_run_with_no_secret_and_nothing_that_steers_them(command: str) -> None:
+    argv = check(command, HUB_ENVIRON)
+    assert not isinstance(argv, Refused)
+    program = argv.index(command.split()[0])
+    assert argv[:2] == ("/usr/bin/env", "-i")
+    assert argv[2:program] == tuple(f"{k}={HUB_ENVIRON[k]}" for k in HUB_ENVIRON if k in KEPT)
+
+
+def test_the_program_sees_only_the_kept_environment(tmp_path: Path) -> None:
+    # A stand-in gh on PATH prints the environment it was started with, as `--jq 'env'` would.
+    fake_gh = tmp_path / "gh"
+    fake_gh.write_text("#!/bin/sh\nexec /usr/bin/env\n")
+    fake_gh.chmod(0o755)
+    environ = {**HUB_ENVIRON, "PATH": f"{tmp_path}:/usr/bin:/bin"}
+    argv = check("gh issue list --json number --jq 'env|keys'", environ)
+    assert not isinstance(argv, Refused)
+
+    out = subprocess.run(["bash", "-c", shlex.join(argv)], env=environ, capture_output=True, text=True, check=True)
+
+    # The stand-in's own /bin/sh adds PWD, SHLVL and _.
+    names = {line.split("=", 1)[0] for line in out.stdout.splitlines()} - {"PWD", "SHLVL", "_"}
+    assert names == set(KEPT)
+    assert "secret" not in out.stdout
+
+
+def git(*args: str, cwd: Path) -> None:
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=cwd, check=True, capture_output=True)
+
+
+def test_no_filter_or_bare_repo_config_in_a_clone_runs_a_program(tmp_path: Path) -> None:
+    marker = tmp_path / "ran"
+    program = tmp_path / "filter.sh"
+    program.write_text(f"#!/bin/sh\ntouch {marker}\ncat\n")
+    program.chmod(0o755)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git("init", "-q", cwd=repo)
+    git("config", "filter.x.clean", str(program), cwd=repo)
+    git("config", "filter.x.process", str(program), cwd=repo)
+    (repo / ".gitattributes").write_text("*.txt filter=x\n")
+    (repo / "a.txt").write_text("a\n")
+    git("add", ".", cwd=repo)
+    git("commit", "-qm", "init", cwd=repo)
+    (repo / "a.txt").write_text("a\nb\n")
+    # A bare repo committed inside the clone would bring its own config, programs included.
+    git("init", "-q", "--bare", "inner.git", cwd=repo)
+    marker.unlink(missing_ok=True)
+    subprocess.run(["git", "-C", str(repo), "diff", "--stat"], check=True, capture_output=True)
+    assert marker.exists(), "the filter runs on an unchecked git diff"
+    marker.unlink()
+
+    for command in (
+        f"git -C {repo} diff --stat",
+        f"git -C {repo} status",
+        f"git -C {repo} blame a.txt",
+        f"git -C {repo} log -p -1",
+    ):
+        argv = check(command)
+        assert not isinstance(argv, Refused)
+        subprocess.run(["bash", "-c", shlex.join(argv)], check=True, capture_output=True)
+        assert not marker.exists(), command
+    argv = check(f"git -C {repo / 'inner.git'} log")
+    assert not isinstance(argv, Refused)
+    bare = subprocess.run(["bash", "-c", shlex.join(argv)], capture_output=True, text=True)
+    assert bare.returncode != 0 and "cannot use bare repository" in bare.stderr
 
 
 @pytest.mark.parametrize(
@@ -244,12 +353,13 @@ def test_git_runs_with_repo_configured_programs_and_index_writes_switched_off() 
     ],
 )
 def test_bash_reads_the_command_that_runs_as_the_same_words(command: str) -> None:
-    argv = check(command)
+    argv = check(command, {})
     assert not isinstance(argv, Refused)
+    env, words = argv[:2], argv[3:]
     # printf stands in for gh or git: it prints each word bash passed it on its own line.
-    probe = shlex.join(["printf", "%s\\n", *argv[1:]])
+    probe = shlex.join([*env, "printf", "%s\\n", *words])
     out = subprocess.run(["bash", "-c", probe], capture_output=True, text=True, check=True).stdout
-    assert out.split("\n")[:-1] == list(argv[1:])
+    assert out.split("\n")[:-1] == list(words)
 
 
 def test_every_gh_and_git_read_on_the_list_is_allowed() -> None:
@@ -270,10 +380,14 @@ async def bash_hook_decision(command: str) -> dict[str, Any]:
     return dict(output.get("hookSpecificOutput", {}))
 
 
-async def test_the_hook_allows_a_read_and_runs_only_its_checked_words() -> None:
+async def test_the_hook_allows_a_read_and_runs_only_its_checked_words(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GH_TOKEN", "ghp_secret")
     decision = await bash_hook_decision("gh pr list   --jq '.[] | .number'")
     assert decision["permissionDecision"] == "allow"
-    assert decision["updatedInput"] == {"command": "gh pr list --jq '.[] | .number'", "timeout": 5000}
+    command = decision["updatedInput"]["command"]
+    assert command.startswith("/usr/bin/env -i ") and command.endswith(" gh pr list --jq '.[] | .number'")
+    assert "ghp_secret" not in command
+    assert decision["updatedInput"]["timeout"] == 5000
 
 
 async def test_the_hook_denies_anything_else_with_the_reason() -> None:
