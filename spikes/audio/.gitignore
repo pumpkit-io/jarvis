@@ -1,0 +1,4 @@
+# Recordings, synthetic clips and results stay local.
+data/
+.venv/
+__pycache__/
