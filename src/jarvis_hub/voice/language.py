@@ -22,7 +22,7 @@ _CODES: dict[Language, Lang] = {Language.ENGLISH: "en", Language.ITALIAN: "it"}
 _FUNCTION_WORDS: dict[Lang, frozenset[str]] = {
     "en": frozenset(
         "the an is are was were of for to what which on and my you your it this that these please with how "
-        "has have do does can could would should i'm it's what's there be at from all any still why who "
+        "am has have do does can could would should i'm it's what's there be at from all any still why who "
         "when where not just".split()
     ),
     "it": frozenset(
@@ -46,16 +46,25 @@ def warm_up() -> None:
     _detector()
 
 
+def _is_english_i(text: str, found: list[re.Match[str]], i: int) -> bool:
+    """A standalone capital "I" is English, except at the start of a sentence before a lowercase word, where it
+    may be the Italian article ("I test sono verdi") and counts for neither language."""
+    if found[i][0] != "I":
+        return False
+    before = text[: found[i].start()].rstrip()
+    at_start = not before or before[-1] in ".?!"
+    following = found[i + 1][0] if i + 1 < len(found) else ""
+    return not (at_start and following[:1].islower())
+
+
 def detect_language(text: str, previous: Lang) -> Lang:
     """The language of `text`, or `previous` when detection is not confident."""
-    found = _WORDS.findall(text)
-    # Acronyms such as "CI" and "IT" are not the Italian words they spell. A capital "I" past the first word is
-    # English, unless Italian function words are present: after a full stop "I test sono verdi" is the article.
-    words = [w.lower() for w in found if not (len(w) > 1 and w.isupper())]
+    found = list(_WORDS.finditer(text))
+    # Acronyms such as "CI" and "IT" are not the Italian words they spell.
+    words = [m[0].lower() for m in found if not (len(m[0]) > 1 and m[0].isupper())]
     en = sum(w in _FUNCTION_WORDS["en"] for w in words)
     it = sum(w in _FUNCTION_WORDS["it"] or bool(_ELISION.match(w)) for w in words)
-    if it == 0:
-        en += found[1:].count("I")
+    en += sum(_is_english_i(text, found, i) for i in range(len(found)))
     if en != it:
         return "en" if en > it else "it"
     values = _detector().compute_language_confidence_values(text)
