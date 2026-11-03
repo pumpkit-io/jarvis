@@ -1,0 +1,20 @@
+# A restart keeps Tasks and their waits, and tells the Orchestrator at once
+
+Story 53 asks that a Hub restart lose no follow-ups. The Hub saves its open Tasks, their Subagents, Watchers and Checks to `.jarvis/state.json` each time they change: one small JSON file, versioned, written to a temporary file and renamed over the old one. A file that is not valid JSON or has another version is moved to `state.unreadable.json` with a notice, and the Hub starts with nothing restored rather than failing. Times are saved as wall-clock times, converted from the Hub's monotonic clock, so a Check keeps its due time across the restart: one that came due while the Hub was down fires as soon as it is back, once, and its next repeat waits from then. Finished Tasks are not saved, and neither is the Talker's conversation: each launch starts a fresh Talker (story 24).
+
+On restart, a Watcher runs its `gh` command again, checked anew against the Org, within what is left of its six-hour limit. A Subagent the old Hub never saw end is marked `interrupted`. Its branch and worktree are kept, and its worktree lock, held under its id, is released the way its own end would have released it, with the branch described for the Orchestrator; a reading Subagent's worktree is removed unless it holds something. The lock's holder is gone with the old process, and a lock left behind would keep the sdlc `sweep` off that worktree for good. A clean close does the same for the Subagents it stops, so the next launch only reports them.
+
+## The recovery message goes at once, and only when something was pending
+
+When the saved state holds an open Task, the Hub sends the Orchestrator one `<event source="hub" reason="restart">` message in the background as soon as it starts, listing those Tasks, their restored waits and interrupted Subagents. That turn covers every listed Task, so its tools take a `task_id`. A Task nothing will wake (an interrupted Subagent, or a turn the old Hub cut off) that the turn leaves without a report fails, and the User hears so. With nothing pending, no message goes and no model call follows the Talker's warm-up.
+
+## Considered Options
+
+- Hold the message until the Orchestrator is first needed. Rejected: a Task whose Subagent was interrupted has nothing left to wake the Orchestrator, so "first needed" could be never, and holding it for the User's first Task would put a second Task's work in front of theirs.
+- Restart interrupted Subagents on their own. Rejected: a Subagent half way through may have pushed or opened a PR, so whether to start over is a judgment for the Orchestrator with the branch in front of it.
+
+## Consequences
+
+- A launch after a restart with open Tasks spends one Orchestrator turn of the Max limits. Story 1 still holds as ADR 0006 reads it: the Talker is ready at once and the message runs in the background.
+- The Orchestrator's queue is not saved: a message waiting in it when the Hub stopped is covered by the recovery message instead.
+- `close()` stops each wait without reporting it, so the state file keeps it waiting; the notice that Checks were dropped on close is gone.
