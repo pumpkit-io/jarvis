@@ -4,8 +4,8 @@ Run: env -u ANTHROPIC_API_KEY uv run python caps.py
 """
 
 import asyncio
-import json
 import time
+from pathlib import Path
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -21,7 +21,7 @@ from claude_agent_sdk import (
     tool,
 )
 
-from common import options, versions
+from common import options, write_json
 
 results: dict[str, object] = {}
 
@@ -70,7 +70,7 @@ async def two_turns_streaming_and_subscription():
         "apiKeySource": init.get("apiKeySource"),
         "rate_limit_events": rate,
         "total_cost_usd_reported": r2.total_cost_usd,
-        "account": (server or {}).get("account"),
+        "account": {k: ((server or {}).get("account") or {}).get(k) for k in ("subscriptionType", "apiProvider")},
     }
     results["two_turn"] = {"turn2_reply": reply_text(t2), "same_session": result_of(t1).session_id == r2.session_id}
     results["stream_deltas"] = {"count": len(deltas), "first": deltas[:3]}
@@ -91,6 +91,7 @@ async def interrupt_mid_stream():
         await c.query("Count from 1 to 300, one number per line, no other text.")
         seen = ""
         t_interrupt = None
+        chars_at_interrupt = None
         msgs = []
         async for m in c.receive_response():
             msgs.append(m)
@@ -99,13 +100,15 @@ async def interrupt_mid_stream():
                 seen += d
                 if t_interrupt is None and len(seen) > 40:
                     t_interrupt = time.perf_counter()
+                    chars_at_interrupt = len(seen)
                     await c.interrupt()
         t_end = time.perf_counter()
         r = result_of(msgs)
         await c.query("Reply with the single word READY.")
         after = await collect(c)
     results["interrupt"] = {
-        "chars_before_result": len(seen),
+        "chars_at_interrupt": chars_at_interrupt,
+        "chars_before_result": len(seen),  # deltas keep arriving after interrupt(); the Hub must drop them
         "last_line_seen": seen.strip().splitlines()[-1] if seen.strip() else None,
         "interrupt_to_result_ms": round((t_end - t_interrupt) * 1000) if t_interrupt else None,
         "result_subtype": r.subtype,
@@ -126,7 +129,7 @@ async def system_prompt_replaces_default():
 
 async def setting_sources_compare():
     # Run inside the jarvis worktree, whose project settings carry a SessionStart hook.
-    repo = str(__import__("pathlib").Path(__file__).resolve().parents[2])
+    repo = str(Path(__file__).resolve().parents[2])
     out = {}
     for label, src in (("empty", []), ("omitted", None)):
         msgs = [m async for m in query(
@@ -182,14 +185,13 @@ async def in_process_tool_and_no_builtins():
 
 
 async def main():
-    print(versions())
     for step in (two_turns_streaming_and_subscription, interrupt_mid_stream, system_prompt_replaces_default,
                  setting_sources_compare, in_process_tool_and_no_builtins):
         try:
             await step()
         except Exception as e:  # spike: record and keep going
             results[step.__name__] = {"error": repr(e)}
-    print(json.dumps(results, indent=2, default=str))
+    write_json("caps.json", results)
 
 
 if __name__ == "__main__":

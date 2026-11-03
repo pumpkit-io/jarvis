@@ -1,7 +1,9 @@
 """Shared setup for the Phase 0 Agent SDK spikes. Throwaway, not Hub code."""
 
+import json
 import os
 import shutil
+import subprocess
 import sys
 
 import claude_agent_sdk
@@ -30,5 +32,15 @@ def options(**overrides) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(**base)
 
 
-def versions() -> str:
-    return f"claude-agent-sdk {claude_agent_sdk.__version__}, CLI {INSTALLED_CLI}"
+def versions() -> dict:
+    cli = subprocess.run([INSTALLED_CLI, "--version"], capture_output=True, text=True).stdout.split()[0]
+    return {"claude-agent-sdk": claude_agent_sdk.__version__, "claude-cli": cli}
+
+
+def write_json(name: str, data) -> None:
+    """Write results/<name> as valid JSON, with the versions inside it."""
+    path = os.path.join(SCRATCH_CWD, "results", name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump({"versions": versions(), **data}, f, indent=1, ensure_ascii=False, default=str)
+        f.write("\n")

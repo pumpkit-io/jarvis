@@ -5,7 +5,11 @@ Joins VoiceMode's event log with the hook log from hook.py. For each spoken turn
   first audio    = TTS_FIRST_AUDIO of the next converse call
 and the gap is split into silence tail, STT, tool return, model, and TTS time to first audio.
 
-Run: python3 analyze.py [--hooks hooks.jsonl] [--events ~/.voicemode/logs/events] [--silence-ms N] [--since ISO]
+Run: python3 analyze.py [--session ID | --session all] [--list-sessions] [--hooks hooks.jsonl]
+                        [--events ~/.voicemode/logs/events] [--silence-ms N]
+The hook log holds every recorded session; by default the analysis covers only the most recent one.
+It exits with an error when the hook log is missing or has no entries, because without it the analysis
+would cover every VoiceMode event ever logged.
 """
 
 import argparse
@@ -13,6 +17,7 @@ import glob
 import json
 import os
 import statistics
+import sys
 from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -76,13 +81,26 @@ def main():
     ap.add_argument("--events", default=os.path.expanduser("~/.voicemode/logs/events"))
     ap.add_argument("--conversations", default=os.path.expanduser("~/.voicemode/logs/conversations"))
     ap.add_argument("--silence-ms", type=float)
-    ap.add_argument("--since", help="ISO time; defaults to the first hook entry")
-    ap.add_argument("--until", help="ISO time; defaults to the last hook entry")
+    ap.add_argument("--session", help="session id from --list-sessions, or 'all'; default: the most recent session")
+    ap.add_argument("--list-sessions", action="store_true")
     args = ap.parse_args()
 
-    hooks = [json.loads(line) for line in open(args.hooks)] if os.path.exists(args.hooks) else []
-    since = ts(args.since) if args.since else (hooks[0]["t"] - 1 if hooks else 0)
-    until = ts(args.until) if args.until else (hooks[-1]["t"] + 60 if hooks else float("inf"))
+    all_hooks = [json.loads(line) for line in open(args.hooks)] if os.path.exists(args.hooks) else []
+    if not all_hooks:
+        sys.exit(f"no hook entries in {args.hooks}: record a session with the hook settings first "
+                 "(see docs/notes/phase-0-spikes.md), or the analysis would cover every VoiceMode event ever logged")
+    sessions = {}
+    for h in all_hooks:
+        sessions.setdefault(h["session"], []).append(h["t"])
+    if args.list_sessions:
+        for sid, times in sorted(sessions.items(), key=lambda kv: kv[1][0]):
+            print(f"{sid}  {datetime.fromtimestamp(times[0]):%Y-%m-%d %H:%M:%S}  {len(times)} hook entries")
+        return
+    chosen = args.session or max(sessions, key=lambda sid: sessions[sid][-1])
+    hooks = all_hooks if chosen == "all" else [h for h in all_hooks if h["session"] == chosen]
+    if not hooks:
+        sys.exit(f"session {chosen} not in the hook log; see --list-sessions")
+    since, until = hooks[0]["t"] - 1, hooks[-1]["t"] + 60
     silence = (args.silence_ms or silence_threshold_ms(args.conversations, since, until)) / 1000
 
     is_converse = lambda h: (h.get("tool") or "").endswith("converse")
@@ -108,10 +126,10 @@ def main():
             "model": next_pre - returned,
             "tts_first_audio": b["TTS_FIRST_AUDIO"] - next_pre,
             "other_tools": sum(returned <= t <= next_pre for t in other_pre),
-            "hooked": bool(post),
         })
 
-    print(f"silence threshold {silence * 1000:.0f} ms, {len(turns)} turns, hook entries {len(hooks)}")
+    print(f"session {chosen}: {len(hooks)} hook entries ({len(pre)} converse calls hooked, {len(other_pre)} other tool calls), "
+          f"silence threshold {silence * 1000:.0f} ms, {len(turns)} turns")
     print("total_s  silence  stt  return  model  tts  other_tools")
     for t in turns:
         print(f"{t['total']:6.2f}  {t['silence_tail']:6.2f}  {t['stt']:4.2f}  {t['tool_return']:5.2f}  "

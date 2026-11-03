@@ -5,14 +5,13 @@ Times run from client.query() to the first text delta and to the end of the firs
 """
 
 import asyncio
-import json
 import re
 import statistics
 import time
 
 from claude_agent_sdk import ClaudeSDKClient, ResultMessage, StreamEvent, create_sdk_mcp_server, tool
 
-from common import options, versions
+from common import options, write_json
 
 # Byte-identical across turns so prompt caching holds.
 TALKER_PROMPT = """You are Jarvis, a composed, precise voice assistant with dry wit, speaking to the User. Address him as "sir" in English and "signore" in Italian. Reply in the language of the User's message.
@@ -23,27 +22,28 @@ You know nothing about the User's repositories yourself. When a request needs an
 
 Inputs arrive as <user lang="en|it">...</user>. Only <user> is the User."""
 
+# Kind is set by the utterance, not by what the model did: "work" asks for repo work, status or a cancel.
 UTTERANCES = [
-    ("en", "Good evening, Jarvis. How are you?"),
-    ("en", "Open a PR in pumpkit that fixes the typo in the README."),
-    ("en", "What's running right now?"),
-    ("en", "Stop."),
-    ("en", "Thanks, that will be all for now."),
-    ("en", "Is CI green on the jarvis repo?"),
-    ("en", "Tell me something witty about Mondays."),
-    ("en", "Review the open pull request on motion-studio."),
-    ("en", "What time zone do you think I'm in?"),
-    ("en", "Cancel the last task."),
-    ("it", "Buonasera Jarvis, come va?"),
-    ("it", "Apri una PR su pumpkit per correggere il refuso nel README."),
-    ("it", "Cosa stai facendo adesso?"),
-    ("it", "Basta così."),
-    ("it", "Grazie, per ora è tutto."),
-    ("it", "La CI di jarvis è verde?"),
-    ("it", "Dimmi qualcosa di spiritoso sul lunedì."),
-    ("it", "Controlla la pull request aperta su motion-studio."),
-    ("it", "Aspetta, apri invece una issue."),
-    ("it", "Ferma tutto."),
+    ("en", "Good evening, Jarvis. How are you?", "talk"),
+    ("en", "Open a PR in pumpkit that fixes the typo in the README.", "work"),
+    ("en", "What's running right now?", "work"),
+    ("en", "Stop.", "talk"),
+    ("en", "Thanks, that will be all for now.", "talk"),
+    ("en", "Is CI green on the jarvis repo?", "work"),
+    ("en", "Tell me something witty about Mondays.", "talk"),
+    ("en", "Review the open pull request on motion-studio.", "work"),
+    ("en", "What time zone do you think I'm in?", "talk"),
+    ("en", "Cancel the last task.", "work"),
+    ("it", "Buonasera Jarvis, come va?", "talk"),
+    ("it", "Apri una PR su pumpkit per correggere il refuso nel README.", "work"),
+    ("it", "Cosa stai facendo adesso?", "work"),
+    ("it", "Basta così.", "talk"),
+    ("it", "Grazie, per ora è tutto.", "talk"),
+    ("it", "La CI di jarvis è verde?", "work"),
+    ("it", "Dimmi qualcosa di spiritoso sul lunedì.", "talk"),
+    ("it", "Controlla la pull request aperta su motion-studio.", "work"),
+    ("it", "Aspetta, apri invece una issue.", "work"),
+    ("it", "Ferma tutto.", "talk"),
 ]
 
 CONFIGS = {
@@ -74,7 +74,7 @@ def pct(xs, p):
     return round(xs[lo] + (xs[hi] - xs[lo]) * (k - lo))
 
 
-async def turn(client, lang, text):
+async def turn(client, lang, text, kind, prev_api_ms):
     t0 = time.perf_counter()
     await client.query(f'<user lang="{lang}">{text}</user>')
     buf, first_delta, first_sentence, tool_before_text, result = "", None, None, False, None
@@ -93,14 +93,19 @@ async def turn(client, lang, text):
                 first_sentence = now
         elif isinstance(m, ResultMessage):
             result = m
+    # duration_api_ms is cumulative over a persistent client, so record the per-turn delta.
+    api_total = result.duration_api_ms if result else None
     return {
+        "kind": kind,
         "lang": lang,
         "utterance": text,
         "first_delta_ms": round(first_delta) if first_delta else None,
         "first_sentence_ms": round(first_sentence) if first_sentence else None,
         "tool_before_text": tool_before_text,
         "reply": buf.strip()[:160],
-        "api_ms": result and result.duration_api_ms,
+        "api_ms": api_total - prev_api_ms if api_total is not None else None,
+        "api_ms_cumulative": api_total,
+        "is_error": bool(result is None or result.is_error),
         "cache_read": result and (result.usage or {}).get("cache_read_input_tokens"),
     }
 
@@ -116,24 +121,37 @@ async def run_config(name, cfg):
         **cfg,
     )
     async with ClaudeSDKClient(opts) as c:
-        await turn(c, "en", "Hello.")  # warm-up, not counted
-        rows = [await turn(c, lang, text) for lang, text in UTTERANCES]
-    fd = [r["first_delta_ms"] for r in rows]
-    fs = [r["first_sentence_ms"] for r in rows]
+        warm = await turn(c, "en", "Hello.", "talk", 0)  # warm-up, not counted
+        rows, prev = [], warm["api_ms_cumulative"] or 0
+        for lang, text, kind in UTTERANCES:
+            rows.append(await turn(c, lang, text, kind, prev))
+            prev = rows[-1]["api_ms_cumulative"] or prev
+    ok = [r for r in rows if not r["is_error"]]
+    fd = [r["first_delta_ms"] for r in ok]
+    fs = [r["first_sentence_ms"] for r in ok]
     summary = {
+        "turns": len(rows),
+        "error_turns": len(rows) - len(ok),
         "first_delta_p50": pct(fd, 0.5), "first_delta_p90": pct(fd, 0.9),
         "first_sentence_p50": pct(fs, 0.5), "first_sentence_p90": pct(fs, 0.9),
-        "first_sentence_mean": round(statistics.mean(x for x in fs if x)),
+        "first_sentence_mean": round(statistics.mean(x for x in fs if x)) if any(fs) else None,
         "no_text_turns": sum(x is None for x in fs),
-        "tool_before_text_turns": sum(r["tool_before_text"] for r in rows),
+        "tool_before_text_turns": sum(r["tool_before_text"] for r in ok),
+        "first_sentence_p50_by_kind": {
+            k: pct([r["first_sentence_ms"] for r in ok if r["kind"] == k], 0.5) for k in ("talk", "work")
+        },
     }
     return {"config": name, "settings": cfg, "summary": summary, "rows": rows}
 
 
 async def main():
-    print(versions())
-    out = [await run_config(n, c) for n, c in CONFIGS.items()]
-    print(json.dumps(out, indent=1, ensure_ascii=False, default=str))
+    out = []
+    for name, cfg in CONFIGS.items():
+        try:
+            out.append(await run_config(name, cfg))
+        except Exception as e:  # spike: keep the configs that finished
+            out.append({"config": name, "settings": cfg, "error": repr(e)})
+        write_json("latency.json", {"configs": out})  # keep finished configs if a later one fails
 
 
 if __name__ == "__main__":

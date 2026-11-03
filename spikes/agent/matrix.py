@@ -1,14 +1,17 @@
 """Phase 0: which effort and thinking settings each model accepts. Throwaway.
 
-Run: env -u ANTHROPIC_API_KEY uv run python matrix.py
+Run: env -u ANTHROPIC_API_KEY uv run python matrix.py [--runs N]
+Appends N runs to results/matrix.json, so every run's raw output stays committed.
 """
 
+import argparse
 import asyncio
 import json
+import os
 
 from claude_agent_sdk import AssistantMessage, ResultMessage, SystemMessage, ThinkingBlock, query
 
-from common import options, versions
+from common import SCRATCH_CWD, options, write_json
 
 MODELS = ["haiku", "sonnet", "opus"]
 EFFORTS = [None, "low", "medium", "high", "xhigh", "max"]
@@ -48,16 +51,25 @@ async def probe(model, effort, thinking, sem):
         return row
 
 
-async def main():
-    print(versions())
+async def one_run():
     sem = asyncio.Semaphore(4)
     jobs = []
     for model in MODELS:
         jobs += [probe(model, e, None, sem) for e in EFFORTS]
         jobs += [probe(model, None, t, sem) for t in THINKING]
         jobs.append(probe(model, "low", {"type": "disabled"}, sem))
-    rows = await asyncio.gather(*jobs)
-    print(json.dumps(rows, indent=1))
+    return await asyncio.gather(*jobs)
+
+
+async def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--runs", type=int, default=1)
+    n = ap.parse_args().runs
+    path = os.path.join(SCRATCH_CWD, "results", "matrix.json")
+    runs = json.load(open(path))["runs"] if os.path.exists(path) else []
+    for _ in range(n):
+        runs.append(await one_run())
+        write_json("matrix.json", {"prompt": PROMPT, "runs": runs})
 
 
 if __name__ == "__main__":
