@@ -8,8 +8,15 @@ from typing import Any, Literal, Protocol
 from jarvis_hub.config import Effort
 
 ToolHandler = Callable[[dict[str, Any]], Awaitable[str]]
-# Returns why a Bash command is refused, or None to let it run.
-BashGuard = Callable[[str], str | None]
+
+
+@dataclass(frozen=True)
+class Refused:
+    reason: str
+
+
+# Parses a Bash command into the words to run, or refuses it; the backend runs those words and nothing else.
+BashGuard = Callable[[str], Sequence[str] | Refused]
 
 
 @dataclass(frozen=True)

@@ -1,6 +1,7 @@
 """The real agent backend: Claude Agent SDK sessions on the installed `claude` CLI and the User's Max login."""
 
 import json
+import shlex
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
@@ -30,6 +31,7 @@ from jarvis_hub.agents.backend import (
     AgentEvent,
     BashGuard,
     HubTool,
+    Refused,
     SessionSpec,
     TextDelta,
     TextEnd,
@@ -52,13 +54,23 @@ def _sdk_tool(hub_tool: HubTool) -> SdkMcpTool[Any]:
 
 def _bash_hook(guard: BashGuard) -> HookCallback:
     async def hook(hook_input: HookInput, tool_use_id: str | None, context: HookContext) -> HookJSONOutput:
-        command = str(hook_input.get("tool_input", {}).get("command", ""))
-        refusal = guard(command)
+        tool_input: dict[str, Any] = dict(hook_input.get("tool_input", {}))
+        verdict = guard(str(tool_input.get("command", "")))
+        if isinstance(verdict, Refused):
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": verdict.reason,
+                }
+            }
+        # Every word re-quoted: bash runs the words the guard checked, however it would have read the original.
         return {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
-                "permissionDecision": "deny" if refusal else "allow",
-                "permissionDecisionReason": refusal or "read-only",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": "read-only",
+                "updatedInput": {**tool_input, "command": shlex.join(verdict)},
             }
         }
 

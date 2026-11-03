@@ -16,7 +16,7 @@ cp .env.example .env    # set JARVIS_USER_NAME and JARVIS_GITHUB_ORG
 ln -s "$PWD/jarvis" ~/.local/bin/jarvis   # optional: start Jarvis from any terminal
 ```
 
-Then rewrite the Repo catalog in `AGENTS.md` for your organization.
+Then rewrite the Repo catalog in `prompts/repo-catalog.md` for your organization.
 
 ## Run
 
@@ -26,7 +26,7 @@ Then rewrite the Repo catalog in `AGENTS.md` for your organization.
 
 It starts Claude Code with Opus in voice mode, so you can talk right away. Extra arguments go to `claude`, for example `./jarvis --continue`.
 
-Jarvis runs with `--dangerously-skip-permissions`. The only guardrail is the Boundary section of `AGENTS.md`: work goes as far as opening a PR, and merging, deploying, publishing or deleting waits for your yes. Read [ADR 0001](docs/adr/0001-skip-permissions-with-written-boundaries.md) before you change that section.
+Jarvis runs with `--dangerously-skip-permissions`. The only guardrail is the Boundary in `prompts/boundary.md`, which `AGENTS.md` imports: work goes as far as opening a PR, and merging, deploying, publishing or deleting waits for your yes. Read [ADR 0001](docs/adr/0001-skip-permissions-with-written-boundaries.md) before you change that section.
 
 ## Files
 

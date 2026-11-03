@@ -9,6 +9,7 @@ import pytest
 
 from jarvis_hub.config import RoleModel, Settings
 from jarvis_hub.main import text_mode
+from jarvis_hub.read_only import check
 from tests.fakes import FakeBackend, FakeClock, Gate, Text, Tool, Wait
 
 
@@ -199,12 +200,12 @@ async def test_the_orchestrator_works_read_only_in_the_org_folder_with_the_bound
         12,
     )
     assert list(spec.read_tools) == ["Read", "Grep", "Glob"]
-    assert spec.bash_guard is not None
-    assert spec.bash_guard("gh pr list -R acme/pumpkit") is None
-    assert spec.bash_guard("gh pr merge 42 -R acme/pumpkit")
-    boundary = (Path(__file__).parents[1] / "prompts" / "boundary.md").read_text()
-    assert boundary in spec.system_prompt
-    assert "**pumpkit-ops**" in spec.system_prompt
+    assert spec.bash_guard is check
+    prompts = Path(__file__).parents[1] / "prompts"
+    boundary = (prompts / "boundary.md").read_text()
+    for shared in ("boundary.md", "working-rules.md", "repo-catalog.md"):
+        assert (prompts / shared).read_text() in spec.system_prompt
+    assert "`gh pr` `checks`" in spec.system_prompt
     assert str(config.repo_dir / "docs" / "working-preferences.md") in spec.system_prompt
     assert "acme" in spec.system_prompt and "{" not in spec.system_prompt.replace(boundary, "")
 

@@ -4,7 +4,7 @@ status: accepted, narrowed by ADR 0002 and ADR 0004
 
 # Skip permissions and rely on written boundaries
 
-> Since ADR 0002, only Subagents skip permissions: the Orchestrator runs with read-only tools, and the boundary text lives in one shared prompt included for both. Since ADR 0004, the User's yes is a recorded Approval, and the Hub carries out merges and branch deletions itself.
+> Since ADR 0002, only Subagents skip permissions: the Orchestrator runs with read-only tools, and the Boundary lives in one shared prompt, `prompts/boundary.md`, which the Hub includes in the Orchestrator's prompt and `AGENTS.md` imports for today's voice session and coding agents. Since ADR 0004, the User's yes is a recorded Approval, and the Hub carries out merges and branch deletions itself.
 
 Jarvis runs with `--dangerously-skip-permissions` so the User can talk to it by voice without approving tool prompts on screen, and so it can carry long tasks through unattended. The only guardrail is therefore the boundary written in AGENTS.md: Jarvis and its Subagents may go as far as pushing a feature branch and opening a PR, and anything irreversible or public (merging, releasing, deploying, posting, deleting, spending money, changing production or analytics config) waits for the User's spoken yes.
 

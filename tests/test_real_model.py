@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -133,18 +134,14 @@ async def test_the_orchestrator_sees_only_its_read_tools_and_hub_tools() -> None
     assert inits == [expected, expected]
 
 
-async def test_the_orchestrator_bash_runs_a_read_and_the_hook_refuses_a_write() -> None:
+async def run_each(commands: list[str]) -> dict[str, list[tuple[bool, str]]]:
+    """Each command in its own message, to a model told to run it as given; the Bash results by command."""
     # A neutral prompt and one command per message, so the model runs each as given and the guard alone decides.
-    # Which commands are refused is table-tested; models decline to try a bare `gh api -X POST` and split chains.
     spec = replace(
         real_orchestrator_spec(),
         system_prompt="You are a test harness. Run the command the user gives with one Bash call, exactly as given, "
         "then reply DONE.",
     )
-    commands = [
-        "gh repo view pumpkit-io/jarvis --json name --jq .name",
-        "gh label create jarvis-probe --repo pumpkit-io/does-not-exist-xyz",
-    ]
     cli = shutil.which("claude")
     assert cli is not None and "ANTHROPIC_API_KEY" not in os.environ
     outcomes: dict[str, list[tuple[bool, str]]] = {}
@@ -162,7 +159,65 @@ async def test_the_orchestrator_bash_runs_a_read_and_the_hook_refuses_a_write() 
                         if isinstance(block, ToolResultBlock) and block.tool_use_id in ran:
                             outcome = (bool(block.is_error), str(block.content))
                             outcomes.setdefault(ran[block.tool_use_id], []).append(outcome)
+    return outcomes
+
+
+async def test_the_orchestrator_bash_runs_a_read_and_the_hook_refuses_a_write() -> None:
+    # Which commands are refused is table-tested; models decline to try a bare `gh api -X POST` and split chains.
+    commands = [
+        "gh repo view pumpkit-io/jarvis --json name --jq .name",
+        "gh label create jarvis-probe --repo pumpkit-io/does-not-exist-xyz",
+    ]
+    outcomes = await run_each(commands)
     assert outcomes.get(commands[0], [])[:1] == [(False, "jarvis")], outcomes
     for command in commands[1:]:
         assert outcomes.get(command), (command, outcomes)
         assert all(is_error and "hook" in content for is_error, content in outcomes[command]), (command, outcomes)
+
+
+async def test_the_orchestrator_bash_runs_the_checked_words_not_the_command_it_wrote(tmp_path: Path) -> None:
+    # The repo's config names a diff program; only the hook's rewrite (git diff --no-ext-diff) keeps it from running.
+    repo, marker = tmp_path / "repo", tmp_path / "ran"
+    program = tmp_path / "differ.sh"
+    program.write_text(f"#!/bin/sh\ntouch {marker}\necho EXTERNAL\n")
+    program.chmod(0o755)
+    git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "f").write_text("before\n")
+    subprocess.run([*git, "add", "f"], check=True)
+    subprocess.run([*git, "commit", "-qm", "x"], check=True)
+    subprocess.run([*git, "config", "diff.external", str(program)], check=True)
+    (repo / "f").write_text("after\n")
+    command = f"git -C {repo} diff"
+
+    outcomes = await run_each([command])
+
+    assert outcomes.get(command), outcomes
+    is_error, content = outcomes[command][0]
+    assert not is_error and "+after" in content and "EXTERNAL" not in content, outcomes
+    assert not marker.exists()
+
+
+async def test_max_turns_caps_each_message_not_the_whole_session() -> None:
+    async def lookup(args: dict[str, Any]) -> str:
+        return "The code word is PERIWINKLE."
+
+    lookup_tool = HubTool("lookup_code", "Returns the code word.", {"type": "object", "properties": {}}, lookup)
+    capped = replace(
+        spec("Each time you are asked for the code word, call lookup_code once, then reply with it.", (lookup_tool,)),
+        model="haiku",
+        max_turns=2,
+    )
+    session = await open_session(capped)
+    outcomes: list[str] = []
+    try:
+        # Each message takes two model turns (the call, then the reply), so a cap on the session would end the second.
+        for _ in range(3):
+            events = await collect(session, "What is the code word now?")
+            assert any(isinstance(e, ToolCall) for e in events)
+            end = events[-1]
+            assert isinstance(end, TurnEnd)
+            outcomes.append(end.outcome)
+    finally:
+        await session.close()
+    assert outcomes == ["completed", "completed", "completed"]
