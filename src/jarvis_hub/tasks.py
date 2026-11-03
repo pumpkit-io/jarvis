@@ -1,6 +1,7 @@
 """The Hub's record of every Task this launch: what the Talker asks about, answered without a model call."""
 
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
 from typing import Literal
 
 TaskState = Literal["queued", "working", "needs_user", "done", "failed", "cancelled"]
@@ -19,6 +20,8 @@ class Task:
     reports: int = 0
     # Messages for this Task still in the Orchestrator's queue.
     waiting: int = 0
+    # What the User typed or said in the turns that started or continued this Task, never a model's rewording.
+    words: list[str] = field(default_factory=lambda: [])
 
     @property
     def cancelled(self) -> bool:
@@ -38,17 +41,23 @@ class Task:
         self.state = "working"
         return True
 
-    def report(self, spoken: str, *, needs_user: bool) -> None:
+    def report(self, spoken: str, *, needs_user: bool, subagents_live: bool) -> None:
+        """`subagents_live`: Subagents of this Task still run, so it keeps working after the report."""
         self.last_report = spoken
         self.reports += 1
         if self.waiting:
             self.state = "queued"
+        elif needs_user:
+            self.state = "needs_user"
         else:
-            self.state = "needs_user" if needs_user else "done"
+            self.state = "working" if subagents_live else "done"
 
-    def fail(self, reason: str) -> None:
+    def fail(self, reason: str, *, subagents_live: bool) -> None:
         self.last_report = f"Failed: {reason}."
-        self.state = "queued" if self.waiting else "failed"
+        if self.waiting:
+            self.state = "queued"
+        elif not subagents_live:
+            self.state = "failed"
 
     def cancel(self) -> bool:
         """False when the Task had already finished with nothing left in the queue for it."""
@@ -70,17 +79,27 @@ class Tasks:
     def get(self, task_id: object) -> Task | None:
         return self._tasks.get(str(task_id).strip().upper()) if task_id else None
 
-    def status(self, now: float) -> str:
-        """One line per Task, newest first, for the Talker to read out of."""
+    def status(self, now: float, subagents: Callable[[str], list[str]] = lambda task_id: []) -> str:
+        """One line per Task, newest first, then a line per Subagent of it, for the Talker to read out of."""
         if not self._tasks:
             return "No Tasks this session."
+        return "\n".join(self._lines(reversed(self._tasks.values()), now, subagents))
+
+    def open_status(self, now: float, subagents: Callable[[str], list[str]] = lambda task_id: []) -> str:
+        """Like `status`, for the Tasks not yet finished (a cancelled one with a message still queued counts)."""
+        open_tasks = [t for t in self._tasks.values() if t.state not in FINISHED or (t.waiting and not t.cancelled)]
+        return "\n".join(self._lines(reversed(open_tasks), now, subagents)) if open_tasks else "No open Tasks."
+
+    @staticmethod
+    def _lines(tasks: Iterable[Task], now: float, subagents: Callable[[str], list[str]]) -> list[str]:
         lines: list[str] = []
-        for task in reversed(self._tasks.values()):
+        for task in tasks:
             line = f"{task.id} {task.state.replace('_', ' ')}, started {_ago(now - task.created)} ago: {task.request}"
             if task.last_report:
                 line += f" | Last report: {task.last_report}"
             lines.append(line)
-        return "\n".join(lines)
+            lines += [f"  {sub}" for sub in subagents(task.id)]
+        return lines
 
 
 def no_task(task_id: object) -> str:

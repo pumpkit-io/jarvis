@@ -8,7 +8,8 @@ import asyncio
 import contextlib
 import json
 import re
-from collections.abc import AsyncIterator, Callable
+from collections import deque
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import asdict, dataclass, replace
 from html import escape
 from typing import Any, Literal, Protocol
@@ -17,13 +18,17 @@ from jarvis_hub.agents.backend import (
     AgentBackend,
     AgentEvent,
     AgentSession,
+    Context,
+    Refused,
     SessionSpec,
     TextDelta,
     TextEnd,
     ToolCall,
     TurnEnd,
 )
+from jarvis_hub.config import DEFAULT_TALKER_RESTART_AT
 from jarvis_hub.orchestrator import orchestrator_tools
+from jarvis_hub.subagents import Subagent, SubagentSetup, Subagents, ended_event, kept_line, over_time_event
 from jarvis_hub.talker import talker_tools
 from jarvis_hub.tasks import Task, Tasks, no_task
 from jarvis_hub.voice.language import Lang, detect_language
@@ -33,6 +38,8 @@ class Clock(Protocol):
     def now(self) -> float:
         """Monotonic seconds."""
         ...
+
+    async def sleep(self, seconds: float) -> None: ...
 
 
 class Output(Protocol):
@@ -107,7 +114,14 @@ WARM_UP = '<event source="hub">Session start. Reply with one word.</event>'
 # The Phase 0 definition, kept so Hub numbers compare with the spike's: the end of a delta counts too.
 _SENTENCE_END = re.compile(r"[.?!](\s|$)")
 
-TalkerKind = Literal["warm_up", "user", "event"]
+TalkerKind = Literal["warm_up", "restart", "user", "event"]
+
+# How many of the latest exchanges a restarted Talker is told about.
+RECENT_EXCHANGES = 6
+# Turns a failed restart waits before trying again: each try costs a model call.
+RESTART_RETRY_AFTER = 5
+# How long a closing Hub lets a Talker open run on, so the session it opens can be closed and not left running.
+OPEN_GRACE = 10.0
 
 # An Orchestrator turn is a look-up of a few commands; one running this long is stuck.
 ORCHESTRATOR_TIMEOUT = 600.0
@@ -125,6 +139,22 @@ def event_message(source: str, text: str, task: str, *, needs_user: bool = False
     on_screen = ' details="on screen"' if details else ""
     flag = "true" if needs_user else "false"
     return f'<event source="{source}" task="{task}" needs_user="{flag}"{on_screen}>{escape(text, quote=False)}</event>'
+
+
+def restart_message(open_tasks: str, exchanges: "deque[tuple[str, str]]") -> str:
+    """The seed of a fresh Talker, written from the Hub's own records. The exchanges reuse the messages as sent."""
+    recent = "\n".join(
+        f"<exchange>\n{message}\n<you>{escape(reply, quote=False)}</you>\n</exchange>" for message, reply in exchanges
+    )
+    return (
+        '<event source="hub" reason="restart">\n'
+        "Your session was restarted to keep it fast, and what you said before it is gone. This is context for you, "
+        "not the User speaking: do not answer it. Carry on from it in the User's next message.\n"
+        f"<open_tasks>\n{open_tasks}\n</open_tasks>\n"
+        f"<recent_exchanges>\n{recent or 'None yet.'}\n</recent_exchanges>\n"
+        "Reply with one word.\n"
+        "</event>"
+    )
 
 
 def task_message(task: Task, request: str, context: str, *, continues: bool) -> str:
@@ -184,10 +214,13 @@ class Hub:
         clock: Clock,
         output: Output,
         metrics: Metrics,
+        subagents: SubagentSetup,
         orchestrator_timeout: float = ORCHESTRATOR_TIMEOUT,
         speech: Speech | None = None,
         speak_typed: bool = True,
         on_end_conversation: Callable[[], None] | None = None,
+        talker_restart_at: float = DEFAULT_TALKER_RESTART_AT,
+        quiet: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         tools = talker_tools(
             delegate=self._delegate,
@@ -197,7 +230,15 @@ class Hub:
             end_conversation=self._end_conversation,
         )
         self._talker_spec = replace(talker, tools=tools)
-        self._orchestrator_spec = replace(orchestrator, tools=orchestrator_tools(report=self._report))
+        self._orchestrator_spec = replace(
+            orchestrator,
+            tools=orchestrator_tools(
+                report=self._report,
+                spawn_subagent=self._spawn_subagent,
+                list_subagents=self._list_subagents,
+                cancel_subagent=self._cancel_subagent,
+            ),
+        )
         self._backend = backend
         self._clock = clock
         self._output = output
@@ -207,11 +248,19 @@ class Hub:
         # In voice mode a typed line gets a text-only reply; with `--text --speak` it is spoken.
         self._speak_typed = speak_typed
         self._on_end_conversation = on_end_conversation
+        self._restart_at = talker_restart_at
+        # In voice mode, returns once Jarvis is idle with nothing playing: a restart never delays a reply or a turn.
+        self._quiet = quiet
+        # The exchanges a restarted Talker is seeded with.
+        self._exchanges: deque[tuple[str, str]] = deque(maxlen=RECENT_EXCHANGES)
         # The language of the latest line read, and of the latest User turn the Talker took: replies follow it.
         self._read_lang: Lang = "en"
         self._lang: Lang = "en"
         self._tasks = Tasks()
         self._talker: AgentSession | None = None
+        # Turns left before a failed restart is tried again, and whether the User has heard of the failure.
+        self._restart_wait = 0
+        self._restart_failing = False
         self._orchestrator: AgentSession | None = None
         self._talker_inbox: asyncio.Queue[_TalkerInput] = asyncio.Queue()
         # One queue, so the Orchestrator's single session takes one message at a time.
@@ -225,6 +274,17 @@ class Hub:
         self._interrupted_turn: int | None = None
         self._orchestrator_gate = _TurnGate()
         self._orchestrating: str | None = None
+        # Subagents the running Orchestrator turn started: their completion events bring the Task's next turn.
+        self._spawned = 0
+        # The User's own text in the Talker turn under way, for the Tasks it delegates.
+        self._user_text: str | None = None
+        self._subagents = Subagents(
+            setup=subagents,
+            backend=backend,
+            clock=clock,
+            on_end=self._subagent_ended,
+            on_over_time=self._subagent_over_time,
+        )
 
     async def start(self) -> None:
         """Open the Talker and warm it in the background (ADR 0006); a line typed meanwhile waits for it."""
@@ -254,6 +314,7 @@ class Hub:
         return await self._talker_gate.interrupt(self._talker, turn)
 
     async def close(self) -> None:
+        await self._subagents.close()
         for loop in self._loops:
             loop.cancel()
         if self._loops:
@@ -288,13 +349,14 @@ class Hub:
 
     async def _talk(self) -> None:
         try:
-            self._talker = await self._backend.open(self._talker_spec)
+            self._talker = await self._open_talker()
             await self._turn(WARM_UP, kind="warm_up", arrived=self._clock.now())
         except Exception as e:
             self._output.notice(f"The Talker could not start: {e}")
             return
+        upcoming: _TalkerInput | None = None
         while True:
-            item = await self._talker_inbox.get()
+            item, upcoming = upcoming or await self._talker_inbox.get(), None
             try:
                 await self._talker_gate.before_next_turn()
                 if item.lang:
@@ -303,15 +365,101 @@ class Hub:
                     self._output.heard(item.heard, typed=item.typed)
                 if item.details:
                     self._output.show(item.details)
-                await self._turn(item.message, kind=item.kind, arrived=item.arrived, spoken=item.spoken)
+                self._user_text = item.heard if item.kind == "user" else None
+                end = await self._turn(item.message, kind=item.kind, arrived=item.arrived, spoken=item.spoken)
             finally:
+                self._user_text = None
                 self._handled()
+            upcoming = await self._restart_if_full(end.context)
 
-    async def _turn(self, message: str, *, kind: TalkerKind, arrived: float, spoken: bool = True) -> None:
-        assert self._talker is not None
+    async def _open_talker(self) -> AgentSession:
+        """Open a Talker session. A cancel that lands meanwhile lets the open finish and closes what it opened."""
+        opening = asyncio.ensure_future(self._backend.open(self._talker_spec))
+        try:
+            return await asyncio.shield(opening)
+        except asyncio.CancelledError:
+            done, _ = await asyncio.wait([opening], timeout=OPEN_GRACE)
+            if not done:
+                opening.cancel()
+            elif not opening.cancelled() and opening.exception() is None:
+                with contextlib.suppress(Exception):
+                    await opening.result().close()
+            raise
+
+    async def _restart_if_full(self, context: Context | None) -> _TalkerInput | None:
+        """Between turns, swap in a fresh Talker once the context passes the threshold (ADR 0006's warm-up, again).
+
+        Only this turn's context decides: an older reading may be stale. The new session reads the seed in the
+        background like the launch warm-up, so a line typed meanwhile waits for it in the inbox. Whatever fails
+        leaves the old session talking, and the restart waits RESTART_RETRY_AFTER turns before trying again.
+        In voice mode the restart first waits for Jarvis to go quiet; an item reaching the inbox before then puts
+        it off to after that item's turn, and is returned for the loop to take next.
+        """
+        if self._restart_wait:
+            self._restart_wait -= 1
+            return None
+        if context is None or context.used < self._restart_at:
+            return None
+        if (upcoming := await self._quiet_or_next()) is not None:
+            return upcoming
+        old = self._talker
+        try:
+            session = await self._open_talker()
+        except Exception as e:
+            self._restart_failed(str(e))
+            return None
+        try:
+            seed = restart_message(self._tasks.open_status(self._clock.now(), self._subagents.lines), self._exchanges)
+            end = await self._turn(seed, kind="restart", arrived=self._clock.now(), session=session)
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await session.close()
+            raise
+        if end.outcome != "completed":
+            with contextlib.suppress(Exception):
+                await session.close()
+            self._restart_failed(end.error or end.outcome)
+            return None
+        self._talker, self._restart_failing = session, False
+        if old is not None:
+            with contextlib.suppress(Exception):
+                await old.close()
+        return None
+
+    async def _quiet_or_next(self) -> _TalkerInput | None:
+        """Waits for voice mode to go quiet, unless the inbox's next item comes first; then returns that item."""
+        if self._quiet is None:
+            return None
+        quiet = asyncio.ensure_future(self._quiet())
+        getting = asyncio.ensure_future(self._talker_inbox.get())
+        try:
+            await asyncio.wait([quiet, getting], return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            quiet.cancel()
+            if not getting.done():
+                getting.cancel()
+        return getting.result() if getting.done() and not getting.cancelled() else None
+
+    def _restart_failed(self, error: str) -> None:
+        self._restart_wait = RESTART_RETRY_AFTER
+        if not self._restart_failing:
+            self._output.notice(f"The Talker could not restart, so the old session goes on: {error}")
+        self._restart_failing = True
+
+    async def _turn(
+        self,
+        message: str,
+        *,
+        kind: TalkerKind,
+        arrived: float,
+        spoken: bool = True,
+        session: AgentSession | None = None,
+    ) -> TurnEnd:
+        session = session or self._talker
+        assert session is not None
         self._turn_count += 1
         turn = self._turn_count
-        show = kind != "warm_up"
+        show = kind in ("user", "event")
         t0 = self._clock.now()
         shown, block = "", ""
         first_delta: float | None = None
@@ -324,7 +472,7 @@ class Hub:
         speech = self._speech if show and spoken else _Silent()
         speech.begin(self._lang, turn=turn, heard_at=arrived if kind == "user" else None)
         try:
-            async for event in self._guarded(self._talker.send(message)):
+            async for event in self._guarded(session.send(message)):
                 match event:
                     case TextDelta(text):
                         if self._interrupted_turn == turn:
@@ -360,8 +508,11 @@ class Hub:
             end = TurnEnd("failed", end.usage, "the turn stopped without the Hub interrupting it")
         if show:
             self._output.reply_end()
-        if end.outcome == "failed":
+        # A failed restart has its own notice.
+        if end.outcome == "failed" and kind != "restart":
             self._output.notice(f"The Talker failed: {end.error}")
+        if show and (shown.strip() or end.outcome != "failed"):
+            self._exchanges.append((message, shown))
 
         def ms(t: float | None) -> int | None:
             return None if t is None else round((t - arrived) * 1000)
@@ -376,7 +527,10 @@ class Hub:
             first_sentence_ms=ms(first_sentence),
             total_ms=ms(self._clock.now()),
             tool_before_text=tool_before_text,
+            **({"context_tokens": end.context.tokens, "context_window": end.context.window} if end.context else {}),
+            **({"no_context": end.no_context} if end.no_context else {}),
         )
+        return end
 
     async def _orchestrate(self) -> None:
         while True:
@@ -415,6 +569,7 @@ class Hub:
         t0 = self._clock.now()
         tools: list[str] = []
         self._orchestrating = task.id
+        self._spawned = 0
         consuming = asyncio.create_task(self._consume(task, session, item.message, turn, tools))
         try:
             end = await self._within_time(consuming, session, turn)
@@ -429,10 +584,11 @@ class Hub:
                 with contextlib.suppress(Exception):
                     await session.close()
         if not task.cancelled and task.reports == reports:
-            if end.outcome == "completed":
-                self._fail(task, "the Orchestrator ended its turn without a report")
-            else:
+            if end.outcome != "completed":
                 self._fail(task, end.error or "the Orchestrator's turn was stopped")
+            elif not (self._spawned or task.waiting or self._subagents.live(task.id)):
+                # Without a report, only news still to come (a Subagent's end, a queued message) carries the Task on.
+                self._fail(task, "the Orchestrator ended its turn without a report")
         self._record(
             self._orchestrator_spec,
             "task",
@@ -479,8 +635,12 @@ class Hub:
             yield TurnEnd("failed", error=f"{type(e).__name__}: {e}")
 
     def _fail(self, task: Task, reason: str) -> None:
-        task.fail(reason)
-        message = event_message("hub", f"{task.id} failed: {reason}.", task.id)
+        live = bool(self._subagents.live(task.id))
+        task.fail(reason, subagents_live=live)
+        text = f"{task.id} failed: {reason}."
+        if live:
+            text = f"The Orchestrator failed on {task.id}: {reason}. Its Subagents keep working and still report."
+        message = event_message("hub", text, task.id)
         self._post(self._talker_inbox, _TalkerInput(message, "event", self._clock.now()))
 
     def _record(self, spec: SessionSpec, kind: str, end: TurnEnd, tools: list[str], **fields: Any) -> None:
@@ -513,13 +673,15 @@ class Hub:
                 return f"{task.id} was cancelled. Delegate without task_id to start a new one."
         else:
             task = self._tasks.create(request, self._clock.now())
+        if self._user_text is not None:
+            task.words.append(self._user_text)
         task.queue_message()
         message = task_message(task, request, context, continues=continues)
         self._post(self._orchestrator_inbox, _OrchestratorInput(task.id, message, self._clock.now()))
         return json.dumps({"task_id": task.id, "queued": True})
 
     async def _status(self, args: dict[str, Any]) -> str:
-        return self._tasks.status(self._clock.now())
+        return self._tasks.status(self._clock.now(), self._subagents.lines)
 
     async def _cancel(self, args: dict[str, Any]) -> str:
         task = self._tasks.get(args.get("task_id"))
@@ -527,6 +689,8 @@ class Hub:
             return no_task(args.get("task_id"))
         if not task.cancel():
             return f"{task.id} is already {task.state}."
+        for subagent in self._subagents.live(task.id):
+            self._subagents.cancel(subagent.id)
         turn = self._orchestrator_gate.turn
         if self._orchestrating == task.id and turn is not None and self._orchestrator is not None:
             await self._orchestrator_gate.interrupt(self._orchestrator, turn)
@@ -558,7 +722,63 @@ class Hub:
             return "spoken is required."
         details = str(args.get("details_markdown") or "").strip() or None
         needs_user = args.get("needs_user") in (True, "true")
-        task.report(spoken, needs_user=needs_user)
+        task.report(spoken, needs_user=needs_user, subagents_live=bool(self._subagents.live(task.id)))
         message = event_message("orchestrator", spoken, task.id, needs_user=needs_user, details=details is not None)
         self._post(self._talker_inbox, _TalkerInput(message, "event", self._clock.now(), details))
         return "Reported to the User."
+
+    async def _spawn_subagent(self, args: dict[str, Any]) -> str:
+        task = self._tasks.get(self._orchestrating)
+        if task is None:
+            return "spawn_subagent works only while you are on a Task."
+        prepared = await self._subagents.prepare(task.id, args, task.words)
+        if isinstance(prepared, Refused):
+            return prepared.reason
+        self._spawned += 1
+        # A running Subagent keeps the Hub from settling, so text mode waits for its report.
+        self._pending += 1
+        self._settled.clear()
+        state = self._subagents.start(prepared)
+        if task.cancelled:
+            self._subagents.cancel(prepared.id)
+        return json.dumps(
+            {
+                "subagent_id": prepared.id,
+                "state": state,
+                "folder": str(prepared.cwd),
+                "branch": prepared.branch,
+                "log": str(prepared.log) if prepared.log else None,
+                "note": "Its report reaches you as an event when it ends. End this turn without a report "
+                "unless the User should hear something now.",
+            }
+        )
+
+    async def _list_subagents(self, args: dict[str, Any]) -> str:
+        return self._subagents.listing()
+
+    async def _cancel_subagent(self, args: dict[str, Any]) -> str:
+        return self._subagents.cancel(args.get("subagent_id"))
+
+    def _subagent_ended(self, subagent: Subagent) -> None:
+        try:
+            task = self._tasks.get(subagent.task_id)
+            if task is None:
+                return
+            if not task.cancelled:
+                task.queue_message()
+                message = ended_event(subagent)
+                self._post(self._orchestrator_inbox, _OrchestratorInput(task.id, message, self._clock.now()))
+            elif subagent.writes:
+                # The Orchestrator hears nothing more of a cancelled Task, so the Hub says what its branch keeps.
+                message = event_message("hub", kept_line(subagent), task.id, details=True)
+                self._post(self._talker_inbox, _TalkerInput(message, "event", self._clock.now(), subagent.report))
+        finally:
+            self._handled()
+
+    def _subagent_over_time(self, subagent: Subagent) -> None:
+        task = self._tasks.get(subagent.task_id)
+        if task is None or task.cancelled:
+            return
+        task.queue_message()
+        message = over_time_event(subagent, self._clock.now())
+        self._post(self._orchestrator_inbox, _OrchestratorInput(task.id, message, self._clock.now()))

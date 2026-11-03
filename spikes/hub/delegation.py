@@ -25,6 +25,7 @@ from jarvis_hub.agents.backend import AgentEvent, SessionSpec, ToolCall, TurnEnd
 from jarvis_hub.agents.sdk import SdkBackend
 from jarvis_hub.config import load_settings
 from jarvis_hub.hub import Hub, Line
+from jarvis_hub.main import subagent_setup
 from jarvis_hub.orchestrator import orchestrator_spec
 from jarvis_hub.talker import talker_spec
 
@@ -74,6 +75,9 @@ class Clock:
 
         return time.perf_counter()
 
+    async def sleep(self, seconds: float) -> None:
+        await asyncio.sleep(seconds)
+
 
 class Rows:
     def __init__(self) -> None:
@@ -117,6 +121,7 @@ async def main() -> None:
         clock=clock,
         output=Screen(),
         metrics=rows,
+        subagents=subagent_setup(settings),
     )
     texts = LINES.read_text().splitlines()
     turn_line: list[int] = []

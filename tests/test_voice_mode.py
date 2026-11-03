@@ -3,9 +3,11 @@
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 
+from jarvis_hub.agents.backend import Context
 from jarvis_hub.hub import Hub
 from jarvis_hub.voice.state import Timing
 from jarvis_hub.voice.voice_mode import VoiceMode, merge
@@ -14,6 +16,7 @@ from tests.fakes import (
     FakeBackend,
     FakeClock,
     FakeTts,
+    Gate,
     RecordingMetrics,
     RecordingOutput,
     RecordingPlayer,
@@ -69,15 +72,21 @@ MakeRig = Callable[..., Awaitable[Rig]]
 async def rig_for() -> AsyncIterator[MakeRig]:
     rigs: list[tuple[Rig, asyncio.Task[None]]] = []
 
-    async def make(*scripts: list[Step]) -> Rig:
+    async def make(*scripts: list[Step], **backend_options: Any) -> Rig:
         clock = FakeClock()
-        backend = FakeBackend(clock, list(scripts))
+        backend = FakeBackend(clock, list(scripts), **backend_options)
         audio, player, output, metrics = ScriptedAudio(clock), RecordingPlayer(), RecordingOutput(), RecordingMetrics()
         voice = VoiceMode(
             audio=audio, tts=FakeTts(), player=player, clock=clock, timing=TIMING, metrics=metrics, notice=output.notice
         )
         hub = make_hub(
-            backend, output, metrics, speech=voice.speech, speak_typed=False, on_end_conversation=voice.end_conversation
+            backend,
+            output,
+            metrics,
+            speech=voice.speech,
+            speak_typed=False,
+            on_end_conversation=voice.end_conversation,
+            quiet=voice.quiet,
         )
         typist = Typist(clock)
         await hub.start()
@@ -270,3 +279,79 @@ async def test_capture_is_on_only_while_listening_for_a_turn(rig_for: MakeRig) -
     await rig.advance(6)
 
     assert rig.audio.capturing == [True, False, True, False]
+
+
+FULL = Context(100_000, 200_000)
+
+
+def talker_kinds(rig: Rig) -> list[str]:
+    return [r["kind"] for r in rig.metrics.records if r.get("role") == "talker"]
+
+
+async def test_a_full_talker_restarts_only_once_jarvis_is_idle(rig_for: MakeRig) -> None:
+    rig: Rig = await rig_for([Text("Half past nine, sir."), FULL])
+
+    rig.audio.wake()
+    rig.audio.say("What time is it?")
+    await until(lambda: rig.state == "follow_up")
+    await rig.settle()
+    assert len(rig.backend.all_sessions("talker")) == 1
+
+    await rig.advance(6)
+    await until(lambda: len(rig.backend.all_sessions("talker")) == 2)
+
+    assert rig.states()[-1] == "idle"
+    assert talker_kinds(rig) == ["warm_up", "user", "restart"]
+    assert rig.player.texts == ["", "Half past nine, sir."]
+
+
+async def test_a_follow_up_said_before_idle_is_answered_on_the_old_talker_then_it_restarts(rig_for: MakeRig) -> None:
+    rig: Rig = await rig_for([Text("Opened, sir."), FULL], [Text("Green, sir."), FULL])
+
+    rig.audio.wake()
+    rig.audio.say("Open a PR for the login bug")
+    await until(lambda: rig.state == "follow_up")
+    await rig.advance(4)
+    rig.audio.say("And is the CI green?")
+    await until(lambda: len(rig.user_messages()) == 2 and rig.state == "follow_up")
+    await rig.settle()
+
+    [old] = rig.backend.all_sessions("talker")
+    assert len([m for m in old.received if m.startswith("<user")]) == 2
+    await rig.advance(6)
+    await until(lambda: len(rig.backend.all_sessions("talker")) == 2)
+    assert talker_kinds(rig) == ["warm_up", "user", "user", "restart"]
+
+
+async def test_a_spoken_ask_for_max_effort_reaches_the_subagent_and_its_end_is_announced(rig_for: MakeRig) -> None:
+    request = "Open a PR fixing typo X in pumpkit"
+    brief = "Fix the typo in pumpkit's README, then open a PR."
+    spawn = {
+        "repo": "pumpkit",
+        "title": "Fix typo X in pumpkit",
+        "brief": brief,
+        "model": "opus",
+        "effort": "max",
+        "writes": True,
+        "branch_kind": "fix",
+    }
+    report = {"task_id": "T1", "spoken": "The typo fix is up.", "needs_user": False}
+    finish = asyncio.Event()
+    rig: Rig = await rig_for(
+        [Text("Right away, sir."), Tool("delegate", {"request": request, "context": ""})],
+        [Text("The typo fix is up, sir.")],
+        orchestrator=[[Tool("spawn_subagent", spawn)], [Tool("report", report)]],
+        subagents={brief: [Gate(finish), Text("Opened pumpkit#43.")]},
+    )
+
+    rig.audio.wake()
+    rig.audio.say(request + ", max effort.")
+    await until(lambda: rig.state == "follow_up" and len(rig.backend.all_sessions("subagent")) == 1)
+    await rig.advance(6)
+    assert rig.state == "idle"
+    finish.set()
+    await until(lambda: "The typo fix is up, sir." in rig.player.texts)
+
+    [subagent] = rig.backend.all_sessions("subagent")
+    assert subagent.spec.effort == "max"
+    assert rig.states()[-3:] == ["idle", "announce", "follow_up"]

@@ -1,6 +1,7 @@
 """The real agent backend: Claude Agent SDK sessions on the installed `claude` CLI and the User's Max login."""
 
 import json
+import re
 import shlex
 from collections.abc import AsyncIterator, Callable
 from typing import Any
@@ -14,6 +15,7 @@ from claude_agent_sdk import (
     ResultMessage,
     SdkMcpTool,
     StreamEvent,
+    SystemMessage,
     create_sdk_mcp_server,
     tool,
 )
@@ -30,7 +32,9 @@ from claude_agent_sdk.types import (
 from jarvis_hub.agents.backend import (
     AgentEvent,
     BashGuard,
+    Context,
     HubTool,
+    McpGuard,
     Refused,
     SessionSpec,
     TextDelta,
@@ -77,7 +81,48 @@ def _bash_hook(guard: BashGuard) -> HookCallback:
     return hook
 
 
+def _mcp_hook(guard: McpGuard) -> HookCallback:
+    async def hook(hook_input: HookInput, tool_use_id: str | None, context: HookContext) -> HookJSONOutput:
+        verdict = guard(str(hook_input.get("tool_name", "")))
+        if verdict is None:
+            return {}
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": verdict.reason,
+            }
+        }
+
+    return hook
+
+
+def _skipping_permissions(spec: SessionSpec, cli_path: str, stderr: Callable[[str], None] | None) -> ClaudeAgentOptions:
+    hooks: dict[HookEvent, list[HookMatcher]] = {}
+    if spec.mcp_guard:
+        # bypassPermissions skips every prompt but not hooks, so this deny holds; a hook that fails blocks the call.
+        hooks["PreToolUse"] = [HookMatcher(matcher="mcp__.*", hooks=[_mcp_hook(spec.mcp_guard)], on_failure="block")]
+    return ClaudeAgentOptions(
+        cli_path=cli_path,
+        cwd=spec.cwd,
+        model=spec.model,
+        effort=spec.effort,
+        thinking=None if spec.thinking else {"type": "disabled"},
+        system_prompt={"type": "preset", "preset": "claude_code", "append": spec.system_prompt},
+        # The user's settings bring the sdlc skills and plugins, the project's the repo's own CLAUDE.md.
+        setting_sources=["user", "project"],
+        disallowed_tools=list(spec.denied_tools),
+        permission_mode="bypassPermissions",
+        max_turns=spec.max_turns,
+        hooks=hooks or None,
+        include_partial_messages=True,
+        stderr=stderr,
+    )
+
+
 def options_for(spec: SessionSpec, cli_path: str, stderr: Callable[[str], None] | None = None) -> ClaudeAgentOptions:
+    if spec.skip_permissions:
+        return _skipping_permissions(spec, cli_path, stderr)
     mcp_servers: dict[str, McpServerConfig] = {}
     if spec.tools:
         mcp_servers[TOOL_SERVER] = create_sdk_mcp_server(TOOL_SERVER, tools=[_sdk_tool(t) for t in spec.tools])
@@ -116,7 +161,33 @@ def options_for(spec: SessionSpec, cli_path: str, stderr: Callable[[str], None] 
     )
 
 
-def turn_end(result: ResultMessage) -> TurnEnd:
+def _prompt_tokens(usage: dict[str, Any]) -> int:
+    return sum(usage.get(k, 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+
+
+def _model_id(name: str) -> str:
+    """`sonnet[1m]` and `claude-sonnet-5-5[1m]` report as `sonnet` and `claude-sonnet-5-5`."""
+    return re.sub(r"\[[^\]]*\]$", "", name.strip())
+
+
+def _window(result: ResultMessage, model: str) -> int | None:
+    """The session model's context window from the CLI's per-model report, or None when no entry is surely it.
+
+    The report also lists the CLI's own Haiku requests, so a wrong guess could restart the Talker far too early.
+    """
+    models = {_model_id(name): u for name, u in (result.model_usage or {}).items()}
+    wanted = _model_id(model)
+    if wanted in models:
+        return models[wanted]["contextWindow"]
+    family = [u for name, u in models.items() if name.startswith(f"claude-{wanted}-")]
+    return family[0]["contextWindow"] if len(family) == 1 else None
+
+
+def turn_end(result: ResultMessage, model: str, last_request: dict[str, Any] | None) -> TurnEnd:
+    """`last_request` is the usage of the turn's final model request: the context as that request saw it.
+
+    The result's own usage adds up every request of the turn, which would count the prompt once per tool round.
+    """
     raw: dict[str, Any] = result.usage or {}
     usage = Usage(
         input_tokens=raw.get("input_tokens", 0),
@@ -124,30 +195,45 @@ def turn_end(result: ResultMessage) -> TurnEnd:
         cache_read_tokens=raw.get("cache_read_input_tokens", 0),
         cache_creation_tokens=raw.get("cache_creation_input_tokens", 0),
     )
+    context: Context | None = None
+    no_context: str | None = None
+    if last_request and result.model_usage:
+        window = _window(result, model)
+        if window:
+            context = Context(_prompt_tokens(last_request), window)
+        else:
+            no_context = f"no single model_usage entry is {model!r}: {', '.join(sorted(result.model_usage))}"
     if result.terminal_reason in INTERRUPTED_REASONS:
-        return TurnEnd("interrupted", usage)
+        return TurnEnd("interrupted", usage, context=context, no_context=no_context)
     if result.is_error:
         detail = "; ".join(result.errors or []) or result.result or result.subtype
         if result.api_error_status:
             detail = f"HTTP {result.api_error_status}: {detail}"
-        return TurnEnd("failed", usage, detail)
-    return TurnEnd("completed", usage)
+        return TurnEnd("failed", usage, detail, context, no_context)
+    return TurnEnd("completed", usage, context=context, no_context=no_context)
 
 
 class SdkSession:
-    def __init__(self, client: ClaudeSDKClient) -> None:
+    def __init__(self, client: ClaudeSDKClient, model: str) -> None:
         self._client = client
+        # The configured name, until the CLI's init message says which model it resolved it to.
+        self._model = model
 
     async def send(self, message: str) -> AsyncIterator[AgentEvent]:
         blocks: dict[int, dict[str, Any]] = {}
+        last_request: dict[str, Any] | None = None
         try:
             await self._client.query(message)
             async for m in self._client.receive_response():
                 if isinstance(m, ResultMessage):
-                    yield turn_end(m)
+                    yield turn_end(m, self._model, last_request)
                     return
+                if isinstance(m, SystemMessage) and m.subtype == "init" and isinstance(m.data.get("model"), str):
+                    self._model = m.data["model"]
                 if not isinstance(m, StreamEvent) or m.parent_tool_use_id is not None:
                     continue
+                if m.event.get("type") == "message_start":
+                    last_request = m.event.get("message", {}).get("usage") or last_request
                 for event in _translate(m.event, blocks):
                     yield event
         except ClaudeSDKError as e:
@@ -196,4 +282,4 @@ class SdkBackend:
     async def open(self, spec: SessionSpec) -> SdkSession:
         client = ClaudeSDKClient(options_for(spec, self._cli_path, self._stderr))
         await client.connect()
-        return SdkSession(client)
+        return SdkSession(client, spec.model)

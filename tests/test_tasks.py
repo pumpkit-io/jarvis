@@ -455,7 +455,12 @@ async def test_each_role_gets_only_its_own_hub_tools(
         "show",
         "end_conversation",
     ]
-    assert [t.name for t in backend.session("orchestrator").spec.tools] == ["report"]
+    assert [t.name for t in backend.session("orchestrator").spec.tools] == [
+        "report",
+        "spawn_subagent",
+        "list_subagents",
+        "cancel_subagent",
+    ]
 
 
 async def test_each_turn_logs_its_tool_calls_and_whether_text_came_first(

@@ -438,3 +438,27 @@ Run `./jarvis` (or `uv run jarvis-hub --debug` to see each transition), in a qui
 - [ ] Ask something with a long answer and say "Hey Jarvis" while it speaks: it stops, chimes and listens.
 - [ ] Type a line while idle: the reply is text only and Jarvis does not chime or listen.
 - [ ] On speakers, let a long answer play: Jarvis must not hear itself (no turn appears on screen from its own voice).
+
+## Subagents
+
+Ticket #10, run on 2026-11-03 on the M3: `claude-agent-sdk` 0.2.177, `claude` CLI 2.1.317 through `cli_path`, Max login, `ANTHROPIC_API_KEY` unset.
+
+### Asking for xhigh or max
+
+`asked_effort` in `src/jarvis_hub/subagent_rules.py` grants `xhigh` or `max` only on an affirmative request in a fixed form, such as "use max effort", "run it at xhigh effort", "max effort" as its own clause, "effort: max" as the whole sentence, or "usa lo sforzo massimo", and denies everything else. Both levels need the word "effort" (or "sforzo", "impegno"), so "use xhigh resolution images" does not grant. The ask must open its sentence or a comma clause, after nothing but "ok", "please", "sure", "yes", "sì", "va bene" or "per favore", and must close the sentence, with at most a short "on it" or "for this one" and a "please" or "grazie"; this keeps reported speech, descriptions and sarcasm out ("Tony said to use max effort", "Oh great, use max effort and burn all my credits", "Effort=max was the bug"). Three review rounds of a denylist (any match anywhere, vetoed by negating words) kept finding false grants such as "Forget max effort" and "Max effort is unnecessary", so the rule is inverted: a matching turn is still denied whole when any sentence naming an effort also holds a negating, limiting, comparing or hedging word or a question, or when a later sentence retracts ("actually", "never mind", "just kidding", "back to normal", "anzi"). The latest turn that names any effort level, high, medium and low included, or retracts decides, so "Make it high." after "Use max effort." denies (`asked_effort` returns `None`, not `high`); a turn that is or opens with "no", "nah", "nope", "ignore that", "never mind", "just kidding" or "no grazie" takes back what came before. False denies are accepted by design, including "No, use max effort.", "Run it at x-high." and "Use max effort, then open a PR.": the refusal tells the Orchestrator the plain words to ask the User for, and saying them once costs less than a Subagent at `max` the User never asked for. The rule has known false grants it does not try to close: a comma clause after someone else's words ("Tony said, use max effort.") and a request under a condition stated in an earlier clause ("In case the tests fail later, use max effort."). Their cost is bounded: no Subagent runs above `JARVIS_MAX_EFFORT`, and the concurrency cap limits how many run at once. `tests/test_subagent_rules.py` holds every case.
+
+### What a Subagent session sees
+
+A Subagent runs with the preset prompt plus `prompts/subagent.md`, `prompts/working-rules.md` and `prompts/boundary.md`, `setting_sources=["user", "project"]` and `bypassPermissions`. A probe on Haiku in a scratch repo, two messages each: without `disallowed_tools` the second turn's `init` listed 189 tools, with MCP servers Claude Docs, DigitalOcean, PostHog and the VoiceMode plugin; with the VoiceMode servers disallowed it listed 186 and no VoiceMode tool. The first turn listed 28 tools and no MCP server: as for the Talker in #7, connectors join after the first query. Pumpkit's connector was not attached that day. `tests/test_real_model.py` (opt-in) checks `permissionMode` `bypassPermissions`, Bash, Edit and Skill present, no VoiceMode tool, and a `PreToolUse` hook's deny of a connector call reaching the model as an error under `bypassPermissions` (ADR 0008).
+
+### One writing Subagent end to end
+
+`spikes/hub/subagent.py` drives the real Hub with stub Talker and Orchestrator and one real Subagent (Sonnet at `effort="low"`), `writes=true` on animate-pixel-art, whose brief says to commit a scratch file and stop before pushing. For the run the clone's `remote.origin.pushurl` pointed at a path that cannot be pushed to, then was unset.
+
+- The Hub made the worktree with the sdlc `worktree.sh create` on `chore/jarvis-scratch-check`, locked it under `jarvis S1 (T1): Jarvis scratch check`, and released the lock at the end.
+- The Subagent made one Bash call (write, add, commit) and ended 4.9 s after its session opened; the whole run took 7.3 s. Its report followed the preamble's format.
+- The completion event reached the Orchestrator with `status="done"`, the report, and the Hub's account of the branch: two commits not on `origin/main` (worktree.sh's `.gitignore` commit, since the repo had no worktrees doc, and the scratch file), nothing uncommitted, not pushed. `git ls-remote` showed no such branch on GitHub.
+- The progress log `.jarvis/subagents/S1.jsonl` held the start, the Bash call, the report and the turn's end with usage.
+- `worktree.sh finish` refused the worktree as neither merged nor pushed (exit 5), so the worktree and the branch stay in animate-pixel-art until the User removes them.
+
+Opening a PR, the cap, the time limit, cancelling and two Tasks side by side are covered by the fake-backend tests in `tests/test_subagents.py` only.

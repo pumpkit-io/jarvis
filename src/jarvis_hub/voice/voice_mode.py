@@ -103,6 +103,8 @@ class VoiceMode:
         self._notice = notice
         self._debug = debug
         self._voice = Voice()
+        self._idle = asyncio.Event()
+        self._idle.set()
         self._events: asyncio.Queue[Event] = asyncio.Queue()
         self._lines: asyncio.Queue[Line] = asyncio.Queue()
         self._speech = Speech(tts, player, clock, metrics=metrics, notice=notice, on_reply_audio=self._reply_audio)
@@ -133,6 +135,14 @@ class VoiceMode:
 
     async def idle(self) -> None:
         await self._speech.idle()
+
+    async def quiet(self) -> None:
+        """Returns once the machine is idle and nothing is playing, such as a cached line said on the way to idle."""
+        while True:
+            await self._idle.wait()
+            await self._speech.idle()
+            if self._voice.state == "idle":
+                return
 
     async def close(self) -> None:
         await self._speech.close()
@@ -178,6 +188,10 @@ class VoiceMode:
         return Tick(self._clock.now())
 
     def _transition(self, before: VoiceState, after: VoiceState, event: Event) -> None:
+        if after == "idle":
+            self._idle.set()
+        else:
+            self._idle.clear()
         capturing = after in CAPTURING
         if capturing != (before in CAPTURING):
             self._audio.capture(capturing)

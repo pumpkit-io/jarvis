@@ -5,12 +5,13 @@ import threading
 from collections.abc import AsyncIterator, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
 from jarvis_hub.agents.backend import (
     AgentEvent,
+    Context,
     SessionSpec,
     TextDelta,
     TextEnd,
@@ -20,6 +21,7 @@ from jarvis_hub.agents.backend import (
 )
 from jarvis_hub.hub import WARM_UP, Hub, Line
 from jarvis_hub.voice.language import Lang
+from jarvis_hub.subagents import Refusal, Subagent, SubagentSetup
 from jarvis_hub.voice.player import Clip, Samples
 from jarvis_hub.voice.state import Heard, SpeechStarted, WakeWord
 
@@ -102,7 +104,14 @@ class Abort:
     """Ends the turn as interrupted although nobody called interrupt(), as when the CLI aborts on its own."""
 
 
-Step = Wait | Text | Tool | AwaitInterrupt | Gate | Set | Fail | Raise | Abort | Usage
+@dataclass(frozen=True)
+class NoContext:
+    """The turn ends without a context, for this reason."""
+
+    reason: str
+
+
+Step = Wait | Text | Tool | AwaitInterrupt | Gate | Set | Fail | Raise | Abort | Usage | Context | NoContext
 
 
 @dataclass(frozen=True)
@@ -135,7 +144,8 @@ class FakeSession:
             self._sending = False
 
     async def _play(self, script: Sequence[Step]) -> AsyncIterator[AgentEvent]:
-        usage, in_text = Usage(), False
+        usage, context, in_text = Usage(), None, False
+        no_context: str | None = None
         for step in script:
             await asyncio.sleep(0)
             if isinstance(step, Text):
@@ -162,16 +172,21 @@ class FakeSession:
                 case Raise(error):
                     raise error
                 case Fail(error):
-                    yield TurnEnd("failed", usage, error)
+                    yield TurnEnd("failed", usage, error, context)
                     return
                 case Abort():
-                    yield TurnEnd("interrupted", usage)
+                    yield TurnEnd("interrupted", usage, context=context)
                     return
                 case Usage():
                     usage = step
+                case Context():
+                    context = step
+                case NoContext(reason):
+                    no_context = reason
         if in_text:
             yield TextEnd()
-        yield TurnEnd("interrupted" if self._interrupted.is_set() else "completed", usage)
+        outcome: Literal["completed", "interrupted"] = "interrupted" if self._interrupted.is_set() else "completed"
+        yield TurnEnd(outcome, usage, context=context, no_context=no_context)
 
     async def interrupt(self) -> None:
         # Like the CLI: the interrupt lands on whatever turn runs when it arrives, or on none.
@@ -183,11 +198,14 @@ class FakeSession:
             self._interrupted.set()
 
     async def close(self) -> None:
+        if self.spec.role == "subagent" and self.backend.subagent_close_gate is not None:
+            await self.backend.subagent_close_gate.wait()
         self.closed = True
 
 
 class FakeBackend:
-    """Plays one script per message, in order, per role; `warm_up` answers the Talker's warm-up message.
+    """Plays one script per message, in order, per role; `warm_up` answers the Talker's warm-up message and
+    `seed_reply` the seed a restarted Talker starts with.
 
     An Orchestrator with no script left ends its turn without a report.
     """
@@ -197,24 +215,53 @@ class FakeBackend:
         clock: FakeClock,
         scripts: Iterable[Sequence[Step]] = (),
         warm_up: Sequence[Step] = (Text("Ready."),),
+        seed_reply: Sequence[Step] = (Text("Ready."),),
+        restart_error: Exception | None = None,
+        restart_open_gate: asyncio.Event | None = None,
         open_error: Exception | None = None,
         orchestrator: Iterable[Sequence[Step]] = (),
         orchestrator_open_error: Exception | None = None,
         interrupt_gate: asyncio.Event | None = None,
         interrupt_error: Exception | None = None,
+        subagents: dict[str, Sequence[Step]] | None = None,
+        subagent_open_error: Exception | None = None,
+        subagent_open_gate: asyncio.Event | None = None,
+        subagent_close_gate: asyncio.Event | None = None,
     ) -> None:
         self.clock = clock
         self.scripts = list(scripts)
         self.orchestrator_scripts = list(orchestrator)
         self.warm_up = warm_up
+        self.seed_reply = seed_reply
+        self.restart_error = restart_error
+        # Holds a restarted Talker's open until set: a CLI slow to start.
+        self.restart_open_gate = restart_open_gate
+        self.talker_opens = 0
         self.open_error = open_error
         self.orchestrator_open_error = orchestrator_open_error
         self.interrupt_gate = interrupt_gate
         self.interrupt_error = interrupt_error
         self.sessions: list[FakeSession] = []
+        # A Subagent's script, by its brief.
+        self.subagent_scripts = dict(subagents or {})
+        self.subagent_open_error = subagent_open_error
+        # Holds a Subagent's open, or its session's close, until set: a CLI that never answers.
+        self.subagent_open_gate = subagent_open_gate
+        self.subagent_close_gate = subagent_close_gate
 
     async def open(self, spec: SessionSpec) -> FakeSession:
+        if spec.role == "subagent":
+            if self.subagent_open_gate is not None:
+                await self.subagent_open_gate.wait()
+            if self.subagent_open_error is not None:
+                raise self.subagent_open_error
         error = self.orchestrator_open_error if spec.role == "orchestrator" else self.open_error
+        if spec.role == "talker":
+            self.talker_opens += 1
+            if self.all_sessions("talker"):
+                error = self.restart_error
+                if self.restart_open_gate is not None:
+                    await self.restart_open_gate.wait()
         if error is not None:
             raise error
         session = FakeSession(self, spec)
@@ -230,8 +277,12 @@ class FakeBackend:
     def next_script(self, role: str, message: str) -> Sequence[Step]:
         if role == "orchestrator":
             return self.orchestrator_scripts.pop(0) if self.orchestrator_scripts else ()
+        if role == "subagent":
+            return self.subagent_scripts.get(message, (Text("Done."),))
         if message == WARM_UP:
             return self.warm_up
+        if message.startswith("<event source=\"hub\" reason=\"restart\""):
+            return self.seed_reply
         return self.scripts.pop(0) if self.scripts else (Text("Very good, sir."),)
 
 
@@ -296,7 +347,94 @@ ORCHESTRATOR = SessionSpec(
 )
 
 
-def make_hub(backend: FakeBackend, output: RecordingOutput, metrics: Any, **options: Any) -> Hub:
+class FakeWorkspace:
+    """Org repos are the names in `org`; a missing one is cloned. Worktrees are paths under /wt, never made."""
+
+    def __init__(self, org: Iterable[str] = ("pumpkit", "jarvis", "pumpkit-ops"), cloned: Iterable[str] = ()) -> None:
+        self.org = set(org)
+        self.cloned = set(cloned)
+        self.clones: list[str] = []
+        self.worktrees: list[tuple[str, str]] = []
+        self.locks: dict[Path, str] = {}
+        self.released: list[Path] = []
+        # What describe() says is on each worktree's branch.
+        self.on_branch: dict[Path, str] = {}
+        self.scratches: list[Path] = []
+        self.discarded: list[Path] = []
+        # Why discard() keeps a scratch worktree, by path; one not listed is removed.
+        self.keep: dict[Path, str] = {}
+        # When set, describe() waits on it, as a hung git would.
+        self.describe_gate: asyncio.Event | None = None
+
+    async def repo(self, name: str) -> tuple[str, Path]:
+        # A real workspace awaits git here, so another spawn may run meanwhile.
+        await asyncio.sleep(0)
+        short = name.removeprefix("pumpkit-io/")
+        if short not in self.org:
+            raise Refusal(f"{name} is outside the Org pumpkit-io.")
+        if short not in self.cloned:
+            self.cloned.add(short)
+            self.clones.append(short)
+        return short, Path("/org") / short
+
+    async def worktree(self, clone: Path, branch: str, holder: str) -> tuple[Path, str]:
+        path = Path("/wt") / clone.name / branch.split("/")[-1]
+        self.worktrees.append((clone.name, branch))
+        self.locks[path] = holder
+        return path, branch
+
+    async def scratch(self, clone: Path, name: str, holder: str) -> Path:
+        path = Path("/wt") / clone.name / name
+        self.scratches.append(path)
+        self.locks[path] = holder
+        return path
+
+    async def release(self, worktree: Path) -> None:
+        self.released.append(worktree)
+        self.locks.pop(worktree, None)
+
+    async def discard(self, worktree: Path) -> str | None:
+        self.locks.pop(worktree, None)
+        self.discarded.append(worktree)
+        return self.keep.get(worktree)
+
+    async def describe(self, worktree: Path) -> str:
+        if self.describe_gate is not None:
+            await self.describe_gate.wait()
+        return self.on_branch.get(worktree, "No commits beyond origin/main.")
+
+
+def subagent_spec(subagent: Subagent) -> SessionSpec:
+    return SessionSpec(
+        role="subagent",
+        model=subagent.model,
+        effort=subagent.effort,
+        thinking=True,
+        system_prompt="You do the work.",
+        cwd=subagent.cwd,
+        skip_permissions=True,
+    )
+
+
+def make_hub(
+    backend: FakeBackend,
+    output: RecordingOutput,
+    metrics: Any,
+    workspace: FakeWorkspace | None = None,
+    log_dir: Path | None = None,
+    max_effort: Any = "max",
+    cap: int = 3,
+    time_limit: float = 3600.0,
+    **options: Any,
+) -> Hub:
+    setup = SubagentSetup(
+        session=subagent_spec,
+        workspace=workspace or FakeWorkspace(),
+        log_dir=log_dir,
+        max_effort=max_effort,
+        cap=cap,
+        time_limit=time_limit,
+    )
     return Hub(
         talker=TALKER,
         orchestrator=ORCHESTRATOR,
@@ -304,6 +442,7 @@ def make_hub(backend: FakeBackend, output: RecordingOutput, metrics: Any, **opti
         clock=backend.clock,
         output=output,
         metrics=metrics,
+        subagents=setup,
         **options,
     )
 
