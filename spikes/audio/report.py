@@ -1,10 +1,4 @@
-"""Write the recording session's numbers into docs/notes/phase-0-spikes.md, at the end of ## Audio.
-
-    uv run report.py            # from results/*recordings*.json and the speaker run
-    uv run report.py --print    # show the block without writing it
-
-The block sits between two HTML comments, so a rerun replaces it instead of adding another.
-"""
+"""Write the recording session's numbers into docs/notes/phase-0-spikes.md, between markers a rerun replaces."""
 
 import argparse
 import datetime
@@ -60,8 +54,8 @@ def wake_block() -> list[str]:
             continue
         per_hour = fa["false_accepts_per_hour"]["vad_threshold=0.0"]
         out += ["", f"False accepts, {label} ({fa['hours']} h"
-                + (f", {fa['quiet_minutes']} min of it near silence" if fa.get("quiet_minutes") else "")
-                + f"): per hour without VAD gate {', '.join(f'{t} {n}' for t, n in per_hour.items())}; "
+                + (f", of which {fa['quiet_minutes']} min near silence are left out of the hours" if fa.get("quiet_minutes") else "")
+                + f"): per hour with sound, without VAD gate, {', '.join(f'{t} {n}' for t, n in per_hour.items())}; "
                 + f"totals {json.dumps(fa['false_accepts_total'])}."]
     return out or ["No Wake word results on recordings."]
 
@@ -90,6 +84,16 @@ def aec_block() -> list[str]:
         row(f"WebRTC APM {delay}", s)
     row("macOS Voice Processing I/O", r.get("macos_vpio", {"failed": "not recorded"}))
     return rows
+
+
+def headphones_block() -> list[str]:
+    r = load("aec-headphones-run")
+    if not r:
+        return ["Not recorded."]
+    s = r["raw_mic"]
+    return [f"Raw mic, no echo cancellation: {s['jarvis_only']['triggers']} Barge-in triggers on Jarvis alone "
+            f"({s['jarvis_only']['per_minute']} per minute); User Barge-ins detected {s.get('user_barge_ins_detected', '-')}; "
+            f"same Jarvis audio alone triggered {s.get('matching_jarvis_span_triggered', '-')}."]
 
 
 def smart_turn_block() -> list[str]:
@@ -121,9 +125,9 @@ def block() -> str:
     today = datetime.date.today().isoformat()
     lines = [f"### Recording session results ({today})", "",
              "Measured by `spikes/audio/session.py` on the User's own recordings. Numbers: `spikes/audio/results/*-recordings.json`, "
-             "`aec-speaker-run.json`, `wake-false-accepts-video.json` and `wake-false-accepts-room.json`; transcripts stay in `spikes/audio/data/results/` (local).",
+             "`aec-speaker-run.json`, `aec-headphones-run.json`, `wake-false-accepts-video.json` and `wake-false-accepts-room.json`; transcripts stay in `spikes/audio/data/results/` (local).",
              "", "**STT**", "", *stt_block(), *lang_block(), "", "**Wake word** (openWakeWord `hey_jarvis`, takes detected)", "", *wake_block(),
-             "", "**Echo cancellation** (built-in speakers)", "", *aec_block(), "", "**Smart Turn v3** (User's clips and pause takes)", "",
+             "", "**Echo cancellation** (built-in speakers)", "", *aec_block(), "", "**Headphones**", "", *headphones_block(), "", "**Smart Turn v3** (User's clips and pause takes)", "",
              *smart_turn_block(), "",
              "Next: update the verdict table above with the chosen STT, TTS, echo cancellation and Wake word.", ""]
     return "\n".join(lines)
