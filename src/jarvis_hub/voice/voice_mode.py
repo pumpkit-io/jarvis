@@ -7,7 +7,8 @@ machine knows when a reply starts and ends playing.
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any, Protocol
+from dataclasses import dataclass
+from typing import Any, Literal, Protocol
 
 from jarvis_hub.hub import Line
 from jarvis_hub.voice.language import Lang
@@ -48,88 +49,145 @@ class AudioInput(Protocol):
 # While the User is listened to or answered, other replies wait (the Spec's announcement policy).
 _FLOOR_TAKEN: frozenset[VoiceState] = frozenset({"listening", "thinking", "speaking"})
 
+# What becomes of a reply as it begins.
+Verdict = Literal["play", "hold", "drop"]
+
+
+@dataclass(frozen=True)
+class _Begin:
+    lang: Lang
+    turn: int
+    heard_at: float | None
+
+
+@dataclass(frozen=True)
+class _Feed:
+    text: str
+
+
+@dataclass(frozen=True)
+class _BlockEnd:
+    pass
+
+
+@dataclass(frozen=True)
+class _End:
+    pass
+
+
+_Op = _Begin | _Feed | _BlockEnd | _End
+
 
 class _ObservedSpeech:
     """The Hub's speech, telling the machine when each reply has finished playing.
 
-    A reply `holds` picks, such as news while the User has the floor, is kept back until `release`.
+    `verdict` decides each reply as it begins: it plays, waits in the held list until `release` (news while the
+    User has the floor), or is dropped (the answer to a turn the User has moved on from, left on screen).
+    News already playing through goes back to the held list when `hold_news` says the User has taken the floor.
     """
 
     def __init__(
         self,
         speech: Speech,
         done: Callable[[float | None], Awaitable[None]],
-        holds: Callable[[float | None], bool],
+        verdict: Callable[[float | None], Verdict],
     ) -> None:
         self._speech = speech
         self._done = done
-        self._holds = holds
+        self._verdict = verdict
         self._replies = 0
         # Replies up to this one were stopped: their playback ending is not a reply done.
         self._stopped = 0
         self._heard_at: float | None = None
         self._waits: set[asyncio.Task[None]] = set()
-        self._held: list[Callable[[], None]] = []
-        # The reply the Hub is streaming now is being held, from this index of `_held` on.
+        self._held: list[_Op] = []
+        # The reply the Hub is streaming now is being held, from this index of `_held` on, or dropped.
         self._holding = False
         self._held_from = 0
+        self._dropping = False
+        # News playing through that has not finished playing, as given so far; None for any other reply.
+        self._news: list[_Op] | None = None
 
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None) -> None:
-        if self._holds(heard_at):
-            self._holding, self._held_from = True, len(self._held)
-            self._held.append(lambda: self._begin(lang, turn, heard_at))
-        else:
-            self._begin(lang, turn, heard_at)
+        op = _Begin(lang, turn, heard_at)
+        verdict = self._verdict(heard_at)
+        self._holding, self._dropping = verdict == "hold", verdict == "drop"
+        if self._holding:
+            self._held_from = len(self._held)
+            self._held.append(op)
+        elif not self._dropping:
+            self._apply(op)
 
     def feed(self, text: str) -> None:
-        if self._holding:
-            self._held.append(lambda: self._speech.feed(text))
-        else:
-            self._speech.feed(text)
+        self._route(_Feed(text))
 
     def block_end(self) -> None:
-        if self._holding:
-            self._held.append(self._speech.block_end)
-        else:
-            self._speech.block_end()
+        self._route(_BlockEnd())
 
     def end(self) -> None:
-        if self._holding:
-            self._held.append(self._end)
-            self._holding = False
-        else:
-            self._end()
+        self._route(_End())
+        self._holding = self._dropping = False
 
     def stop(self) -> None:
-        # Held news the Hub has finished streaming survives the stop; a reply still streaming does not.
+        # Held news the Hub has finished streaming survives the stop; whatever is still streaming does not.
         if self._holding:
             del self._held[self._held_from :]
-            self._holding = False
+        self._holding, self._dropping = False, True
+        self._news = None
         self._stopped = self._replies
         self._speech.stop()
+
+    def hold_news(self) -> None:
+        """The User has taken the floor: news not yet played out waits in the held list again, from its start."""
+        if self._news is None:
+            return
+        ops, self._news = self._news, None
+        self._stopped = self._replies
+        self._speech.stop()
+        if not isinstance(ops[-1], _End):
+            self._holding, self._held_from = True, len(self._held)
+        self._held.extend(ops)
 
     def release(self) -> None:
         """Plays what was held; a held reply still streaming plays on as it comes."""
         held, self._held, self._holding = self._held, [], False
         for op in held:
-            op()
+            self._apply(op)
 
-    def _begin(self, lang: Lang, turn: int, heard_at: float | None) -> None:
-        self._replies += 1
-        self._heard_at = heard_at
-        self._speech.begin(lang, turn=turn, heard_at=heard_at)
+    def _route(self, op: _Op) -> None:
+        if self._dropping:
+            return
+        if self._holding:
+            self._held.append(op)
+        else:
+            self._apply(op)
 
-    def _end(self) -> None:
-        self._speech.end()
-        wait = asyncio.create_task(self._played(self._replies, self._heard_at))
-        self._waits.add(wait)
-        wait.add_done_callback(self._waits.discard)
+    def _apply(self, op: _Op) -> None:
+        match op:
+            case _Begin(lang, turn, heard_at):
+                self._replies += 1
+                self._heard_at = heard_at
+                self._news = [] if heard_at is None else None
+                self._speech.begin(lang, turn=turn, heard_at=heard_at)
+            case _Feed(text):
+                self._speech.feed(text)
+            case _BlockEnd():
+                self._speech.block_end()
+            case _End():
+                self._speech.end()
+                wait = asyncio.create_task(self._played(self._replies, self._heard_at))
+                self._waits.add(wait)
+                wait.add_done_callback(self._waits.discard)
+        if self._news is not None:
+            self._news.append(op)
 
     async def _played(self, reply: int, heard_at: float | None) -> None:
         await self._speech.idle()
         # A reply begun since has the floor; its own end reports.
-        if reply == self._replies and reply > self._stopped:
-            await self._done(heard_at)
+        if reply == self._replies:
+            self._news = None
+            if reply > self._stopped:
+                await self._done(heard_at)
 
 
 class VoiceMode:
@@ -159,7 +217,7 @@ class VoiceMode:
         self._speech = Speech(
             tts, player, clock, metrics=metrics, notice=notice, on_reply_audio=self._reply_audio, on_chime=self._chime_started
         )
-        self.speech = _ObservedSpeech(self._speech, self._reply_done, self._holds)
+        self.speech = _ObservedSpeech(self._speech, self._reply_done, self._verdict)
 
     @property
     def state(self) -> VoiceState:
@@ -207,9 +265,15 @@ class VoiceMode:
     async def _reply_done(self, heard_at: float | None) -> None:
         self._events.put_nowait(ReplyDone(self._clock.now(), heard_at))
 
-    def _holds(self, heard_at: float | None) -> bool:
-        """Whether a reply begun now waits: any but the awaited one, while the User has the floor or is being answered."""
-        return self._voice.state in _FLOOR_TAKEN and (heard_at is None or heard_at != self._voice.awaiting)
+    def _verdict(self, heard_at: float | None) -> Verdict:
+        voice = self._voice
+        # The User woke Jarvis again after this turn and moved on: its answer stays on screen.
+        if heard_at is not None and voice.woke_at is not None and heard_at < voice.woke_at:
+            return "drop"
+        # Any reply but the awaited one waits while the User has the floor or is being answered.
+        if voice.state in _FLOOR_TAKEN and (heard_at is None or heard_at != voice.awaiting):
+            return "hold"
+        return "play"
 
     async def _listen(self) -> None:
         async for event in self._audio.events():
@@ -252,6 +316,9 @@ class VoiceMode:
             self._idle.clear()
         if after not in _FLOOR_TAKEN:
             self.speech.release()
+        elif after == "listening" and before in ("idle", "follow_up"):
+            # The User takes the floor. News already heard (`announce`) is not held: the wake's Interrupt stops it.
+            self.speech.hold_news()
         capturing = after in CAPTURING
         if capturing != (before in CAPTURING):
             self._audio.capture(capturing)

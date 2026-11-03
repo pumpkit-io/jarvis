@@ -271,8 +271,10 @@ class Hub:
         self._settled.set()
         self._turn_count = 0
         self._talker_gate = _TurnGate()
-        # Whether the Talker turn under way is heard: only a spoken turn's reply is interrupted or ends the conversation.
+        # Whether the Talker turn under way is heard: only a spoken turn's reply is interrupted.
         self._turn_spoken = False
+        # Only the reply to the User's own spoken turn ends the conversation; news never does.
+        self._turn_answers_user = False
         self._interrupted_turn: int | None = None
         self._orchestrator_gate = _TurnGate()
         self._orchestrating: str | None = None
@@ -473,6 +475,7 @@ class Hub:
         end = TurnEnd("failed", error="the session ended without a result")
         self._talker_gate.turn = turn if show else None
         self._turn_spoken = show and spoken
+        self._turn_answers_user = self._turn_spoken and kind == "user"
         speech = self._speech if self._turn_spoken else _Silent()
         speech.begin(self._lang, turn=turn, heard_at=arrived if kind == "user" else None)
         try:
@@ -506,7 +509,7 @@ class Hub:
                         end = event
         finally:
             self._talker_gate.turn = None
-            self._turn_spoken = False
+            self._turn_spoken = self._turn_answers_user = False
             if self._interrupted_turn != turn:
                 speech.end()
         if end.outcome == "interrupted" and self._interrupted_turn != turn:
@@ -709,8 +712,8 @@ class Hub:
         return "Shown on screen."
 
     async def _end_conversation(self, args: dict[str, Any]) -> str:
-        # Text mode, or a typed line in voice mode, has no listening to stop, so there the Hub only acknowledges it.
-        if self._on_end_conversation is not None and self._turn_spoken:
+        # Text mode, a typed line in voice mode, or news has no listening of its own to stop: only acknowledged.
+        if self._on_end_conversation is not None and self._turn_answers_user:
             self._on_end_conversation()
         return "The conversation ends after this reply."
 

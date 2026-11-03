@@ -131,6 +131,8 @@ class Voice:
     window_ends: float | None = None
     # The `at` of the spoken turn sent and not yet answered: only its reply moves `thinking` on.
     awaiting: float | None = None
+    # When the Wake word last opened listening: a spoken turn heard before it is one the User has moved on from.
+    woke_at: float | None = None
 
 
 # Said on their own, after punctuation and the wake phrase are gone. Anything longer goes to the Talker.
@@ -231,7 +233,9 @@ def _wake(voice: Voice, at: float, timing: Timing) -> tuple[Voice, list[Action]]
     # A hit inside the User's turn is "Jarvis" said in it, or the phrase that opened it: the turn goes on.
     if at < voice.chime_until or voice.in_turn:
         return voice, []
-    listening = replace(voice, state="listening", deadline=at + timing.listen_s, ending=False, awaiting=None)
+    listening = replace(
+        voice, state="listening", deadline=at + timing.listen_s, ending=False, awaiting=None, woke_at=at
+    )
     if voice.state == "listening":
         return listening, []
     chimed = replace(listening, chime_until=at + timing.chime_s)
