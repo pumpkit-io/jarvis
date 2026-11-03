@@ -139,6 +139,7 @@ class Speech:
         metrics: Metrics,
         notice: Callable[[str], None],
         holding_line_after: float = HOLDING_LINE_AFTER,
+        on_reply_audio: Callable[[], None] | None = None,
     ) -> None:
         self._tts = tts
         self._player = player
@@ -146,6 +147,7 @@ class Speech:
         self._metrics = metrics
         self._notice = notice
         self._holding_line_after = holding_line_after
+        self._on_reply_audio = on_reply_audio
         # One thread: MLX ties its streams to the thread that loaded the model.
         self._thread = _DaemonThread("tts")
         self._queue: asyncio.Queue[_Say | _Cached | _End] = asyncio.Queue()
@@ -308,6 +310,8 @@ class Speech:
                 reply.gaps += 1
             reply.audio_s += clip.seconds
         self._player.play(clip, starts_reply=starts_reply)
+        if starts_reply and self._on_reply_audio is not None:
+            self._on_reply_audio()
 
     async def _hold_the_line(self, reply: _Reply) -> None:
         await self._clock.sleep(self._holding_line_after)

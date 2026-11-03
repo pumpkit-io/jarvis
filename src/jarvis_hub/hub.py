@@ -8,7 +8,7 @@ import asyncio
 import contextlib
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, replace
 from html import escape
 from typing import Any, Literal, Protocol
@@ -36,7 +36,7 @@ class Clock(Protocol):
 
 
 class Output(Protocol):
-    def heard(self, text: str) -> None:
+    def heard(self, text: str, *, typed: bool = True) -> None:
         """The User's line, as the Talker starts on it."""
         ...
 
@@ -92,12 +92,13 @@ class _Silent:
 
 @dataclass(frozen=True)
 class Line:
-    """A line the User typed, stamped when it was read rather than when the Hub got to it."""
+    """A line the User typed or said, stamped when it was read or the User stopped speaking, not when the Hub got to it."""
 
     text: str
     arrived: float
     # Left out, the Hub detects it from the text.
     lang: Lang | None = None
+    typed: bool = True
 
 
 # Sent once at launch, in the background, so the first real turn finds the prompt cached (ADR 0006); never shown.
@@ -114,9 +115,10 @@ ORCHESTRATOR_TIMEOUT = 600.0
 INTERRUPT_GRACE = 10.0
 
 
-def user_message(text: str, lang: Lang) -> str:
-    # Escaped so typed text can never close the tag or forge another one.
-    return f'<user lang="{lang}" typed="true">{escape(text, quote=False)}</user>'
+def user_message(text: str, lang: Lang, *, typed: bool = True) -> str:
+    # Escaped so the User's text can never close the tag or forge another one.
+    marker = ' typed="true"' if typed else ""
+    return f'<user lang="{lang}"{marker}>{escape(text, quote=False)}</user>'
 
 
 def event_message(source: str, text: str, task: str, *, needs_user: bool = False, details: bool = False) -> str:
@@ -141,6 +143,8 @@ class _TalkerInput:
     details: str | None = None
     heard: str | None = None
     lang: Lang | None = None
+    typed: bool = True
+    spoken: bool = True
 
 
 @dataclass(frozen=True)
@@ -182,6 +186,8 @@ class Hub:
         metrics: Metrics,
         orchestrator_timeout: float = ORCHESTRATOR_TIMEOUT,
         speech: Speech | None = None,
+        speak_typed: bool = True,
+        on_end_conversation: Callable[[], None] | None = None,
     ) -> None:
         tools = talker_tools(
             delegate=self._delegate,
@@ -198,6 +204,9 @@ class Hub:
         self._metrics = metrics
         self._orchestrator_timeout = orchestrator_timeout
         self._speech: Speech = speech if speech is not None else _Silent()
+        # In voice mode a typed line gets a text-only reply; with `--text --speak` it is spoken.
+        self._speak_typed = speak_typed
+        self._on_end_conversation = on_end_conversation
         # The language of the latest line read, and of the latest User turn the Talker took: replies follow it.
         self._read_lang: Lang = "en"
         self._lang: Lang = "en"
@@ -261,8 +270,10 @@ class Hub:
         async for line in inputs:
             if text := line.text.strip():
                 self._read_lang = lang = line.lang or detect_language(text, self._read_lang)
-                message = user_message(text, lang)
-                self._post(self._talker_inbox, _TalkerInput(message, "user", line.arrived, heard=text, lang=lang))
+                message = user_message(text, lang, typed=line.typed)
+                spoken = not line.typed or self._speak_typed
+                item = _TalkerInput(message, "user", line.arrived, heard=text, lang=lang, typed=line.typed, spoken=spoken)
+                self._post(self._talker_inbox, item)
 
     def _post(self, inbox: "asyncio.Queue[Any]", item: _TalkerInput | _OrchestratorInput) -> None:
         """Queue an item; the Hub counts as settled again once every posted item is handled."""
@@ -289,14 +300,14 @@ class Hub:
                 if item.lang:
                     self._lang = item.lang
                 if item.heard:
-                    self._output.heard(item.heard)
+                    self._output.heard(item.heard, typed=item.typed)
                 if item.details:
                     self._output.show(item.details)
-                await self._turn(item.message, kind=item.kind, arrived=item.arrived)
+                await self._turn(item.message, kind=item.kind, arrived=item.arrived, spoken=item.spoken)
             finally:
                 self._handled()
 
-    async def _turn(self, message: str, *, kind: TalkerKind, arrived: float) -> None:
+    async def _turn(self, message: str, *, kind: TalkerKind, arrived: float, spoken: bool = True) -> None:
         assert self._talker is not None
         self._turn_count += 1
         turn = self._turn_count
@@ -310,7 +321,7 @@ class Hub:
         after_block = False
         end = TurnEnd("failed", error="the session ended without a result")
         self._talker_gate.turn = turn if show else None
-        speech = self._speech if show else _Silent()
+        speech = self._speech if show and spoken else _Silent()
         speech.begin(self._lang, turn=turn, heard_at=arrived if kind == "user" else None)
         try:
             async for event in self._guarded(self._talker.send(message)):
@@ -529,7 +540,9 @@ class Hub:
         return "Shown on screen."
 
     async def _end_conversation(self, args: dict[str, Any]) -> str:
-        # Text mode has no listening to stop, so the Hub only acknowledges it.
+        # Text mode has no listening to stop, so there the Hub only acknowledges it.
+        if self._on_end_conversation is not None:
+            self._on_end_conversation()
         return "The conversation ends after this reply."
 
     async def _report(self, args: dict[str, Any]) -> str:

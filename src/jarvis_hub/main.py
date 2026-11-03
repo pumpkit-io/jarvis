@@ -31,6 +31,8 @@ from jarvis_hub.voice.speech import Speech, SpeechClock
 from jarvis_hub.voice.tts import KokoroSynthesizer, Synthesizer
 
 PROMPT = "› "
+# Marks what the User said aloud, as transcribed, apart from what they typed.
+SAID = "» "
 
 # Each of these sends model calls past the Max subscription (ADR 0002).
 BILLING_SWITCHES = {
@@ -87,9 +89,12 @@ class TerminalOutput:
         self._console = _Console(file=stdout, highlight=False)
         self._mid_reply = False
 
-    def heard(self, text: str) -> None:
+    def heard(self, text: str, *, typed: bool = True) -> None:
         # A terminal already shows what was typed; piped input is echoed so the transcript reads in order.
-        if not self._prompt:
+        if not typed:
+            self._stdout.write(f"\r{SAID}{text}\n")
+            self._stdout.flush()
+        elif not self._prompt:
             self._stdout.write(f"{PROMPT}{text}\n")
 
     def reply(self, text: str) -> None:

@@ -19,7 +19,9 @@ from jarvis_hub.agents.backend import (
     Usage,
 )
 from jarvis_hub.hub import WARM_UP, Hub, Line
+from jarvis_hub.voice.language import Lang
 from jarvis_hub.voice.player import Clip, Samples
+from jarvis_hub.voice.state import Heard, SpeechStarted, WakeWord
 
 
 class FakeClock:
@@ -238,8 +240,8 @@ class RecordingOutput:
         self.log: list[tuple[str, str]] = []
         self.on_text: asyncio.Event = asyncio.Event()
 
-    def heard(self, text: str) -> None:
-        self.log.append(("heard", text))
+    def heard(self, text: str, *, typed: bool = True) -> None:
+        self.log.append(("heard" if typed else "said", text))
 
     def reply(self, text: str) -> None:
         self.log.append(("reply", text))
@@ -406,3 +408,30 @@ class RecordingPlayer:
     @property
     def voices(self) -> list[str]:
         return [c.voice for c in self.clips]
+
+
+class ScriptedAudio:
+    """Audio input as the pipeline reports it: Wake word hits, speech onsets and transcribed turns, sent by the test."""
+
+    def __init__(self, clock: FakeClock) -> None:
+        self._clock = clock
+        self._queue: asyncio.Queue[WakeWord | SpeechStarted | Heard] = asyncio.Queue()
+        self.capturing: list[bool] = []
+
+    def wake(self) -> None:
+        self._queue.put_nowait(WakeWord(self._clock.now()))
+
+    def speech(self) -> None:
+        self._queue.put_nowait(SpeechStarted(self._clock.now()))
+
+    def say(self, text: str, lang: Lang | None = None) -> None:
+        """Speech onset, then the turn's transcript at its end."""
+        self.speech()
+        self._queue.put_nowait(Heard(text, lang, self._clock.now()))
+
+    def capture(self, on: bool) -> None:
+        self.capturing.append(on)
+
+    async def events(self) -> AsyncIterator[WakeWord | SpeechStarted | Heard]:
+        while True:
+            yield await self._queue.get()
