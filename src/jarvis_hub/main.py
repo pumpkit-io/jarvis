@@ -22,7 +22,7 @@ from rich.markdown import Markdown
 from jarvis_hub.agents.backend import AgentBackend, SessionSpec
 from jarvis_hub.agents.sdk import SdkBackend
 from jarvis_hub.config import ConfigError, Settings, VoiceSettings, load_settings
-from jarvis_hub.hub import Clock, Hub, Line
+from jarvis_hub.hub import Clock, Hub, Line, Metrics, Output
 from jarvis_hub.orchestrator import orchestrator_spec
 from jarvis_hub.subagents import Subagent, SubagentSetup, subagent_session
 from jarvis_hub.talker import talker_spec
@@ -229,6 +229,24 @@ def subagent_setup(settings: Settings) -> SubagentSetup:
     )
 
 
+def settings_hub(
+    settings: Settings, *, backend: AgentBackend, clock: Clock, output: Output, metrics: Metrics, **options: Any
+) -> Hub:
+    """A Hub with everything the settings decide filled in; `options` are what differs between the modes."""
+    return Hub(
+        talker=talker_spec(settings),
+        orchestrator=orchestrator_spec(settings),
+        backend=backend,
+        clock=clock,
+        output=output,
+        metrics=metrics,
+        subagents=subagent_setup(settings),
+        waits=WaitSetup(org=settings.org),
+        talker_restart_at=settings.talker_restart_at,
+        **options,
+    )
+
+
 async def text_mode(
     *,
     settings: Settings,
@@ -248,7 +266,6 @@ async def text_mode(
     interactive = stdin.isatty()
     output = TerminalOutput(stdout, stderr, prompt=interactive, show_log=settings.runtime_dir / "show.log")
     metrics = JsonlMetrics(settings.runtime_dir / "metrics.jsonl")
-    talker, orchestrator = talker_spec(settings), orchestrator_spec(settings)
     speech = None
     if voice is not None:
         try:
@@ -257,18 +274,7 @@ async def text_mode(
             output.notice(f"Speech is off: no audio output: {type(e).__name__}: {e}")
         else:
             speech = Speech(voice.tts, player, clock, metrics=metrics, notice=output.notice)
-    hub = Hub(
-        talker=talker,
-        orchestrator=orchestrator,
-        backend=backend,
-        clock=clock,
-        output=output,
-        metrics=metrics,
-        subagents=subagent_setup(settings),
-        waits=WaitSetup(org=settings.org),
-        speech=speech,
-        talker_restart_at=settings.talker_restart_at,
-    )
+    hub = settings_hub(settings, backend=backend, clock=clock, output=output, metrics=metrics, speech=speech)
     try:
         await hub.start()
         await asyncio.to_thread(language.warm_up)
@@ -327,19 +333,15 @@ async def voice_mode(
         notice=output.notice,
         debug=debug,
     )
-    hub = Hub(
-        talker=talker_spec(settings),
-        orchestrator=orchestrator_spec(settings),
+    hub = settings_hub(
+        settings,
         backend=backend,
         clock=clock,
         output=output,
         metrics=metrics,
-        subagents=subagent_setup(settings),
-        waits=WaitSetup(org=settings.org),
         speech=conversation.speech,
         speak_typed=False,
         on_end_conversation=conversation.end_conversation,
-        talker_restart_at=settings.talker_restart_at,
         floor=conversation,
     )
     try:

@@ -124,7 +124,7 @@ def orchestrator_tools(
         ),
         HubTool(
             "cancel_wait",
-            "Stop a Watcher or Check you no longer need.",
+            "Stop a Watcher or Check of the Task you are on.",
             object_schema({"wait_id": {**STRING, "description": "Such as W1 or C2."}}, ("wait_id",)),
             cancel_wait,
         ),

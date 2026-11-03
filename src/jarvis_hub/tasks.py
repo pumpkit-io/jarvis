@@ -59,6 +59,11 @@ class Task:
         elif not live:
             self.state = "failed"
 
+    def settle(self) -> None:
+        """Nothing more is coming for this Task, so one its last report left working is done."""
+        if self.state == "working" and not self.waiting:
+            self.state = "done"
+
     def cancel(self) -> bool:
         """False when the Task had already finished with nothing left in the queue for it."""
         if self.cancelled or (self.state in FINISHED and not self.waiting):

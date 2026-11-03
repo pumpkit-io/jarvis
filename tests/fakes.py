@@ -37,6 +37,10 @@ class FakeClock:
     def now(self) -> float:
         return self.t
 
+    @property
+    def sleepers(self) -> int:
+        return len(self._sleepers)
+
     def advance(self, seconds: float) -> None:
         self.t += seconds
         for sleeper in self._sleepers:
@@ -48,7 +52,11 @@ class FakeClock:
         while self.t < deadline:
             woken = asyncio.Event()
             self._sleepers.append(woken)
-            await woken.wait()
+            try:
+                await woken.wait()
+            finally:
+                if woken in self._sleepers:
+                    self._sleepers.remove(woken)
 
 
 @dataclass(frozen=True)
@@ -452,14 +460,20 @@ def make_hub(
 
 
 class StubRunner:
-    """Stands in for a Watcher's gh process: each command blocks until the test ends it with `finish`."""
+    """Stands in for a Watcher's gh processes: a `view` answers `view_result` at once; a watch blocks until the test
+    ends it with `finish`."""
 
-    def __init__(self) -> None:
+    def __init__(self, view_result: tuple[int, str] = (0, "{}")) -> None:
+        self.view_result = view_result
+        self.viewed: list[tuple[str, ...]] = []
         self.started: list[tuple[str, ...]] = []
         self.killed: list[tuple[str, ...]] = []
         self._ends: dict[tuple[str, ...], asyncio.Future[tuple[int, str]]] = {}
 
     async def __call__(self, argv: tuple[str, ...]) -> tuple[int, str]:
+        if argv[2] == "view":
+            self.viewed.append(argv)
+            return self.view_result
         self.started.append(argv)
         end = self._ends[argv] = asyncio.get_running_loop().create_future()
         try:

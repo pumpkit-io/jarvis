@@ -2,13 +2,15 @@
 
 import asyncio
 import json
+import os
 import subprocess
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from jarvis_hub.agents.backend import Refused
-from jarvis_hub.waits import run_confined, watch_command
+from jarvis_hub.waits import Waits, WaitSetup, run_confined, watch_command
 from tests.fakes import (
     FakeBackend,
     FakeClock,
@@ -48,6 +50,13 @@ def events(backend: FakeBackend, source: str) -> list[str]:
     return [m for m in received if m.startswith(f'<event source="{source}"')]
 
 
+async def advance(clock: FakeClock, seconds: float) -> None:
+    """Moves the clock past nothing due, returning once every sleeper it woke is asleep again."""
+    sleeping = clock.sleepers
+    clock.advance(seconds)
+    await until(lambda: clock.sleepers == sleeping)
+
+
 @pytest.fixture
 def clock() -> FakeClock:
     return FakeClock()
@@ -81,8 +90,7 @@ async def test_a_check_wakes_the_orchestrator_with_a_timer_event_once_its_time_h
     [set_check] = results(backend, "orchestrator", "schedule_check")
     assert json.loads(set_check.result or "")["check_id"] == "C1"
 
-    clock.advance(599)
-    await asyncio.sleep(0.01)
+    await advance(clock, 599)
     assert events(backend, "timer") == []
     clock.advance(1)
     await until(lambda: output.replies[-1:] == ["Ada has reviewed it, sir."])
@@ -110,13 +118,11 @@ async def test_a_repeating_check_waits_twice_as_long_each_time_and_stops_after_i
     typist.type(REVIEW)
     await until(lambda: results(backend, "orchestrator", "schedule_check"))
     for gap, count in ((60, 1), (120, 2), (240, 3)):
-        clock.advance(gap - 1)
-        await asyncio.sleep(0.01)
+        await advance(clock, gap - 1)
         assert len(events(backend, "timer")) == count - 1
         clock.advance(1)
         await until(lambda: len(events(backend, "timer")) == count)
-    clock.advance(4 * 3600)
-    await asyncio.sleep(0.01)
+    await advance(clock, 4 * 3600)
     await until(lambda: output.replies[-1:] == ["No review yet, sir."])
     typist.end()
     await running
@@ -143,8 +149,7 @@ async def test_a_check_waits_at_least_a_minute_whatever_it_is_asked(
     [set_check] = results(backend, "orchestrator", "schedule_check")
     assert json.loads(set_check.result or "")["first_in_seconds"] == 60
 
-    clock.advance(59)
-    await asyncio.sleep(0.01)
+    await advance(clock, 59)
     assert events(backend, "timer") == []
     clock.advance(1)
     await until(lambda: len(events(backend, "timer")) == 1)
@@ -204,8 +209,7 @@ async def test_the_user_sees_watchers_and_checks_in_status_and_can_cancel_one(
     await until(lambda: results(backend, "talker", "status"))
     typist.type("Forget the review")
     await until(lambda: len(results(backend, "talker", "status")) == 2)
-    clock.advance(600)
-    await asyncio.sleep(0.01)
+    await advance(clock, 600)
     runner.finish(0, 0, "All checks were successful")
     typist.end()
     await running
@@ -248,7 +252,7 @@ async def test_a_watcher_runs_a_fixed_gh_command_and_its_end_wakes_the_orchestra
     await hub.start()
     running = asyncio.create_task(hub.run(lines_of(clock, CI)))
     await until(lambda: runner.started)
-    await asyncio.sleep(0.01)
+    await advance(clock, 0)
     assert not running.done() and events(backend, "watcher") == []
     runner.finish(0, code, printed)
     await running
@@ -336,8 +340,7 @@ async def test_cancelling_the_task_stops_its_watcher_process_and_its_checks_with
     typist.type("Never mind")
     typist.end()
     await running
-    clock.advance(3600)
-    await asyncio.sleep(0.01)
+    await advance(clock, 3600)
 
     assert runner.killed == runner.started
     assert events(backend, "watcher") == events(backend, "timer") == []
@@ -405,7 +408,220 @@ async def test_a_real_watcher_on_a_finished_ci_run_of_an_org_repo_returns_at_onc
     assert not isinstance(command, Refused)
 
     async with asyncio.timeout(30):
-        code, printed = await run_confined(command[1])
+        code, printed = await run_confined(command.watch)
 
     assert code == 0
     assert f"({run_id}) has already completed with 'success'" in printed
+
+
+@pytest.mark.parametrize(
+    ("view_result", "printed"),
+    [
+        ((1, "HTTP 404: Not Found (https://api.github.com/repos/pumpkit-io/pumpkit/actions/runs/1)"), "HTTP 404"),
+        ((4, "To get started with GitHub CLI, please run:  gh auth login"), "gh auth login"),
+    ],
+)
+async def test_a_watch_gh_cannot_make_ends_as_an_error_with_ghs_message_and_never_starts_watching(
+    clock: FakeClock,
+    output: RecordingOutput,
+    metrics: RecordingMetrics,
+    view_result: tuple[int, str],
+    printed: str,
+) -> None:
+    runner = StubRunner(view_result=view_result)
+    backend = FakeBackend(
+        clock,
+        [[Text("Very well, sir."), delegate(CI)]],
+        orchestrator=[[Tool("watch", {"kind": "ci_run", "target": "pumpkit#1"})], [report("T1", "No such run.")]],
+    )
+    hub = make_hub(backend, output, metrics, runner=runner)
+
+    await hub.start()
+    await hub.run(lines_of(clock, CI))
+
+    assert runner.viewed == [("gh", "run", "view", "1", "-R", "pumpkit-io/pumpkit", "--json", "status")]
+    assert runner.started == []
+    [event] = events(backend, "watcher")
+    assert 'status="error">' in event and printed in event
+
+
+async def test_a_pr_with_no_checks_ends_its_watcher_as_an_error_not_a_failure(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    runner = StubRunner()
+    backend = FakeBackend(
+        clock,
+        [[Text("Very well, sir."), delegate(CI)]],
+        orchestrator=[[Tool("watch", {"kind": "pr_checks", "target": "jarvis#7"})], [report("T1", "No checks.")]],
+    )
+    hub = make_hub(backend, output, metrics, runner=runner)
+
+    await hub.start()
+    running = asyncio.create_task(hub.run(lines_of(clock, CI)))
+    await until(lambda: runner.started)
+    runner.finish(0, 1, "no checks reported on the 'feat/x' branch")
+    await running
+
+    assert runner.viewed == [("gh", "pr", "view", "7", "-R", "pumpkit-io/jarvis", "--json", "number")]
+    [event] = events(backend, "watcher")
+    assert 'status="error">no checks reported' in event
+
+
+async def test_the_orchestrator_cannot_cancel_a_wait_of_another_task(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    backend = FakeBackend(
+        clock,
+        [[Text("Very well, sir."), delegate()], [Text("Very well, sir."), delegate("Forget the review")]],
+        orchestrator=[
+            [check(), report("T1", "I'll look in ten minutes.")],
+            [Tool("cancel_wait", {"wait_id": "C1"}), report("T2", "Done.")],
+        ],
+    )
+    hub = make_hub(backend, output, metrics)
+
+    await hub.start()
+    await hub.run(lines_of(clock, REVIEW, "Forget the review"))
+    await hub.close()
+
+    assert results(backend, "orchestrator", "cancel_wait")[0].result == "There is no Watcher or Check C1 on T2."
+    assert output.notices == ["C1 dropped; Checks aren't kept across restarts yet."]
+
+
+async def test_a_task_that_reported_and_then_cancelled_its_last_wait_is_done(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    backend = FakeBackend(
+        clock,
+        [[Text("I'll watch it, sir."), delegate(CI)], [Text("Watching it, sir.")], [Text("Let me see."), Tool("status")]],
+        orchestrator=[
+            [
+                Tool("watch", {"kind": "ci_run", "target": "pumpkit#1"}),
+                report("T1", "Watching the run."),
+                Tool("cancel_wait", {"wait_id": "W1"}),
+            ]
+        ],
+    )
+    hub = make_hub(backend, output, metrics)
+    typist = Typist(clock)
+
+    await hub.start()
+    running = asyncio.create_task(hub.run(typist.lines()))
+    typist.type(CI)
+    await until(lambda: any(r["kind"] == "task" for r in metrics.records))
+    typist.type("What are you working on?")
+    await until(lambda: results(backend, "talker", "status"))
+    typist.end()
+    await running
+
+    [status] = results(backend, "talker", "status")
+    assert status.result is not None and status.result.startswith("T1 done,")
+
+
+async def test_a_check_asked_for_later_than_the_longest_repeat_waits_only_that_long_so_waits_never_shrink(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    backend = FakeBackend(
+        clock,
+        [[Text("Very well, sir."), delegate()]],
+        orchestrator=[[check(after=24 * 3600), report("T1", "I'll look tomorrow.")]],
+    )
+    hub = make_hub(backend, output, metrics)
+
+    await hub.start()
+    await hub.run(lines_of(clock, REVIEW))
+    await hub.close()
+
+    [set_check] = results(backend, "orchestrator", "schedule_check")
+    assert json.loads(set_check.result or "")["first_in_seconds"] == 4 * 3600
+
+
+@pytest.mark.parametrize(
+    ("kind", "target", "expected"),
+    [
+        ("pr_checks", "pumpkit#42", "pumpkit#42"),
+        ("pr_checks", "  pumpkit#42\n", "pumpkit#42"),
+        ("pr_checks", "PumpKit-IO/pumpkit#42", "pumpkit#42"),
+        ("ci_run", "pumpkit#1234567890123456", "pumpkit#1234567890123456"),
+        ("ci_run", "pumpkit#12345678901234567", None),
+        ("pr_checks", "pumpkit#0", None),
+        ("pr_checks", "pumpkit #42", None),
+        ("pr_checks", "../x#1", None),
+        ("pr_checks", "./x#1", None),
+        ("pr_checks", "a/b/c#1", None),
+    ],
+)
+def test_watch_command_takes_an_org_repo_and_a_number_and_nothing_else(
+    kind: str, target: str, expected: str | None
+) -> None:
+    command = watch_command(kind, target, "pumpkit-io")
+
+    if expected is None:
+        assert isinstance(command, Refused)
+    else:
+        assert not isinstance(command, Refused) and command.target == expected
+
+
+@pytest.mark.parametrize(
+    ("after", "repeats", "expected"),
+    [
+        (5, 1, (60.0, 1)),
+        (600, 3, (600.0, 3)),
+        (10**9, 1, (4 * 3600.0, 1)),
+        ("90", "2", (90.0, 2)),
+        (600, 0, (600.0, 1)),
+        (600, None, (600.0, 1)),
+        (600, 99, (600.0, 10)),
+        ("soon", 1, None),
+        (600, "often", None),
+    ],
+)
+async def test_a_checks_first_wait_and_repeats_are_clamped_and_anything_else_is_refused(
+    after: Any, repeats: Any, expected: tuple[float, int] | None
+) -> None:
+    waits = Waits(setup=WaitSetup(org="pumpkit-io"), clock=FakeClock(), on_watcher_end=print, on_check=print)
+
+    check = waits.schedule("T1", after, "Look", repeats)
+    await waits.close()
+
+    if expected is None:
+        assert isinstance(check, Refused)
+    else:
+        assert not isinstance(check, Refused) and (check.interval, check.max_repeats) == expected
+
+
+async def test_closing_before_a_watcher_ran_reports_it_cancelled() -> None:
+    ended: list[str] = []
+    waits = Waits(
+        setup=WaitSetup(org="pumpkit-io", runner=StubRunner()),
+        clock=FakeClock(),
+        on_watcher_end=lambda watcher: ended.append(watcher.state),
+        on_check=print,
+    )
+
+    waits.watch("T1", "ci_run", "pumpkit#1")
+    await waits.close()
+
+    assert ended == ["cancelled"]
+
+
+async def test_cancelling_a_confined_command_kills_the_children_it_started(tmp_path: Path) -> None:
+    pid_file = tmp_path / "child"
+    running = asyncio.create_task(run_confined(("/bin/sh", "-c", f"sleep 30 & echo $! > {pid_file}; wait")))
+    await until(lambda: pid_file.exists() and pid_file.read_text().strip(), timeout=5)
+    child = int(pid_file.read_text())
+
+    running.cancel()
+    async with asyncio.timeout(5):
+        with pytest.raises(asyncio.CancelledError):
+            await running
+
+    await until(lambda: not _alive(child), timeout=5)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
