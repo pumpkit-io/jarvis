@@ -170,6 +170,15 @@ def restart_message(open_tasks: str, exchanges: "deque[tuple[str, str]]") -> str
     )
 
 
+def away_message(count: int) -> str:
+    updates = "update" if count == 1 else "updates"
+    return f'<event source="hub" away="{count}">{count} {updates} while you were away; their details are on screen.</event>'
+
+
+def _needs_user_key(spoken: str) -> str:
+    return " ".join(spoken.casefold().split())
+
+
 def task_message(task: Task, request: str, context: str, *, continues: bool) -> str:
     opening = f'<task id="{task.id}" continues="true">' if continues else f'<task id="{task.id}">'
     parts = [opening, f"<request>{escape(request, quote=False)}</request>"]
@@ -190,6 +199,12 @@ class _TalkerInput:
     spoken: bool = True
     # How many posted items this one carries: news is merged into one turn, and each item counts as handled.
     count: int = 1
+    # News only: its line in the "while you were away" list, and whether it gets through Quiet mode.
+    news: str | None = None
+    urgent: bool = False
+    # The "while you were away" item, and the news it holds.
+    away: bool = False
+    parts: tuple["_TalkerInput", ...] = ()
 
 
 def _merged(items: "list[_TalkerInput]") -> _TalkerInput:
@@ -257,6 +272,7 @@ class Hub:
             cancel=self._cancel,
             show=self._show,
             end_conversation=self._end_conversation,
+            quiet_mode=self._quiet_mode_tool,
         )
         self._talker_spec = replace(talker, tools=tools)
         self._orchestrator_spec = replace(
@@ -297,6 +313,11 @@ class Hub:
         self._talker_inbox: asyncio.Queue[_TalkerInput] = asyncio.Queue()
         # Voice mode's news, in arrival order, for when Jarvis is quiet; text mode puts it in the inbox.
         self._news: deque[_TalkerInput] = deque()
+        # Quiet mode, and the news it holds for the next Wake word.
+        self._quiet_mode = False
+        self._held: list[_TalkerInput] = []
+        # Per Task, the needs_user news last let through: the same again waits out Quiet mode.
+        self._needs_user: dict[str, str] = {}
         # Set whenever a line or news is posted for the Talker.
         self._arrived = asyncio.Event()
         # One queue, so the Orchestrator's single session takes one message at a time.
@@ -344,6 +365,7 @@ class Hub:
             return
         await reading
         self._input_ended.set()
+        self._release_held()
         settling = asyncio.create_task(self._settled.wait())
         await asyncio.wait([settling, talking], return_when=asyncio.FIRST_COMPLETED)
         settling.cancel()
@@ -390,14 +412,54 @@ class Hub:
         inbox.put_nowait(item)
         self._arrived.set()
 
-    def _post_news(self, item: _TalkerInput) -> None:
+    def _post_news(self, source: str, text: str, task: str, *, needs_user: bool = False, details: str | None = None) -> None:
+        message = event_message(source, text, task, needs_user=needs_user, details=details is not None)
+        item = _TalkerInput(message, "event", self._clock.now(), details, news=f"{task}: {text}")
         if self._floor is None:
             self._post(self._talker_inbox, item)
             return
+        key = _needs_user_key(text)
+        urgent = needs_user and self._needs_user.get(task) != key
+        if needs_user:
+            self._needs_user[task] = key
+        else:
+            self._needs_user.pop(task, None)
         self._pending += 1
         self._settled.clear()
-        self._news.append(item)
+        if self._quiet_mode and not urgent:
+            self._held.append(item)
+        else:
+            self._news.append(replace(item, urgent=urgent))
         self._arrived.set()
+
+    def woke(self) -> None:
+        """A Wake word opened listening: it ends Quiet mode, and the news it held opens the User's next turn."""
+        self._release_held()
+
+    def _release_held(self) -> None:
+        """Ends Quiet mode. What it held goes first in the news, as one "while you were away" item."""
+        self._quiet_mode = False
+        if not self._held:
+            return
+        held, self._held = self._held, []
+        listed = "\n".join(f"- {item.news}" for item in held)
+        details = "\n\n".join([f"**While you were away**\n\n{listed}", *(item.details for item in held if item.details)])
+        message = "\n".join([away_message(len(held)), *(item.message for item in held)])
+        away = _TalkerInput(message, "event", self._clock.now(), details, count=len(held), away=True, parts=tuple(held))
+        self._news.appendleft(away)
+        self._arrived.set()
+
+    def _with_away(self, item: _TalkerInput) -> _TalkerInput:
+        """The User's first spoken turn after the Wake word that ended Quiet mode opens with what it held."""
+        if item.kind != "user" or item.typed or not self._news:
+            return item
+        away = self._news[0]
+        if not away.away or away.arrived > item.arrived:
+            return item
+        self._news.popleft()
+        return replace(
+            item, message=f"{away.message}\n{item.message}", details=away.details, count=item.count + away.count
+        )
 
     def _handled(self) -> None:
         self._pending -= 1
@@ -418,6 +480,7 @@ class Hub:
             else:
                 item, upcoming = upcoming, None
                 await self._talker_gate.before_next_turn()
+            item = self._with_away(item)
             try:
                 if item.lang:
                     self._lang = item.lang
@@ -769,8 +832,7 @@ class Hub:
         text = f"{task.id} failed: {reason}."
         if self._subagents.live(task.id):
             text = f"The Orchestrator failed on {task.id}: {reason}. Its Subagents keep working and still report."
-        message = event_message("hub", text, task.id)
-        self._post_news(_TalkerInput(message, "event", self._clock.now()))
+        self._post_news("hub", text, task.id)
 
     def _record(self, spec: SessionSpec, kind: str, end: TurnEnd, tools: list[str], **fields: Any) -> None:
         entry = {
@@ -847,6 +909,20 @@ class Hub:
             self._on_end_conversation()
         return "The conversation ends after this reply."
 
+    async def _quiet_mode_tool(self, args: dict[str, Any]) -> str:
+        on = args.get("on") in (True, "true")
+        if self._floor is None:
+            return "Quiet mode is for voice mode; here news only appears on screen, so nothing changed."
+        if not on:
+            self._release_held()
+            return "Quiet mode is off."
+        self._quiet_mode = True
+        # News already waiting for this reply to end waits for the Wake word instead.
+        waiting = [item for item in self._news if not item.urgent]
+        self._news = deque(item for item in self._news if item.urgent)
+        self._held += [part for item in waiting for part in (item.parts or (item,))]
+        return "Quiet mode is on until the User's next Wake word. News that needs the User still comes through."
+
     async def _report(self, args: dict[str, Any]) -> str:
         task = self._tasks.get(args.get("task_id"))
         if task is None:
@@ -861,8 +937,7 @@ class Hub:
         details = str(args.get("details_markdown") or "").strip() or None
         needs_user = args.get("needs_user") in (True, "true")
         task.report(spoken, needs_user=needs_user, live=self._has_pending(task.id))
-        message = event_message("orchestrator", spoken, task.id, needs_user=needs_user, details=details is not None)
-        self._post_news(_TalkerInput(message, "event", self._clock.now(), details))
+        self._post_news("orchestrator", spoken, task.id, needs_user=needs_user, details=details)
         return "Reported to the User."
 
     async def _spawn_subagent(self, args: dict[str, Any]) -> str:
@@ -906,8 +981,7 @@ class Hub:
                 self._wake(task.id, ended_event(subagent))
             elif subagent.writes:
                 # The Orchestrator hears nothing more of a cancelled Task, so the Hub says what its branch keeps.
-                message = event_message("hub", kept_line(subagent), task.id, details=True)
-                self._post_news(_TalkerInput(message, "event", self._clock.now(), subagent.report))
+                self._post_news("hub", kept_line(subagent), task.id, details=subagent.report)
         finally:
             self._handled()
 

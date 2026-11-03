@@ -95,7 +95,7 @@ async def rig_for() -> AsyncIterator[MakeRig]:
         typist = Typist(clock)
         await hub.start()
         voice.start()
-        running = asyncio.create_task(hub.run(merge(typist.lines(), voice.lines(hub.interrupt))))
+        running = asyncio.create_task(hub.run(merge(typist.lines(), voice.lines(hub.interrupt, hub.woke))))
         rig = Rig(clock, backend, audio, player, output, metrics, typist, voice, hub, tts, running)
         rigs.append((rig, running))
         await until(lambda: player.texts == ["At your service, sir."])
@@ -768,3 +768,191 @@ async def test_news_while_idle_chimes_then_says_its_sentence_and_listens_briefly
     assert rig.state == "follow_up"
     await rig.advance(0.1)
     assert rig.state == "idle"
+
+
+QUIET: list[Step] = [Text("Very well, sir."), Tool("quiet_mode", {"on": True})]
+AWAY = "Two updates came in, sir."
+
+
+async def quiet_rig(rig_for: MakeRig, *scripts: list[Step], items: int = 2) -> tuple[Rig, list[asyncio.Event]]:
+    """`news_rig`, then the User asks for Quiet mode and Jarvis is idle again."""
+    rig, arrivals = await news_rig(rig_for, QUIET, *scripts, items=items)
+    rig.audio.wake()
+    rig.audio.say("Quiet mode, please")
+    await until(lambda: rig.state == "follow_up")
+    await rig.advance(6)
+    assert rig.state == "idle"
+    return rig, arrivals
+
+
+def talker_received(rig: Rig) -> list[str]:
+    return [m for s in rig.backend.all_sessions("talker") for m in s.received]
+
+
+async def test_quiet_mode_holds_news_until_the_wake_word_which_opens_with_the_count(rig_for: MakeRig) -> None:
+    rig, arrivals = await quiet_rig(rig_for, [Text(AWAY), Text(" Main is green, sir.")])
+    turns = len(talker_received(rig))
+
+    for arrival in arrivals:
+        await arrive(rig, arrival)
+    await rig.advance(60)
+    assert len(talker_received(rig)) == turns
+    assert rig.state == "idle"
+
+    rig.audio.wake()
+    rig.audio.say("Is main green?")
+    await until(lambda: rig.state == "follow_up")
+
+    [message] = talker_received(rig)[turns:]
+    lines = message.splitlines()
+    assert lines[0] == '<event source="hub" away="2">2 updates while you were away; their details are on screen.</event>'
+    assert lines[1].startswith('<event source="orchestrator" task="T1"')
+    assert lines[2].startswith('<event source="orchestrator" task="T2"')
+    assert lines[3] == '<user lang="en">Is main green?</user>'
+    assert talker_kinds(rig)[-1] == "user"
+    [shown] = rig.output.shown
+    assert "T1: The typo fix is up." in shown and "T2: The docs are merged." in shown
+    assert spoken(rig)[-1] == "Main is green, sir."
+    assert spoken(rig)[-2] == AWAY
+
+
+async def test_a_wake_with_nothing_said_after_quiet_mode_announces_the_count_once_idle(rig_for: MakeRig) -> None:
+    rig, arrivals = await quiet_rig(rig_for, [Text(AWAY)])
+    for arrival in arrivals:
+        await arrive(rig, arrival)
+
+    rig.audio.wake()
+    await until(lambda: rig.state == "listening")
+    await rig.advance(6)
+    await until(lambda: AWAY in rig.player.texts and rig.state == "follow_up")
+
+    assert talker_kinds(rig)[-1] == "event"
+    assert talker_received(rig)[-1].startswith('<event source="hub" away="2">2 updates while you were away')
+    assert rig.states()[-3:] == ["idle", "announce", "follow_up"]
+
+
+async def test_quiet_mode_ends_at_the_wake_word_so_later_news_is_announced(rig_for: MakeRig) -> None:
+    rig, [arrival] = await quiet_rig(rig_for, [Text("Main is green, sir.")], [Text(NEWS)], items=1)
+
+    rig.audio.wake()
+    rig.audio.say("Is main green?")
+    await until(lambda: rig.state == "follow_up")
+    await rig.advance(6)
+    await arrive(rig, arrival)
+    await until(lambda: NEWS in rig.player.texts and rig.state == "follow_up")
+
+    assert not any("away=" in m for m in talker_received(rig))
+
+
+async def test_quiet_mode_holds_news_that_was_already_waiting_for_the_reply_to_end(rig_for: MakeRig) -> None:
+    rig, [arrival] = await news_rig(rig_for, QUIET, [Text("One update while you were away, sir.")])
+
+    rig.audio.wake()
+    await until(lambda: rig.state == "listening")
+    await arrive(rig, arrival)
+    rig.audio.say("Quiet mode, please")
+    await until(lambda: rig.state == "follow_up")
+    await rig.advance(60)
+    assert talker_kinds(rig)[-1] == "user"
+
+    rig.audio.wake()
+    await rig.advance(6)
+    await until(lambda: rig.state == "follow_up")
+    assert talker_received(rig)[-1].startswith('<event source="hub" away="1">1 update while you were away')
+
+
+async def test_quiet_mode_off_by_a_typed_line_announces_what_was_held(rig_for: MakeRig) -> None:
+    off: list[Step] = [Text("Quiet mode is off, sir."), Tool("quiet_mode", {"on": False})]
+    rig, arrivals = await quiet_rig(rig_for, off, [Text(AWAY)])
+    for arrival in arrivals:
+        await arrive(rig, arrival)
+
+    rig.typist.type("Quiet mode off")
+    await until(lambda: AWAY in rig.player.texts and rig.state == "follow_up")
+
+    assert talker_kinds(rig)[-2:] == ["user", "event"]
+    assert talker_received(rig)[-1].startswith('<event source="hub" away="2">')
+
+
+async def test_news_held_in_quiet_mode_is_shown_when_the_input_ends_and_the_hub_stops(rig_for: MakeRig) -> None:
+    rig, arrivals = await quiet_rig(rig_for, [Text(AWAY)])
+    for arrival in arrivals:
+        await arrive(rig, arrival)
+
+    rig.typist.end()
+    await rig.advance(30)
+
+    await until(lambda: rig.running.done())
+    assert AWAY in rig.output.replies
+    assert AWAY not in rig.player.texts
+
+
+RED = "CI is red on pumpkit 42."
+
+
+async def blocker_rig(rig_for: MakeRig, reports_: list[tuple[str, bool]], *scripts: list[Step]) -> tuple[Rig, list[asyncio.Event]]:
+    """One Task whose Orchestrator turn sends `reports_` (spoken, needs_user) one per arrival, in Quiet mode."""
+    arrivals = [asyncio.Event() for _ in reports_]
+    turn: list[Step] = []
+    for arrival, (said, needs_user) in zip(arrivals, reports_):
+        turn += [Gate(arrival), Tool("report", {"task_id": "T1", "spoken": said, "needs_user": needs_user})]
+    delegating = [Text("Right away, sir."), Tool("delegate", {"request": "Watch the CI", "context": ""})]
+    rig: Rig = await rig_for(delegating, QUIET, *scripts, orchestrator=[turn])
+    for said in ("Watch the CI on pumpkit 42", "Quiet mode, please"):
+        rig.audio.wake()
+        rig.audio.say(said)
+        await until(lambda: rig.state == "follow_up")
+        await rig.advance(6)
+    assert rig.state == "idle"
+    return rig, arrivals
+
+
+async def test_news_that_needs_the_user_gets_through_quiet_mode_once_per_change(rig_for: MakeRig) -> None:
+    worse = "CI is red on pumpkit 42 with a new failure."
+    rig, arrivals = await blocker_rig(
+        rig_for, [(RED, True), (RED, True), (worse, True)], [Text("CI is red, sir.")], [Text("A new failure, sir.")]
+    )
+
+    await arrive(rig, arrivals[0])
+    await until(lambda: "CI is red, sir." in rig.player.texts and rig.state == "follow_up")
+    assert rig.player.texts[-2:] == ["", "CI is red, sir."]
+    await rig.advance(4)
+    turns = len(talker_received(rig))
+
+    await arrive(rig, arrivals[1])
+    await rig.advance(60)
+    assert len(talker_received(rig)) == turns
+
+    await arrive(rig, arrivals[2])
+    await until(lambda: "A new failure, sir." in rig.player.texts and rig.state == "follow_up")
+    assert talker_received(rig)[-1].startswith('<event source="orchestrator" task="T1" needs_user="true">CI is red on pumpkit 42 with')
+
+
+async def test_needs_user_news_counts_as_changed_after_the_task_reported_something_else(rig_for: MakeRig) -> None:
+    rig, arrivals = await blocker_rig(
+        rig_for, [(RED, True), ("CI is green.", False), (RED, True)], [Text("CI is red, sir.")], [Text("Red again, sir.")]
+    )
+
+    await arrive(rig, arrivals[0])
+    await until(lambda: "CI is red, sir." in rig.player.texts and rig.state == "follow_up")
+    await rig.advance(4)
+    await arrive(rig, arrivals[1])
+    await rig.advance(30)
+    assert "Red again, sir." not in rig.player.texts
+
+    await arrive(rig, arrivals[2])
+    await until(lambda: "Red again, sir." in rig.player.texts and rig.state == "follow_up")
+    assert talker_received(rig)[-1].startswith('<event source="orchestrator" task="T1" needs_user="true">')
+
+
+async def test_a_repeat_held_in_quiet_mode_still_counts_among_the_updates(rig_for: MakeRig) -> None:
+    rig, arrivals = await blocker_rig(rig_for, [(RED, True), (RED, True)], [Text("CI is red, sir.")], [Text("One more.")])
+    await arrive(rig, arrivals[0])
+    await until(lambda: "CI is red, sir." in rig.player.texts and rig.state == "follow_up")
+    await rig.advance(4)
+    await arrive(rig, arrivals[1])
+
+    rig.audio.wake()
+    await rig.advance(6)
+    await until(lambda: "One more." in rig.player.texts)
+    assert talker_received(rig)[-1].startswith('<event source="hub" away="1">1 update while you were away')

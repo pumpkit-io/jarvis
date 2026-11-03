@@ -352,7 +352,7 @@ async def voice_mode(
         if stdin.isatty():
             stdout.write(PROMPT)
             stdout.flush()
-        await hub.run(merge(_typed_lines(stdin, clock), conversation.lines(hub.interrupt)))
+        await hub.run(merge(_typed_lines(stdin, clock), conversation.lines(hub.interrupt, hub.woke)))
     finally:
         try:
             await hub.close()

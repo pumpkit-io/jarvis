@@ -24,6 +24,7 @@ def talker_tools(
     cancel: ToolHandler,
     show: ToolHandler,
     end_conversation: ToolHandler,
+    quiet_mode: ToolHandler,
 ) -> tuple[HubTool, ...]:
     return (
         HubTool(
@@ -65,5 +66,12 @@ def talker_tools(
             "The User is done for now: stop listening after this reply.",
             object_schema({}),
             end_conversation,
+        ),
+        HubTool(
+            "quiet_mode",
+            "Turn Quiet mode on or off. While it is on, news waits until the User's next Wake word, which ends it; "
+            "news that needs the User still comes through.",
+            object_schema({"on": {"type": "boolean"}}, ("on",)),
+            quiet_mode,
         ),
     )
