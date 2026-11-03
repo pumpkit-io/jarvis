@@ -83,7 +83,9 @@ def smart_turn() -> None:
     for m, v in r["models"].items():
         print(f"\nsmart turn {m}: {v['size_mb']} MB, p50 {v['inference_ms_p50']} ms, max {v['inference_ms_max']} ms, "
               f"complete {v['complete_judged_complete']}, cut {v['cut_judged_incomplete']}, "
-              f"end of turn {v['end_of_turn_ms_with_smart_turn']} ms, saved {v['saved_ms_vs_fixed_silence']}")
+              f"real pause {v.get('real_pause_judged_incomplete')}, pause takes {v.get('pause_takes_judged_complete')}, "
+              f"end of turn {v['end_of_turn']}")
+    print(f"pauses found: {r.get('pause_s')}")
 
 
 def memory() -> None:
