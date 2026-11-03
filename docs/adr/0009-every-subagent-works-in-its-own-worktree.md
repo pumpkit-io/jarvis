@@ -2,7 +2,9 @@
 
 A Subagent runs with permissions skipped (ADR 0001), so whatever folder it starts in, it can change. A Subagent that only reads used to start in the User's own clone of the repo, where the User may have a branch checked out and uncommitted work. A mistaken `git checkout`, a formatter run or a stray edit there would land on the User's work.
 
-So every Subagent gets a worktree the Hub makes for it, locked under its id with the sdlc `worktree.sh lock`. A writing Subagent gets one on a fresh `feat/`, `fix/` or `chore/` branch from `worktree.sh create`, kept when it ends. A reading Subagent gets one with no branch, detached at `origin/<default>`, in the repo's `.claude/worktrees/read-<title>`, and the Hub removes it when the Subagent ends. Removal uses `git worktree remove` without `--force`, so a read-only worktree the Subagent changed after all is kept, and its report says so.
+So every Subagent gets a worktree the Hub makes for it, locked under its id with the sdlc `worktree.sh lock`. A writing Subagent gets one on a fresh `feat/`, `fix/` or `chore/` branch from `worktree.sh create`, kept when it ends. A reading Subagent gets one with no branch, detached at `origin/<default>`, in the repo's `.claude/worktrees/read-<title>`, and the Hub removes it when the Subagent ends. Removal uses `git worktree remove` without `--force`, so a read-only worktree the Subagent changed after all is kept, and its report says so. The Hub also keeps it when it holds commits found on no branch or remote (checked with `git log HEAD --not --branches --remotes`), listing them, because removing it would leave them dangling. It keeps it too when that check itself fails, since an unchecked worktree may hold commits.
+
+A kept read-only worktree is left unlocked, and that is safe from the sdlc `sweep`: sweep finishes only worktrees whose branch is merged into `origin/<default>`, and a detached worktree has no branch. Verified in a scratch repo: a detached worktree with an unpushed commit came back as "Left read-x: not merged into origin/main" and stayed on disk.
 
 ## Considered Options
 

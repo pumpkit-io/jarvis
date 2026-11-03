@@ -693,3 +693,27 @@ async def test_a_run_cut_off_at_close_still_releases_its_lock_and_ends(
 
     assert [s.state for s in ended] == ["cancelled"]
     assert workspace.released == [subagent.cwd] and not workspace.locks
+
+
+async def test_close_does_not_wait_forever_on_a_cancelled_run_whose_describe_hangs(
+    clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("jarvis_hub.subagents.STOP_GRACE", 0.01)
+    workspace = FakeWorkspace()
+    workspace.describe_gate = asyncio.Event()
+    backend = FakeBackend(clock, subagents={"b": [AwaitInterrupt()]}, subagent_close_gate=asyncio.Event())
+    subagents = Subagents(
+        setup=SubagentSetup(session=subagent_spec, workspace=workspace),
+        backend=backend,
+        clock=clock,
+        on_end=lambda s: None,
+        on_over_time=lambda s: None,
+    )
+    args = {"repo": "pumpkit", "title": "T", "brief": "b", "model": "haiku", "effort": "low", "writes": True}
+    subagent = await subagents.prepare("T1", args, [])
+    assert isinstance(subagent, Subagent)
+    subagents.start(subagent)
+    await until(lambda: backend.all_sessions("subagent"))
+
+    async with asyncio.timeout(1):
+        await subagents.close()

@@ -342,6 +342,8 @@ class FakeWorkspace:
         self.discarded: list[Path] = []
         # Why discard() keeps a scratch worktree, by path; one not listed is removed.
         self.keep: dict[Path, str] = {}
+        # When set, describe() waits on it, as a hung git would.
+        self.describe_gate: asyncio.Event | None = None
 
     async def repo(self, name: str) -> tuple[str, Path]:
         # A real workspace awaits git here, so another spawn may run meanwhile.
@@ -376,6 +378,8 @@ class FakeWorkspace:
         return self.keep.get(worktree)
 
     async def describe(self, worktree: Path) -> str:
+        if self.describe_gate is not None:
+            await self.describe_gate.wait()
         return self.on_branch.get(worktree, "No commits beyond origin/main.")
 
 
