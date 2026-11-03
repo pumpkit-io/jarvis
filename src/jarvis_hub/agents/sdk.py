@@ -1,0 +1,144 @@
+"""The real agent backend: Claude Agent SDK sessions on the installed `claude` CLI and the User's Max login."""
+
+import json
+from collections.abc import AsyncIterator, Callable
+from typing import Any, cast
+
+from claude_agent_sdk import (
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    ClaudeSDKError,
+    ResultMessage,
+    StreamEvent,
+    create_sdk_mcp_server,
+    tool,
+)
+from claude_agent_sdk import SdkMcpTool
+from claude_agent_sdk.types import EffortLevel, McpServerConfig, ThinkingConfig
+
+from jarvis_hub.agents.backend import (
+    AgentEvent,
+    HubTool,
+    SessionSpec,
+    TextDelta,
+    TextEnd,
+    ToolCall,
+    TurnEnd,
+    Usage,
+)
+
+TOOL_SERVER = "jarvis"
+# How the CLI reports a turn stopped by interrupt(); the result's is_error is set for these too.
+INTERRUPTED_REASONS = {"aborted_streaming", "aborted_tools"}
+
+
+def _sdk_tool(hub_tool: HubTool) -> SdkMcpTool[Any]:
+    async def handler(args: dict[str, Any]) -> dict[str, Any]:
+        return {"content": [{"type": "text", "text": await hub_tool.handler(args)}]}
+
+    return tool(hub_tool.name, hub_tool.description, hub_tool.input_schema)(handler)
+
+
+def options_for(spec: SessionSpec, cli_path: str, stderr: Callable[[str], None] | None = None) -> ClaudeAgentOptions:
+    mcp_servers: dict[str, McpServerConfig] = {}
+    if spec.tools:
+        mcp_servers[TOOL_SERVER] = create_sdk_mcp_server(TOOL_SERVER, tools=[_sdk_tool(t) for t in spec.tools])
+    thinking: ThinkingConfig | None = None if spec.thinking else {"type": "disabled"}
+    return ClaudeAgentOptions(
+        # Without cli_path the SDK runs its own bundled CLI, not the one logged in to Max.
+        cli_path=cli_path,
+        cwd=spec.cwd,
+        model=spec.model,
+        effort=cast(EffortLevel, spec.effort),
+        thinking=thinking,
+        system_prompt=spec.system_prompt,
+        setting_sources=[],
+        tools=[],
+        mcp_servers=mcp_servers,
+        allowed_tools=[f"mcp__{TOOL_SERVER}__{t.name}" for t in spec.tools],
+        include_partial_messages=True,
+        stderr=stderr,
+    )
+
+
+def turn_end(result: ResultMessage) -> TurnEnd:
+    raw: dict[str, Any] = result.usage or {}
+    usage = Usage(
+        input_tokens=raw.get("input_tokens", 0),
+        output_tokens=raw.get("output_tokens", 0),
+        cache_read_tokens=raw.get("cache_read_input_tokens", 0),
+        cache_creation_tokens=raw.get("cache_creation_input_tokens", 0),
+    )
+    if result.terminal_reason in INTERRUPTED_REASONS:
+        return TurnEnd("interrupted", usage)
+    if result.is_error:
+        detail = "; ".join(result.errors or []) or result.result or result.subtype
+        if result.api_error_status:
+            detail = f"HTTP {result.api_error_status}: {detail}"
+        return TurnEnd("failed", usage, detail)
+    return TurnEnd("completed", usage)
+
+
+class SdkSession:
+    def __init__(self, client: ClaudeSDKClient) -> None:
+        self._client = client
+
+    async def send(self, message: str) -> AsyncIterator[AgentEvent]:
+        blocks: dict[int, dict[str, Any]] = {}
+        try:
+            await self._client.query(message)
+            async for m in self._client.receive_response():
+                if isinstance(m, ResultMessage):
+                    yield turn_end(m)
+                    return
+                if not isinstance(m, StreamEvent) or m.parent_tool_use_id is not None:
+                    continue
+                for event in _translate(m.event, blocks):
+                    yield event
+        except ClaudeSDKError as e:
+            yield TurnEnd("failed", error=str(e))
+            return
+        yield TurnEnd("failed", error="the stream ended without a result")
+
+    async def interrupt(self) -> None:
+        await self._client.interrupt()
+
+    async def close(self) -> None:
+        await self._client.disconnect()
+
+
+def _translate(event: dict[str, Any], blocks: dict[int, dict[str, Any]]) -> list[AgentEvent]:
+    """Raw API stream events to AgentEvents. A tool call is reported when its input is complete."""
+    kind = event.get("type")
+    index: int = event.get("index", -1)
+    if kind == "content_block_start":
+        block: dict[str, Any] = event.get("content_block", {})
+        blocks[index] = {"type": block.get("type"), "name": block.get("name", ""), "json": ""}
+    elif kind == "content_block_delta":
+        delta: dict[str, Any] = event.get("delta", {})
+        if delta.get("type") == "text_delta":
+            return [TextDelta(delta.get("text", ""))]
+        if delta.get("type") == "input_json_delta" and index in blocks:
+            blocks[index]["json"] += delta.get("partial_json", "")
+    elif kind == "content_block_stop" and index in blocks:
+        done = blocks.pop(index)
+        if done["type"] == "text":
+            return [TextEnd()]
+        if done["type"] in ("tool_use", "server_tool_use"):
+            try:
+                args: dict[str, Any] = json.loads(done["json"] or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            return [ToolCall(done["name"], args)]
+    return []
+
+
+class SdkBackend:
+    def __init__(self, cli_path: str, stderr: Callable[[str], None] | None = None) -> None:
+        self._cli_path = cli_path
+        self._stderr = stderr
+
+    async def open(self, spec: SessionSpec) -> SdkSession:
+        client = ClaudeSDKClient(options_for(spec, self._cli_path, self._stderr))
+        await client.connect()
+        return SdkSession(client)

@@ -2,3 +2,8 @@
 .claude/worktrees/
 .sdlc/
 .DS_Store
+.venv/
+__pycache__/
+.pytest_cache/
+# Hub runtime state, logs and metrics.
+.jarvis/
