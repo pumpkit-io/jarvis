@@ -219,6 +219,7 @@ def _merged(items: "list[_TalkerInput]") -> _TalkerInput:
         message="\n".join(item.message for item in items),
         details=details or None,
         count=sum(item.count for item in items),
+        parts=tuple(part for item in items for part in item.parts),
     )
 
 
@@ -255,6 +256,8 @@ class _OrchestratorInput:
 
 # What the state file keeps of a message the Orchestrator has not answered yet.
 _UNANSWERED = Fields(("task_id", "message", "arrived", "last_check"), times=frozenset({"arrived"}))
+# What it keeps of news Quiet mode held that the User has not heard yet.
+_HELD = Fields(("message", "arrived", "details", "news"), times=frozenset({"arrived"}))
 
 
 class _TurnGate:
@@ -350,6 +353,8 @@ class Hub:
         self._held: list[_TalkerInput] = []
         # Per Task, the needs_user news last let through: the same again waits out Quiet mode.
         self._needs_user: dict[str, str] = {}
+        # Held news on the Talker in the turn under way, saved until that turn ends.
+        self._telling: tuple[_TalkerInput, ...] = ()
         # Set whenever a line or news is posted for the Talker.
         self._arrived = asyncio.Event()
         # One queue, so the Orchestrator's single session takes one message at a time.
@@ -496,6 +501,7 @@ class Hub:
         """Ends Quiet mode. What it held goes first in the news, as one "while you were away" item."""
         self._quiet_mode = False
         if not self._held:
+            self._persist()
             return
         held, self._held = self._held, []
         listed = "\n".join(f"- {item.news}" for item in held)
@@ -506,6 +512,7 @@ class Hub:
         away = _TalkerInput(message, "event", self._clock.now(), details, count=len(held), away=True, parts=tuple(held))
         self._news.appendleft(away)
         self._arrived.set()
+        self._persist()
 
     def _with_away(self, item: _TalkerInput) -> _TalkerInput:
         """The User's first spoken turn after the Wake word that ended Quiet mode opens with what it held."""
@@ -516,7 +523,11 @@ class Hub:
             return item
         self._news.popleft()
         return replace(
-            item, message=f"{away.message}\n{item.message}", details=away.details, count=item.count + away.count
+            item,
+            message=f"{away.message}\n{item.message}",
+            details=away.details,
+            count=item.count + away.count,
+            parts=away.parts,
         )
 
     def _handled(self) -> None:
@@ -547,6 +558,9 @@ class Hub:
             "waits": [w for w in self._waits.dump(to_wall) if w["task_id"] in ids],
             "interrupted": self._interrupted,
             "unanswered": [_UNANSWERED.dump(i, to_wall) for i in self._unanswered if i.task_id in ids],
+            "quiet_mode": self._quiet_mode,
+            "held": [_HELD.dump(i, to_wall) for i in self._unheard()],
+            "needs_user": self._needs_user,
         }
         try:
             self._state.save(data)
@@ -556,6 +570,27 @@ class Hub:
             self._save_failing = True
         else:
             self._save_failing = False
+
+    def _unheard(self) -> list[_TalkerInput]:
+        """News Quiet mode held that the User has not heard: in the turn under way, waiting in the news, or held."""
+        waiting = [part for item in self._news for part in item.parts]
+        return [*self._telling, *waiting, *self._held]
+
+    def _restore_held(self, held: list[_TalkerInput], quiet_mode: bool, needs_user: dict[str, str]) -> None:
+        """Brings back Quiet mode and its news; news released before the restart but not yet heard goes out again."""
+        if self._floor is None:
+            for item in held:
+                self._post(self._talker_inbox, item)
+            return
+        self._needs_user = needs_user
+        self._held = held
+        self._pending += len(held)
+        if held:
+            self._settled.clear()
+        if quiet_mode:
+            self._quiet_mode = True
+        else:
+            self._release_held()
 
     def _restore(self) -> "Coroutine[Any, Any, None] | None":
         """Brings back what the last launch saved; returns the recovery to run in the background, if any."""
@@ -579,10 +614,14 @@ class Hub:
             waits, problems = self._waits.load(data["waits"], from_wall)
             unanswered = [_OrchestratorInput(**_UNANSWERED.load(r, from_wall)) for r in data["unanswered"]]
             told = [str(i) for i in data["interrupted"]]
+            held = [_TalkerInput(kind="event", **_HELD.load(r, from_wall)) for r in data["held"]]
+            quiet_mode = data["quiet_mode"] is True
+            needs_user = {str(task): str(key) for task, key in dict(data["needs_user"]).items()}
         except (KeyError, TypeError, ValueError, IndexError, AttributeError) as e:
             self._output.notice(self._state.set_aside(f"could not be read whole ({type(e).__name__}: {e})"))
             return None
         if not tasks:
+            self._restore_held(held, quiet_mode, needs_user)
             return None
         self._tasks.restore(tasks)
         cut_off = self._subagents.restore(subagents)
@@ -590,6 +629,8 @@ class Hub:
         self._unanswered = unanswered
         interrupted = [s for s in map(self._subagents.get, told) if s is not None]
         self._interrupted = [s.id for s in interrupted]
+        # After the rest, since releasing held news saves the state file.
+        self._restore_held(held, quiet_mode, needs_user)
         # A restored Watcher ends on its own, and the recovery message is news still to come.
         self._pending += 1 + sum(isinstance(w, Watcher) for w in waits)
         self._settled.clear()
@@ -637,9 +678,11 @@ class Hub:
                 if item.details:
                     self._output.show(item.details)
                 self._user_text = item.heard if item.kind == "user" else None
+                self._telling = item.parts
                 end = await self._turn(item.message, kind=item.kind, arrived=item.arrived, spoken=item.spoken)
             finally:
                 self._user_text = None
+                self._telling = ()
                 for _ in range(item.count):
                     self._handled()
             upcoming = await self._restart_if_full(end.context)
@@ -1091,6 +1134,7 @@ class Hub:
         waiting = [item for item in self._news if not item.urgent]
         self._news = deque(item for item in self._news if item.urgent)
         self._held += [part for item in waiting for part in (item.parts or (item,))]
+        self._persist()
         return "Quiet mode is on until the User's next Wake word. News that needs the User still comes through."
 
     async def _report(self, args: dict[str, Any]) -> str:

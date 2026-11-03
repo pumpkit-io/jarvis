@@ -1,8 +1,10 @@
 """Voice mode through the Hub: scripted audio input in, the Talker's messages and what was played out."""
 
 import asyncio
+import shutil
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -75,7 +77,7 @@ MakeRig = Callable[..., Awaitable[Rig]]
 async def rig_for() -> AsyncIterator[MakeRig]:
     rigs: list[tuple[Rig, asyncio.Task[None]]] = []
 
-    async def make(*scripts: list[Step], **backend_options: Any) -> Rig:
+    async def make(*scripts: list[Step], state_path: Path | None = None, **backend_options: Any) -> Rig:
         clock = FakeClock()
         backend = FakeBackend(clock, list(scripts), **backend_options)
         audio, player, output, metrics = ScriptedAudio(clock), RecordingPlayer(), RecordingOutput(), RecordingMetrics()
@@ -91,6 +93,7 @@ async def rig_for() -> AsyncIterator[MakeRig]:
             speak_typed=False,
             on_end_conversation=voice.end_conversation,
             floor=voice,
+            state_path=state_path,
         )
         typist = Typist(clock)
         await hub.start()
@@ -427,7 +430,9 @@ DOCS = "The docs are merged, sir."
 _REPORTS = ["The typo fix is up.", "The docs are merged."]
 
 
-async def news_rig(rig_for: MakeRig, *scripts: list[Step], items: int = 1) -> tuple[Rig, list[asyncio.Event]]:
+async def news_rig(
+    rig_for: MakeRig, *scripts: list[Step], items: int = 1, state_path: Path | None = None
+) -> tuple[Rig, list[asyncio.Event]]:
     """A rig that delegated `items` Tasks and is idle again; setting `arrivals[i]` brings Task i's news to the Hub.
 
     `scripts` are the Talker's turns after the delegation, in the order the Talker takes them.
@@ -439,7 +444,7 @@ async def news_rig(rig_for: MakeRig, *scripts: list[Step], items: int = 1) -> tu
         [Gate(arrival), Tool("report", {"task_id": f"T{i + 1}", "spoken": _REPORTS[i], "needs_user": False})]
         for i, arrival in enumerate(arrivals)
     ]
-    rig: Rig = await rig_for(delegating, *scripts, orchestrator=reports)
+    rig: Rig = await rig_for(delegating, *scripts, orchestrator=reports, state_path=state_path)
     rig.audio.wake()
     rig.audio.say("Fix the typo and merge the docs")
     await until(lambda: rig.state == "follow_up")
@@ -891,7 +896,7 @@ RED = "CI is red on pumpkit 42."
 
 
 async def blocker_rig(
-    rig_for: MakeRig, reports_: list[tuple[str, bool]], *scripts: list[Step]
+    rig_for: MakeRig, reports_: list[tuple[str, bool]], *scripts: list[Step], state_path: Path | None = None
 ) -> tuple[Rig, list[asyncio.Event]]:
     """One Task whose Orchestrator turn sends `reports_` (spoken, needs_user) one per arrival, in Quiet mode."""
     arrivals = [asyncio.Event() for _ in reports_]
@@ -899,7 +904,7 @@ async def blocker_rig(
     for arrival, (said, needs_user) in zip(arrivals, reports_):
         turn += [Gate(arrival), Tool("report", {"task_id": "T1", "spoken": said, "needs_user": needs_user})]
     delegating = [Text("Right away, sir."), Tool("delegate", {"request": "Watch the CI", "context": ""})]
-    rig: Rig = await rig_for(delegating, QUIET, *scripts, orchestrator=[turn])
+    rig: Rig = await rig_for(delegating, QUIET, *scripts, orchestrator=[turn], state_path=state_path)
     for said in ("Watch the CI on pumpkit 42", "Quiet mode, please"):
         rig.audio.wake()
         rig.audio.say(said)
@@ -963,3 +968,81 @@ async def test_a_repeat_held_in_quiet_mode_still_counts_among_the_updates(rig_fo
     await rig.advance(6)
     await until(lambda: "One more." in rig.player.texts)
     assert talker_received(rig)[-1].startswith('<event source="hub" away="1">1 update while you were away')
+
+
+def crash(state: Path, tmp_path: Path) -> Path:
+    """The state file as a crash would leave it now, for a second Hub to start from."""
+    crashed = tmp_path / "crashed" / "state.json"
+    crashed.parent.mkdir(exist_ok=True)
+    shutil.copy(state, crashed)
+    return crashed
+
+
+async def test_news_held_in_quiet_mode_survives_a_crash_and_opens_the_turn_after_the_next_wake_word(
+    rig_for: MakeRig, tmp_path: Path
+) -> None:
+    state = tmp_path / ".jarvis" / "state.json"
+    first, arrivals = await news_rig(rig_for, QUIET, items=2, state_path=state)
+    first.audio.wake()
+    first.audio.say("Quiet mode, please")
+    await until(lambda: first.state == "follow_up")
+    await first.advance(6)
+    for arrival in arrivals:
+        await arrive(first, arrival)
+
+    second = await rig_for([Text(AWAY), Text(" Main is green, sir.")], state_path=crash(state, tmp_path))
+    turns = len(talker_received(second))
+    await second.advance(60)
+    assert len(talker_received(second)) == turns
+
+    second.audio.wake()
+    second.audio.say("Is main green?")
+    await until(lambda: second.state == "follow_up")
+    [message] = talker_received(second)[turns:]
+    lines = message.splitlines()
+    assert lines[0].startswith('<event source="hub" away="2">2 updates while you were away')
+    assert lines[1].startswith('<event source="orchestrator" task="T1"')
+    assert lines[2].startswith('<event source="orchestrator" task="T2"')
+    assert lines[3] == '<user lang="en">Is main green?</user>'
+
+
+async def test_after_a_restart_quiet_mode_holds_a_recovery_report_that_repeats_the_last_needs_user_news(
+    rig_for: MakeRig, tmp_path: Path
+) -> None:
+    state = tmp_path / ".jarvis" / "state.json"
+    first, [arrival] = await blocker_rig(rig_for, [(RED, True)], [Text("CI is red, sir.")], state_path=state)
+    await arrive(first, arrival)
+    await until(lambda: "CI is red, sir." in first.player.texts and first.state == "follow_up")
+    await first.advance(4)
+
+    again = Tool("report", {"task_id": "T1", "spoken": RED, "needs_user": True})
+    second = await rig_for(
+        [Text("One update, sir.")], state_path=crash(state, tmp_path), orchestrator=[[again]]
+    )
+    turns = len(talker_received(second))
+    await until(lambda: second.backend.all_sessions("orchestrator") != [])
+    await second.advance(60)
+    assert len(talker_received(second)) == turns
+
+    second.audio.wake()
+    await second.advance(6)
+    await until(lambda: "One update, sir." in second.player.texts)
+    assert talker_received(second)[-1].startswith('<event source="hub" away="1">1 update while you were away')
+
+
+async def test_a_recovery_report_outside_quiet_mode_is_an_announcement_once_jarvis_is_idle(
+    rig_for: MakeRig, tmp_path: Path
+) -> None:
+    state = tmp_path / ".jarvis" / "state.json"
+    _, [arrival] = await news_rig(rig_for, items=1, state_path=state)
+    recovered = asyncio.Event()
+    fixed = Tool("report", {"task_id": "T1", "spoken": "The typo fix is up.", "needs_user": False})
+    second = await rig_for(
+        [Text(NEWS)], state_path=crash(state, tmp_path), orchestrator=[[Gate(recovered), fixed]]
+    )
+    recovered.set()
+    await until(lambda: NEWS in second.player.texts and second.state == "follow_up")
+
+    assert second.player.texts[-2:] == ["", NEWS]
+    assert second.states()[-2:] == ["announce", "follow_up"]
+    arrival.set()
