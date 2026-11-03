@@ -1,6 +1,6 @@
 # Phase 0 spikes
 
-Results of the Phase 0 spikes for the voice Hub (Spec #3). Each section belongs to one Ticket: `## Agent SDK` to #4, `## Audio` to #5, `## Talker in the Hub` to #7, which answers the open questions #4 left. The throwaway scripts live under `spikes/`, never in Hub code.
+Results of the Phase 0 spikes for the voice Hub (Spec #3). Each section belongs to one Ticket: `## Agent SDK` to #4, `## Audio` to #5, `## Talker in the Hub` to #7, which answers the open questions #4 left, and `## Tasks and the Orchestrator` to #8. The throwaway scripts live under `spikes/`, never in Hub code.
 
 ## Agent SDK
 
@@ -301,3 +301,46 @@ The warm-up runs in the background (ADR 0006): the prompt appears at once, and a
 ### Interrupting from the keyboard
 
 Ctrl-C in the terminal reaches the `claude` CLI as well, because it runs in the Hub's process group, and the CLI exits. So in text mode Ctrl-C ends the conversation (exit 130), not a reply. `Hub.interrupt()` works through the backend (tested with the fake and against the real model); a keyboard or spoken trigger for it needs the CLI out of the terminal's process group, which the SDK does not offer.
+
+## Tasks and the Orchestrator
+
+Ticket #8, run on 2026-11-03 on the M3: `claude-agent-sdk` 0.2.177, `claude` CLI 2.1.317 through `cli_path`, Max login, `ANTHROPIC_API_KEY` unset, the Talker at `effort="low"` with thinking disabled. Every number below is in `docs/notes/talker-delegation.json`, per turn, with no message text beyond the fixed lines of `docs/notes/talker-delegation.txt`.
+
+### Speak first, then delegate
+
+`spikes/hub/delegation.py` drives the real Hub with the real Talker and a stub Orchestrator, so a run costs only Talker turns. The stub answers each Task with one fixed report, and asks which repo a requested issue should go in, so the next line answers it through `task_id`. The script types each of the 20 lines (English and Italian: look-ups, status, cancel, answers, a summary on screen, goodbye) once the Hub has gone quiet. A turn is tool-using when it calls any Hub tool; the Talker's relays of reports count too. Four versions of the speak-first wording were tried (`prompts` in the data file); D is the committed one.
+
+| Run | Talker | Wording | Stub reports | Tool-using turns | Text before the first tool |
+|---|---|---|---|---|---|
+| 1 | Sonnet | A | at once | 17 | 14 |
+| 2 | Sonnet | B | at once | 18 | 15 |
+| 3 | Sonnet | C | at once | 18 | 18 |
+| 4 | Sonnet | D | at once, alongside run 5 | 17 | 17 |
+| 5 | Haiku | D | at once, alongside run 4 | 17 | 9 |
+| 6 | Sonnet | D | after 3 s | 17 | 17 |
+| 7 | Haiku | D | after 3 s | 17 | 15 |
+
+- **Sonnet meets the 95% target on the committed wording:** 17 of 17 in both runs. It spoke first on every delegation in every run but one (run 2, line 18). With wording A its three misses were the three `status` turns, as in Phase 0; naming `status` in the hard rule fixed them (4 of 4, 3 of 3, 3 of 3 in runs 3, 4 and 6).
+- **Wording B backfired.** Its extra line in `delegate`'s result, "End your turn", made Sonnet call `end_conversation` after 6 of its delegations (lines 3, 6, 9, 13, 15 and 17). The result went back to `{"task_id", "queued"}` and the hint was dropped.
+- **Haiku misses it:** 9 of 17 (run 5) and 15 of 17 (run 7) on the committed wording, going tool-first on 5 of 12 and 1 of 10 delegations. It also misjudged requests: in run 7 it answered line 1 with `status` instead of delegating, and on line 5 delegated the answer twice, then cancelled the duplicate. **The Talker stays on Sonnet (ADR 0005).**
+- Sonnet called `status` right after `delegate` on 5 lines in run 4 and on 1 in run 6. In run 4 the stub had already reported, so the check found the Task done. With the 3 s delay it mostly stopped.
+- Sonnet often adds a second short sentence after `delegate` returns ("Right away, sir."), in the transcripts of every run. It delays nothing, since the first sentence is already out, but the prompt does not fully stop it.
+- First sentence of the User's turns, p50 and p90: Sonnet 1.09 s and 1.32 s (run 6), Haiku 0.93 s and 1.61 s (run 7). Runs 4 and 5 ran at the same time, so their timings are not comparable.
+
+### End to end against the Org
+
+`jarvis-hub --text` with the real Talker and the real Orchestrator (Sonnet, `effort="medium"`), two lines piped at launch: the open PRs in pumpkit and whether CI is green on jarvis main (the `end_to_end` rows). Both answers matched `gh` checked by hand.
+
+| Task | Waited in the queue | Bash calls | Report, from the `delegate` call |
+|---|---|---|---|
+| T1, open PRs | 0.34 s | 1 | 5.07 s |
+| T2, CI on jarvis main | 3.06 s, behind T1 | 3 | 12.02 s |
+
+The Talker relayed each report with its first sentence 1.09 s and 0.88 s after it arrived, and the details for T2 were on screen and in `.jarvis/show.log` before the relay began.
+
+### The Orchestrator cannot change a repo
+
+The Orchestrator runs under `permission_mode="dontAsk"` with Read, Grep and Glob on the allowlist and Bash off it, so the CLI denies every Bash call by default. A `PreToolUse` hook on Bash (`on_failure="block"`) is the only thing that can allow one. It allows a command only when `read_only_refusal` in `src/jarvis_hub/orchestrator.py` finds a single plain `gh` or `git` read: listed `gh` subcommands (`pr`, `issue`, `run`, `repo`, `release`, `workflow`: `list` and `view`, `pr checks`, `pr diff`, `search`), and `git status`, `log`, `diff`, `show` and branch listings, optionally with `-C <repo>`. It refuses chaining, pipes, redirection and substitution, `gh api` (its flags turn a read into a write in too many spellings), `--web` and `--watch`, `git -c` and `--output`. The guard has table tests. If the hook were missing or failed, Bash would stay denied. A probe on 2026-11-03 confirmed both halves: under `dontAsk` without the hook, `gh repo list` was denied, and with it, the hook's allow let it run.
+
+`tests/test_real_model.py` (opt-in) checks this against the real CLI. The Orchestrator's `init.tools` on both of two turns is exactly Bash, Glob, Grep, Read and `mcp__jarvis__report`, with `permissionMode` `dontAsk` and no claude.ai connector. Given a prompt that runs whatever it is told, `gh repo view` ran and the hook refused `gh label create`. A first version of that test sent four commands in one message, and on Haiku it also saw `gh api -X POST …` and a read chained with a write refused by the hook. Sent alone, though, the model declines to try the bare `gh api -X POST` or splits the chain into two commands, so the test keeps the two commands it tries every time, and the table tests cover the rest.
+

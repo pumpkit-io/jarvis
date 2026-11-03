@@ -1,0 +1,20 @@
+What PRs are open in pumpkit?
+What are you working on?
+Is CI green on the jarvis main branch?
+Open an issue to add dark mode to the pumpkit settings page.
+In pumpkit, please.
+Quali PR sono aperte su sdlc?
+Su cosa stai lavorando?
+Annulla l'ultima attività.
+Check whether motion-studio has any uncommitted work.
+Cancel that.
+Apri una issue su jarvis per aggiungere la modalità silenziosa.
+Sì, su jarvis.
+When was pumpkit last deployed?
+What's still running?
+Review the open PR on animate-pixel-art and tell me if it's ready to merge.
+Controlla se la CI di pumpkit è verde.
+Put a summary of everything that came back on screen, please.
+Which repos in the org have open issues assigned to me?
+Cosa è tornato finora?
+That's all for now, thanks.
