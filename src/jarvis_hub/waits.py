@@ -14,7 +14,8 @@ from typing import Any, Literal, Protocol
 
 from jarvis_hub.agents.backend import Refused
 from jarvis_hub.read_only import Argv, confined
-from jarvis_hub.tasks import TimeShift, ago
+from jarvis_hub.state import Fields, TimeShift, numbered
+from jarvis_hub.tasks import ago
 
 WATCH_KINDS: dict[str, str] = {"ci_run": "CI run", "pr_checks": "checks on PR"}
 WatcherState = Literal["waiting", "succeeded", "failed", "timed_out", "error", "cancelled"]
@@ -140,6 +141,11 @@ class Check:
 
 Wait = Watcher | Check
 
+_WATCHER = Fields(("id", "task_id", "kind", "created"), times=frozenset({"created"}))
+_CHECK = Fields(
+    ("id", "task_id", "note", "created", "due", "interval", "max_repeats", "repeats"), times=frozenset({"created", "due"})
+)
+
 
 def watcher_event(watcher: Watcher) -> str:
     """The Orchestrator's news that a Watcher ended, with the last of what its command printed."""
@@ -241,7 +247,11 @@ class Waits:
         if wait.state != "waiting":
             return f"{wait.id} is already {wait.state.replace('_', ' ')}."
         wait.state = "cancelled"
-        self._runs[wait.id].cancel()
+        if (run := self._runs.get(wait.id)) is not None:
+            run.cancel()
+        elif isinstance(wait, Watcher):
+            # Restored and not yet resumed: no run will report its end, so it is reported here.
+            self._watcher_stopped(wait)
         return wait
 
     def cancel_task(self, task_id: str) -> None:
@@ -268,54 +278,59 @@ class Waits:
         """The waits still waiting, for the state file."""
         records: list[dict[str, Any]] = []
         for w in self._all.values():
-            if w.state != "waiting":
-                continue
-            if isinstance(w, Watcher):
-                created = to_wall(w.created)
-                records.append(
-                    {"id": w.id, "task_id": w.task_id, "kind": w.kind, "target": w.command.target, "created": created}
-                )
-            else:
-                records.append(
-                    {
-                        "id": w.id,
-                        "task_id": w.task_id,
-                        "note": w.note,
-                        "created": to_wall(w.created),
-                        "due": to_wall(w.due),
-                        "interval": w.interval,
-                        "max_repeats": w.max_repeats,
-                        "repeats": w.repeats,
-                    }
-                )
+            if isinstance(w, Watcher) and w.state == "waiting":
+                records.append({**_WATCHER.dump(w, to_wall), "target": w.command.target})
+            elif isinstance(w, Check) and w.state == "waiting":
+                records.append(_CHECK.dump(w, to_wall))
         return records
 
-    def restore(self, records: list[dict[str, Any]], from_wall: TimeShift) -> tuple[list[Wait], list[str]]:
-        """Starts the saved waits again: a Watcher reruns its gh command, checked anew, within what is left of its
-        limit; a Check keeps its due time, so one overdue fires at once, once. Returns the waits restored, and a line
-        per wait that could not be."""
-        restored: list[Wait] = []
+    def load(self, records: list[dict[str, Any]], from_wall: TimeShift) -> tuple[list[Wait], list[str]]:
+        """Saved waits, checked whole and not yet restored, and a line per wait that cannot be. A wall clock set
+        back while the Hub was down never stretches a Watcher's limit or a Check's wait."""
+        now = self._clock.now()
+        waits: list[Wait] = []
         problems: list[str] = []
         for r in records:
-            wait_id, task_id, created = r["id"], r["task_id"], from_wall(r["created"])
-            number = int(wait_id[1:])
             if "kind" in r:
-                self._watchers = max(self._watchers, number)
-                command = watch_command(r["kind"], r["target"], self._setup.org)
+                values = _WATCHER.load(r, from_wall)
+                numbered(values["id"], "W")
+                command = watch_command(values["kind"], r["target"], self._setup.org)
                 if isinstance(command, Refused):
-                    problems.append(f"{wait_id} on {task_id} could not be restored: {command.reason}")
+                    problems.append(f"{values['id']} on {values['task_id']} could not be restored: {command.reason}")
                     continue
-                watcher = Watcher(wait_id, task_id, r["kind"], command, created)
-                self._start(watcher, self._run_watcher(watcher))
-                self._runs[watcher.id].add_done_callback(lambda _, w=watcher: self._watcher_stopped(w))
-                restored.append(watcher)
+                values["created"] = min(values["created"], now)
+                waits.append(Watcher(**values, command=command))
             else:
-                self._checks = max(self._checks, number)
-                due = from_wall(r["due"])
-                check = Check(wait_id, task_id, r["note"], created, due, r["interval"], r["max_repeats"], r["repeats"])
-                self._start(check, self._run_check(check))
-                restored.append(check)
-        return restored, problems
+                check = Check(**_CHECK.load(r, from_wall))
+                numbered(check.id, "C")
+                if not all(isinstance(r[k], (int, float)) for k in ("interval", "max_repeats", "repeats")):
+                    raise ValueError(f"{check.id} has a count or interval that is not a number")
+                check.created, check.due = min(check.created, now), min(check.due, now + check.interval)
+                waits.append(check)
+        return waits, problems
+
+    def restore(self, waits: list[Wait]) -> None:
+        """Takes back loaded waits without starting them, so the recovery message can go first: see `resume`."""
+        for wait in waits:
+            self._all[wait.id] = wait
+            if isinstance(wait, Watcher):
+                self._watchers = max(self._watchers, numbered(wait.id, "W"))
+            else:
+                self._checks = max(self._checks, numbered(wait.id, "C"))
+
+    def resume(self) -> None:
+        """Starts the restored waits: a Watcher reruns its gh command, checked anew, within what is left of its
+        limit; a Check keeps its due time, so one overdue fires at once, once."""
+        if self._closing:
+            return
+        for wait in self._all.values():
+            if wait.state != "waiting" or wait.id in self._runs:
+                continue
+            if isinstance(wait, Watcher):
+                self._start(wait, self._run_watcher(wait))
+                self._runs[wait.id].add_done_callback(lambda _, w=wait: self._watcher_stopped(w))
+            else:
+                self._start(wait, self._run_check(wait))
 
     def _waiting(self, kind: type[Watcher] | type[Check]) -> list[Wait]:
         return [w for w in self._all.values() if isinstance(w, kind) and w.state == "waiting"]

@@ -4,10 +4,10 @@ import asyncio
 import contextlib
 import json
 from collections.abc import Callable, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from html import escape
 from pathlib import Path
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, Protocol, get_args
 
 from jarvis_hub.agents.backend import (
     AgentBackend,
@@ -22,11 +22,12 @@ from jarvis_hub.agents.backend import (
 from jarvis_hub.config import Effort, Settings, is_effort
 from jarvis_hub.prompts import render
 from jarvis_hub.subagent_rules import BRANCH_KINDS, branch_name, check_choice, connector_check, slug
-from jarvis_hub.tasks import TimeShift
+from jarvis_hub.state import Fields, TimeShift, numbered, one_of
 
 # Interrupted: the Hub stopped or crashed while it worked; its worktree and branch are kept.
 SubagentState = Literal["queued", "running", "done", "failed", "cancelled", "interrupted"]
 FINISHED: frozenset[SubagentState] = frozenset({"done", "failed", "cancelled", "interrupted"})
+INTERRUPTED = "Interrupted: the Hub stopped while it worked, so it never finished."
 
 # Kept out of a Subagent's tools altogether: the Hub owns the microphone and speaker.
 VOICE_TOOLS = ("mcp__plugin_voicemode_voicemode", "mcp__voicemode")
@@ -61,15 +62,23 @@ class Workspace(Protocol):
         """A new worktree with no branch, detached at the default branch, locked by `holder`."""
         ...
 
-    async def release(self, worktree: Path) -> None: ...
+    async def release(self, worktree: Path, holder: str) -> str | None:
+        """Releases the worktree's lock only while it names `holder`. None once `holder` holds no lock there, else
+        why the lock was left: after a crash someone else may have taken the stale lock over."""
+        ...
 
     async def describe(self, worktree: Path) -> str:
         """What is on the worktree's branch: commits not on the default branch or not pushed, uncommitted changes."""
         ...
 
-    async def discard(self, worktree: Path) -> str | None:
-        """Releases and removes a scratch worktree. None once it is gone, else why it was kept."""
+    async def discard(self, worktree: Path, holder: str) -> str | None:
+        """Releases and removes a scratch worktree `holder` locked. None once it is gone, else why it was kept."""
         ...
+
+
+def lock_holder(subagent_id: str, task_id: str, title: str) -> str:
+    """Who a Subagent's worktree lock names: the Hub releases only a lock that still names it."""
+    return f"jarvis {subagent_id} ({task_id}): {title}"
 
 
 @dataclass
@@ -94,6 +103,10 @@ class Subagent:
     @property
     def writes(self) -> bool:
         return self.branch is not None
+
+    @property
+    def holder(self) -> str:
+        return lock_holder(self.id, self.task_id, self.title)
 
     def line(self, now: float) -> str:
         since = self.started if self.started is not None else self.created
@@ -180,7 +193,7 @@ class Subagents:
         # Taken before the first await, so two spawns in flight never share an id.
         self._ids += 1
         sid = f"S{self._ids}"
-        holder = f"jarvis {sid} ({task_id}): {title}"
+        holder = lock_holder(sid, task_id, title)
         workspace = self._setup.workspace
         try:
             name, clone = await workspace.repo(repo)
@@ -239,55 +252,28 @@ class Subagents:
 
     def dump(self, task_ids: set[str], to_wall: TimeShift) -> list[dict[str, Any]]:
         """The Subagents of these Tasks, for the state file."""
-        records: list[dict[str, Any]] = []
-        for s in self._all.values():
-            if s.task_id not in task_ids:
-                continue
-            records.append(
-                {
-                    "id": s.id,
-                    "task_id": s.task_id,
-                    "repo": s.repo,
-                    "title": s.title,
-                    "brief": s.brief,
-                    "model": s.model,
-                    "effort": s.effort,
-                    "cwd": str(s.cwd),
-                    "created": to_wall(s.created),
-                    "branch": s.branch,
-                    "log": str(s.log) if s.log else None,
-                    "state": s.state,
-                    "started": to_wall(s.started) if s.started is not None else None,
-                    "ended": to_wall(s.ended) if s.ended is not None else None,
-                    "report": s.report,
-                }
-            )
-        return records
+        return [_SAVED.dump(s, to_wall) for s in self._all.values() if s.task_id in task_ids]
 
-    def restore(self, records: list[dict[str, Any]], from_wall: TimeShift) -> list[Subagent]:
-        """Brings back the saved Subagents. One the old Hub never saw end is marked interrupted and returned, its
+    @staticmethod
+    def load(records: list[dict[str, Any]], from_wall: TimeShift) -> list[Subagent]:
+        """Saved Subagents, checked whole and not yet restored."""
+        subagents: list[Subagent] = []
+        for r in records:
+            subagent = Subagent(**_SAVED.load(r, from_wall))
+            numbered(subagent.id, "S")
+            one_of(subagent.state, get_args(SubagentState))
+            if not is_effort(subagent.effort):
+                raise ValueError(f"{subagent.effort!r} is not an effort")
+            subagents.append(subagent)
+        return subagents
+
+    def restore(self, subagents: list[Subagent]) -> list[Subagent]:
+        """Brings back loaded Subagents. One the old Hub never saw end is marked interrupted and returned, its
         worktree still to free with `free_interrupted`."""
         cut_off: list[Subagent] = []
-        for r in records:
-            subagent = Subagent(
-                r["id"],
-                r["task_id"],
-                r["repo"],
-                r["title"],
-                r["brief"],
-                r["model"],
-                cast(Effort, r["effort"]),
-                Path(r["cwd"]),
-                from_wall(r["created"]),
-                r.get("branch"),
-                Path(r["log"]) if r.get("log") else None,
-                cast(SubagentState, r["state"]),
-                from_wall(r["started"]) if r.get("started") is not None else None,
-                from_wall(r["ended"]) if r.get("ended") is not None else None,
-                r.get("report", ""),
-            )
+        for subagent in subagents:
             self._all[subagent.id] = subagent
-            self._ids = max(self._ids, int(subagent.id[1:]))
+            self._ids = max(self._ids, numbered(subagent.id, "S"))
             if subagent.state not in FINISHED:
                 subagent.state = "interrupted"
                 cut_off.append(subagent)
@@ -296,7 +282,7 @@ class Subagents:
     async def free_interrupted(self, subagent: Subagent) -> None:
         """Releases the lock of a Subagent cut off by a crash, as its own end would have: the session holding it is
         gone, and a lock left behind would keep sweep off the worktree for good."""
-        report = "Interrupted: the Hub stopped while it worked, so it never finished."
+        report = INTERRUPTED
         try:
             report += await self._free(subagent)
         finally:
@@ -432,8 +418,7 @@ class Subagents:
             state: SubagentState = "done"
             report = text or "It ended without a report."
         elif self._closing and stopped and end.outcome != "failed":
-            state = "interrupted"
-            report = "Interrupted: the Hub stopped while it worked, so it never finished."
+            state, report = "interrupted", INTERRUPTED
         elif end.outcome == "interrupted" and stopped:
             state = "cancelled"
             report = "Cancelled before it finished." if subagent.started else "Cancelled before it started."
@@ -452,17 +437,27 @@ class Subagents:
         workspace = self._setup.workspace
         if not subagent.writes:
             try:
-                kept = await workspace.discard(subagent.cwd)
+                kept = await workspace.discard(subagent.cwd, subagent.holder)
             except Exception as e:
                 kept = str(e)
             return f"\n\nIts read-only worktree {subagent.cwd} was kept: {kept}" if kept else ""
-        with contextlib.suppress(Exception):
-            await workspace.release(subagent.cwd)
+        try:
+            left = await workspace.release(subagent.cwd, subagent.holder)
+        except Exception as e:
+            left = f"its lock could not be released: {e}"
         try:
             on_branch = await workspace.describe(subagent.cwd)
         except Exception as e:
             on_branch = f"Could not read the branch: {e}"
-        return f"\n\nBranch {subagent.branch}, kept in {subagent.cwd}:\n{on_branch}"
+        lock = f"\nIts worktree was not unlocked: {left}" if left else ""
+        return f"\n\nBranch {subagent.branch}, kept in {subagent.cwd}:\n{on_branch}{lock}"
+
+
+_SAVED = Fields(
+    tuple(f.name for f in fields(Subagent) if f.name != "stop"),
+    times=frozenset({"created", "started", "ended"}),
+    paths=frozenset({"cwd", "log"}),
+)
 
 
 class _Log:

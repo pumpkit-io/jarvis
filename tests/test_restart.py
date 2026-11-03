@@ -120,6 +120,7 @@ async def test_a_check_due_while_the_hub_was_down_fires_once_as_soon_as_it_is_ba
     await asyncio.sleep(0.01)
     await second.close()
 
+    assert received(backend)[0].startswith('<event source="hub" reason="restart">')
     timers = [m for m in received(backend) if m.startswith('<event source="timer"')]
     assert timers == ['<event source="timer" id="C1" task="T1" repeat="1" of="3">Look</event>']
 
@@ -183,6 +184,138 @@ async def test_a_subagent_at_work_when_the_hub_crashed_comes_back_interrupted_wi
     assert "Branch fix/fix-typo-x, kept in /wt/pumpkit/fix-typo-x" in message
     assert workspace.released == [WORKTREE] and not workspace.locks
     assert backend.all_sessions("subagent") == []
+
+
+async def test_a_lock_the_user_took_over_after_a_crash_is_left_in_place_and_the_recovery_message_says_so(
+    clock: FakeClock, state: Path, tmp_path: Path
+) -> None:
+    first, first_backend = a_hub(
+        clock,
+        state,
+        RecordingOutput(),
+        scripts=[[Text("On it."), delegate("Fix typo X in pumpkit")]],
+        orchestrator=[[SPAWN]],
+        subagents={"Fix it.": [AwaitInterrupt()]},
+    )
+    typist = Typist(clock)
+    await first.start()
+    running = asyncio.create_task(first.run(typist.lines()))
+    typist.type("Fix typo X in pumpkit")
+    await until(lambda: first_backend.all_sessions("subagent") and "\"S1\"" in state.read_text())
+    crashed = tmp_path / "crashed" / "state.json"
+    crashed.parent.mkdir()
+    shutil.copy(state, crashed)
+
+    workspace = FakeWorkspace()
+    workspace.locks[WORKTREE] = "the User's session"
+    second, backend = a_hub(
+        clock, crashed, RecordingOutput(), orchestrator=[[report("T1", "Cut off.")]], workspace=workspace
+    )
+    await second.start()
+    await until(lambda: received(backend))
+    await second.close()
+    running.cancel()
+    await first.close()
+
+    assert workspace.locks == {WORKTREE: "the User's session"} and workspace.released == []
+    [message] = received(backend)
+    assert "the User's session" in message
+
+
+async def test_a_subagent_report_still_queued_when_the_hub_stopped_reaches_the_recovery_turn(
+    clock: FakeClock, state: Path, tmp_path: Path
+) -> None:
+    s1_done, t2_busy = asyncio.Event(), asyncio.Event()
+    first, first_backend = a_hub(
+        clock,
+        state,
+        RecordingOutput(),
+        scripts=[[Text("On it."), delegate("Fix typo X in pumpkit")], [Text("Looking."), delegate("How many PRs?")]],
+        orchestrator=[[SPAWN], [Gate(t2_busy)]],
+        subagents={"Fix it.": [Gate(s1_done), Text("Typo fixed in commit abc123.")]},
+    )
+    typist = Typist(clock)
+    await first.start()
+    running = asyncio.create_task(first.run(typist.lines()))
+    typist.type("Fix typo X in pumpkit")
+    await until(lambda: first_backend.all_sessions("subagent"))
+    typist.type("How many PRs?")
+    await until(lambda: len(received(first_backend)) == 2)
+    s1_done.set()
+    await until(lambda: "Typo fixed in commit abc123." in state.read_text())
+    crashed = tmp_path / "crashed" / "state.json"
+    crashed.parent.mkdir()
+    shutil.copy(state, crashed)
+
+    second, backend = a_hub(
+        clock,
+        crashed,
+        RecordingOutput(),
+        orchestrator=[[report("T1", "The typo is fixed."), report("T2", "Three.")]],
+    )
+    await second.start()
+    await until(lambda: received(backend))
+    await second.close()
+    t2_busy.set()
+    running.cancel()
+    await first.close()
+
+    [message] = received(backend)
+    assert '<event source="subagent" id="S1" task="T1" status="done">Typo fixed in commit abc123.' in message
+
+
+async def test_a_check_restored_after_the_wall_clock_went_back_waits_no_longer_than_its_interval(
+    clock: FakeClock, state: Path
+) -> None:
+    first, _ = a_hub(
+        clock,
+        state,
+        RecordingOutput(),
+        scripts=[[Text("I'll keep an eye on it, sir."), delegate()]],
+        orchestrator=[[check(), report("T1", "I'll look in ten minutes.")]],
+    )
+    await first.start()
+    await first.run(lines(clock, REVIEW))
+    await first.close()
+
+    second, backend = a_hub(
+        clock, state, RecordingOutput(), orchestrator=[[], []], wall=lambda: clock.now() - 3600
+    )
+    await second.start()
+    await until(lambda: len(received(backend)) == 1)
+    clock.advance(600)
+    await until(lambda: len(received(backend)) == 2)
+    await second.close()
+
+    assert received(backend)[1].startswith('<event source="timer" id="C1" task="T1" repeat="1" of="1">')
+
+
+async def test_a_state_file_with_one_bad_record_restores_nothing_and_starts_no_wait(
+    clock: FakeClock, state: Path
+) -> None:
+    first, _ = a_hub(
+        clock,
+        state,
+        RecordingOutput(),
+        scripts=[[Text("I'll keep an eye on it, sir."), delegate()]],
+        orchestrator=[[check(after=60), report("T1", "Later.")]],
+    )
+    await first.start()
+    await first.run(lines(clock, REVIEW))
+    await first.close()
+    data = json.loads(state.read_text())
+    data["waits"].append({"id": "C2", "task_id": "T1"})
+    state.write_text(json.dumps(data))
+
+    output = RecordingOutput()
+    second, backend = a_hub(clock, state, output)
+    await second.start()
+    clock.advance(600)
+    await asyncio.sleep(0.01)
+    await second.close()
+
+    assert backend.all_sessions("orchestrator") == []
+    assert len(output.notices) == 1 and "could not be read whole" in output.notices[0]
 
 
 async def test_a_subagent_stopped_by_a_clean_close_is_reported_interrupted_on_the_next_launch(

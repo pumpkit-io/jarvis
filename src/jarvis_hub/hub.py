@@ -30,7 +30,7 @@ from jarvis_hub.agents.backend import (
 )
 from jarvis_hub.config import DEFAULT_TALKER_RESTART_AT
 from jarvis_hub.orchestrator import orchestrator_tools
-from jarvis_hub.state import StateFile, UnreadableState
+from jarvis_hub.state import Fields, StateFile, UnreadableState
 from jarvis_hub.subagents import Subagent, SubagentSetup, Subagents, ended_event, kept_line, over_time_event
 from jarvis_hub.talker import talker_tools
 from jarvis_hub.tasks import Task, Tasks, no_task
@@ -193,22 +193,20 @@ class _TalkerInput:
     spoken: bool = True
 
 
-def recovery_message(open_tasks: str, interrupted: list[Subagent], problems: list[str]) -> str:
-    """The Orchestrator's one message after a restart, listing what was pending when the old Hub stopped."""
-    parts = [
-        '<event source="hub" reason="restart">',
-        "The Hub restarted, and your earlier session is gone. These Tasks were open; their Watchers and Checks "
-        "are restored and wake you as before. Interrupted Subagents ended without finishing; their branches are "
-        "kept. Take up each Task that nothing will wake: report on it, or start what it still needs. Pass the "
-        "Task's task_id to every tool in this turn.",
-        f"<open_tasks>\n{open_tasks}\n</open_tasks>",
-    ]
+def recovery_message(
+    open_tasks: str, interrupted: list[Subagent], unanswered: "list[_OrchestratorInput]", problems: list[str]
+) -> str:
+    """The Orchestrator's one message after a restart, listing what was pending when the old Hub stopped; what to
+    do with it is in the Orchestrator's prompt."""
+    parts = ['<event source="hub" reason="restart">', f"<open_tasks>\n{open_tasks}\n</open_tasks>"]
     for subagent in interrupted:
         where = f"branch {subagent.branch}" if subagent.branch else "read-only"
         parts.append(
             f'<interrupted id="{subagent.id}" task="{subagent.task_id}" repo="{subagent.repo}">'
             f"{escape(f'{subagent.title} ({where}). {subagent.report}', quote=False)}</interrupted>"
         )
+    # Each message is one the Hub built, its contents already escaped.
+    parts += [f'<unanswered task="{item.task_id}">{item.message}</unanswered>' for item in unanswered]
     parts += [f"<not_restored>{escape(p, quote=False)}</not_restored>" for p in problems]
     return "\n".join([*parts, "</event>"])
 
@@ -222,6 +220,12 @@ class _OrchestratorInput:
     last_check: bool = False
     # The recovery message after a restart, on these Tasks at once.
     restart: tuple[str, ...] = ()
+    # The messages the old Hub left unanswered, which the recovery message carries.
+    carried: "tuple[_OrchestratorInput, ...]" = ()
+
+
+# What the state file keeps of a message the Orchestrator has not answered yet.
+_UNANSWERED = Fields(("task_id", "message", "arrived", "last_check"), times=frozenset({"arrived"}))
 
 
 class _TurnGate:
@@ -340,6 +344,8 @@ class Hub:
         self._save_failing = False
         # Subagents stopped by this Hub's close, for the next launch's recovery message.
         self._interrupted: list[str] = []
+        # The Orchestrator's messages from posting until their turn ends, saved so a restart loses none.
+        self._unanswered: list[_OrchestratorInput] = []
         # The User's own text in the Talker turn under way, for the Tasks it delegates.
         self._user_text: str | None = None
         self._subagents = Subagents(
@@ -419,6 +425,10 @@ class Hub:
         self._arrived.set()
         self._persist()
 
+    def _ask(self, item: _OrchestratorInput) -> None:
+        self._unanswered.append(item)
+        self._post(self._orchestrator_inbox, item)
+
     def _post_news(self, item: _TalkerInput) -> None:
         if self._floor is None:
             self._post(self._talker_inbox, item)
@@ -456,6 +466,7 @@ class Hub:
             "subagents": self._subagents.dump(ids, to_wall),
             "waits": [w for w in self._waits.dump(to_wall) if w["task_id"] in ids],
             "interrupted": self._interrupted,
+            "unanswered": [_UNANSWERED.dump(i, to_wall) for i in self._unanswered if i.task_id in ids],
         }
         try:
             self._state.save(data)
@@ -483,35 +494,44 @@ class Hub:
             return now - (wall - t)
 
         try:
-            tasks = self._tasks.restore(data["tasks"], from_wall)
-            cut_off = self._subagents.restore(data["subagents"], from_wall)
-            waits, problems = self._waits.restore(data["waits"], from_wall)
-            told = [s for s in map(self._subagents.get, data["interrupted"]) if s is not None]
-        except (KeyError, TypeError, ValueError, IndexError) as e:
+            tasks = Tasks.load(data["tasks"], from_wall)
+            subagents = Subagents.load(data["subagents"], from_wall)
+            waits, problems = self._waits.load(data["waits"], from_wall)
+            unanswered = [_OrchestratorInput(**_UNANSWERED.load(r, from_wall)) for r in data["unanswered"]]
+            told = [str(i) for i in data["interrupted"]]
+        except (KeyError, TypeError, ValueError, IndexError, AttributeError) as e:
             self._output.notice(self._state.set_aside(f"could not be read whole ({type(e).__name__}: {e})"))
             return None
         if not tasks:
             return None
-        self._interrupted = [s.id for s in told]
+        self._tasks.restore(tasks)
+        cut_off = self._subagents.restore(subagents)
+        self._waits.restore(waits)
+        self._unanswered = unanswered
+        interrupted = [s for s in map(self._subagents.get, told) if s is not None]
+        self._interrupted = [s.id for s in interrupted]
         # A restored Watcher ends on its own, and the recovery message is news still to come.
         self._pending += 1 + sum(isinstance(w, Watcher) for w in waits)
         self._settled.clear()
-        return self._recover(tasks, cut_off, told + cut_off, problems)
+        return self._recover(tasks, cut_off, interrupted + cut_off, problems)
 
     async def _recover(
         self, tasks: list[Task], cut_off: list[Subagent], interrupted: list[Subagent], problems: list[str]
     ) -> None:
-        """Frees the worktrees of Subagents a crash cut off, then tells the Orchestrator at once what was pending."""
+        """Frees the worktrees of Subagents a crash cut off, tells the Orchestrator what was pending, and only then
+        starts the restored waits, so an overdue Check never reaches it before the recovery message."""
         try:
             for subagent in cut_off:
                 await self._subagents.free_interrupted(subagent)
             ids = tuple(task.id for task in tasks if task.open)
             if ids:
                 listing = self._tasks.open_status(self._clock.now(), self._task_lines)
-                message = recovery_message(listing, interrupted, problems)
-                self._post(self._orchestrator_inbox, _OrchestratorInput("", message, self._clock.now(), restart=ids))
+                carried = tuple(self._unanswered)
+                message = recovery_message(listing, interrupted, list(carried), problems)
+                self._ask(_OrchestratorInput("", message, self._clock.now(), restart=ids, carried=carried))
             self._interrupted = []
         finally:
+            self._waits.resume()
             self._handled()
 
     async def _talk(self) -> None:
@@ -774,6 +794,8 @@ class Hub:
                     self._fail(task, error)
                 self._output.notice(f"The Orchestrator failed on {item.task_id}: {error}")
             finally:
+                answered = {id(item), *map(id, item.carried)}
+                self._unanswered = [i for i in self._unanswered if id(i) not in answered]
                 self._handled()
 
     async def _orchestrator_turn(self, item: _OrchestratorInput) -> None:
@@ -930,7 +952,7 @@ class Hub:
             task.words.append(self._user_text)
         task.queue_message()
         message = task_message(task, request, context, continues=continues)
-        self._post(self._orchestrator_inbox, _OrchestratorInput(task.id, message, self._clock.now()))
+        self._ask(_OrchestratorInput(task.id, message, self._clock.now()))
         return json.dumps({"task_id": task.id, "queued": True})
 
     async def _status(self, args: dict[str, Any]) -> str:
@@ -1066,7 +1088,7 @@ class Hub:
         if task is None or task.cancelled:
             return
         task.queue_message()
-        self._post(self._orchestrator_inbox, _OrchestratorInput(task.id, message, self._clock.now(), last_check))
+        self._ask(_OrchestratorInput(task.id, message, self._clock.now(), last_check))
 
     async def _watch(self, args: dict[str, Any]) -> str:
         task = self._turn_task("watch", args)

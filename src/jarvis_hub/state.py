@@ -4,10 +4,62 @@ import contextlib
 import json
 import os
 import tempfile
+from collections.abc import Callable, Collection
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 VERSION = 1
+
+TimeShift = Callable[[float], float]
+T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class Fields:
+    """The attributes of one kind of record the state file keeps. `times` are on the Hub's monotonic clock and saved
+    as wall-clock times; `paths` are saved as strings."""
+
+    names: tuple[str, ...]
+    times: frozenset[str] = frozenset()
+    paths: frozenset[str] = frozenset()
+
+    def dump(self, record: object, to_wall: TimeShift) -> dict[str, Any]:
+        saved: dict[str, Any] = {}
+        for name in self.names:
+            value = getattr(record, name)
+            if value is not None and name in self.times:
+                value = to_wall(value)
+            elif value is not None and name in self.paths:
+                value = str(value)
+            saved[name] = value
+        return saved
+
+    def load(self, saved: dict[str, Any], from_wall: TimeShift) -> dict[str, Any]:
+        """The record's constructor arguments; a missing field raises KeyError."""
+        values: dict[str, Any] = {}
+        for name in self.names:
+            value = saved[name]
+            if value is not None and name in self.times:
+                value = from_wall(float(value))
+            elif value is not None and name in self.paths:
+                value = Path(value)
+            values[name] = value
+        return values
+
+
+def one_of(value: T, allowed: Collection[T]) -> T:
+    """`value`, or ValueError when a saved field holds something this Hub does not know."""
+    if value not in allowed:
+        raise ValueError(f"{value!r} is not one of {', '.join(map(repr, allowed))}")
+    return value
+
+
+def numbered(record_id: object, prefix: str) -> int:
+    """The number of an id such as T3 or C2; ValueError for any other shape."""
+    if not isinstance(record_id, str) or not record_id.startswith(prefix) or not record_id[1:].isdigit():
+        raise ValueError(f"{record_id!r} is not a {prefix} id")
+    return int(record_id[1:])
 
 
 class UnreadableState(Exception):
@@ -43,6 +95,9 @@ class StateFile:
         try:
             with os.fdopen(fd, "w") as f:
                 json.dump({"version": VERSION, **data}, f, ensure_ascii=False, indent=1)
+                # Without it a power cut after the rename can leave an empty file in place of both states.
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(temporary, self._path)
         except BaseException:
             with contextlib.suppress(OSError):

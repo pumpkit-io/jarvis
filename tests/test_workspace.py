@@ -103,7 +103,7 @@ async def test_worktree_makes_a_fresh_locked_branch_and_describe_says_what_is_on
     git(path, "add", "README.md")
     git(path, "commit", "-qm", "fix: the typo")
     (path / "notes.txt").write_text("draft\n")
-    await workspace.release(path)
+    assert await workspace.release(path, "jarvis S1 (T1): Fix typo") is None
     assert not (path / ".sdlc" / "lock").exists()
     described = await workspace.describe(path)
     assert "Commits not on origin/main:" in described and "fix: the typo" in described
@@ -161,7 +161,7 @@ async def test_a_read_only_worktree_is_detached_locked_and_removed_by_discard(cl
     assert git(path, "branch", "--show-current") == ""
     assert git(path, "rev-parse", "HEAD") == git(clone, "rev-parse", "origin/main")
     assert (path / ".sdlc" / "lock").read_text().splitlines()[1] == "jarvis S1 (T1): What changed"
-    assert await workspace.discard(path) is None
+    assert await workspace.discard(path, "jarvis S1 (T1): What changed") is None
     assert not path.exists()
     assert git(clone, "branch", "--show-current") == "users-own-work" and (clone / "wip.txt").exists()
 
@@ -171,7 +171,7 @@ async def test_a_read_only_worktree_with_changes_is_kept_and_discard_says_why(cl
     workspace = GitWorkspace("pumpkit-io", clone.parent, SCRIPT)
     path = await workspace.scratch(clone, "read-what-changed", "jarvis S1 (T1): What changed")
     (path / ".gitignore").write_text("changed\n")
-    kept = await workspace.discard(path)
+    kept = await workspace.discard(path, "jarvis S1 (T1): What changed")
     assert kept and path.exists()
 
 
@@ -184,7 +184,7 @@ async def test_a_read_only_worktree_that_holds_new_commits_is_kept_and_discard_n
     git(path, "commit", "-qm", "note what changed")
     sha = git(path, "rev-parse", "--short", "HEAD")
 
-    kept = await workspace.discard(path)
+    kept = await workspace.discard(path, "jarvis S1 (T1): What changed")
 
     assert path.exists() and kept and "note what changed" in kept and sha in kept
     assert git(path, "rev-parse", "--short", "HEAD") == sha
@@ -207,6 +207,35 @@ async def test_a_read_only_worktree_is_kept_when_discard_cannot_check_its_commit
 
     monkeypatch.setattr(workspace_module, "_git", log_fails)  # pyright: ignore[reportPrivateUsage]
 
-    kept = await workspace.discard(path)
+    kept = await workspace.discard(path, "jarvis S1 (T1): What changed")
 
     assert path.exists() and kept and "could not check" in kept and "fatal: bad object" in kept
+
+
+def take_over(path: Path, holder: str) -> None:
+    assert SCRIPT is not None
+    subprocess.run(["bash", str(SCRIPT), "lock", "--take-over", str(path), holder], cwd=path, check=True)
+
+
+@needs_script
+async def test_release_leaves_a_lock_someone_else_took_over_and_says_who_holds_it(clone: Path) -> None:
+    workspace = GitWorkspace("pumpkit-io", clone.parent, SCRIPT)
+    path, _ = await workspace.worktree(clone, "fix/typo", "jarvis S1 (T1): Fix typo")
+    take_over(path, "the User's session")
+
+    left = await workspace.release(path, "jarvis S1 (T1): Fix typo")
+
+    assert left is not None and "the User's session" in left
+    assert (path / ".sdlc" / "lock").read_text().splitlines()[1] == "the User's session"
+
+
+@needs_script
+async def test_discard_keeps_a_read_only_worktree_someone_else_locked(clone: Path) -> None:
+    workspace = GitWorkspace("pumpkit-io", clone.parent, SCRIPT)
+    path = await workspace.scratch(clone, "read-what-changed", "jarvis S1 (T1): What changed")
+    take_over(path, "the User's session")
+
+    kept = await workspace.discard(path, "jarvis S1 (T1): What changed")
+
+    assert kept is not None and "the User's session" in kept and path.exists()
+    assert (path / ".sdlc" / "lock").read_text().splitlines()[1] == "the User's session"

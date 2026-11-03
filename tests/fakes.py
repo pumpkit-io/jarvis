@@ -398,11 +398,16 @@ class FakeWorkspace:
         self.locks[path] = holder
         return path
 
-    async def release(self, worktree: Path) -> None:
+    async def release(self, worktree: Path, holder: str) -> str | None:
+        if self.locks.get(worktree, holder) != holder:
+            return f"its lock is held by {self.locks[worktree]} now, so it was left in place."
         self.released.append(worktree)
         self.locks.pop(worktree, None)
+        return None
 
-    async def discard(self, worktree: Path) -> str | None:
+    async def discard(self, worktree: Path, holder: str) -> str | None:
+        if self.locks.get(worktree, holder) != holder:
+            return f"its lock is held by {self.locks[worktree]} now, so it was left in place."
         self.locks.pop(worktree, None)
         self.discarded.append(worktree)
         return self.keep.get(worktree)

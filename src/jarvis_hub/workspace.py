@@ -139,12 +139,22 @@ class GitWorkspace:
                 raise Refusal(f"Could not lock {path}, so it is removed again: {err}")
             return path
 
-    async def release(self, worktree: Path) -> None:
+    async def release(self, worktree: Path, holder: str) -> str | None:
+        # worktree.sh writes the lock as the time it was taken, then the holder's description.
+        try:
+            lines = (worktree / ".sdlc" / "lock").read_text().splitlines()
+        except FileNotFoundError:
+            return None
+        if lines[1:2] != [holder]:
+            now = lines[1] if len(lines) > 1 else "an unnamed holder"
+            return f"its lock is held by {now} now, so it was left in place."
         if self._script is not None:
             await _run("bash", str(self._script), "release", str(worktree), cwd=worktree)
+        return None
 
-    async def discard(self, worktree: Path) -> str | None:
-        await self.release(worktree)
+    async def discard(self, worktree: Path, holder: str) -> str | None:
+        if (left := await self.release(worktree, holder)) is not None:
+            return left
         code, common, err = await _git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir")
         if code != 0:
             return err or "it is no longer a git worktree."
