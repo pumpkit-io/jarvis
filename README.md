@@ -34,11 +34,4 @@ Jarvis runs with `--dangerously-skip-permissions`. The only guardrail is the Bou
 | --- | --- |
 | `AGENTS.md` | Jarvis's instructions, loaded every session (`CLAUDE.md` imports it) |
 | `docs/working-preferences.md` | How you want work done; Jarvis hands it to every subagent |
-| `scripts/session-start.sh` | SessionStart hook: your name, the organization, its live repos and open PRs |
 | `GLOSSARY.md` | The terms the instructions use |
-
-## Test
-
-```bash
-bash tests/session-start.test.sh
-```
