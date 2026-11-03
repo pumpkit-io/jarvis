@@ -3,11 +3,15 @@
     uv run test_session.py
 """
 
+import http.server
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +21,7 @@ os.environ["JARVIS_AUDIO_DATA"] = str(SCRATCH / "data")
 os.environ["JARVIS_AUDIO_RESULTS"] = str(SCRATCH / "results")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import bench_aec  # noqa: E402
 import bench_smart_turn  # noqa: E402
 import common  # noqa: E402
 import report  # noqa: E402
@@ -112,8 +117,9 @@ def test_cue_times_refuse_a_reference_too_short_for_five_cues():
 
 def test_vpio_marks_are_shifted_by_when_playback_began_in_the_recording():
     out = session.parse_helper_output("recording_started_at=1000.25\nplaying_at=1000.75\nwrote x.wav\n")
-    m = session.marks([30.0, 36.0], out["playing_at"] - out["recording_started_at"])
+    m = session.marks([30.0, 36.0], out["playing_at"] - out["recording_started_at"], half_s=29.0)
     assert m["jarvis_only"] == [0.5, 30.5]
+    assert m["echo_shift_s"] == 29.0
     assert m["user_speech"] == [[30.5, 30.5 + session.USER_SPAN_S], [36.5, 36.5 + session.USER_SPAN_S]]
 
 
@@ -128,6 +134,80 @@ def test_a_failed_or_empty_vpio_run_is_not_scored():
     assert "never reported" in session.vpio_failure(0, {"playing_at": 1.2}, wav)
     common.save_16k(wav, tone(300, 5, SR))
     assert session.vpio_failure(0, times, wav) is None
+
+
+def test_a_vpio_pass_without_its_marks_is_not_done():
+    run = SCRATCH / "vpio-run"
+    common.save_16k(run / "vpio.wav", tone(300, 2, SR))
+    assert not session.vpio_done(run, {})
+    assert not session.vpio_done(run, {"vpio": {"failed": "helper timed out"}})
+    assert session.vpio_done(run, {"vpio": session.marks([30.0], 0.4, half_s=29.0)})
+    (run / "vpio.wav").unlink()
+    assert not session.vpio_done(run, {"vpio": session.marks([30.0], 0.4, half_s=29.0)})
+
+
+def test_the_room_run_resumes_with_the_chunks_still_missing():
+    folder = SCRATCH / "room"
+    n = session.ROOM_MINUTES // session.ROOM_CHUNK_MINUTES
+    assert session.room_chunks_todo(folder, redo=False) == list(range(1, n + 1))
+    for i in (1, 2, 4):
+        common.save_16k(folder / f"room_{i:02d}.wav", tone(300, 1, SR))
+    assert session.room_chunks_todo(folder, redo=False) == [3] + list(range(5, n + 1))
+    assert session.room_chunks_todo(folder, redo=True) == list(range(1, n + 1))
+
+
+def free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def serve(status: int) -> tuple[http.server.HTTPServer, int]:
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(status)
+            self.end_headers()
+
+        def log_message(self, *_):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", free_port()), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, server.server_address[1]
+
+
+def test_a_server_is_ready_only_when_it_answers_with_success():
+    assert not session.server_ready(free_port())
+    for status, ready in ((503, False), (200, True)):
+        server, port = serve(status)
+        try:
+            assert session.server_ready(port) is ready
+        finally:
+            server.shutdown()
+
+
+def stub_server(body: str) -> Path:
+    stub = SCRATCH / "whisper-server-stub"
+    stub.write_text(f"#!/bin/sh\necho $$ > {SCRATCH / 'stub.pid'}\n{body}\n")
+    stub.chmod(0o755)
+    return stub
+
+
+def test_turbo_server_that_crashes_or_never_answers_gives_no_row_and_is_stopped():
+    model = SCRATCH / "model.bin"
+    model.write_bytes(b"")
+    saved = session.WHISPER_SERVER, session.TURBO_MODEL, session.TURBO_PORT, session.SERVER_READY_TIMEOUT_S
+    try:
+        session.TURBO_MODEL, session.TURBO_PORT, session.SERVER_READY_TIMEOUT_S = model, free_port(), 2
+        session.WHISPER_SERVER = stub_server("exit 3")
+        assert session.start_turbo_server() is None
+        session.WHISPER_SERVER = stub_server("exec sleep 60")
+        assert session.start_turbo_server() is None
+        pid = int((SCRATCH / "stub.pid").read_text())
+        time.sleep(0.2)
+        assert subprocess.run(["kill", "-0", str(pid)], capture_output=True).returncode != 0, "stub still running"
+    finally:
+        session.WHISPER_SERVER, session.TURBO_MODEL, session.TURBO_PORT, session.SERVER_READY_TIMEOUT_S = saved
 
 
 def test_enter_click_is_trimmed_from_the_end_of_a_take():
@@ -145,6 +225,16 @@ def test_end_of_turn_saving_comes_from_the_verdicts_and_counts_premature_cuts_ap
     assert out["saved_ms_vs_fixed_silence"] == {800: -90, 1000: 110, 1500: 610}
     # "y" is judged complete mid-pause; "w" outlasts the extension; "z" never reaches 500 ms of silence.
     assert out["premature_cuts"] == {"smart_turn": "2/4", "fixed_800ms": "3/4", "fixed_1000ms": "3/4", "fixed_1500ms": "1/4"}
+
+
+def test_a_barge_in_counts_only_speech_the_same_jarvis_audio_did_not_already_trigger():
+    frame_s = bench_aec.VAD_FRAME / SR
+    probs = np.zeros(200)
+    probs[0:16] = probs[100:116] = 0.9  # echo: the same Jarvis audio fires VAD in both halves
+    probs[150:166] = 0.9  # the User, over a stretch where Jarvis's first half was quiet
+    spans = [[100 * frame_s, 125 * frame_s], [150 * frame_s, 175 * frame_s]]
+    out = bench_aec.barge_ins(probs, spans, shift_s=100 * frame_s)
+    assert out == {"user_barge_ins_detected": "1/2", "matching_jarvis_span_triggered": "1/2"}
 
 
 def test_report_replaces_its_block_instead_of_adding_another():

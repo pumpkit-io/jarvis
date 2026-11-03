@@ -8,6 +8,11 @@ with the reference by a duplex stream), optionally `vpio.wav` (macOS Voice Proce
 I/O output from vpio_playrec.swift) and `segments.json`: where the User spoke and the
 Jarvis-only window in mic.wav's seconds, and the same under "vpio" in vpio.wav's own
 seconds (or "vpio": {"failed": reason}).
+
+Jarvis plays the same audio twice, and the User speaks only over the second play, so
+`echo_shift_s` (one play's length) maps each User window onto the same Jarvis audio heard
+alone. A Barge-in counts as detected only when VAD holds speech for TRIGGER_MS on frames
+where that Jarvis-alone span had none: leftover echo fires in both plays and cancels out.
 """
 
 import argparse
@@ -18,7 +23,7 @@ import numpy as np
 from livekit import rtc
 from openwakeword.vad import VAD
 
-from common import DATA, SR, load_16k, save_16k, write_result
+from common import DATA, SR, SYNTHETIC, load_16k, save_16k, write_result
 
 FRAME = SR // 100  # the APM only accepts exactly 10 ms frames
 VAD_FRAME = 512
@@ -52,20 +57,43 @@ def vad_probs(audio: np.ndarray) -> np.ndarray:
     return np.array([vad.predict(pcm[i : i + VAD_FRAME], VAD_FRAME) for i in range(0, len(pcm) - VAD_FRAME + 1, VAD_FRAME)])
 
 
-def triggers(probs: np.ndarray, start_s: float = 0, end_s: float | None = None) -> dict:
-    """Count Barge-in triggers: runs of speech frames at least TRIGGER_MS long."""
-    fs = VAD_FRAME / SR
-    a, b = int(start_s / fs), int(end_s / fs) if end_s else len(probs)
-    speech = probs[a:b] > SPEECH_P
-    need = int(np.ceil(TRIGGER_MS / 1000 / fs))
+def trigger_count(speech: np.ndarray) -> int:
+    """Barge-in triggers: runs of speech frames at least TRIGGER_MS long."""
+    need = int(np.ceil(TRIGGER_MS / 1000 / (VAD_FRAME / SR)))
     count, run = 0, 0
     for s in speech:
         run = run + 1 if s else 0
         if run == need:
             count += 1
+    return count
+
+
+def triggers(probs: np.ndarray, start_s: float = 0, end_s: float | None = None) -> dict:
+    fs = VAD_FRAME / SR
+    a, b = int(start_s / fs), int(end_s / fs) if end_s else len(probs)
+    speech = probs[a:b] > SPEECH_P
+    count = trigger_count(speech)
     minutes = (b - a) * fs / 60
     return {"triggers": count, "per_minute": round(count / minutes, 2) if minutes else None,
             "speech_frame_pct": round(float(speech.mean() * 100), 1) if len(speech) else None}
+
+
+def barge_ins(probs: np.ndarray, user_spans: list, shift_s: float) -> dict:
+    """User Barge-ins detected over the echo, and how many of the matching Jarvis-alone spans fired VAD themselves."""
+    fs = VAD_FRAME / SR
+    speech = probs > SPEECH_P
+    shift = round(shift_s / fs)
+    # One frame either side absorbs VAD jitter between the two plays of the same audio.
+    echo = speech | np.roll(speech, 1) | np.roll(speech, -1)
+    detected = echoed = 0
+    for s, e in user_spans:
+        a, b = round(s / fs), round(e / fs)
+        if a < shift:
+            raise ValueError(f"User window at {s} s has no Jarvis-alone span {shift_s} s earlier")
+        detected += trigger_count(speech[a:b] & ~echo[a - shift : b - shift]) > 0
+        echoed += trigger_count(speech[a - shift : b - shift]) > 0
+    n = len(user_spans)
+    return {"user_barge_ins_detected": f"{detected}/{n}", "matching_jarvis_span_triggered": f"{echoed}/{n}"}
 
 
 def analyse(run: Path) -> dict:
@@ -79,8 +107,7 @@ def analyse(run: Path) -> dict:
         probs = vad_probs(audio)
         out = {"jarvis_only_s": jarvis_only, "jarvis_only": triggers(probs, *jarvis_only)}
         if user:
-            hits = [triggers(probs, s, e)["triggers"] > 0 for s, e in user]
-            out["user_barge_ins_detected"] = f"{sum(hits)}/{len(hits)}"
+            out |= barge_ins(probs, user, marks["echo_shift_s"])
         return out
 
     result = {"run": str(run), "seconds": round(len(mic) / SR, 1), "raw_mic": score(mic, segments), "webrtc": {}}
@@ -98,7 +125,7 @@ def simulate() -> Path:
     """Build a run dir with digital echo: Kokoro speech through a toy room, plus a User clip."""
     from kokoro_mlx import KokoroTTS
 
-    from common import SYNTHETIC, resample
+    from common import resample
     from corpus import JARVIS_LINES
 
     tts = KokoroTTS.from_pretrained("mlx-community/Kokoro-82M-bf16")
@@ -125,7 +152,8 @@ def simulate() -> Path:
     run = DATA / "synthetic" / "speaker-run"
     save_16k(run / "reference.wav", ref)
     save_16k(run / "mic.wav", mic.astype(np.float32))
-    (run / "segments.json").write_text(json.dumps({"user_speech": user_spans, "note": "digital echo, 35 ms delay"}))
+    (run / "segments.json").write_text(json.dumps({"user_speech": user_spans, "echo_shift_s": half / SR,
+                                                   "note": "digital echo, 35 ms delay"}))
     return run
 
 
@@ -139,7 +167,8 @@ def main() -> None:
     run = simulate() if args.cmd == "simulate" else args.run
     result = analyse(run)
     print(json.dumps(result, indent=2))
-    print(f"-> {write_result('aec-' + ('synthetic' if args.cmd == 'simulate' else run.name), result)}")
+    synthetic = args.cmd == "simulate" or run.resolve().is_relative_to(SYNTHETIC.resolve())
+    print(f"-> {write_result('aec-' + ('synthetic' if synthetic else run.name), result)}")
 
 
 if __name__ == "__main__":

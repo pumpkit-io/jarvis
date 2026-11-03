@@ -1,16 +1,18 @@
 """The User's recording session for Ticket #5, then every measurement on what it recorded.
 
-    cd spikes/audio && uv run session.py              # the whole session, about 40 minutes
-    uv run session.py --only clips                     # one step: preflight, baseline, clips, pauses, wake, speakers, analyse
-    uv run session.py --redo                           # re-record takes that already exist
+    cd spikes/audio && uv run session.py   # about 40 minutes with the User, then about 80 minutes unattended
+    uv run session.py --only clips          # one step: preflight, baseline, clips, pauses, wake, speakers, room, analyse
+    uv run session.py --redo                # re-record takes that already exist
 
 Recordings go to data/recordings/ (gitignored). Each step skips takes already on disk,
-so a session can stop and resume. The analysis writes numbers without transcripts to
-results/ (tracked) and replaces its block in the notes.
+so a session can stop and resume. The room step records an hour with a video playing
+while the User is away; analyse then runs on its own, writes numbers without transcripts
+to results/ (tracked) and replaces its block in the notes.
 """
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -28,12 +30,14 @@ from corpus import CLIPS, JARVIS_LINES, PAUSE, PAUSE_TAKES, TAKES_PER_PHRASING, 
 PLAY_SR = 48_000
 WAKE_TAKE_S = 2.5
 VIDEO_MINUTES = 5
+ROOM_MINUTES = 60
+ROOM_CHUNK_MINUTES = 5
 ENTER_CLICK_S = 0.15
 TURBO_MODEL = Path.home() / ".cache/jarvis-spikes/whisper/ggml-large-v3-turbo.bin"
 WHISPER_SERVER = Path.home() / ".voicemode/services/whisper/build/bin/whisper-server"
 TURBO_PORT = 2023
 SERVER_READY_TIMEOUT_S = 120
-STEPS = ["preflight", "baseline", "clips", "pauses", "wake", "speakers", "analyse"]
+STEPS = ["preflight", "baseline", "clips", "pauses", "wake", "speakers", "room", "analyse"]
 
 # What the User says over Jarvis in the second half of the speaker run.
 BARGE_IN_WORDS = ["okay", "mhm", "wait, stop", "aspetta", "actually, open an issue instead"]
@@ -140,7 +144,11 @@ def pauses(redo: bool) -> None:
             heard = f"pause of {pause[1] - pause[0]:.1f} s at {pause[0]:.1f} s" if pause else "no pause heard"
             print(f"  {len(audio) / SR:.1f} s, {level_db(audio):.0f} dBFS, {heard}")
             if take.paused and not pause:
-                print("  I need the pause in this one: pause a little longer.")
+                print(f"  I need the pause in this one: stop for about a second at {PAUSE.strip()}.")
+                if wait_enter("Enter to record it again, k to keep it anyway:") != "k":
+                    continue
+                save_16k(path, audio)
+                break
             if wait_enter("Enter to keep, r to redo:") != "r":
                 save_16k(path, audio)
                 break
@@ -180,9 +188,14 @@ def jarvis_reference() -> np.ndarray:
     return ref
 
 
+def jarvis_half_s(ref_s: float) -> float:
+    """Length of one play of Jarvis's lines in a reference of `ref_s` seconds."""
+    return (ref_s - SPEAKER_TAIL_S) / 2
+
+
 def cue_times(ref_s: float) -> list[float]:
     """Seconds after playback starts at which each Barge-in cue shows, spread over the second half of Jarvis."""
-    half = (ref_s - SPEAKER_TAIL_S) / 2
+    half = jarvis_half_s(ref_s)
     step = (half - 2.0) / len(BARGE_IN_WORDS)
     if step < USER_SPAN_S:
         raise ValueError(f"Jarvis's half of {half:.1f} s is too short for {len(BARGE_IN_WORDS)} cues")
@@ -198,10 +211,14 @@ def show_cues(elapsed, times: list[float]) -> None:
         print(f'  ● say: "{words}"', flush=True)
 
 
-def marks(cues: list[float], offset: float) -> dict:
-    """Where the User spoke and where Jarvis was alone, in seconds of a recording whose playback began at `offset`."""
+def marks(cues: list[float], offset: float, half_s: float) -> dict:
+    """Where the User spoke and where Jarvis was alone, in seconds of a recording whose playback began at `offset`.
+
+    `echo_shift_s` maps a User window back onto the same Jarvis audio in the first play, for bench_aec's echo check.
+    """
     return {"jarvis_only": [round(max(0.0, offset), 2), round(offset + cues[0], 2)],
-            "user_speech": [[round(offset + c, 2), round(offset + c + USER_SPAN_S, 2)] for c in cues]}
+            "user_speech": [[round(offset + c, 2), round(offset + c + USER_SPAN_S, 2)] for c in cues],
+            "echo_shift_s": round(half_s, 4)}
 
 
 def parse_helper_output(text: str) -> dict:
@@ -245,6 +262,10 @@ def vpio_pass(helper: Path, run: Path, ref_s: float, cues: list[float]) -> dict:
         seen += proc.communicate(timeout=ref_s + 30)[0] or ""
     except subprocess.TimeoutExpired:
         timed_out = True
+    except BaseException:
+        stop(proc)
+        wav.unlink(missing_ok=True)
+        raise
     finally:
         stop(proc)
     times = parse_helper_output(seen)
@@ -252,7 +273,12 @@ def vpio_pass(helper: Path, run: Path, ref_s: float, cues: list[float]) -> dict:
     if reason:
         wav.unlink(missing_ok=True)
         return {"failed": reason}
-    return marks(cues, times["playing_at"] - times["recording_started_at"])
+    return marks(cues, times["playing_at"] - times["recording_started_at"], jarvis_half_s(ref_s))
+
+
+def vpio_done(run: Path, segments: dict) -> bool:
+    """A VPIO pass counts only with both its recording and the marks placing the cues in it."""
+    return (run / "vpio.wav").exists() and "user_speech" in segments.get("vpio", {})
 
 
 def compile_helper() -> Path | None:
@@ -267,6 +293,36 @@ def compile_helper() -> Path | None:
     return helper
 
 
+def play_and_record(ref: np.ndarray, cues: list[float]) -> np.ndarray:
+    """Play `ref` and record the mic on one duplex stream, showing each cue on the clock of the speaker output."""
+    rec = np.zeros(len(ref), np.float32)
+    pos, clock = 0, {}
+    started, done = threading.Event(), threading.Event()
+
+    def callback(indata, outdata, frames, time_info, status):
+        nonlocal pos
+        if not clock:
+            latency = time_info.outputBufferDacTime - time_info.currentTime
+            # The cue clock starts when the first sample reaches the speaker, not when the stream was asked to open.
+            clock["t0"] = time.monotonic() + (latency if 0 <= latency < 1 else 0.0)
+            started.set()
+        n = min(frames, len(ref) - pos)
+        outdata[:n, 0] = ref[pos : pos + n]
+        outdata[n:] = 0
+        # Input and output share the callback's sample index, so the recording stays aligned with the reference.
+        rec[pos : pos + n] = indata[:n, 0]
+        pos += n
+        if pos >= len(ref):
+            raise sd.CallbackStop
+
+    with sd.Stream(samplerate=PLAY_SR, channels=1, dtype="float32", callback=callback, finished_callback=done.set):
+        if not started.wait(5):
+            sys.exit("  the audio stream never started: check the built-in speakers and microphone access.")
+        show_cues(lambda: time.monotonic() - clock["t0"], cues)
+        done.wait(len(ref) / PLAY_SR + 10)
+    return rec
+
+
 def speakers(redo: bool) -> None:
     run = RECORDINGS / "speaker-run"
     say("Speaker run. Built-in speakers at your usual volume, no headphones. Jarvis talks for about a minute.\n"
@@ -278,16 +334,13 @@ def speakers(redo: bool) -> None:
     segments = json.loads(segments_path.read_text()) if segments_path.exists() else {}
     if redo or not (run / "mic.wav").exists():
         wait_enter("Enter to start (WebRTC pass: raw mic).")
-        start = time.monotonic()
-        rec = sd.playrec(ref, samplerate=PLAY_SR, channels=1, dtype="float32")
-        show_cues(lambda: time.monotonic() - start, cues)
-        sd.wait()
-        save_16k(run / "mic.wav", resample(rec[:, 0], PLAY_SR, SR))
+        rec = play_and_record(ref, cues)
+        save_16k(run / "mic.wav", resample(rec, PLAY_SR, SR))
         save_16k(run / "reference.wav", resample(ref, PLAY_SR, SR))
-        # playrec is a duplex stream: recording and playback share sample 0.
-        segments = {**marks(cues, 0.0), "cues": dict(zip(BARGE_IN_WORDS, cues)), "vpio": segments.get("vpio", {})}
+        segments = {**marks(cues, 0.0, jarvis_half_s(ref_s)), "cues": dict(zip(BARGE_IN_WORDS, cues)),
+                    "vpio": segments.get("vpio", {})}
         segments_path.write_text(json.dumps(segments))
-    if redo or not (run / "vpio.wav").exists():
+    if redo or not vpio_done(run, segments):
         helper = compile_helper()
         while True:
             if helper is None:
@@ -308,13 +361,47 @@ def speakers(redo: bool) -> None:
             "Stay quiet and don't say Jarvis. This measures false wakes with a video playing.")
         wait_enter("Enter once the video is playing.")
         save_16k(run / "video.wav", record_after_cue("  ● recording the room", VIDEO_MINUTES * 60))
-        print("  done; you can stop the video.")
+        print("  done.")
 
 
-def port_open(port: int) -> bool:
+def room_chunks_todo(folder: Path, redo: bool) -> list[int]:
+    """Numbers of the ROOM_CHUNK_MINUTES chunks still to record; a chunk is saved only once complete."""
+    n = ROOM_MINUTES // ROOM_CHUNK_MINUTES
+    return [i for i in range(1, n + 1) if redo or not (folder / f"room_{i:02d}.wav").exists()]
+
+
+def room(redo: bool) -> None:
+    folder = RECORDINGS / "room"
+    todo = room_chunks_todo(folder, redo)
+    if not todo:
+        return
+    minutes = len(todo) * ROOM_CHUNK_MINUTES
+    say(f"Room run, unattended: {minutes} minutes with a video playing, for false wakes per hour. Then the analysis runs on its own.\n"
+        "Start a long video or podcast with people talking (an hour or more, or a playlist), at normal volume on the\n"
+        "built-in speakers. Keep the lid open and the Mac on power. Then leave: nobody should speak near it.")
+    wait_enter("Enter once the video is playing, then walk away.")
+    # Keeps the Mac awake while this process lives; a sleeping Mac records nothing.
+    awake = subprocess.Popen(["caffeinate", "-ims", "-w", str(os.getpid())])
     try:
-        httpx.get(f"http://127.0.0.1:{port}/", timeout=1)
-        return True
+        for i in todo:
+            audio = record_after_cue(f"  ● room {i}/{ROOM_MINUTES // ROOM_CHUNK_MINUTES} ({ROOM_CHUNK_MINUTES} min)",
+                                     ROOM_CHUNK_MINUTES * 60)
+            save_16k(folder / f"room_{i:02d}.wav", audio)
+            print(f"    saved, {level_db(audio):.0f} dBFS", flush=True)
+    except KeyboardInterrupt:
+        left = len(room_chunks_todo(folder, False)) * ROOM_CHUNK_MINUTES
+        loud(f"Room run stopped with {left} minutes to go; finished chunks are kept.\n"
+             "To resume: uv run session.py --only room   then: uv run session.py --only analyse")
+        sys.exit(1)
+    finally:
+        stop(awake)
+    print("  Room run done; the video can stop whenever you are back.")
+
+
+def server_ready(port: int) -> bool:
+    """True once a server on `port` answers with a success status, not merely holds the port."""
+    try:
+        return httpx.get(f"http://127.0.0.1:{port}/", timeout=1).is_success
     except httpx.TransportError:
         return False
 
@@ -335,7 +422,7 @@ def start_turbo_server() -> subprocess.Popen | None:
     if missing:
         loud(f"No whisper.cpp large-v3-turbo row: missing {', '.join(missing)}.")
         return None
-    if port_open(TURBO_PORT):
+    if server_ready(TURBO_PORT):
         loud(f"Something already listens on :{TURBO_PORT}; the turbo row measures whatever that is.")
         return None
     log = DATA / "whisper-server-2023.log"
@@ -349,7 +436,7 @@ def start_turbo_server() -> subprocess.Popen | None:
             if proc.poll() is not None:
                 loud(f"The whisper.cpp turbo server exited with {proc.returncode}; no turbo row. Log: {log}")
                 return None
-            if port_open(TURBO_PORT):
+            if server_ready(TURBO_PORT):
                 return proc
             time.sleep(0.5)
         loud(f"The whisper.cpp turbo server did not answer within {SERVER_READY_TIMEOUT_S} s; no turbo row. Log: {log}")
@@ -365,13 +452,14 @@ BENCHES = [
     ["bench_lang.py", "--source", "recordings"],
     ["bench_wake.py", "recall", "--source", "recordings"],
     ["bench_wake.py", "false-accepts", "{run}/video.wav", "--name", "false-accepts-video"],
+    ["bench_wake.py", "false-accepts", "{recordings}/room", "--name", "false-accepts-room"],
     ["bench_aec.py", "analyse", "{run}"],
     ["bench_smart_turn.py", "--source", "recordings"],
 ]
 
 
 def analyse() -> None:
-    say("Analysis. This runs on its own for about 12 minutes; you can leave.")
+    say("Analysis. This runs on its own for about 17 minutes; you can leave.")
     run = RECORDINGS / "speaker-run"
     log = DATA / "analysis.log"
     failed = []
@@ -380,7 +468,7 @@ def analyse() -> None:
         turbo = start_turbo_server()
         with log.open("w") as out:
             for cmd in BENCHES:
-                cmd = [part.format(run=run) for part in cmd]
+                cmd = [part.format(run=run, recordings=RECORDINGS) for part in cmd]
                 print(f"  $ {' '.join(cmd)}", flush=True)
                 code = subprocess.run([sys.executable, str(HERE / cmd[0])] + cmd[1:], cwd=HERE, check=False,
                                       stdout=out, stderr=subprocess.STDOUT).returncode
@@ -391,7 +479,8 @@ def analyse() -> None:
     if failed:
         loud("These steps FAILED; their rows are missing. Details in " + str(log) + ":\n  " + "\n  ".join(failed))
     subprocess.run([sys.executable, str(HERE / "report.py")], cwd=HERE, check=False)
-    print(f"  numbers: {RESULTS}/*-recordings.json, aec-speaker-run.json, wake-false-accepts-video.json")
+    print(f"  numbers: {RESULTS}/*-recordings.json, aec-speaker-run.json, wake-false-accepts-video.json, "
+          "wake-false-accepts-room.json")
 
 
 def main() -> None:
@@ -402,7 +491,7 @@ def main() -> None:
     steps = [args.only] if args.only else STEPS
     actions = {"preflight": preflight, "baseline": baseline, "clips": lambda: clips(args.redo),
                "pauses": lambda: pauses(args.redo), "wake": lambda: wake(args.redo),
-               "speakers": lambda: speakers(args.redo), "analyse": analyse}
+               "speakers": lambda: speakers(args.redo), "room": lambda: room(args.redo), "analyse": analyse}
     for step in steps:
         actions[step]()
     say("Session complete. The results block is in docs/notes/phase-0-spikes.md under ## Audio.")

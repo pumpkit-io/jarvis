@@ -49,28 +49,41 @@ def wake_block() -> list[str]:
     r = load("wake-recall-recordings")
     out = []
     if r:
-        out += ["| Phrasing | vad 0 @0.3 / 0.5 / 0.7 | vad 0.5 @0.3 / 0.5 / 0.7 |", "|---|---|---|"]
+        out += ["| Phrasing | vad 0 @0.3 / 0.5 / 0.7 | vad 0.5 @0.3 / 0.5 / 0.7 | 95 % at 0.5, vad 0 |", "|---|---|---|---|"]
         no_vad, vad = r["by_vad"]["vad_threshold=0.0"]["per_phrasing"], r["by_vad"]["vad_threshold=0.5"]["per_phrasing"]
         for phrase in no_vad:
             cells = [" / ".join(t[f"recall@{x}"] for x in ("0.3", "0.5", "0.7")) for t in (no_vad[phrase], vad[phrase])]
-            out.append(f"| {phrase} | {cells[0]} | {cells[1]} |")
-    fa = load("wake-false-accepts-video")
-    if fa:
-        out += ["", f"False accepts with a video playing in the room ({fa['hours']} h): {json.dumps(fa['false_accepts_total'])}."]
+            out.append(f"| {phrase} | {cells[0]} | {cells[1]} | {'yes' if meets_95(no_vad[phrase]['recall@0.5']) else 'no'} |")
+    for name, label in (("video", "attended, video playing"), ("room", "unattended, video playing")):
+        fa = load(f"wake-false-accepts-{name}")
+        if not fa:
+            continue
+        per_hour = fa["false_accepts_per_hour"]["vad_threshold=0.0"]
+        out += ["", f"False accepts, {label} ({fa['hours']} h"
+                + (f", {fa['quiet_minutes']} min of it near silence" if fa.get("quiet_minutes") else "")
+                + f"): per hour without VAD gate {', '.join(f'{t} {n}' for t, n in per_hour.items())}; "
+                + f"totals {json.dumps(fa['false_accepts_total'])}."]
     return out or ["No Wake word results on recordings."]
+
+
+def meets_95(fraction: str) -> bool:
+    hit, n = map(int, fraction.split("/"))
+    return n > 0 and hit / n >= 0.95
 
 
 def aec_block() -> list[str]:
     r = load("aec-speaker-run")
     if not r:
         return ["No speaker run results."]
-    rows = ["| Path | Barge-in triggers on Jarvis alone (per min) | User Barge-ins detected |", "|---|---|---|"]
+    rows = ["| Path | Barge-in triggers on Jarvis alone (per min) | User Barge-ins detected over the echo | "
+            "Same Jarvis audio alone triggered |", "|---|---|---|---|"]
 
     def row(name, s):
         if "failed" in s:
-            rows.append(f"| {name} | failed: {s['failed']} | - |")
+            rows.append(f"| {name} | failed: {s['failed']} | - | - |")
             return
-        rows.append(f"| {name} | {s['jarvis_only']['triggers']} ({s['jarvis_only']['per_minute']}) | {s.get('user_barge_ins_detected', '-')} |")
+        rows.append(f"| {name} | {s['jarvis_only']['triggers']} ({s['jarvis_only']['per_minute']}) | "
+                    f"{s.get('user_barge_ins_detected', '-')} | {s.get('matching_jarvis_span_triggered', '-')} |")
 
     row("raw mic", r["raw_mic"])
     for delay, s in r["webrtc"].items():
@@ -108,7 +121,7 @@ def block() -> str:
     today = datetime.date.today().isoformat()
     lines = [f"### Recording session results ({today})", "",
              "Measured by `spikes/audio/session.py` on the User's own recordings. Numbers: `spikes/audio/results/*-recordings.json`, "
-             "`aec-speaker-run.json` and `wake-false-accepts-video.json`; transcripts stay in `spikes/audio/data/results/` (local).",
+             "`aec-speaker-run.json`, `wake-false-accepts-video.json` and `wake-false-accepts-room.json`; transcripts stay in `spikes/audio/data/results/` (local).",
              "", "**STT**", "", *stt_block(), *lang_block(), "", "**Wake word** (openWakeWord `hey_jarvis`, takes detected)", "", *wake_block(),
              "", "**Echo cancellation** (built-in speakers)", "", *aec_block(), "", "**Smart Turn v3** (User's clips and pause takes)", "",
              *smart_turn_block(), "",
