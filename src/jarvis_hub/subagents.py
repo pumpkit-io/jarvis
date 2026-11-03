@@ -7,7 +7,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from html import escape
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 from jarvis_hub.agents.backend import (
     AgentBackend,
@@ -22,9 +22,11 @@ from jarvis_hub.agents.backend import (
 from jarvis_hub.config import Effort, Settings, is_effort
 from jarvis_hub.prompts import render
 from jarvis_hub.subagent_rules import BRANCH_KINDS, branch_name, check_choice, connector_check, slug
+from jarvis_hub.tasks import TimeShift
 
-SubagentState = Literal["queued", "running", "done", "failed", "cancelled"]
-FINISHED: frozenset[SubagentState] = frozenset({"done", "failed", "cancelled"})
+# Interrupted: the Hub stopped or crashed while it worked; its worktree and branch are kept.
+SubagentState = Literal["queued", "running", "done", "failed", "cancelled", "interrupted"]
+FINISHED: frozenset[SubagentState] = frozenset({"done", "failed", "cancelled", "interrupted"})
 
 # Kept out of a Subagent's tools altogether: the Hub owns the microphone and speaker.
 VOICE_TOOLS = ("mcp__plugin_voicemode_voicemode", "mcp__voicemode")
@@ -159,6 +161,7 @@ class Subagents:
         self._all: dict[str, Subagent] = {}
         self._ids = 0
         self._runs: list[asyncio.Task[None]] = []
+        self._closing = False
 
     async def prepare(self, task_id: str, args: dict[str, Any], user_words: Sequence[str]) -> Subagent | Refused:
         """Check the request and set up its worktree, with a branch when it writes. Not started yet."""
@@ -234,8 +237,75 @@ class Subagents:
         kept = " Its worktree and branch are kept." if subagent.writes else ""
         return f"Stopping {subagent.id}; its report follows as an event.{kept}"
 
+    def dump(self, task_ids: set[str], to_wall: TimeShift) -> list[dict[str, Any]]:
+        """The Subagents of these Tasks, for the state file."""
+        records: list[dict[str, Any]] = []
+        for s in self._all.values():
+            if s.task_id not in task_ids:
+                continue
+            records.append(
+                {
+                    "id": s.id,
+                    "task_id": s.task_id,
+                    "repo": s.repo,
+                    "title": s.title,
+                    "brief": s.brief,
+                    "model": s.model,
+                    "effort": s.effort,
+                    "cwd": str(s.cwd),
+                    "created": to_wall(s.created),
+                    "branch": s.branch,
+                    "log": str(s.log) if s.log else None,
+                    "state": s.state,
+                    "started": to_wall(s.started) if s.started is not None else None,
+                    "ended": to_wall(s.ended) if s.ended is not None else None,
+                    "report": s.report,
+                }
+            )
+        return records
+
+    def restore(self, records: list[dict[str, Any]], from_wall: TimeShift) -> list[Subagent]:
+        """Brings back the saved Subagents. One the old Hub never saw end is marked interrupted and returned, its
+        worktree still to free with `free_interrupted`."""
+        cut_off: list[Subagent] = []
+        for r in records:
+            subagent = Subagent(
+                r["id"],
+                r["task_id"],
+                r["repo"],
+                r["title"],
+                r["brief"],
+                r["model"],
+                cast(Effort, r["effort"]),
+                Path(r["cwd"]),
+                from_wall(r["created"]),
+                r.get("branch"),
+                Path(r["log"]) if r.get("log") else None,
+                cast(SubagentState, r["state"]),
+                from_wall(r["started"]) if r.get("started") is not None else None,
+                from_wall(r["ended"]) if r.get("ended") is not None else None,
+                r.get("report", ""),
+            )
+            self._all[subagent.id] = subagent
+            self._ids = max(self._ids, int(subagent.id[1:]))
+            if subagent.state not in FINISHED:
+                subagent.state = "interrupted"
+                cut_off.append(subagent)
+        return cut_off
+
+    async def free_interrupted(self, subagent: Subagent) -> None:
+        """Releases the lock of a Subagent cut off by a crash, as its own end would have: the session holding it is
+        gone, and a lock left behind would keep sweep off the worktree for good."""
+        report = "Interrupted: the Hub stopped while it worked, so it never finished."
+        try:
+            report += await self._free(subagent)
+        finally:
+            subagent.report, subagent.ended = report, self._clock.now()
+
     async def close(self) -> None:
-        """Stop every Subagent and wait for each to end, cutting off any that will not; worktrees and branches stay."""
+        """Stop every Subagent and wait for each to end, cutting off any that will not; worktrees and branches stay.
+        A Subagent still at work ends interrupted, not cancelled."""
+        self._closing = True
         for subagent in self._all.values():
             subagent.stop.set()
         runs = [run for run in self._runs if not run.done()]
@@ -361,6 +431,9 @@ class Subagents:
         if end.outcome == "completed":
             state: SubagentState = "done"
             report = text or "It ended without a report."
+        elif self._closing and stopped and end.outcome != "failed":
+            state = "interrupted"
+            report = "Interrupted: the Hub stopped while it worked, so it never finished."
         elif end.outcome == "interrupted" and stopped:
             state = "cancelled"
             report = "Cancelled before it finished." if subagent.started else "Cancelled before it started."

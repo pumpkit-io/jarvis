@@ -438,6 +438,7 @@ def make_hub(
     watch_limit: float = 6 * 3600.0,
     **options: Any,
 ) -> Hub:
+    options.setdefault("wall", backend.clock.now)
     setup = SubagentSetup(
         session=subagent_spec,
         workspace=workspace or FakeWorkspace(),

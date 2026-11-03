@@ -1,8 +1,9 @@
-"""The Hub's record of every Task this launch: what the Talker asks about, answered without a model call."""
+"""The Hub's record of every Task this launch, and the open ones from before a restart: what the Talker asks about,
+answered without a model call."""
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal, cast
 
 TaskState = Literal["queued", "working", "needs_user", "done", "failed", "cancelled"]
 FINISHED: frozenset[TaskState] = frozenset({"done", "failed", "cancelled"})
@@ -72,14 +73,60 @@ class Task:
         return True
 
 
+    @property
+    def open(self) -> bool:
+        """Not yet finished; a cancelled one with a message still queued counts."""
+        return self.state not in FINISHED or (bool(self.waiting) and not self.cancelled)
+
+
+TimeShift = Callable[[float], float]
+
+
 class Tasks:
     def __init__(self) -> None:
         self._tasks: dict[str, Task] = {}
+        self._ids = 0
 
     def create(self, request: str, now: float) -> Task:
-        task = Task(id=f"T{len(self._tasks) + 1}", request=request, created=now)
+        self._ids += 1
+        task = Task(id=f"T{self._ids}", request=request, created=now)
         self._tasks[task.id] = task
         return task
+
+    def dump(self, to_wall: TimeShift) -> list[dict[str, Any]]:
+        """The open Tasks, for the state file; finished ones end with the launch (story 24)."""
+        return [
+            {
+                "id": t.id,
+                "request": t.request,
+                "created": to_wall(t.created),
+                "state": t.state,
+                "last_report": t.last_report,
+                "reports": t.reports,
+                "words": t.words,
+            }
+            for t in self._tasks.values()
+            if t.open
+        ]
+
+    def restore(self, records: list[dict[str, Any]], from_wall: TimeShift) -> list[Task]:
+        """Brings back open Tasks saved before a restart. Their queued messages died with the old Hub."""
+        restored: list[Task] = []
+        for r in records:
+            state = cast(TaskState, r["state"])
+            task = Task(
+                id=r["id"],
+                request=r["request"],
+                created=from_wall(r["created"]),
+                state="working" if state == "queued" else state,
+                last_report=r.get("last_report"),
+                reports=r.get("reports", 0),
+                words=list(r.get("words", [])),
+            )
+            self._tasks[task.id] = task
+            self._ids = max(self._ids, int(task.id[1:]))
+            restored.append(task)
+        return restored
 
     def get(self, task_id: object) -> Task | None:
         return self._tasks.get(str(task_id).strip().upper()) if task_id else None
@@ -92,7 +139,7 @@ class Tasks:
 
     def open_status(self, now: float, subagents: Callable[[str], list[str]] = lambda task_id: []) -> str:
         """Like `status`, for the Tasks not yet finished (a cancelled one with a message still queued counts)."""
-        open_tasks = [t for t in self._tasks.values() if t.state not in FINISHED or (t.waiting and not t.cancelled)]
+        open_tasks = [t for t in self._tasks.values() if t.open]
         return "\n".join(self._lines(reversed(open_tasks), now, subagents)) if open_tasks else "No open Tasks."
 
     @staticmethod

@@ -691,7 +691,7 @@ async def test_a_run_cut_off_at_close_still_releases_its_lock_and_ends(
     async with asyncio.timeout(1):
         await subagents.close()
 
-    assert [s.state for s in ended] == ["cancelled"]
+    assert [s.state for s in ended] == ["interrupted"]
     assert workspace.released == [subagent.cwd] and not workspace.locks
 
 

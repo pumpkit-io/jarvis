@@ -243,6 +243,7 @@ def settings_hub(
         subagents=subagent_setup(settings),
         waits=WaitSetup(org=settings.org),
         talker_restart_at=settings.talker_restart_at,
+        state_path=settings.runtime_dir / "state.json",
         **options,
     )
 
