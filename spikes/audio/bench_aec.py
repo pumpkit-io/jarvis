@@ -83,7 +83,7 @@ def analyse(run: Path) -> dict:
             out["user_barge_ins_detected"] = f"{sum(hits)}/{len(hits)}"
         return out
 
-    result = {"run": run.name, "seconds": round(len(mic) / SR, 1), "raw_mic": score(mic, segments), "webrtc": {}}
+    result = {"run": str(run), "seconds": round(len(mic) / SR, 1), "raw_mic": score(mic, segments), "webrtc": {}}
     for delay in DELAYS_MS:
         result["webrtc"][f"delay={delay}ms"] = score(webrtc_aec(mic, ref, delay), segments)
     vpio = segments.get("vpio", {})

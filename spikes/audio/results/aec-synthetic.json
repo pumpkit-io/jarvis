@@ -1,5 +1,5 @@
 {
-  "run": "/Users/fpaolileonardi/Projects/pumpkit-io/jarvis/.claude/worktrees/voice-hub-t5/spikes/audio/data/synthetic/speaker-run",
+  "run": "synthetic/speaker-run",
   "seconds": 58.0,
   "raw_mic": {
     "jarvis_only": {

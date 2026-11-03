@@ -19,7 +19,7 @@ HERE = Path(__file__).resolve().parent
 DATA = Path(os.environ.get("JARVIS_AUDIO_DATA", HERE / "data"))
 SYNTHETIC = DATA / "synthetic"
 RECORDINGS = DATA / "recordings"
-# Tracked: numbers only. Results on the User's recordings keep their transcripts in LOCAL_RESULTS.
+# Tracked: numbers, plus transcripts of synthetic speech. Transcripts of the User stay in LOCAL_RESULTS.
 RESULTS = Path(os.environ.get("JARVIS_AUDIO_RESULTS", HERE / "results"))
 LOCAL_RESULTS = DATA / "results"
 TRANSCRIPT_KEYS = {"hyp", "samples", "wrong"}
@@ -85,9 +85,21 @@ def strip_transcripts(data):
     return data
 
 
+def portable(data):
+    """Paths under DATA made relative to it and the home folder written as ~, so no result names this machine."""
+    if isinstance(data, dict):
+        return {k: portable(v) for k, v in data.items()}
+    if isinstance(data, list):
+        return [portable(v) for v in data]
+    if isinstance(data, str):
+        return data.replace(f"{DATA}/", "").replace(str(DATA), ".").replace(str(Path.home()), "~")
+    return data
+
+
 def write_result(name: str, data: dict) -> Path:
     """Write `<name>.json` to RESULTS; a result on the User's recordings goes there without transcripts."""
     path = RESULTS / f"{name}.json"
+    data = portable(data)
     if data.get("source") == "recordings":
         _write_json(LOCAL_RESULTS / f"{name}.json", data)
         data = strip_transcripts(data)

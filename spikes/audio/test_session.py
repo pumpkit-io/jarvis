@@ -5,6 +5,7 @@
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -52,11 +53,30 @@ def test_synthetic_results_are_written_whole():
     assert json.loads(common.write_result("stt-x-synthetic", data).read_text()) == data
 
 
+def test_tracked_results_name_no_home_folder():
+    tracked = subprocess.run(["git", "ls-files", "spikes/*/results/*"], cwd=common.HERE.parent.parent,
+                             capture_output=True, text=True, check=True).stdout.split()
+    assert tracked
+    for name in tracked:
+        text = (common.HERE.parent.parent / name).read_text()
+        assert "/Users/" not in text and str(Path.home()) not in text, name
+
+
+def test_written_results_give_paths_relative_to_the_data_folder():
+    run = common.DATA / "recordings" / "speaker-run"
+    data = {"run": str(run), "log": str(Path.home() / "elsewhere" / "x.log"), "files": [str(run / "mic.wav")]}
+    text = common.write_result("paths-synthetic", data).read_text()
+    assert str(Path.home()) not in text and "/Users/" not in text
+    kept = json.loads(text)
+    assert kept["run"] == "recordings/speaker-run" and kept["files"] == ["recordings/speaker-run/mic.wav"]
+    assert kept["log"] == "~/elsewhere/x.log"
+
+
 def test_resample_keeps_a_tone_and_rejects_what_the_target_rate_cannot_hold():
     out = common.resample(tone(1000, 1.0, 48_000) + tone(12_000, 1.0, 48_000), 48_000, SR)
     assert len(out) == SR
     spectrum = np.abs(np.fft.rfft(out))
-    # 12 kHz is above the 8 kHz Nyquist of 16 kHz; linear interpolation folds it to 4 kHz.
+    # 12 kHz is above 16 kHz's 8 kHz Nyquist: unfiltered, it would alias to 4 kHz, so 4 kHz must stay near silent.
     assert spectrum[4000] < spectrum[1000] / 100
     assert spectrum[1000] > 1000
 
