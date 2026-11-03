@@ -12,7 +12,7 @@ from typing import Any, Protocol
 from jarvis_hub.hub import Line
 from jarvis_hub.voice.language import Lang
 from jarvis_hub.voice.player import Player
-from jarvis_hub.voice.speech import Metrics, Speech, SpeechClock
+from jarvis_hub.voice.speech import ClipName, Metrics, Speech, SpeechClock
 from jarvis_hub.voice.state import (
     CAPTURING,
     Action,
@@ -79,6 +79,10 @@ class _ObservedSpeech:
     def feed(self, text: str) -> None:
         if not self._dropping:
             self._speech.feed(text)
+
+    def say(self, name: ClipName, lang: Lang, *, in_reply: bool = False) -> None:
+        if not self._dropping:
+            self._speech.say(name, lang, in_reply=in_reply)
 
     def block_end(self) -> None:
         if not self._dropping:

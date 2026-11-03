@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import json
 import re
+import time
 from collections import deque
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, replace
@@ -27,11 +28,13 @@ from jarvis_hub.agents.backend import (
     TurnEnd,
 )
 from jarvis_hub.config import DEFAULT_TALKER_RESTART_AT
+from jarvis_hub.limits import UsageLimit, reset_sentence
 from jarvis_hub.orchestrator import orchestrator_tools
 from jarvis_hub.subagents import Subagent, SubagentSetup, Subagents, ended_event, kept_line, over_time_event
 from jarvis_hub.talker import talker_tools
 from jarvis_hub.tasks import Task, Tasks, no_task
 from jarvis_hub.voice.language import Lang, detect_language
+from jarvis_hub.voice.speech import LINES, ClipName
 from jarvis_hub.waits import Check, Watcher, Waits, WaitSetup, cancelled_event, check_event, watcher_event
 
 
@@ -72,6 +75,8 @@ class Speech(Protocol):
 
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None) -> None: ...
 
+    def say(self, name: ClipName, lang: Lang, *, in_reply: bool = False) -> None: ...
+
     def feed(self, text: str) -> None: ...
 
     def block_end(self) -> None: ...
@@ -95,6 +100,9 @@ class Floor(Protocol):
 
 class _Silent:
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None) -> None:
+        pass
+
+    def say(self, name: ClipName, lang: Lang, *, in_reply: bool = False) -> None:
         pass
 
     def feed(self, text: str) -> None:
@@ -237,6 +245,7 @@ class Hub:
         on_end_conversation: Callable[[], None] | None = None,
         talker_restart_at: float = DEFAULT_TALKER_RESTART_AT,
         floor: Floor | None = None,
+        wall: Callable[[], float] = time.time,
     ) -> None:
         tools = talker_tools(
             delegate=self._delegate,
@@ -302,6 +311,13 @@ class Hub:
         self._turn_answers_user = False
         self._interrupted_turn: int | None = None
         self._orchestrator_gate = _TurnGate()
+        self._wall = wall
+        self._limit = UsageLimit(clock, wall, self._limit_hit, self._limit_cleared)
+        # Held until the usage limit resets, each still counted in `_pending` so a text-mode run waits for it: the
+        # Orchestrator's messages, and the news the limited Talker could not take.
+        self._deferred: list[_OrchestratorInput] = []
+        self._parked_news: list[_TalkerInput] = []
+        self._announcing: set[asyncio.Task[None]] = set()
         self._orchestrating: str | None = None
         # Subagents the running Orchestrator turn started: their completion events bring the Task's next turn.
         self._spawned = 0
@@ -313,6 +329,8 @@ class Hub:
             clock=clock,
             on_end=self._subagent_ended,
             on_over_time=self._subagent_over_time,
+            on_turn=self._subagent_turn,
+            limit=self._limit,
         )
         self._waits = Waits(setup=waits, clock=clock, on_watcher_end=self._watcher_ended, on_check=self._check_due)
 
@@ -349,6 +367,9 @@ class Hub:
         for check in await self._waits.close():
             self._output.notice(f"{check.id} dropped; Checks aren't kept across restarts yet.")
         await self._subagents.close()
+        await self._limit.close()
+        for announcing in self._announcing:
+            announcing.cancel()
         for loop in self._loops:
             loop.cancel()
         if self._loops:
@@ -405,18 +426,32 @@ class Hub:
             else:
                 item, upcoming = upcoming, None
                 await self._talker_gate.before_next_turn()
+            parked = False
             try:
                 if item.lang:
                     self._lang = item.lang
                 if item.heard:
                     self._output.heard(item.heard, typed=item.typed)
+                if item.kind == "event" and self._limit.blocks("talker"):
+                    # Still counted as pending: it is told once the limit resets.
+                    self._parked_news.append(item)
+                    parked = True
+                    continue
                 if item.details:
                     self._output.show(item.details)
                 self._user_text = item.heard if item.kind == "user" else None
-                end = await self._turn(item.message, kind=item.kind, arrived=item.arrived, spoken=item.spoken)
+                if item.kind == "user" and self._limit.blocks("talker"):
+                    end = self._limited_reply(item)
+                else:
+                    end = await self._turn(item.message, kind=item.kind, arrived=item.arrived, spoken=item.spoken)
+                    if end.outcome == "limited" and item.kind == "event":
+                        # The news was not told, so the Talker gets it again after the reset.
+                        self._parked_news.append(item)
+                        parked = True
             finally:
                 self._user_text = None
-                self._handled()
+                if not parked:
+                    self._handled()
             upcoming = await self._restart_if_full(end.context)
 
     async def _next_input(self) -> _TalkerInput:
@@ -604,6 +639,10 @@ class Hub:
                         tools.append(name)
                     case TurnEnd():
                         end = event
+                        if event.outcome == "limited":
+                            self._limit.hit("talker", event.resets_at)
+                            if show:
+                                shown += self._limit_notice(speech, event.resets_at)
         finally:
             self._talker_gate.turn = None
             self._turn_spoken = self._turn_answers_user = False
@@ -631,6 +670,7 @@ class Hub:
             first_delta_ms=ms(first_delta),
             first_sentence_ms=ms(first_sentence),
             total_ms=ms(self._clock.now()),
+            duration_ms=round((self._clock.now() - t0) * 1000),
             tool_before_text=tool_before_text,
             **({"context_tokens": end.context.tokens, "context_window": end.context.window} if end.context else {}),
             **({"no_context": end.no_context} if end.no_context else {}),
@@ -656,6 +696,9 @@ class Hub:
     async def _orchestrator_turn(self, item: _OrchestratorInput) -> None:
         task = self._tasks.get(item.task_id)
         if task is None:
+            return
+        if self._limit.blocks("orchestrator") and not task.cancelled:
+            self._defer(item)
             return
         if self._orchestrator is None:
             try:
@@ -690,7 +733,13 @@ class Hub:
                     await session.close()
         # Only news still to come (a Subagent's or Watcher's end, a Check, a queued message) carries a Task on.
         quiet = not (self._spawned or task.waiting or self._has_pending(task.id))
-        if not task.cancelled and task.reports == reports:
+        if end.outcome == "limited":
+            # The turn was not answered, so the same message is sent again once the limit resets.
+            self._limit.hit("orchestrator", end.resets_at)
+            if not task.cancelled:
+                task.queue_message()
+                self._defer(item)
+        elif not task.cancelled and task.reports == reports:
             if end.outcome != "completed":
                 self._fail(task, end.error or "the Orchestrator's turn was stopped")
             elif quiet and item.last_check:
@@ -710,6 +759,7 @@ class Hub:
             task=task.id,
             wait_ms=round((t0 - item.arrived) * 1000),
             total_ms=round((self._clock.now() - item.arrived) * 1000),
+            duration_ms=round((self._clock.now() - t0) * 1000),
         )
 
     async def _consume(self, task: Task, session: AgentSession, message: str, turn: int, tools: list[str]) -> TurnEnd:
@@ -756,20 +806,103 @@ class Hub:
         self._post_news(_TalkerInput(message, "event", self._clock.now()))
 
     def _record(self, spec: SessionSpec, kind: str, end: TurnEnd, tools: list[str], **fields: Any) -> None:
-        entry = {
-            "kind": kind,
-            "role": spec.role,
-            "model": spec.model,
-            "effort": spec.effort,
-            **fields,
-            "tools": tools,
-            "outcome": end.outcome,
-            "usage": asdict(end.usage),
-        }
+        self._write(
+            {
+                "kind": kind,
+                "role": spec.role,
+                "model": spec.model,
+                "effort": spec.effort,
+                **fields,
+                "tools": tools,
+                "outcome": end.outcome,
+                "usage": asdict(end.usage),
+                **({"resets_at": end.resets_at} if end.resets_at is not None else {}),
+            }
+        )
+
+    def _write(self, entry: dict[str, Any]) -> None:
         try:
             self._metrics.record(entry)
         except Exception as e:
             self._output.notice(f"Could not write metrics: {e}")
+
+    def _subagent_turn(self, subagent: Subagent, spec: SessionSpec, end: TurnEnd, duration_ms: int) -> None:
+        self._record(spec, "run", end, [], task=subagent.task_id, subagent=subagent.id, duration_ms=duration_ms)
+
+    def _limited_reply(self, item: _TalkerInput) -> TurnEnd:
+        """The reply to a line while the Talker is limited: the cached line and the reset time, with no model call."""
+        speech = self._speech if item.spoken else _Silent()
+        self._turn_count += 1
+        speech.begin(self._lang, turn=self._turn_count, heard_at=item.arrived if item.kind == "user" else None)
+        shown = self._limit_notice(speech, self._limit.resets_at("talker"))
+        speech.end()
+        self._output.reply_end()
+        self._exchanges.append((item.message, shown))
+        return TurnEnd("limited")
+
+    def _limit_notice(self, speech: Speech, resets_at: float | None) -> str:
+        """Prints the cached usage-limit line and the reset time, and says them in the reply `speech` has begun.
+        Returns what was shown."""
+        lang = self._lang
+        when = reset_sentence(resets_at, lang, self._wall())
+        speech.say("usage_limit", lang, in_reply=True)
+        if when:
+            speech.feed(when)
+        speech.block_end()
+        text = f"{LINES['usage_limit'][lang]} {when}".strip()
+        self._output.reply(text)
+        return text
+
+    def _limit_hit(self, role: str, opened: bool) -> None:
+        self._write({"kind": "usage_limit", "role": role, "resets_at": self._limit.resets_at(role)})
+        # A limited Talker tells the User itself, in the reply that hit it.
+        if opened and role != "talker":
+            announcing = asyncio.create_task(self._announce_limit(role))
+            self._announcing.add(announcing)
+            announcing.add_done_callback(self._announcing.discard)
+
+    async def _announce_limit(self, role: str) -> None:
+        """Tells the User once that the limit was reached: in voice mode as news, when the voice is quiet."""
+        if self._floor is not None:
+            while not self._input_ended.is_set():
+                await self._quiet()
+                if self._floor.announce():
+                    break
+        speech = self._speech if self._floor is None or not self._input_ended.is_set() else _Silent()
+        self._turn_count += 1
+        speech.begin(self._lang, turn=self._turn_count, heard_at=None)
+        self._limit_notice(speech, self._limit.resets_at(role))
+        speech.end()
+        self._output.reply_end()
+
+    def _limit_cleared(self, roles: frozenset[str], everyone: bool) -> None:
+        self._write({"kind": "usage_reset", "roles": sorted(roles)})
+        if "orchestrator" in roles:
+            for deferred in self._deferred:
+                self._orchestrator_inbox.put_nowait(deferred)
+            self._deferred.clear()
+        if "talker" in roles:
+            for parked in self._parked_news:
+                if self._floor is None:
+                    self._talker_inbox.put_nowait(parked)
+                else:
+                    self._news.append(parked)
+            self._parked_news.clear()
+            self._arrived.set()
+        if everyone:
+            text = (
+                "The usage limit has reset. Queued Subagents are starting and any waiting Task carries on. "
+                "Say so in one sentence."
+            )
+            self._post_news(
+                _TalkerInput(f'<event source="hub" reason="usage_reset">{text}</event>', "event", self._clock.now())
+            )
+
+    def _defer(self, item: _OrchestratorInput) -> None:
+        """Holds the Orchestrator's message until its limit resets; the Hub stays unsettled meanwhile."""
+        self._deferred.append(item)
+        self._pending += 1
+        self._settled.clear()
 
     async def _delegate(self, args: dict[str, Any]) -> str:
         request = str(args.get("request") or "").strip()
@@ -796,7 +929,8 @@ class Hub:
         return self._tasks.status(self._clock.now(), self._task_lines)
 
     def _task_lines(self, task_id: str) -> list[str]:
-        return self._subagents.lines(task_id) + self._waits.lines(task_id)
+        held = ["waiting for the usage limit to reset"] if any(d.task_id == task_id for d in self._deferred) else []
+        return held + self._subagents.lines(task_id) + self._waits.lines(task_id)
 
     def _has_pending(self, task_id: str) -> bool:
         return bool(self._subagents.live(task_id) or self._waits.live(task_id))

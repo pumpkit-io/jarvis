@@ -20,6 +20,7 @@ from jarvis_hub.agents.backend import (
     Usage,
 )
 from jarvis_hub.hub import WARM_UP, Hub, Line
+from jarvis_hub.limits import UsageLimit
 from jarvis_hub.voice.language import Lang
 from jarvis_hub.subagents import Refusal, Subagent, SubagentSetup
 from jarvis_hub.waits import WaitSetup
@@ -114,13 +115,20 @@ class Abort:
 
 
 @dataclass(frozen=True)
+class Limited:
+    """The usage limit ends the turn, resetting `seconds` from now (None: the event gave no time)."""
+
+    seconds: float | None = None
+
+
+@dataclass(frozen=True)
 class NoContext:
     """The turn ends without a context, for this reason."""
 
     reason: str
 
 
-Step = Wait | Text | Tool | AwaitInterrupt | Gate | Set | Fail | Raise | Abort | Usage | Context | NoContext
+Step = Wait | Text | Tool | AwaitInterrupt | Gate | Set | Fail | Raise | Abort | Limited | Usage | Context | NoContext
 
 
 @dataclass(frozen=True)
@@ -161,7 +169,7 @@ class FakeSession:
                 in_text = True
                 yield TextDelta(step.text)
                 continue
-            if in_text and isinstance(step, (Tool, Fail, Abort)):
+            if in_text and isinstance(step, (Tool, Fail, Abort, Limited)):
                 in_text = False
                 yield TextEnd()
             match step:
@@ -185,6 +193,10 @@ class FakeSession:
                     return
                 case Abort():
                     yield TurnEnd("interrupted", usage, context=context)
+                    return
+                case Limited(seconds):
+                    resets_at = None if seconds is None else self.backend.wall() + seconds
+                    yield TurnEnd("limited", usage, "the usage limit was reached", context, resets_at=resets_at)
                     return
                 case Usage():
                     usage = step
@@ -258,6 +270,10 @@ class FakeBackend:
         self.subagent_open_gate = subagent_open_gate
         self.subagent_close_gate = subagent_close_gate
 
+    def wall(self) -> float:
+        """Unix seconds for the Hub's usage limit: the fake clock, so a reset comes when a test advances it."""
+        return self.clock.now()
+
     async def open(self, spec: SessionSpec) -> FakeSession:
         if spec.role == "subagent":
             if self.subagent_open_gate is not None:
@@ -293,6 +309,11 @@ class FakeBackend:
         if message.startswith("<event source=\"hub\" reason=\"restart\""):
             return self.seed_reply
         return self.scripts.pop(0) if self.scripts else (Text("Very good, sir."),)
+
+
+def idle_limit(clock: FakeClock) -> UsageLimit:
+    """A usage limit that nothing has hit, for a Subagents built without a Hub."""
+    return UsageLimit(clock, clock.now, lambda role, opened: None, lambda roles, everyone: None)
 
 
 class RecordingOutput:
@@ -455,6 +476,7 @@ def make_hub(
         metrics=metrics,
         subagents=setup,
         waits=WaitSetup(org="pumpkit-io", runner=runner or StubRunner(), watch_limit=watch_limit),
+        wall=backend.wall,
         **options,
     )
 

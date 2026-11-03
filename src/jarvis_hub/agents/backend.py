@@ -104,13 +104,16 @@ class ToolCall:
 
 @dataclass(frozen=True)
 class TurnEnd:
-    outcome: Literal["completed", "interrupted", "failed"]
+    # "limited": the Max usage limit stopped the turn, so it was not answered and can be sent again after the reset.
+    outcome: Literal["completed", "interrupted", "failed", "limited"]
     usage: Usage = Usage()
     error: str | None = None
     # Left out when the backend could not tell, which never triggers a restart.
     context: Context | None = None
     # Why the context is left out, when the backend had a report but could not read the window from it.
     no_context: str | None = None
+    # With "limited": when the limit resets, as Unix seconds. Left out when the backend could not tell.
+    resets_at: float | None = None
 
 
 AgentEvent = TextDelta | TextEnd | ToolCall | TurnEnd

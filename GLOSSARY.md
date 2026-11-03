@@ -66,6 +66,10 @@ _Avoid_: poll, cron, heartbeat
 The User's preferences for how agents behave while doing work. The Orchestrator follows them and hands them to every Subagent.
 _Avoid_: orchestrator preferences, rules
 
+**Usage limit**:
+The Max subscription's cap on model use, which stops a session until its window resets. Jarvis says so with the reset time, holds the Orchestrator's Task and any new Subagent until then, and makes one Announcement when it resets.
+_Avoid_: rate limit, quota, billing limit
+
 ### Conversation
 
 **Wake word**:

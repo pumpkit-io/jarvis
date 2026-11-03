@@ -20,6 +20,7 @@ from jarvis_hub.agents.backend import (
     TurnEnd,
 )
 from jarvis_hub.config import Effort, Settings, is_effort
+from jarvis_hub.limits import UsageLimit
 from jarvis_hub.prompts import render
 from jarvis_hub.subagent_rules import BRANCH_KINDS, branch_name, check_choice, connector_check, slug
 
@@ -32,6 +33,9 @@ VOICE_TOOLS = ("mcp__plugin_voicemode_voicemode", "mcp__voicemode")
 TIME_LIMIT = 3600.0
 # How long a stopped Subagent has to end its turn before the Hub drops its session.
 STOP_GRACE = 10.0
+
+# What a Subagent stopped by the usage limit is told when it may go on.
+RESUME = "The usage limit has reset. Carry on from where you stopped."
 
 
 class SubagentClock(Protocol):
@@ -139,7 +143,8 @@ class SubagentSetup:
 
 
 class Subagents:
-    """The registry and runner. `on_end` hears of every Subagent that ends, `on_over_time` of each limit passed."""
+    """The registry and runner. `on_end` hears of every Subagent that ends, `on_over_time` of each limit passed, and
+    `on_turn` of each turn's result with its duration. While `limit` is active nothing new starts."""
 
     def __init__(
         self,
@@ -149,12 +154,16 @@ class Subagents:
         clock: SubagentClock,
         on_end: Callable[[Subagent], None],
         on_over_time: Callable[[Subagent], None],
+        on_turn: Callable[[Subagent, SessionSpec, TurnEnd, int], None],
+        limit: UsageLimit,
     ) -> None:
         self._setup = setup
         self._backend = backend
         self._clock = clock
         self._on_end = on_end
         self._on_over_time = on_over_time
+        self._on_turn = on_turn
+        self._limit = limit
         self._slots = asyncio.Semaphore(setup.cap)
         self._all: dict[str, Subagent] = {}
         self._ids = 0
@@ -194,11 +203,11 @@ class Subagents:
         return subagent
 
     def start(self, subagent: Subagent) -> SubagentState:
-        """Runs it now, or queues it behind the cap: which of the two it says."""
+        """Runs it now, or queues it behind the cap or the usage limit: which of the two it says."""
         ahead = [s for s in self._all.values() if s is not subagent and s.state not in FINISHED and s.started is None]
         running = [s for s in self._all.values() if s.state == "running"]
         self._runs.append(asyncio.create_task(self._run(subagent)))
-        return "queued" if len(running) + len(ahead) >= self._setup.cap else "running"
+        return "queued" if self._limit.active or len(running) + len(ahead) >= self._setup.cap else "running"
 
     def get(self, subagent_id: object) -> Subagent | None:
         return self._all.get(str(subagent_id).strip().upper()) if subagent_id else None
@@ -252,6 +261,7 @@ class Subagents:
         end, text = TurnEnd("interrupted"), ""
         held = False
         try:
+            await self._limit.wait_clear(subagent.stop)
             held = await self._take_slot(subagent)
             if held and not subagent.stop.is_set():
                 subagent.state, subagent.started = "running", self._clock.now()
@@ -289,7 +299,7 @@ class Subagents:
         session = await self._open(spec, subagent.stop)
         if session is None:
             return TurnEnd("interrupted"), ""
-        consuming = asyncio.create_task(self._consume(session, subagent.brief, log))
+        consuming = asyncio.create_task(self._consume(session, spec, subagent, log))
         stopping = asyncio.create_task(subagent.stop.wait())
         timing = asyncio.create_task(self._watch_time(subagent))
         try:
@@ -329,11 +339,28 @@ class Subagents:
             return None
         return session
 
-    async def _consume(self, session: AgentSession, brief: str, log: "_Log") -> tuple[TurnEnd, str]:
-        """The turn's end, and the text after its last tool call: the Subagent's report."""
+    async def _consume(
+        self, session: AgentSession, spec: SessionSpec, subagent: Subagent, log: "_Log"
+    ) -> tuple[TurnEnd, str]:
+        """The last turn's end, and the text after its last tool call: the Subagent's report. A turn the usage limit
+        stopped is sent again, as a request to carry on, once the limit has reset."""
+        message = subagent.brief
+        while True:
+            started = self._clock.now()
+            end, final = await self._turn(session, message, log)
+            self._on_turn(subagent, spec, end, round((self._clock.now() - started) * 1000))
+            if end.outcome != "limited":
+                return end, final
+            self._limit.hit("subagent", end.resets_at)
+            await self._limit.wait_clear(subagent.stop)
+            if subagent.stop.is_set():
+                return TurnEnd("interrupted"), ""
+            message = RESUME
+
+    async def _turn(self, session: AgentSession, message: str, log: "_Log") -> tuple[TurnEnd, str]:
         end = TurnEnd("failed", error="the session ended without a result")
         block, final = "", ""
-        async for event in session.send(brief):
+        async for event in session.send(message):
             match event:
                 case TextDelta(text):
                     block += text
@@ -346,7 +373,7 @@ class Subagents:
                     final = ""
                 case TurnEnd():
                     end = event
-        log.write("end", outcome=end.outcome, error=end.error, usage=asdict(end.usage))
+        log.write("end", outcome=end.outcome, error=end.error, usage=asdict(end.usage), resets_at=end.resets_at)
         return end, final.strip()
 
     async def _watch_time(self, subagent: Subagent) -> None:

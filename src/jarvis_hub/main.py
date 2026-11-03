@@ -25,6 +25,7 @@ from jarvis_hub.config import ConfigError, Settings, VoiceSettings, load_setting
 from jarvis_hub.hub import Clock, Hub, Line, Metrics, Output
 from jarvis_hub.orchestrator import orchestrator_spec
 from jarvis_hub.subagents import Subagent, SubagentSetup, subagent_session
+from jarvis_hub.stats import parse_when, read_rows, render, summarise
 from jarvis_hub.talker import talker_spec
 from jarvis_hub.voice import language
 from jarvis_hub.voice.engines import EngineChoice
@@ -378,13 +379,33 @@ def _ignored_in_text(error: str) -> None:
     sys.stderr.write(f"jarvis-hub: {error}; voice settings are not used with --text, so it is ignored.\n")
 
 
+def print_stats(settings: Settings, since: str | None, until: str | None, stdout: TextIO) -> None:
+    now = datetime.now(timezone.utc)
+    start = parse_when(since, now) if since else None
+    end = parse_when(until, now) if until else None
+    stats = summarise(read_rows(settings.runtime_dir / "metrics.jsonl"), start, end)
+    stdout.write(render(stats, start, end) + "\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="jarvis-hub", description="Run the Jarvis Hub.")
     parser.add_argument("--text", action="store_true", help="talk by typing, with no audio")
     parser.add_argument("--speak", action="store_true", help="with --text, also speak the replies aloud")
     parser.add_argument("--headphones", action="store_true", help="voice mode with echo cancellation off")
     parser.add_argument("--debug", action="store_true", help="show the voice state machine's transitions")
+    commands = parser.add_subparsers(dest="command", metavar="stats")
+    stats = commands.add_parser("stats", help="print usage and latency per role from the metrics log")
+    stats.add_argument("--since", help="start of the range: a time ago like 24h or 7d, or a date like 2026-11-01")
+    stats.add_argument("--until", help="end of the range, written like --since; default now")
     args = parser.parse_args()
+
+    if args.command == "stats":
+        try:
+            settings = load_settings(Path(__file__).resolve().parents[2], os.environ, ignore_voice=lambda error: None)
+            print_stats(settings, args.since, args.until, sys.stdout)
+        except (ConfigError, ValueError) as e:
+            sys.exit(f"jarvis-hub: {e}")
+        return
 
     voice = Mouth(KokoroSynthesizer(), SoundPlayer) if args.speak else None
     cli = shutil.which("claude")

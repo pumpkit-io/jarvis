@@ -23,6 +23,7 @@ from tests.fakes import (
     ToolResult,
     Typist,
     lines,
+    idle_limit,
     make_hub,
     subagent_spec,
     until,
@@ -609,6 +610,8 @@ async def test_two_spawns_in_flight_get_different_ids(
         clock=clock,
         on_end=lambda s: None,
         on_over_time=lambda s: None,
+        on_turn=lambda subagent, spec, end, ms: None,
+        limit=idle_limit(clock),
     )
     args = {"repo": "pumpkit", "title": "One", "brief": "b", "model": "haiku", "effort": "low", "writes": False}
     one, two = await asyncio.gather(
@@ -629,6 +632,8 @@ async def test_a_subagent_being_stopped_is_not_reported_over_time(clock: FakeClo
         clock=clock,
         on_end=ended.append,
         on_over_time=over.append,
+        on_turn=lambda subagent, spec, end, ms: None,
+        limit=idle_limit(clock),
     )
     args = {"repo": "pumpkit", "title": "T", "brief": "b", "model": "haiku", "effort": "low", "writes": True}
     subagent = await subagents.prepare("T1", args, [])
@@ -681,6 +686,8 @@ async def test_a_run_cut_off_at_close_still_releases_its_lock_and_ends(
         clock=clock,
         on_end=ended.append,
         on_over_time=lambda s: None,
+        on_turn=lambda subagent, spec, end, ms: None,
+        limit=idle_limit(clock),
     )
     args = {"repo": "pumpkit", "title": "T", "brief": "b", "model": "haiku", "effort": "low", "writes": True}
     subagent = await subagents.prepare("T1", args, [])
@@ -708,6 +715,8 @@ async def test_close_does_not_wait_forever_on_a_cancelled_run_whose_describe_han
         clock=clock,
         on_end=lambda s: None,
         on_over_time=lambda s: None,
+        on_turn=lambda subagent, spec, end, ms: None,
+        limit=idle_limit(clock),
     )
     args = {"repo": "pumpkit", "title": "T", "brief": "b", "model": "haiku", "effort": "low", "writes": True}
     subagent = await subagents.prepare("T1", args, [])

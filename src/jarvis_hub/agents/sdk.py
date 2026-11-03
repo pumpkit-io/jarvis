@@ -12,6 +12,7 @@ from claude_agent_sdk import (
     ClaudeSDKError,
     HookContext,
     HookMatcher,
+    RateLimitEvent,
     ResultMessage,
     SdkMcpTool,
     StreamEvent,
@@ -47,6 +48,7 @@ from jarvis_hub.agents.backend import (
 TOOL_SERVER = "jarvis"
 # How the CLI reports a turn stopped by interrupt(); is_error is set for these too, so it cannot tell them apart.
 INTERRUPTED_REASONS = {"aborted_streaming", "aborted_tools"}
+HTTP_TOO_MANY_REQUESTS = 429
 
 
 def _sdk_tool(hub_tool: HubTool) -> SdkMcpTool[Any]:
@@ -183,10 +185,13 @@ def _window(result: ResultMessage, model: str) -> int | None:
     return family[0]["contextWindow"] if len(family) == 1 else None
 
 
-def turn_end(result: ResultMessage, model: str, last_request: dict[str, Any] | None) -> TurnEnd:
+def turn_end(
+    result: ResultMessage, model: str, last_request: dict[str, Any] | None, rejected: RateLimitEvent | None = None
+) -> TurnEnd:
     """`last_request` is the usage of the turn's final model request: the context as that request saw it.
 
     The result's own usage adds up every request of the turn, which would count the prompt once per tool round.
+    `rejected` is the turn's last rate-limit event with status "rejected", which carries when the limit resets.
     """
     raw: dict[str, Any] = result.usage or {}
     usage = Usage(
@@ -205,6 +210,9 @@ def turn_end(result: ResultMessage, model: str, last_request: dict[str, Any] | N
             no_context = f"no single model_usage entry is {model!r}: {', '.join(sorted(result.model_usage))}"
     if result.terminal_reason in INTERRUPTED_REASONS:
         return TurnEnd("interrupted", usage, context=context, no_context=no_context)
+    if result.is_error and (rejected is not None or result.api_error_status == HTTP_TOO_MANY_REQUESTS):
+        resets_at = rejected.rate_limit_info.resets_at if rejected is not None else None
+        return TurnEnd("limited", usage, "the usage limit was reached", context, no_context, resets_at)
     if result.is_error:
         detail = "; ".join(result.errors or []) or result.result or result.subtype
         if result.api_error_status:
@@ -222,12 +230,15 @@ class SdkSession:
     async def send(self, message: str) -> AsyncIterator[AgentEvent]:
         blocks: dict[int, dict[str, Any]] = {}
         last_request: dict[str, Any] | None = None
+        rejected: RateLimitEvent | None = None
         try:
             await self._client.query(message)
             async for m in self._client.receive_response():
                 if isinstance(m, ResultMessage):
-                    yield turn_end(m, self._model, last_request)
+                    yield turn_end(m, self._model, last_request, rejected)
                     return
+                if isinstance(m, RateLimitEvent) and m.rate_limit_info.status == "rejected":
+                    rejected = m
                 if isinstance(m, SystemMessage) and m.subtype == "init" and isinstance(m.data.get("model"), str):
                     self._model = m.data["model"]
                 if not isinstance(m, StreamEvent) or m.parent_tool_use_id is not None:

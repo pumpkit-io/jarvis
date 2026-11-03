@@ -26,7 +26,7 @@ LINES: dict[ClipName, dict[Lang, str]] = {
     "startup": {"en": "At your service, sir.", "it": "Ai suoi ordini, signore."},
     "holding_line": {"en": "One moment, sir.", "it": "Un momento, signore."},
     "very_good": {"en": "Very good, sir.", "it": "Molto bene, signore."},
-    # The reset time is not known at startup; the usage-limit ticket says it after this line.
+    # The reset time is not known at startup; the Hub says it after this line.
     "usage_limit": {"en": "I've reached the usage limit, sir.", "it": "Ho raggiunto il limite di utilizzo, signore."},
 }
 
@@ -169,8 +169,9 @@ class Speech:
         self._loading = asyncio.get_running_loop().run_in_executor(self._thread, self._load)
         self._worker = asyncio.create_task(self._work(self._loading))
 
-    def say(self, name: ClipName, lang: Lang) -> None:
-        self._queue.put_nowait(_Cached(name, lang))
+    def say(self, name: ClipName, lang: Lang, *, in_reply: bool = False) -> None:
+        """Plays a cached line after what is queued; with `in_reply`, as the start of the reply `begin` opened."""
+        self._queue.put_nowait(_Cached(name, lang, self._reply if in_reply else None))
 
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None) -> None:
         """A new reply in `lang`. With `heard_at`, when the User's turn ended, the holding line covers a slow start.
