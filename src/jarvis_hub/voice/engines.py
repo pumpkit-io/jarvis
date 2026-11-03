@@ -47,6 +47,32 @@ class NoEchoCancellation:
         pass
 
 
+class ReferenceBuffer:
+    """What the speakers played, from the output thread to the capture thread. Keeps the latest `max_s` only, so a
+    capture thread that stalls neither grows it without bound nor feeds the APM a long-stale reference."""
+
+    def __init__(self, max_s: float = 0.5) -> None:
+        self._max_s = max_s
+        self._lock = threading.Lock()
+        self._blocks: deque[tuple[Samples, int]] = deque()
+        self._seconds = 0.0
+
+    def put(self, samples: Samples, rate: int) -> None:
+        with self._lock:
+            self._blocks.append((samples.copy(), rate))
+            self._seconds += len(samples) / rate
+            while self._seconds > self._max_s + 1e-9 and len(self._blocks) > 1:
+                dropped, dropped_rate = self._blocks.popleft()
+                self._seconds -= len(dropped) / dropped_rate
+
+    def take(self) -> list[tuple[Samples, int]]:
+        with self._lock:
+            blocks = list(self._blocks)
+            self._blocks.clear()
+            self._seconds = 0.0
+        return blocks
+
+
 class WebRtcEchoCancellation:
     """LiveKit's WebRTC audio processing: echo cancellation fed with every played sample, noise suppression and a
     high-pass filter, as Phase 0 measured it. The APM takes the 24 kHz reference as it is, in 10 ms frames."""
@@ -58,21 +84,16 @@ class WebRtcEchoCancellation:
         self._apm = rtc.AudioProcessingModule(
             echo_cancellation=True, noise_suppression=True, high_pass_filter=True, auto_gain_control=False
         )
-        self._lock = threading.Lock()
-        self._played: deque[tuple[Samples, int]] = deque()
+        self._played = ReferenceBuffer()
         self._pending = np.zeros(0, np.int16)
         self._rate = 0
 
     def reference(self, samples: Samples, rate: int) -> None:
-        with self._lock:
-            self._played.append((samples.copy(), rate))
+        self._played.put(samples, rate)
 
     def process(self, frame: Pcm) -> Pcm:
         # The APM is driven from this thread alone; the output thread only queues what it played.
-        with self._lock:
-            played = list(self._played)
-            self._played.clear()
-        for samples, rate in played:
+        for samples, rate in self._played.take():
             if rate != self._rate:
                 self._pending, self._rate = np.zeros(0, np.int16), rate
             pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16)

@@ -267,9 +267,17 @@ class Microphone:
             self._stream.close()
 
 
+# A real microphone never gives exact digital silence for this long; macOS gives it when access is denied.
+SILENT_MIC_S = 3.0
+
+
 class Capture:
     """The pipeline on a frame source, the microphone by default. Engines load and run on a thread of their own,
-    since MLX ties a model to the thread that loaded it; `ready` is set once they have loaded and frames flow."""
+    since MLX ties a model to the thread that loaded it; `ready` is set once they have loaded and frames flow.
+
+    Frames wait at most `backlog_s` for that thread; past it they are dropped, so a slow engine costs audio, not
+    an ever later Wake word and a growing queue.
+    """
 
     def __init__(
         self,
@@ -278,6 +286,7 @@ class Capture:
         record: Callable[[dict[str, Any]], None],
         notice: Callable[[str], None],
         source: FrameSource | None = None,
+        backlog_s: float = 2.0,
     ) -> None:
         self._load = load
         self._settings = settings
@@ -286,10 +295,18 @@ class Capture:
         self._source: FrameSource = source if source is not None else Microphone()
         # Frames and capture switches in the order they happened; None stops the thread.
         self._frames: queue.SimpleQueue[tuple[Pcm, float] | bool | None] = queue.SimpleQueue()
+        self._max_backlog = round(backlog_s * 100)
+        self._backlog = 0
+        self._behind = False
+        self._backlog_lock = threading.Lock()
         self._events: asyncio.Queue[InputEvent] = asyncio.Queue()
         self._loop: asyncio.AbstractEventLoop | None = None
+        # Held while the source opens or closes, so a close during loading cannot leave it open.
+        self._source_lock = threading.Lock()
+        self._closed = False
+        # Set once the source is open; until then, and after close, nothing is captured to cancel echo from.
+        self._echo: EchoCanceller | None = None
         self.ready = threading.Event()
-        self.engines: Engines | None = None
 
     def start(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -299,28 +316,44 @@ class Capture:
         self._frames.put(on)
 
     def reference(self, samples: Samples, rate: int) -> None:
-        # What plays before the engines load has no capture to cancel it from.
-        if (engines := self.engines) is not None:
-            engines.echo.reference(samples, rate)
+        if (echo := self._echo) is not None:
+            echo.reference(samples, rate)
 
     async def events(self) -> AsyncIterator[InputEvent]:
         while True:
             yield await self._events.get()
 
     def close(self) -> None:
+        with self._source_lock:
+            self._closed = True
+            self._echo = None
+            self._source.close()
         self._frames.put(None)
-        self._source.close()
 
     def _on_loop(self, fn: Callable[[Any], None], arg: Any) -> None:
         """Runs `fn` on the event loop's thread, where the Hub's metrics and screen live."""
         assert self._loop is not None
         self._loop.call_soon_threadsafe(fn, arg)
 
+    def _push(self, frame: Pcm, at: float) -> None:
+        with self._backlog_lock:
+            if self._backlog >= self._max_backlog:
+                if not self._behind:
+                    self._behind = True
+                    self._on_loop(self._notice, "Listening is falling behind the microphone: dropping audio.")
+                return
+            self._backlog += 1
+        self._frames.put((frame, at))
+
     def _run(self) -> None:
         began = time.perf_counter()
         try:
-            self.engines = engines = self._load()
-            self._source.open(lambda frame, at: self._frames.put((frame, at)))
+            engines = self._load()
+            with self._source_lock:
+                if self._closed:
+                    return
+                self._source.open(self._push)
+                self._echo = engines.echo
         except Exception as e:
             self._on_loop(self._notice, f"Listening is off: {type(e).__name__}: {e}")
             return
@@ -328,10 +361,20 @@ class Capture:
         self.ready.set()
         self._on_loop(self._record, {"kind": "ears_loaded", "load_ms": round((time.perf_counter() - began) * 1000)})
         self._on_loop(self._notice, 'Listening for "Hey Jarvis".')
+        silent = 0
         while (item := self._frames.get()) is not None:
             if isinstance(item, bool):
                 pipeline.capture(item)
                 continue
+            with self._backlog_lock:
+                self._backlog -= 1
+            silent = silent + 1 if not item[0].any() else 0
+            if silent == round(SILENT_MIC_S * 100):
+                self._on_loop(
+                    self._notice,
+                    "The microphone gives only silence. If macOS has not allowed it, turn on your terminal app in "
+                    "System Settings > Privacy & Security > Microphone, then restart Jarvis.",
+                )
             try:
                 events = pipeline.push(*item)
             except Exception as e:
