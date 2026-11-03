@@ -1,0 +1,218 @@
+claude-agent-sdk 0.2.177, CLI /Users/fpaolileonardi/.local/bin/claude
+{
+  "subscription": {
+    "apiKeySource": "none",
+    "rate_limit_events": [
+      {
+        "status": "allowed",
+        "resetsAt": 1793721000,
+        "rateLimitType": "five_hour",
+        "overageStatus": "rejected",
+        "overageDisabledReason": "out_of_credits",
+        "isUsingOverage": false,
+        "unifiedWindows": {
+          "five_hour": {
+            "utilization": 0.17,
+            "resetsAt": 1793721000,
+            "status": "allowed"
+          },
+          "seven_day": {
+            "utilization": 0.73,
+            "resetsAt": 1794052800,
+            "status": "allowed"
+          }
+        }
+      }
+    ],
+    "total_cost_usd_reported": 0.0023229,
+    "account": {
+      "email": "<redacted>",
+      "organization": "<redacted>",
+      "subscriptionType": "Claude Max",
+      "apiProvider": "firstParty"
+    }
+  },
+  "two_turn": {
+    "turn2_reply": "42",
+    "same_session": true
+  },
+  "stream_deltas": {
+    "count": 4,
+    "first": [
+      "Got it,",
+      " I'll remember the",
+      " number 41."
+    ]
+  },
+  "init_default_tools_empty": {
+    "tools": [],
+    "mcp_servers": [],
+    "skills": [
+      "deep-research",
+      "design",
+      "design-sync",
+      "dataviz",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "send-to-project",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-privacy",
+        "path": "builtin",
+        "source": "cc-plugin-privacy@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "slash_commands_n": 56,
+    "agents": [
+      "claude",
+      "Explore",
+      "general-purpose",
+      "Plan",
+      "statusline-setup"
+    ],
+    "model": "claude-haiku-5-5",
+    "claude_code_version": "2.1.317"
+  },
+  "interrupt": {
+    "chars_before_result": 89,
+    "last_line_seen": "33",
+    "interrupt_to_result_ms": 10,
+    "result_subtype": "error_during_execution",
+    "terminal_reason": "aborted_streaming",
+    "next_turn_reply": "READY"
+  },
+  "system_prompt_string": {
+    "reply": "Zorblax",
+    "usage": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 900,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 7,
+      "output_tokens_details": {
+        "thinking_tokens": 0
+      },
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 900,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "global",
+      "iterations": [
+        {
+          "input_tokens": 2,
+          "output_tokens": 7,
+          "cache_read_input_tokens": 0,
+          "cache_creation_input_tokens": 900,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 900
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+    }
+  },
+  "setting_sources": {
+    "empty": {
+      "plugins": [
+        "cc-plugin-agents-md",
+        "cc-plugin-telemetry",
+        "cc-plugin-privacy",
+        "cc-plugin-plugin-authoring"
+      ],
+      "skills_n": 20,
+      "mcp_servers": [],
+      "slash_commands_n": 56,
+      "hook_events": [],
+      "input_plus_cache_tokens": 879
+    },
+    "omitted": {
+      "plugins": [
+        "swift-lsp",
+        "pyright-lsp",
+        "playwright-skill",
+        "sdlc-spec-toolkit",
+        "sdlc",
+        "voicemode",
+        "cc-plugin-agents-md",
+        "cc-plugin-telemetry",
+        "cc-plugin-privacy",
+        "cc-plugin-plugin-authoring"
+      ],
+      "skills_n": 76,
+      "mcp_servers": [
+        "plugin:voicemode:voicemode",
+        "digitalocean",
+        "posthog",
+        "pumpkit",
+        "claude.ai Claude Docs",
+        "claude.ai Pumpkit",
+        "claude.ai Google Drive",
+        "claude.ai Gmail",
+        "claude.ai Google Calendar"
+      ],
+      "slash_commands_n": 119,
+      "hook_events": [
+        "hook_started",
+        "hook_progress",
+        "hook_response",
+        "hook_started",
+        "hook_response"
+      ],
+      "input_plus_cache_tokens": 66222
+    }
+  },
+  "in_process_tool": {
+    "handler_calls": [
+      {
+        "name": "Ada"
+      }
+    ],
+    "reply": "The code for Ada is **7319**.",
+    "tool_uses": [
+      "mcp__jarvis__lookup_code"
+    ]
+  },
+  "tools_empty_plus_mcp": {
+    "init_tools": [
+      "mcp__jarvis__lookup_code"
+    ],
+    "shell_probe_reply": "NO_SHELL",
+    "shell_probe_tool_uses": []
+  }
+}
