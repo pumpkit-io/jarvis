@@ -542,6 +542,7 @@ async def test_a_wake_cuts_unheard_news_and_the_news_after_it_still_plays(rig_fo
     await arrive(rig, arrivals[0])
     await until(lambda: rig.output.replies[-1:] == [NEWS])
     await arrive(rig, arrivals[1])
+    await rig.advance(1)
     rig.audio.wake()
     await until(lambda: rig.state == "listening")
     rig.tts.hold.set()
@@ -747,3 +748,18 @@ async def test_news_from_a_check_that_comes_due_mid_exchange_waits_until_jarvis_
     await until(lambda: "Ada has approved it, sir." in rig.player.texts and rig.state == "follow_up")
     assert spoken(rig)[-2:] == ["Green, sir.", "Ada has approved it, sir."]
     assert rig.states()[-3:] == ["idle", "announce", "follow_up"]
+
+
+async def test_news_while_idle_chimes_then_says_its_sentence_and_listens_briefly(rig_for: MakeRig) -> None:
+    rig, [arrival] = await news_rig(rig_for, [Text(NEWS)])
+    rig.player.clips.clear()
+
+    await arrive(rig, arrival)
+    await until(lambda: NEWS in rig.player.texts and rig.state == "follow_up")
+
+    assert rig.player.voices[:2] == ["chime", "am_liam"]
+    assert rig.player.texts[:2] == ["", NEWS]
+    await rig.advance(3.9)
+    assert rig.state == "follow_up"
+    await rig.advance(0.1)
+    assert rig.state == "idle"

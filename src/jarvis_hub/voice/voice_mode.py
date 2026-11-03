@@ -175,7 +175,10 @@ class VoiceMode:
         """
         if self._voice.state != "idle":
             return False
-        self._step(AnnouncementBegins(self._clock.now()))
+        for action in self._step(AnnouncementBegins(self._clock.now())):
+            if isinstance(action, Chime):
+                # Queued now, so it plays ahead of the news turn's first sentence.
+                self._speech.say("chime", "en")
         return True
 
     async def close(self) -> None:
