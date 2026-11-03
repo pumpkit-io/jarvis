@@ -311,7 +311,7 @@ def compile_helper() -> Path | None:
     return helper
 
 
-def play_and_record(ref: np.ndarray, cues: list[float], mic: int | None = None) -> np.ndarray:
+def play_and_record(ref: np.ndarray, cues: list[float], mic: int | None = None, speaker: int | None = None) -> np.ndarray:
     """Play `ref` and record the mic on one duplex stream, showing each cue on the clock of the speaker output."""
     rec = np.zeros(len(ref), np.float32)
     pos, clock = 0, {}
@@ -333,7 +333,7 @@ def play_and_record(ref: np.ndarray, cues: list[float], mic: int | None = None) 
         if pos >= len(ref):
             raise sd.CallbackStop
 
-    with sd.Stream(samplerate=PLAY_SR, channels=1, dtype="float32", device=(mic, None), callback=callback,
+    with sd.Stream(samplerate=PLAY_SR, channels=1, dtype="float32", device=(mic, speaker), callback=callback,
                    finished_callback=done.set):
         if not started.wait(5):
             sys.exit("  the audio stream never started: check the built-in speakers and microphone access.")
@@ -394,30 +394,46 @@ def builtin_mic() -> int | None:
     return None
 
 
+def refresh_devices() -> None:
+    """Make PortAudio see the devices connected or removed since it started: it reads the list once per initialisation."""
+    sd._terminate()
+    sd._initialize()
+
+
+def headphones_devices() -> tuple[int | None, int] | None:
+    """The built-in mic and the current default output, or None while the default output is still the built-in speakers."""
+    refresh_devices()
+    output = sd.query_devices(kind="output")
+    print(f"  output: {output['name']}")
+    if "MacBook" in output["name"]:
+        return None
+    return builtin_mic(), output["index"]
+
+
 def headphones(redo: bool) -> None:
     run = RECORDINGS / "headphones-run"
     if (run / "mic.wav").exists() and not redo:
         return
     say("Headphones, optional, under 3 minutes. Jarvis plays the same lines through headphones, with no echo cancellation,\n"
         "and the built-in mic records. As before: silent for the first half, then say the words shown, over Jarvis.")
+    ref = jarvis_reference()
+    cues = cue_times(len(ref) / PLAY_SR)
     while True:
         if wait_enter("Put them on, then Enter. No headphones to hand: type s and Enter.") == "s":
             return
-        output = sd.query_devices(kind="output")["name"]
-        print(f"  output: {output}")
-        if "MacBook" not in output:
+        devices = headphones_devices()
+        if devices:
             break
         loud("Sound still goes to the built-in speakers. Connect the headphones, or pick them in the menu bar's sound menu.")
-    ref = jarvis_reference()
-    cues = cue_times(len(ref) / PLAY_SR)
+    mic, phones = devices
     try:
-        rec = play_and_record(ref, cues, mic=builtin_mic())
+        rec = play_and_record(ref, cues, mic=mic, speaker=phones)
+        (run / "segments.json").write_text(json.dumps(save_run(run, ref, rec, cues)))
     except sd.PortAudioError as err:
         loud(f"The headphones run FAILED ({err}); the speaker numbers still stand.")
-        return
-    (run / "segments.json").write_text(json.dumps(save_run(run, ref, rec, cues)))
-    say("Done. Take the headphones off and disconnect them: the room step plays its video on the built-in speakers.")
+    say("Take the headphones off and disconnect them: the room step plays its video on the built-in speakers.")
     wait_enter()
+    refresh_devices()
 
 
 def room_chunks_todo(folder: Path, redo: bool) -> list[int]:
@@ -514,11 +530,11 @@ def start_turbo_server() -> subprocess.Popen | None:
         raise
 
 
-def benches(recordings: Path) -> list[list[str]]:
-    """The analysis commands, with the headphones run only when the User recorded it."""
+def benches(recordings: Path, turbo_pid: int | None = None) -> list[list[str]]:
+    """The analysis commands, with the headphones run only when the User recorded it and :2023 only as the session's server."""
     run, phones = recordings / "speaker-run", recordings / "headphones-run"
     cmds = [
-        ["bench_stt.py", "--source", "recordings"],
+        ["bench_stt.py", "--source", "recordings"] + (["--turbo-pid", str(turbo_pid)] if turbo_pid else []),
         ["bench_lang.py", "--source", "recordings"],
         ["bench_wake.py", "recall", "--source", "recordings"],
         ["bench_wake.py", "false-accepts", f"{run}/video.wav", "--name", "false-accepts-video"],
@@ -555,7 +571,7 @@ def analyse() -> None:
     try:
         turbo = start_turbo_server()
         with log.open("w") as out:
-            for cmd in benches(RECORDINGS):
+            for cmd in benches(RECORDINGS, turbo.pid if turbo else None):
                 print(f"  $ {' '.join(cmd)}", flush=True)
                 code = run_bench([sys.executable, str(HERE / cmd[0])] + cmd[1:], out, BENCH_TIMEOUT_S)
                 if code is None:
