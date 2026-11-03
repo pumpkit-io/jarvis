@@ -102,7 +102,6 @@ def main() -> None:
         "claude_processes_seen": claudes, "claude_median_footprint_mb": per_claude,
         "audio_stack_footprint_mb": audio, "budget_mb": BUDGET_MB,
         "within_budget": audio is not None and audio <= BUDGET_MB,
-        "audio_plus_three_claude_mb": round(audio + 3 * per_claude) if audio and per_claude else None,
         "machine_total_mb": round(psutil.virtual_memory().total / 2**20),
     }
     print(json.dumps({k: v for k, v in result.items() if k != "claude_processes_seen"}, indent=2))

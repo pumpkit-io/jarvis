@@ -21,7 +21,9 @@ os.environ["JARVIS_AUDIO_RESULTS"] = str(SCRATCH / "results")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import bench_aec  # noqa: E402
+import bench_claude_idle  # noqa: E402
 import bench_smart_turn  # noqa: E402
+import bench_stt  # noqa: E402
 import bench_wake  # noqa: E402
 import common  # noqa: E402
 import report  # noqa: E402
@@ -256,6 +258,26 @@ def test_a_barge_in_counts_only_speech_the_same_jarvis_audio_did_not_already_tri
     assert out == {"user_barge_ins_detected": "1/2", "matching_jarvis_span_triggered": "1/2"}
 
 
+def test_a_pause_of_exactly_the_vad_silence_is_cut_and_scored_alike():
+    folder = SCRATCH / "pauses-boundary"
+    common.save_16k(folder / "p_en01.wav", tone(200, 2.0, SR))
+    saved = bench_smart_turn.find_pause
+    try:
+        # 0.57 - 0.07 is 0.49999999999999994 in floating point, yet the pause is 500 ms long.
+        bench_smart_turn.find_pause = lambda audio: (0.07, 0.57)
+        cut, _, pauses = bench_smart_turn.pause_turns(folder)
+    finally:
+        bench_smart_turn.find_pause = saved
+    assert set(cut) == {"p_en01"} and pauses == {"p_en01": 0.5}
+    out = bench_smart_turn.end_of_turn({"a": 0.9}, {"p_en01": 0.8}, pauses, infer_ms=15)
+    assert out["premature_cuts"]["smart_turn"] == "1/1"
+
+
+def test_a_pause_long_enough_but_without_a_verdict_is_not_read_as_one():
+    out = bench_smart_turn.end_of_turn({"a": 0.9}, {}, {"x": 0.6}, infer_ms=15)
+    assert out["premature_cuts"]["smart_turn"] == "0/1"
+
+
 def test_smart_turn_hears_the_turn_up_to_half_a_second_into_the_silence():
     rng = np.random.default_rng(0)
     room_tone = rng.normal(0, 0.002, int(0.8 * SR)).astype(np.float32)
@@ -355,6 +377,54 @@ def test_an_orphan_on_the_turbo_port_is_named_and_not_measured():
     assert f"pid {os.getpid()}" in said.getvalue()
 
 
+def test_the_turbo_port_is_measured_only_when_it_is_the_server_the_session_started():
+    assert "nothing" in bench_stt.server_skip("server-2023", listener_pid=None, turbo_pid=None)
+    assert "not started by the session" in bench_stt.server_skip("server-2023", listener_pid=999, turbo_pid=None)
+    assert "999" in bench_stt.server_skip("server-2023", listener_pid=999, turbo_pid=123)
+    assert bench_stt.server_skip("server-2023", listener_pid=123, turbo_pid=123) is None
+    assert bench_stt.server_skip("server-2022", listener_pid=555, turbo_pid=None) is None
+    stt_cmd = session.benches(SCRATCH / "benches", turbo_pid=123)[0]
+    assert stt_cmd[0] == "bench_stt.py" and stt_cmd[-2:] == ["--turbo-pid", "123"]
+    assert "--turbo-pid" not in session.benches(SCRATCH / "benches")[0]
+
+
+def run_stt_session(turbo_pid: int, port: int) -> tuple[int, str]:
+    """Run bench_stt's parent with one stub engine; the parent starts this stub as its child process, which sees a real listener on `port`."""
+    stub = SCRATCH / "stt-stub"
+    stub.mkdir(exist_ok=True)
+    here = Path(__file__).resolve().parent
+    (stub / "bench_stt.py").write_text(
+        f"import sys\nsys.path.insert(0, {str(here)!r})\nimport bench_stt\n"
+        f"import pathlib\nbench_stt.HERE = pathlib.Path(__file__).resolve().parent\n"
+        f"bench_stt.ENGINES = ['server-2023']\nbench_stt.SERVER_PORTS = {{'server-2023': {port}}}\n"
+        "bench_stt.run_engine = lambda engine, source: {'engine': engine, 'source': source, 'clips': {}}\n"
+        "bench_stt.main()\n")
+    (SCRATCH / "results" / "stt-server-2023-synthetic.json").unlink(missing_ok=True)
+    done = subprocess.run([sys.executable, str(stub / "bench_stt.py"), "--turbo-pid", str(turbo_pid)],
+                          capture_output=True, text=True, env={**os.environ, "JARVIS_AUDIO_RESULTS": str(SCRATCH / "results")})
+    return done.returncode, done.stdout + done.stderr
+
+
+def test_a_full_stt_run_hands_the_turbo_pid_to_the_child_that_measures_it():
+    server, port = serve(200)
+    try:
+        code, said = run_stt_session(turbo_pid=os.getpid(), port=port)
+    finally:
+        server.shutdown()
+    assert code == 0, said
+    assert (SCRATCH / "results" / "stt-server-2023-synthetic.json").exists(), said
+
+
+def test_a_turbo_row_the_session_expected_but_skipped_fails_the_run():
+    server, port = serve(200)
+    try:
+        code, said = run_stt_session(turbo_pid=os.getpid() + 1, port=port)
+    finally:
+        server.shutdown()
+    assert code != 0 and "server-2023" in said
+    assert not (SCRATCH / "results" / "stt-server-2023-synthetic.json").exists()
+
+
 def test_a_bench_that_hangs_is_stopped_with_everything_it_started():
     child = SCRATCH / "bench-child.pid"
     script = f"import subprocess, time; p = subprocess.Popen(['sleep', '60']); open({str(child)!r}, 'w').write(str(p.pid)); time.sleep(60)"
@@ -369,11 +439,80 @@ def test_a_bench_that_hangs_is_stopped_with_everything_it_started():
         assert session.run_bench([sys.executable, "-c", "raise SystemExit(4)"], log, timeout_s=10) == 4
 
 
+def test_a_failed_claude_spawn_still_ends_the_sessions_already_started_with_their_children():
+    bin_dir, child = SCRATCH / "claude-bin", SCRATCH / "claude-child.pid"
+    bin_dir.mkdir()
+    # Stands in for `claude` and an MCP server it starts, one that ignores the hangup when the session's pty closes.
+    (bin_dir / "claude").write_text(f"#!/bin/sh\ntrap '' HUP\nsleep 60 &\necho $! > {child}\nexec sleep 60\n")
+    (bin_dir / "claude").chmod(0o755)
+    real_spawn, spawned = bench_claude_idle.spawn, []
+
+    def spawn_once(cwd):
+        if spawned:
+            raise OSError("out of ptys")
+        spawned.append(real_spawn(cwd))
+        deadline = time.monotonic() + 10
+        while not child.exists() or not child.read_text().strip():
+            assert time.monotonic() < deadline, "the stub session never started its child"
+            time.sleep(0.05)
+        return spawned[0]
+
+    saved = os.environ["PATH"]
+    try:
+        os.environ["PATH"] = f"{bin_dir}:{saved}"
+        bench_claude_idle.spawn = spawn_once
+        bench_claude_idle.idle_footprints(SCRATCH, settle_s=0)
+    except OSError:
+        pass
+    else:
+        raise AssertionError("expected the failed spawn to propagate")
+    finally:
+        bench_claude_idle.spawn, os.environ["PATH"] = real_spawn, saved
+    time.sleep(0.2)
+    for pid in (spawned[0][0], int(child.read_text())):
+        assert subprocess.run(["kill", "-0", str(pid)], capture_output=True).returncode != 0, f"{pid} still running"
+
+
 def test_the_headphones_run_is_analysed_only_when_it_was_recorded():
     recordings = SCRATCH / "benches"
     assert not any("headphones-run" in " ".join(cmd) for cmd in session.benches(recordings))
     common.save_16k(recordings / "headphones-run" / "mic.wav", tone(300, 1, SR))
     assert any(cmd[:2] == ["bench_aec.py", "analyse"] and cmd[2].endswith("headphones-run") for cmd in session.benches(recordings))
+
+
+class FakePortAudio:
+    """sounddevice as PortAudio sees it: the device list is read once per initialisation."""
+
+    def __init__(self, *device_lists):
+        self.lists, self.now = list(device_lists), device_lists[0]
+
+    def _terminate(self):
+        pass
+
+    def _initialize(self):
+        self.now = self.lists.pop(1) if len(self.lists) > 1 else self.now
+
+    def query_devices(self, kind=None):
+        if kind == "output":
+            return self.now[self.now["default_output"]]
+        return [d for k, d in self.now.items() if k != "default_output"]
+
+
+def device(index: int, name: str, inputs: int, outputs: int) -> dict:
+    return {"index": index, "name": name, "max_input_channels": inputs, "max_output_channels": outputs}
+
+
+def test_headphones_connected_after_start_are_found_and_played_to():
+    at_start = {0: device(0, "MacBook Pro Microphone", 1, 0), 1: device(1, "MacBook Pro Speakers", 0, 2), "default_output": 1}
+    plugged = {0: device(0, "AirPods Pro", 1, 2), 1: device(1, "MacBook Pro Microphone", 1, 0),
+               2: device(2, "MacBook Pro Speakers", 0, 2), "default_output": 0}
+    saved = session.sd
+    try:
+        session.sd = FakePortAudio(at_start, at_start, plugged)
+        assert session.headphones_devices() is None
+        assert session.headphones_devices() == (1, 0)
+    finally:
+        session.sd = saved
 
 
 def test_report_replaces_its_block_instead_of_adding_another():
