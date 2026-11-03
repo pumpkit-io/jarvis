@@ -200,12 +200,12 @@ async def test_a_read_only_worktree_is_kept_when_discard_cannot_check_its_commit
 ) -> None:
     workspace = GitWorkspace("pumpkit-io", clone.parent, SCRIPT)
     path = await workspace.scratch(clone, "read-what-changed", "jarvis S1 (T1): What changed")
-    real_git = workspace_module._git
+    real_git = getattr(workspace_module, "_git")
 
     async def log_fails(repo: Path, *args: str) -> tuple[int, str, str]:
         return (128, "", "fatal: bad object") if args[:1] == ("log",) else await real_git(repo, *args)
 
-    monkeypatch.setattr(workspace_module, "_git", log_fails)
+    monkeypatch.setattr(workspace_module, "_git", log_fails)  # pyright: ignore[reportPrivateUsage]
 
     kept = await workspace.discard(path)
 
