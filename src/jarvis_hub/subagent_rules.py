@@ -20,8 +20,12 @@ ON_REQUEST: dict[Effort, re.Pattern[str]] = {
     ),
 }
 
-# A negation earlier in the same clause turns the request around: "don't use xhigh", "non usare sforzo massimo".
-NEGATION = re.compile(r"\b(don['\u2019]?t|do\s+not|never|no|not|without|non|senza|mai)\b", re.IGNORECASE)
+# Any negating or avoiding word in the clause that holds the effort phrase denies it, so an unrecognised refusal fails closed.
+NEGATION = re.compile(
+    r"\b(don['\u2019]?t|do\s+not|never|no|not|without|avoid|skip|instead\s+of|rather\s+than|except"
+    r"|non|senza|mai|niente|nessun[oa]?|evita|evitare|invece\s+di|piuttosto\s+che|tranne)\b",
+    re.IGNORECASE,
+)
 CLAUSE_END = re.compile(r"[.,;:!?\n]")
 
 # Pumpkit's tools that only read, under both names it reaches a session by: the claude.ai connector of the User's
@@ -43,9 +47,11 @@ def asked_effort(user_words: Sequence[str]) -> Effort | None:
 
 
 def _requests(pattern: re.Pattern[str], words: str) -> bool:
-    """Whether the words match the pattern somewhere that no negation in the same clause precedes."""
+    """Whether the words match the pattern somewhere in a clause that holds no negation."""
     for match in pattern.finditer(words):
-        clause = CLAUSE_END.split(words[: match.start()])[-1]
+        start = max((m.end() for m in CLAUSE_END.finditer(words, 0, match.start())), default=0)
+        end = CLAUSE_END.search(words, match.end())
+        clause = words[start : end.start() if end else len(words)]
         if not NEGATION.search(clause):
             return True
     return False
