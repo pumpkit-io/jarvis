@@ -221,9 +221,8 @@ def step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Action
         case Heard(text, lang, at):
             return _heard(voice, text, lang, at, timing)
         case ReplyAudio(_, answers):
-            if voice.state == "idle":
-                return replace(voice, state="announce", deadline=None), []
-            if voice.state == "follow_up" or (voice.state == "thinking" and answers == voice.awaiting):
+            # Only a spoken turn's reply moves on here: news has already claimed the voice with AnnouncementBegins.
+            if voice.state == "thinking" and answers == voice.awaiting:
                 return replace(voice, state="speaking", deadline=None), []
             return voice, []
         case ReplyDone(at, answers):

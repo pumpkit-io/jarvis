@@ -228,8 +228,8 @@ def test_audio_that_starts_while_the_user_has_the_floor_keeps_listening() -> Non
     assert voice.state == "listening"
 
 
-def test_a_reply_that_starts_while_idle_is_an_announcement_with_a_shorter_window() -> None:
-    voice, _ = run(ReplyAudio(10.0))
+def test_an_announcement_has_a_shorter_follow_up_window() -> None:
+    voice, _ = run(AnnouncementBegins(10.0), ReplyAudio(10.5))
     assert voice.state == "announce"
     voice, _ = run(ReplyDone(12.0), Tick(15.9), start=voice)
     assert voice.state == "follow_up"
@@ -258,7 +258,7 @@ def test_the_language_of_the_turn_carries_through_unknown() -> None:
 
 
 def test_end_conversation_during_an_announcement_idles_once_it_has_played() -> None:
-    voice, _ = run(ReplyAudio(10.0), EndConversation(10.5), ReplyDone(12.0))
+    voice, _ = run(AnnouncementBegins(10.0), EndConversation(10.5), ReplyDone(12.0))
     assert voice.state == "idle"
     # The User's next exchange gets its Follow-up window.
     voice, _ = run(WakeWord(30.0), Heard("Hi", "en", 31.0), ReplyDone(32.0, 31.0), start=voice)
@@ -337,3 +337,9 @@ def test_an_announcement_begun_while_idle_is_one_the_wake_word_interrupts() -> N
 def test_an_announcement_begins_only_from_idle(state: VoiceState) -> None:
     voice = Voice(state=state)
     assert step(voice, AnnouncementBegins(10.0), TIMING) == (voice, [])
+
+
+@pytest.mark.parametrize("state", ["idle", "follow_up"])
+def test_reply_audio_outside_a_spoken_turn_or_announcement_changes_nothing(state: VoiceState) -> None:
+    voice = Voice(state=state, deadline=20.0 if state == "follow_up" else None)
+    assert step(voice, ReplyAudio(10.0), TIMING) == (voice, [])
