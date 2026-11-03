@@ -1,4 +1,4 @@
-# Recordings, synthetic clips and anything transcribed from the User stay local; results/ holds numbers only.
+# Recordings, synthetic clips and anything transcribed from the User stay local; results/ holds numbers and transcripts of synthetic speech only.
 data/
 .venv/
 __pycache__/

@@ -130,27 +130,27 @@ Dry run on the User's VoiceMode logs from 2026-11-01: 26 turns, end of speech to
 
 ## Audio
 
-Ticket #5, first pass run on 2026-11-03 on the User's MacBook Pro (Apple M3 Pro, 18 GB), without the User. Every number here comes from synthetic speech: macOS `say` voices reading the same 30 clips and 40 Wake word takes the User will record (`spikes/audio/corpus.py`), plus public audiobooks for false accepts. Synthetic speech is clean and evenly paced, so it proves the pipelines and gives speed and memory, but **accuracy on the User's voice, Wake word recall, echo on the real speakers and Smart Turn on real pauses wait on the recording session**. Leaders named below are provisional unless the criterion doesn't depend on the User's voice.
+Ticket #5, first pass run on 2026-11-03 on the User's MacBook Pro (Apple M3 Pro, 18 GB), without the User. Every number here comes from synthetic speech: macOS `say` voices reading the same 30 clips, 12 pause takes and four Wake word phrasings the User will record (`spikes/audio/corpus.py`; 10 synthetic takes per phrasing, where the User records 20), plus public audiobooks for false accepts. Synthetic speech is clean and evenly paced, so it proves the pipelines and gives speed and memory, but **accuracy on the User's voice, Wake word recall, echo on the real speakers and Smart Turn on real pauses wait on the recording session**. Leaders named below are provisional unless the criterion doesn't depend on the User's voice.
 
 **Results:** every number in this section is in `spikes/audio/results/` (tracked, numbers and synthetic transcripts only), and `uv run summarise.py` from `spikes/audio/` prints them all. The User's recordings and anything transcribed from them stay in `spikes/audio/data/` (gitignored). A few facts come from outside those files and are marked *(not in the results)*.
 
 **Versions:** Python 3.12 via `uv` (3.12 because `kokoro-mlx` requires `<3.13`); package versions are pinned in `spikes/audio/uv.lock` (`parakeet-mlx` 0.6.0, `mlx` 0.32.4, `kokoro-mlx` 0.1.4, `openwakeword` 0.6.0 among them). VoiceMode's services: whisper.cpp server on :2022 running `ggml-small.bin` and Kokoro-FastAPI on :8880 (their versions are *not in the results*). Models: `mlx-community/parakeet-tdt-0.6b-v3`, `mlx-community/whisper-large-v3-turbo`, `ggml-large-v3-turbo.bin`, `mlx-community/Kokoro-82M-bf16`, openWakeWord `hey_jarvis_v0.1`, `pipecat-ai/smart-turn-v3` (`v3.2-cpu` and `v3.0`).
 
-Scripts: `spikes/audio/` (`uv run <script>` from there). `make_synthetic.py` renders the corpus; `bench_stt.py`, `bench_lang.py`, `bench_tts.py`, `bench_wake.py`, `bench_aec.py`, `bench_smart_turn.py`, `bench_memory.py` measure; `session.py` is the recording session; `report.py` writes its results here; `test_session.py` checks the session kit without a mic. The synthetic clips were resampled from `say`'s 22.05 kHz output by linear interpolation; the scripts now use `scipy`'s `resample_poly`, so a rerun on freshly rendered clips can differ slightly.
+Scripts: `spikes/audio/` (`uv run <script>` from there). `make_synthetic.py` renders the corpus; `bench_stt.py`, `bench_lang.py`, `bench_tts.py`, `bench_wake.py`, `bench_aec.py`, `bench_smart_turn.py`, `bench_memory.py` measure; `session.py` is the recording session; `report.py` writes its results here; `test_session.py` checks the session kit without a mic. The synthetic clips were resampled from `say`'s 22.05 kHz output by linear interpolation; the scripts now use `scipy`'s `resample_poly`, so a rerun on freshly rendered clips can differ slightly. The synthetic pause takes were rendered later, with `resample_poly`.
 
 ### Verdicts
 
 | Criterion | Result |
 |---|---|
-| Recording session | **Kit ready, waiting on the User.** `cd spikes/audio && uv run session.py`, about 40 minutes with the User (30 without the #4 baseline step), then about 12 minutes of unattended analysis. |
+| Recording session | **Kit ready, waiting on the User.** `cd spikes/audio && uv run session.py`, about 41 minutes with the User (31 without the #4 baseline step), then about 77 minutes unattended: an hour of the room with a video playing, then the analysis. |
 | STT latency, partials, memory | **Measured.** `parakeet-mlx` is 2.5 to 6 times faster than VoiceMode's whisper.cpp small, 5.5 to 15 times faster than `mlx-whisper` turbo and 9.5 to 26 times faster than whisper.cpp turbo, and the only engine under 100 ms on 0.4 to 0.8 s partials. |
 | STT word error rate on the User's clips | **Waiting on the User.** Synthetic WER: parakeet 2.2 %, mlx-whisper turbo 2.2 %, whisper.cpp turbo 2.9 %, VoiceMode's small 7.6 %. Provisional leader: `parakeet-mlx`. |
 | TTS | **Chosen: `kokoro-mlx` in-process.** First audio 222 ms (EN) and 240 ms (IT) against 358 and 371 ms for VoiceMode's server; `am_liam` and `im_nicola` present in both; speed 1.0. Doesn't depend on the User's voice. |
-| Echo cancellation | **Pipeline proven, acoustic run waiting on the User.** On digital echo the WebRTC APM takes VAD speech frames during Jarvis alone from 86.8 % to at most 0.5 % and keeps 3 of 3 Barge-ins. The Voice Processing I/O helper is built for the session. |
-| Wake word recall | **Waiting on the User.** Synthetic, at threshold 0.5: "Hey Jarvis" 10/10, "Hi Jarvis" 9/10, "Jarvis" 7/10, "Ehi Jarvis" 5/10. The last two are at risk. |
-| Wake word false accepts per hour | **Measured on public audio: 0 per hour at threshold 0.5** over 11.5 h of English and Italian audiobooks; at 0.3, 5 false accepts, 0.43 per hour (all in the Italian book). A room run with a video playing is in the session. |
+| Echo cancellation | **Pipeline proven, acoustic run waiting on the User.** On digital echo the WebRTC APM takes VAD speech frames during Jarvis alone from 86.8 % to at most 0.5 % and detects 3 of 3 Barge-ins over the echo, against 1 of 3 on the raw mic. The Voice Processing I/O helper is built for the session. |
+| Wake word recall | **Waiting on the User.** Synthetic, at threshold 0.5: "Hey Jarvis" 10/10, "Hi Jarvis" 9/10, "Jarvis" 7/10, "Ehi Jarvis" 5/10. The last two are at risk. The session records 20 takes per phrasing, so 95 % is 19 of 20. |
+| Wake word false accepts per hour | **Measured on public audio: 0 per hour at threshold 0.5** over 11.5 h of English and Italian audiobooks; at 0.3, 5 false accepts, 0.43 per hour (all in the Italian book). The session adds 5 minutes of the room with a video playing while the User is there, and an unattended hour of it for the per-hour figure. |
 | Wake word licence | openWakeWord code is Apache-2.0; the pretrained `hey_jarvis` model is CC BY-NC-SA 4.0 (non-commercial: fine here, goes in the README) *(not in the results)*. Porcupine not run: it needs a Picovoice AccessKey, which needs an account. |
-| Smart Turn v3 | **Inference measured: 14.8 ms p50, 30.1 ms max** (v3.2 cpu, 8.3 MB). Saves about 485 ms per complete turn against VoiceMode's 1000 ms silence threshold; whether it holds on the User's real pauses is the session's pause step. |
+| Smart Turn v3 | **Inference measured: 16.0 ms p50, 22.6 ms max** (v3.2 cpu, 8.3 MB). From its verdicts on synthetic speech, a turn ends 623 ms after the User stops on average, 377 ms sooner than VoiceMode's 1000 ms silence threshold, but it cut 4 of 8 synthetic mid-sentence pauses short (the 1000 ms threshold cut 2). The session's pause step measures both on the User's real pauses. |
 | Memory | **Within budget.** Whole audio stack in one process 2.42 GB (parakeet) or 2.78 GB (mlx-whisper); with three idle `claude` processes 3.30 or 3.65 GB, against 4 GB. Needs an MLX cache cap. |
 | Chosen STT, echo cancellation, Wake word | **Waiting on the User.** |
 
@@ -168,7 +168,7 @@ Scripts: `spikes/audio/` (`uv run <script>` from there). `make_synthetic.py` ren
 Parakeet's speed-up, the other engine's p50 over parakeet's: against whisper.cpp small 4.9× on 2 s clips, 2.5× on 6 s clips and 5.1 to 6.2× on partials; against `mlx-whisper` 12.0×, 5.5× and 12.8 to 14.9×; against whisper.cpp turbo 20.5×, 9.5× and 21.8 to 25.6×. An earlier parakeet run on the same afternoon was faster (80 ms on 2 s clips) but is *not in the results*. Findings:
 
 - **Whisper's cost is flat.** Both Whisper builds encode a 30 s window whatever the clip length, so a 0.4 s snippet costs about as much as a 6 s clip (`mlx-whisper` 1,243 against 1,320 ms). That rules Whisper out for Barge-in partials, which the Spec wants at about 400 and 700 ms into the User's speech.
-- **Parakeet partials are usable.** Of the six partials kept per length, at 0.4 s three have the first word or two ("What are you doing?", "Cancel", "Wait.") and three are empty; at 0.8 s all six have the first two to four words ("What are you working on?", "Open a PR.", "Is the CI green?"). Enough for the hard-interrupt and Backchannel lexicons.
+- **Parakeet partials are usable from about 0.6 s.** The six partials kept per length are the first six English short clips. At 0.4 s three are empty and three have a start: "What are you doing?" (three right words, then a guess), "Cancel" and "Wait.". At 0.6 s all six have text, two of them with a wrong last word where the snippet cuts a word ("What are you worth?", "Merge cooler."). At 0.8 s all six have one to five words ("Wait." to "What are you working on?"), all right except "Merge pool request.". Enough for the hard-interrupt and Backchannel lexicons.
 - **Parakeet reports no language.** The Hub picks the reply voice from the User's language, so with parakeet it needs text language detection. `lingua` restricted to EN and IT got 28/30 on parakeet's transcripts in 0.03 ms; both misses were short, mixed clips ("Merge pull request 42.", "La C verde su Pump Kit."). The Hub should keep the previous language when detection isn't confident. `mlx-whisper`'s own detection got 30/30.
 - **VoiceMode's server translates Italian unless asked not to.** whisper.cpp's server defaults to English when the request names no language, and returned English translations of the Italian clips (that run is *not in the results*). The numbers above pass `language=auto`.
 - The large-v3-turbo whisper.cpp server ran on :2023 from VoiceMode's binary and a downloaded model in `~/.cache/jarvis-spikes/whisper/`, and was stopped afterwards; VoiceMode's own config was not touched.
@@ -191,17 +191,19 @@ The 12-word sentences in `corpus.py` (`TTS_SENTENCES`), speed 1.0, p50 of five r
 
 `bench_aec.py simulate` plays Jarvis's lines (Kokoro, EN and IT) through a toy room (35 ms delay plus a decaying tail), adds noise, overlays three User clips in the second half, and runs Silero VAD (512-sample frames, p > 0.5) on the raw mic and on the WebRTC APM output (echo cancellation, noise suppression and high-pass on, 10 ms frames, reference through `process_reverse_stream`).
 
-| Path | VAD speech frames during Jarvis alone | User Barge-ins kept |
-|---|---|---|
-| Raw mic | 86.8 % | 3/3 |
-| WebRTC APM, stream delay 0 to 40 ms | 0.0 % | 3/3 |
-| WebRTC APM, stream delay 60 to 120 ms | 0.1 to 0.5 % | 3/3 |
+| Path | VAD speech frames during Jarvis alone | User Barge-ins detected over the echo | Same Jarvis audio alone fired VAD |
+|---|---|---|---|
+| Raw mic | 86.8 % | 1/3 | 3/3 |
+| WebRTC APM, stream delay 0 to 40 ms | 0.0 % | 3/3 | 0/3 |
+| WebRTC APM, stream delay 60 to 120 ms | 0.1 to 0.5 % | 3/3 | 0/3 |
 
-Digital echo is linear and easy, so this only proves the pipeline. The session's speaker run measures the real thing: Jarvis's lines twice over (about a minute) on the built-in speakers, recorded with a sample-aligned duplex stream, the User silent for the first half and speaking five cued Backchannels and Interruptions in the second. The same run then repeats through macOS Voice Processing I/O (`vpio_playrec.swift`, compiled by the session; compiled here but not run, since it plays aloud and needs the mic). The helper reports when its recording and its playback started, so the cues and the Jarvis-only window are placed in its own recording's time; a run that fails or records silence is discarded and offered again, never scored. `bench_aec.py analyse` reports Barge-in triggers (VAD speech held 200 ms) per minute on Jarvis alone and the User Barge-ins detected, for the raw mic, WebRTC at six stream delays and VPIO. Headphones mode needs none of this: with no echo path the raw mic is the input.
+A Barge-in counts as detected only when VAD holds speech for 200 ms on frames where the same Jarvis audio, heard alone, had none. Jarvis's lines play twice and the User speaks only over the second play, so each User window has a twin in the first play with the same echo and no User; one VAD frame either side of the twin's speech is also excluded, for jitter between plays. Counting any 200 ms of speech in the User's window, as the first pass did, credited the raw mic with 3 of 3 although its echo alone fires VAD in all three twins. Running STT on the window and matching the cue words was the alternative; it was not chosen because "mhm" and "okay" are often transcribed as nothing or as other words, so it would fail real Barge-ins rather than echo.
+
+Digital echo is linear and easy, so this only proves the pipeline. The session's speaker run measures the real thing: Jarvis's lines twice over (about a minute) on the built-in speakers, recorded with a sample-aligned duplex stream, the User silent for the first half and speaking five cued Backchannels and Interruptions in the second. The same run then repeats through macOS Voice Processing I/O (`vpio_playrec.swift`, compiled by the session; compiled here but not run, since it plays aloud and needs the mic). The helper reports when its recording and its playback started, so the cues and the Jarvis-only window are placed in its own recording's time; a run that fails or records silence is discarded and offered again, never scored. The WebRTC pass plays and records on one duplex stream and starts the cue clock when the first sample reaches the speaker. `bench_aec.py analyse` reports Barge-in triggers (VAD speech held 200 ms) per minute on Jarvis alone and the User Barge-ins detected over the echo, for the raw mic, WebRTC at six stream delays and VPIO. Headphones mode needs none of this: with no echo path the raw mic is the input.
 
 ### Wake word
 
-openWakeWord `hey_jarvis_v0.1`, ONNX, 80 ms frames; a take counts when its peak score reaches the threshold. Synthetic takes: 10 per phrasing from nine `say` voices at random rates (Italian voices for "Ehi Jarvis").
+openWakeWord `hey_jarvis_v0.1`, ONNX, 80 ms frames; a take counts when its peak score reaches the threshold. Synthetic takes: 10 per phrasing from nine `say` voices at random rates (Italian voices for "Ehi Jarvis"). The session records 20 per phrasing, so the Spec's 95 % recall is 19 of 20 for each phrasing.
 
 | Phrasing | @0.3 | @0.5 | @0.7 | Median peak |
 |---|---|---|---|---|
@@ -221,7 +223,7 @@ These are without openWakeWord's VAD gate. With `vad_threshold=0.5` every phrasi
 | LibriSpeech `dev-clean` (English, many speakers) | 5.39 | 0 / 0 | 0 / 0 | 0 / 0 |
 | LibriVox *Il giornalino di Gian Burrasca* (Italian, one reader) | 6.15 | 5 / 3 | 0 / 0 | 0 / 0 |
 
-Each cell is false accepts without / with `vad_threshold=0.5`. At threshold 0.5 that is 0 per hour over 11.54 hours. At 0.3 it is 0.43 per hour over both books (0.26 with VAD), all of it in the Italian book (0.81 per hour there, 0.49 with VAD), still under the Spec's 1 per hour. Model cost is 3.4 to 3.8 % of one core in real time. Read audiobooks are cleaner than a room with a video playing, so the session also records 5 minutes of that, and the User's own speech near "Jarvis" is untested.
+Each cell is false accepts without / with `vad_threshold=0.5`. At threshold 0.5 that is 0 per hour over 11.54 hours. At 0.3 it is 0.43 per hour over both books (0.26 with VAD), all of it in the Italian book (0.81 per hour there, 0.49 with VAD), still under the Spec's 1 per hour. Model cost is 3.4 to 3.8 % of one core in real time. Read audiobooks are cleaner than a room with a video playing, so the session records that twice: 5 minutes while the User is there, and an unattended hour at the end that gives false accepts per hour (minutes where the video had stopped are reported as near silence). The User's own speech near "Jarvis" is untested.
 
 ### Smart Turn v3
 
@@ -229,14 +231,28 @@ ONNX on CPU, one inter-op thread, including Whisper feature extraction; audio is
 
 | Model | Inference p50 (max) | Complete judged complete | Cut-off judged incomplete |
 |---|---|---|---|
-| `smart-turn-v3.2-cpu.onnx` (8.3 MB) | 14.8 ms (30.1 ms) | 28/30 | 6/10 |
-| `smart-turn-v3.0.onnx` (8.4 MB) | 14.6 ms (22.9 ms) | 24/30 | 8/10 |
+| `smart-turn-v3.2-cpu.onnx` (8.3 MB) | 16.0 ms (22.6 ms) | 28/30 | 6/10 |
+| `smart-turn-v3.0.onnx` (8.4 MB) | 15.1 ms (18.3 ms) | 24/30 | 8/10 |
 
-With the Spec's 500 ms VAD silence, a complete turn ends 515 ms after the User stops, against 1000 ms for VoiceMode's fixed silence threshold today: about 485 ms saved per turn (285 ms against 800 ms, 985 ms against 1500 ms). The cost is a cut-off turn judged complete, which ends the User's turn early. A cut at a word gap of evenly paced synthetic speech is not a real pause, and 6/10 on ten of them is too few to judge. The session's pause step records the User saying eight sentences with a deliberate pause of about a second at a marked point and four without (`PAUSE_TAKES` in `corpus.py`); `bench_smart_turn.py` finds each pause, cuts the take 200 ms into it, and scores that cut (should be incomplete) and the whole take (should be complete).
+The synthetic run also has the 12 pause takes (`PAUSE_TAKES` in `corpus.py`): eight sentences with a 900 ms silence at a marked point, pauses found from 0.90 to 1.04 s long, and four without. `bench_smart_turn.py` cuts each paused take 200 ms into its pause (should be incomplete) and scores each whole take (should be complete).
+
+| Model | Cut at the pause judged incomplete | Whole pause take judged complete |
+|---|---|---|
+| `smart-turn-v3.2-cpu.onnx` | 4/8 | 11/12 |
+| `smart-turn-v3.0.onnx` | 4/8 | 10/12 |
+
+The end-of-turn saving comes from these verdicts, following the Spec: after 500 ms of VAD silence Smart Turn runs, "complete" ends the turn, and "incomplete" keeps listening up to 1.5 s more. Each complete turn (the 30 clips and the 12 whole pause takes) ends at 500 ms plus inference, and one judged incomplete is charged the whole 1.5 s extension, so the saving is a lower bound. A real pause judged complete is a premature cut and is counted apart, as is a pause longer than a fixed threshold.
+
+| Model | Complete turns judged incomplete | Mean end of turn | Saved against 800 / 1000 / 1500 ms | Pauses cut short: Smart Turn / 800 / 1000 / 1500 ms |
+|---|---|---|---|---|
+| `smart-turn-v3.2-cpu.onnx` | 3/42 | 623 ms | 177 / 377 / 877 ms | 4/8 / 8/8 / 2/8 / 0/8 |
+| `smart-turn-v3.0.onnx` | 8/42 | 801 ms | -1 / 199 / 699 ms | 4/8 / 8/8 / 2/8 / 0/8 |
+
+Against VoiceMode's 1000 ms threshold today, v3.2 ends turns 377 ms sooner on average, and cuts short 4 of the 8 pauses where 1000 ms cuts 2. Synthetic pauses are a fixed 900 ms silence inside evenly paced speech, and the synthetic cut-offs are word gaps, so neither says how the User pauses; the session's pause step records the same 12 sentences in the User's voice, and the same computation runs on them.
 
 ### Memory
 
-`bench_memory.py`: one process loads the STT, `kokoro-mlx` with both voices, openWakeWord with Silero VAD, Smart Turn v3.2 and the WebRTC APM, runs each, then reuses STT and TTS three times. MLX's buffer cache is capped at 256 MB. Uncapped, freed buffers swell the footprint: the STT benchmark's parakeet process reached 3.9 GB (2.5 GB of it MLX cache) and the TTS benchmark's process 4.8 GB, so the Hub must call `mx.set_cache_limit`. The `claude` share is the median footprint of the six `claude` processes running at the time (291 and 293 MB in the two runs), times three.
+`bench_memory.py`: one process loads the STT, `kokoro-mlx` with both voices, openWakeWord with Silero VAD, Smart Turn v3.2 and the WebRTC APM, runs each, then reuses STT and TTS three times. MLX's buffer cache is capped at 256 MB. Uncapped, freed buffers swell the footprint: the STT benchmark's parakeet process reached 3.9 GB (2.5 GB of it MLX cache) and the TTS benchmark's process 4.8 GB, so the Hub must call `mx.set_cache_limit`. The `claude` share is the median footprint of the six `claude` processes running at the time (293 MB in the parakeet run, 291 MB in the mlx-whisper run), times three.
 
 | Stack | Audio stack footprint | MLX peak during load | Plus three idle `claude` |
 |---|---|---|---|
@@ -252,10 +268,13 @@ Both are under the 4 GB audio-stack budget on the 18 GB machine. Using VoiceMode
 1. **Preflight** (2 min): built-in mic and speakers, a 3 s level check, and a stop if macOS gives the terminal no mic access.
 2. **Baseline, Ticket #4** (about 10 min): points at #4's hook-based harness in `spikes/agent/baseline/` (steps in `## Agent SDK` above, Baseline) and waits.
 3. **Clips** (about 10 min): the 30 sentences, Enter to start and stop, keep or redo.
-4. **Pauses** (about 4 min): 12 sentences, 8 with a marked mid-sentence pause; the step says whether it heard the pause, so a take without one can be redone on the spot.
-5. **Wake word** (about 3 min): "Hey Jarvis", "Hi Jarvis", "Ehi Jarvis", "Jarvis", ten 2.5 s takes each on a cue.
-6. **Speaker run** (about 10 min): the WebRTC pass, the Voice Processing I/O pass, then 5 minutes of the room with a video or podcast playing, for false accepts.
-7. **Analysis** (about 12 min, unattended): starts a temporary large-v3-turbo server on :2023 and waits until it answers, runs every bench on the recordings, stops the server, and writes a results block into this section with `report.py` (a rerun replaces it). Numbers go to `spikes/audio/results/` without transcripts; a missing server or a failed bench is printed in a banner, not skipped silently.
+4. **Pauses** (about 4 min): 12 sentences, 8 with a marked mid-sentence pause; right after each paused take the step checks it heard the pause, and asks for the take again if not.
+5. **Wake word** (about 5 min): "Hey Jarvis", "Hi Jarvis", "Ehi Jarvis", "Jarvis", twenty 2.5 s takes each on a cue, about 3 s per take. Twenty instead of ten adds about 2 minutes.
+6. **Speaker run** (about 10 min): the WebRTC pass, the Voice Processing I/O pass, then 5 minutes of the room with a video or podcast playing, for false accepts. A Voice Processing I/O pass interrupted or without its cue marks is redone on resume.
+7. **Room, unattended** (60 min): the User starts a long video or podcast, an hour or more, and walks away with the Mac on power and the lid open. The step records twelve 5-minute chunks with `caffeinate` keeping the Mac awake. If it is interrupted, finished chunks are kept and `uv run session.py --only room` records only the missing ones, then `--only analyse` runs the analysis.
+8. **Analysis** (about 17 min, unattended, straight after the room run): starts a temporary large-v3-turbo server on :2023 and waits until it answers with a success status, runs every bench on the recordings, stops the server, and writes a results block into this section with `report.py` (a rerun replaces it). Numbers go to `spikes/audio/results/` without transcripts or home paths; a missing server, a failed bench or a crashed STT engine is printed in a banner, not skipped silently.
+
+With the User: about 41 minutes (31 without the baseline). Unattended: about 77 minutes.
 
 ## Talker in the Hub
 

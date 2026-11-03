@@ -24,6 +24,7 @@ CHUNK = 1280  # 80 ms, the frame size openWakeWord is trained on
 THRESHOLDS = [0.3, 0.5, 0.7]
 VAD_THRESHOLDS = [0.0, 0.5]
 REFRACTORY_S = 2.0
+QUIET_DBFS = -55
 AUDIO_EXT = {".wav", ".flac", ".mp3", ".m4a", ".mp4", ".mov", ".aiff"}
 
 
@@ -75,12 +76,15 @@ def false_accepts(paths: list[Path], max_hours: float) -> dict:
     models = {vad: model(vad) for vad in VAD_THRESHOLDS}
     hits = {vad: {t: 0 for t in THRESHOLDS} for vad in VAD_THRESHOLDS}
     examples = defaultdict(list)
-    seconds, compute = 0.0, 0.0
+    seconds, quiet, compute = 0.0, 0.0, 0.0
     for f in files:
         if seconds >= max_hours * 3600:
             break
         pcm = decode(f)
         seconds += len(pcm) / SR
+        # A file near silence means the video had stopped, so those minutes tested nothing.
+        if 20 * np.log10(np.sqrt(np.mean((pcm / 32768.0) ** 2)) + 1e-9) < QUIET_DBFS:
+            quiet += len(pcm) / SR
         for vad, m in models.items():
             t0 = time.perf_counter()
             s = scores(m, pcm)
@@ -96,7 +100,7 @@ def false_accepts(paths: list[Path], max_hours: float) -> dict:
                     last = at
     hours = seconds / 3600
     return {
-        "files": len(files), "hours": round(hours, 2),
+        "files": len(files), "hours": round(hours, 2), "quiet_minutes": round(quiet / 60, 1),
         "realtime_factor_no_vad": round(compute / seconds, 4) if seconds else None,
         "false_accepts_per_hour": {f"vad_threshold={v}": {f"@{t}": round(n / hours, 2) for t, n in h.items()} for v, h in hits.items()},
         "false_accepts_total": {f"vad_threshold={v}": h for v, h in hits.items()},

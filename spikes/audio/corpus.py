@@ -48,14 +48,14 @@ CLIPS: list[Clip] = [
     Clip("it15", "it", "long", "Scrivi un breve riassunto di cosa è cambiato nelle skill sdlc questa settimana e mostrami i dettagli."),
 ]
 
-# Each phrasing is recorded TAKES_PER_PHRASING times in the session.
 WAKE_PHRASINGS: dict[str, str] = {
     "hey": "Hey Jarvis",
     "hi": "Hi Jarvis",
     "ehi": "Ehi Jarvis",
     "bare": "Jarvis",
 }
-TAKES_PER_PHRASING = 10
+# 20 takes make 95 % recall (19/20) measurable per phrasing.
+TAKES_PER_PHRASING = 20
 
 # What the Hub would say during the speaker run, so the echo is Jarvis's own voice.
 JARVIS_LINES: list[tuple[str, str]] = [

@@ -194,11 +194,16 @@ def main() -> None:
         print(json.dumps({k: v for k, v in result.items() if k != "clips"}, indent=2, ensure_ascii=False))
         print(f"-> {path}")
         return
+    crashed = []
     for engine in ENGINES:
         if engine.startswith("server") and subprocess.run(["lsof", "-t", f"-iTCP:{SERVER_PORTS[engine]}", "-sTCP:LISTEN"], capture_output=True).returncode:
             print(f"skip {engine}: nothing listening")
             continue
-        subprocess.run([sys.executable, str(HERE / "bench_stt.py"), "--source", args.source, "--engine", engine], check=False)
+        code = subprocess.run([sys.executable, str(HERE / "bench_stt.py"), "--source", args.source, "--engine", engine]).returncode
+        if code:
+            crashed.append(f"{engine} (exit {code})")
+    if crashed:
+        sys.exit(f"STT engines that crashed, so their rows are missing: {', '.join(crashed)}")
 
 
 if __name__ == "__main__":
