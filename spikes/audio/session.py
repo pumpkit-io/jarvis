@@ -1,6 +1,6 @@
 """The User's recording session for Ticket #5, then every measurement on what it recorded.
 
-    cd spikes/audio && uv run session.py   # about 40 minutes with the User, then about 80 minutes unattended
+    cd spikes/audio && uv run session.py   # about 41 minutes with the User, then about 77 unattended
     uv run session.py --only clips          # one step: preflight, baseline, clips, pauses, wake, speakers, room, analyse
     uv run session.py --redo                # re-record takes that already exist
 
