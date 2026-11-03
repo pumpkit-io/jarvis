@@ -250,9 +250,10 @@ def _heard(voice: Voice, text: str, lang: Lang | None, at: float, timing: Timing
     heard = replace(voice, in_turn=False, window_ends=None)
     turn = without_wake_phrase(text)
     if _is_noise(turn):
-        # Only the wake phrase, said in the window, waits for the request as the Wake word would.
+        # Noise in the Follow-up window lets the window run on to its end.
         if voice.window_ends is not None and _is_noise(text):
             return replace(heard, state="follow_up", deadline=voice.window_ends), []
+        # The wake phrase alone, or noise after the Wake word, waits for the request as the Wake word would.
         return replace(heard, state="listening", deadline=at + timing.listen_s), []
     if (stop_lang := stop_phrase(turn)) is not None:
         return replace(heard, state="idle", deadline=None, ending=False), [Say("very_good", stop_lang)]
