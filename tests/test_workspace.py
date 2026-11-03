@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from jarvis_hub import workspace as workspace_module
 from jarvis_hub.config import load_settings
 from jarvis_hub.subagents import Refusal
 from jarvis_hub.workspace import GitWorkspace, find_worktree_script, is_org_remote, lock_key
@@ -191,3 +192,21 @@ async def test_a_read_only_worktree_that_holds_new_commits_is_kept_and_discard_n
 
 def test_the_repo_lock_key_is_the_same_for_two_spellings_of_one_clone(clone: Path) -> None:
     assert lock_key(clone) == lock_key(clone.parent / clone.name.upper())
+
+
+@needs_script
+async def test_a_read_only_worktree_is_kept_when_discard_cannot_check_its_commits(
+    clone: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = GitWorkspace("pumpkit-io", clone.parent, SCRIPT)
+    path = await workspace.scratch(clone, "read-what-changed", "jarvis S1 (T1): What changed")
+    real_git = workspace_module._git
+
+    async def log_fails(repo: Path, *args: str) -> tuple[int, str, str]:
+        return (128, "", "fatal: bad object") if args[:1] == ("log",) else await real_git(repo, *args)
+
+    monkeypatch.setattr(workspace_module, "_git", log_fails)
+
+    kept = await workspace.discard(path)
+
+    assert path.exists() and kept and "could not check" in kept and "fatal: bad object" in kept

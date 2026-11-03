@@ -149,7 +149,9 @@ class GitWorkspace:
         if code != 0:
             return err or "it is no longer a git worktree."
         # A detached HEAD that gained commits would leave them dangling once the worktree is gone.
-        _, new, _ = await _git(worktree, "log", "--oneline", "HEAD", "--not", "--branches", "--remotes")
+        code, new, err = await _git(worktree, "log", "--oneline", "HEAD", "--not", "--branches", "--remotes")
+        if code != 0:
+            return f"could not check it for commits found on no branch or remote, so it is kept: {err or 'git log failed.'}"
         if new:
             listed = "\n".join(f"- {c}" for c in new.splitlines())
             return f"it holds commits found on no branch or remote, which removing it would lose:\n{listed}"
