@@ -18,13 +18,12 @@ import numpy as np
 from numpy.typing import NDArray
 
 from jarvis_hub.voice.player import Samples
-from jarvis_hub.voice.state import Heard, SpeechStarted, WakeWord
+from jarvis_hub.voice.state import Heard, InputEvent, SpeechStarted, WakeWord
 
 SAMPLE_RATE = 16_000
 FRAME = SAMPLE_RATE // 100
 
 Pcm = NDArray[np.int16]
-InputEvent = WakeWord | SpeechStarted | Heard
 
 
 class EchoCanceller(Protocol):

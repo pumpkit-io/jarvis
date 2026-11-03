@@ -9,7 +9,8 @@ from functools import cache
 import numpy as np
 from numpy.typing import NDArray
 
-SAMPLE_RATE = 16_000
+from jarvis_hub.voice.input import SAMPLE_RATE
+
 N_FFT = 400
 HOP = 160
 N_MELS = 80

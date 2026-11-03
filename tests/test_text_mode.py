@@ -8,7 +8,7 @@ from typing import TextIO
 import pytest
 
 from jarvis_hub.config import RoleModel, Settings
-from jarvis_hub.main import TerminalOutput, Voice, text_mode
+from jarvis_hub.main import Mouth, TerminalOutput, text_mode
 from jarvis_hub.read_only import check
 from tests.fakes import FakeBackend, FakeClock, FakeTts, Gate, RecordingPlayer, Text, Tool, Wait
 
@@ -31,7 +31,7 @@ async def converse(
     *,
     config: Settings,
     environ: MutableMapping[str, str] | None = None,
-    voice: Voice | None = None,
+    voice: Mouth | None = None,
 ) -> tuple[str, str]:
     stdout, stderr = io.StringIO(), io.StringIO()
     await asyncio.wait_for(
@@ -279,7 +279,7 @@ async def test_speak_says_the_startup_line_then_every_reply_and_ends_once_they_h
     config = settings(tmp_path)
 
     stdout, stderr = await converse(
-        backend, io.StringIO("Good evening\nTutto bene?\n"), config=config, voice=Voice(FakeTts(), lambda rate: player)
+        backend, io.StringIO("Good evening\nTutto bene?\n"), config=config, voice=Mouth(FakeTts(), lambda rate: player)
     )
 
     assert stdout == "› Good evening\nGood evening, sir. All quiet.\n› Tutto bene?\nBene, signore.\n"
@@ -304,7 +304,7 @@ async def test_speak_with_no_audio_output_goes_on_in_text(tmp_path: Path) -> Non
         raise OSError("no output device")
 
     stdout, stderr = await converse(
-        backend, io.StringIO("Good evening\n"), config=settings(tmp_path), voice=Voice(FakeTts(), no_device)
+        backend, io.StringIO("Good evening\n"), config=settings(tmp_path), voice=Mouth(FakeTts(), no_device)
     )
 
     assert stdout == "› Good evening\nGood evening, sir.\n"

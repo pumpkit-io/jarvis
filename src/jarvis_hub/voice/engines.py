@@ -1,5 +1,6 @@
 """The audio input engines Phase 0 chose provisionally (docs/notes/phase-0-spikes.md, `## Audio`), behind the
-protocols in `jarvis_hub.voice.input`. `load_engines` is the one place to swap one for the recording session's pick.
+protocols in `jarvis_hub.voice.input`. An engine the recording session picks is an adapter here, added to `WAKE_ENGINES`
+or `STT_ENGINES` and to its `JARVIS_*_ENGINE` setting's choices.
 
 Every import is inside a loader, so text mode never pays for them.
 """
@@ -7,11 +8,12 @@ Every import is inside a loader, so text mode never pays for them.
 import threading
 from collections import deque
 from dataclasses import dataclass
+from collections.abc import Callable
 from typing import Any, Literal
 
 import numpy as np
 
-from jarvis_hub.voice.input import FRAME, SAMPLE_RATE, Engines, EveryoneGate, Pcm
+from jarvis_hub.voice.input import FRAME, SAMPLE_RATE, Engines, EveryoneGate, Pcm, Transcriber, WakeDetector
 from jarvis_hub.voice.player import Samples
 from jarvis_hub.voice.tts import MLX_CACHE_LIMIT
 from jarvis_hub.voice.whisper_features import log_mel
@@ -187,10 +189,15 @@ def words_after(tokens: Any, after: float) -> str:
     return "".join(t.text for w in kept for t in w).strip().lstrip(",.;:!? ")
 
 
+WAKE_ENGINES: dict[WakeEngine, Callable[[], WakeDetector]] = {"openwakeword": OpenWakeWord}
+STT_ENGINES: dict[SttEngine, Callable[[], Transcriber]] = {"parakeet": Parakeet}
+
+
 def load_engines(choice: EngineChoice) -> Engines:
-    """Loads every engine and runs each once, so the first turn does not pay for a warm-up. Blocking: seconds."""
+    """Loads the chosen engines and runs each once, so the first turn does not pay for a warm-up. Blocking: seconds."""
     echo = WebRtcEchoCancellation() if choice.aec == "webrtc" else NoEchoCancellation()
-    engines = Engines(echo=echo, wake=OpenWakeWord(), vad=SileroVad(), turn=SmartTurn(), stt=Parakeet(), gate=EveryoneGate())
+    wake, stt = WAKE_ENGINES[choice.wake](), STT_ENGINES[choice.stt]()
+    engines = Engines(echo=echo, wake=wake, vad=SileroVad(), turn=SmartTurn(), stt=stt, gate=EveryoneGate())
     noise = np.random.default_rng(0).normal(0, 0.01, SAMPLE_RATE).astype(np.float32)
     pcm = (noise * 32767).astype(np.int16)
     engines.wake.score(pcm[: engines.wake.chunk])

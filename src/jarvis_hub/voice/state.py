@@ -80,6 +80,8 @@ class Tick:
     at: float
 
 
+# What the audio input reports.
+InputEvent = WakeWord | SpeechStarted | Heard
 Event = WakeWord | ChimeStarted | SpeechStarted | Heard | ReplyAudio | ReplyDone | EndConversation | Tick
 
 

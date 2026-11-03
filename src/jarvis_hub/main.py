@@ -60,7 +60,7 @@ class MonotonicClock:
 
 
 @dataclass(frozen=True)
-class Voice:
+class Mouth:
     """What `--speak` adds: a synthesiser, and how to open a player at its sample rate."""
 
     tts: Synthesizer
@@ -237,7 +237,7 @@ async def text_mode(
     stdin: TextIO,
     stdout: TextIO,
     stderr: TextIO,
-    voice: Voice | None = None,
+    voice: Mouth | None = None,
 ) -> None:
     """A terminal conversation: typed lines in, streamed replies out, until end of input and every Task is quiet.
 
@@ -377,7 +377,7 @@ def main() -> None:
     parser.add_argument("--debug", action="store_true", help="show the voice state machine's transitions")
     args = parser.parse_args()
 
-    voice = Voice(KokoroSynthesizer(), SoundPlayer) if args.speak else None
+    voice = Mouth(KokoroSynthesizer(), SoundPlayer) if args.speak else None
     cli = shutil.which("claude")
     if cli is None:
         sys.exit("jarvis-hub: the claude CLI is not on PATH; install Claude Code and log in with your Max plan.")

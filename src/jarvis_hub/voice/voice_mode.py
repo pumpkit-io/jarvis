@@ -20,23 +20,19 @@ from jarvis_hub.voice.state import (
     ChimeStarted,
     EndConversation,
     Event,
-    Heard,
+    InputEvent,
     Interrupt,
     ReplyAudio,
     ReplyDone,
     Say,
     SendTurn,
-    SpeechStarted,
     Tick,
     Timing,
     Voice,
     VoiceState,
-    WakeWord,
     step,
 )
 from jarvis_hub.voice.tts import Synthesizer
-
-InputEvent = WakeWord | SpeechStarted | Heard
 
 
 class AudioInput(Protocol):
