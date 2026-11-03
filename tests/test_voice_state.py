@@ -129,6 +129,10 @@ def test_empty_or_noise_only_transcripts_are_dropped_and_listening_goes_on(text:
         ("Okay so hey Jarvis, status please", "status please"),
         ("Tell Jarvis's tests to run", "Tell Jarvis's tests to run"),
         ("What did Jarvis say?", "What did Jarvis say?"),
+        ("Harvis. Open a PR for the typo fix.", "Open a PR for the typo fix."),
+        ("Jarvid, show me the open issues.", "show me the open issues."),
+        ("Jorvis! Sì, procedi pure.", "Sì, procedi pure."),
+        ("Travis said the build is red", "Travis said the build is red"),
     ],
 )
 def test_the_wake_phrase_said_in_one_breath_is_cut_from_the_turn(heard: str, turn: str) -> None:
@@ -150,6 +154,8 @@ def test_the_wake_phrase_said_in_one_breath_is_cut_from_the_turn(heard: str, tur
         ("Basta così.", "it"),
         ("basta cosi", "it"),
         ("Hey Jarvis, that's all.", "en"),
+        ("Thanks Jarvis, that's all.", "en"),
+        ("Grazie Jarvis, basta così.", "it"),
     ],
 )
 def test_a_stop_phrase_on_its_own_says_very_good_and_idles_without_the_model(heard: str, lang: Lang) -> None:

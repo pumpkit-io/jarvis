@@ -6,6 +6,7 @@ next `Voice` with the actions to carry out. Time passes only through events, `Ti
 
 import re
 from dataclasses import dataclass, replace
+from difflib import SequenceMatcher
 from typing import Literal
 
 from jarvis_hub.voice.language import Lang
@@ -119,11 +120,13 @@ STOP_PHRASES: dict[str, Lang] = {
     "that's all thank you": "en",
     "thanks jarvis": "en",
     "thank you jarvis": "en",
+    "thanks jarvis that's all": "en",
     "stand by": "en",
     "go to sleep": "en",
     "grazie jarvis": "it",
     "basta così": "it",
     "basta cosi": "it",
+    "grazie jarvis basta così": "it",
     "è tutto": "it",
 }
 
@@ -139,8 +142,19 @@ def _words(text: str) -> list[str]:
     return [w.lower().replace("’", "'") for w in _WORDS.findall(text.replace("’", "'"))]
 
 
+# What is left of "Jarvis" when the Wake word fired before STT's end of the word: "Harvis", "Jarvid", "Jorvis".
+_FIRST_WORD = re.compile(r"^(\w+)(?!')\W+(?=\w)")
+
+
+def _sounds_like_jarvis(word: str) -> bool:
+    return SequenceMatcher(None, word.lower(), "jarvis").ratio() >= 0.8
+
+
 def without_wake_phrase(text: str) -> str:
-    return _WAKE_PHRASE.sub("", text.strip(), count=1)
+    text = _WAKE_PHRASE.sub("", text.strip(), count=1)
+    if (first := _FIRST_WORD.match(text)) and _sounds_like_jarvis(first[1]):
+        text = text[first.end() :]
+    return text
 
 
 def _is_noise(text: str) -> bool:

@@ -393,3 +393,48 @@ Ticket #9, run on 2026-11-03 on the M3: `jarvis-hub --text --speak` with `kokoro
 - **Synthesis is GPU-bound and sensitive to load.** Earlier in the day, with the machine at a load average of 11 and a virtual machine running, the same model took 450-870 ms per sentence (12 words: about 750 ms) against 120-160 ms here. On a busy machine the 300 ms target would be missed, though the pipeline still keeps sentences gap-free.
 - **The voice follows the User's language.** `<user lang=…>` now carries it. Typed lines are detected by counting function words of each language first, then `lingua` (EN and IT, preloaded at launch), keeping the previous language when lingua is under 0.8, or 0.9 for one word. Function words come first because lingua alone read "Apri una issue su pumpkit per il bug del login" as English (0.76) from its English nouns. A capital "I" counts as English, except at the start of a sentence before a lowercase word, where it may be the Italian article ("Ok. I test passano") and counts for neither. On the 40 lines of the two text-mode files, this got every line right; "Stop." keeps the previous language.
 - `misaki` pulls in `en-core-web-sm`; the Hub now declares it, so nothing is pip-installed into another environment.
+
+## Listening
+
+Ticket #12, run on 2026-11-03 on the M3 without the User: no microphone, no model call. `spikes/hub/voice_input.py` pushes #5's synthetic clips (`say` voices, `spikes/audio/data/synthetic` in the #5 worktree) as 10 ms frames, in real time, through the Hub's real input path (`Capture`: WebRTC APM, openWakeWord `hey_jarvis`, Silero VAD, Smart Turn v3.2, parakeet-mlx, the pass-through speaker gate) into `VoiceMode`, which runs the voice state machine and answers each turn with a canned line in the real Kokoro voice through a silent player. Numbers only, no transcripts, are in `docs/notes/voice-input.json`. Versions: parakeet-mlx 0.6.0, openwakeword 0.6.0, onnxruntime 1.31.1, livekit 1.2.0, mlx 0.32.4, kokoro-mlx 0.1.4. Thresholds at their defaults; the run's windows were shortened to 3 s to save time (`TIMING` in the script), which changes no logic.
+
+**Engines are provisional.** The recording session (#5) has not happened, so these are Phase 0's leaders, each behind a protocol in `jarvis_hub.voice.input` and loaded in one place, `jarvis_hub.voice.engines.load_engines`: swapping one for the session's pick (Voice Processing I/O for echo cancellation, a custom or Porcupine Wake word, another STT) changes that function and adds an adapter, nothing else.
+
+| Measure | Result |
+|---|---|
+| Wake word, phrase alone, threshold 0.5 | "Hey Jarvis" 10/10, "Hi Jarvis" 9/10, **"Ehi Jarvis" 3/10**, bare "Jarvis" 7/10 |
+| Wake word, end of phrase to the event in the Hub | p50 166 ms, p90 355 ms, max 387 ms |
+| "Hey Jarvis, <request>" in one breath (150 ms gap), 30 clips | 29 heard; end of speech to the turn reaching the Hub p50 757 ms, p90 804 ms, max 2,254 ms |
+| "Hey Jarvis", 1 s pause, request, 30 clips | 30 heard; p50 787 ms, p90 1,041 ms, max 2,162 ms |
+| STT per turn (parakeet, whole turn) | p50 138-144 ms, p90 228-234 ms, max 383 ms |
+| Smart Turn per verdict | p50 24 ms, max 34 ms |
+| A turn in the Follow-up window without the Wake word | 6/6 heard |
+| Stop phrases on their own ("That's all.", "Grazie Jarvis.") | 2/2 idled at once, no turn sent |
+| Requests with no Wake word while idle | 0 of 6 reached the Hub |
+| Startup to listening | 4.9 s (engines and the voice load in parallel, in the background) |
+| Memory, whole audio stack in one process | 2,140 MB footprint (MLX active 1,549 MB, peak 2,444 MB), against the 4 GB budget |
+
+- **End of turn is 500 ms of silence plus about 250 ms of work.** The p50 of 757-787 ms is the 500 ms VAD silence (measured from the end of the last loud 10 ms frame, so up to one 32 ms VAD window more), Smart Turn's 24 ms, parakeet's 140 ms, and the frame and event-loop hand-offs. The max of about 2.2 s is a turn Smart Turn judged incomplete, which waits the whole 1.5 s extension: the cost of "incomplete" on a turn that was in fact complete. Phase 0 saw 2 of 42 complete turns judged incomplete; this run, 1 or 2 of 30 per scenario.
+- **Smart Turn gets exactly the turn up to 500 ms into the silence**, as #5's review fixed; STT gets the same audio, so the extension's silence is never transcribed.
+- **The wake phrase is cut from the turn by time, not by text.** Parakeet hears the synthetic wake phrase as "A Jarvis", "E i Jarvis", "Ey, Charles", "Hey George" or "Agearwood", so a text strip let 15 of 40 bare wake phrases through as turns in the first run. The pipeline now drops the words parakeet times as ending before the Wake word hit (`after=` on the transcriber), with the text strip kept as a fallback, plus one more: a first word within one letter of "Jarvis" ("Harvis", "Jarvid", "Jorvis") is dropped, since the hit can come just before parakeet's end of the word. The run above had the time cut but not that last fallback: 2 of 40 bare wake phrases still went through as one-word turns ("week.", "Charles."), and four one-breath turns began with a "Jarvis" remnant, which the fallback removes when replayed on the same transcripts. One Italian one-breath turn lost its first two words ("Apri una"), cut with the wake phrase.
+- **The pre-roll keeps "Hey Jarvis, open…" whole.** VAD runs in every state, so when the Wake word turns capture on mid-phrase the turn starts 200 ms before the phrase's onset, up to the 1.5 s pre-roll.
+- **Transcripts.** Exact against the script: 16 of 29 in one breath, 22 of 30 after a pause; most misses are spellings the Talker reads past ("Pump Kit", "42", "sub-agent", "Ci"), a "post hoc" for PostHog, and the wake remnants above. Language is not reported by parakeet; the Hub detects it from the text (`detect_language`, #9), keeping the previous language when unsure.
+- **"Ehi Jarvis" is the known weak spot**, 3/10 here against 5/10 in Phase 0 (the echo canceller's noise suppression sits in front of the model now), and bare "Jarvis" 7/10. Both wait on the User's own takes in the recording session; if they stay short of 95 %, a custom openWakeWord model or Porcupine (#5's open question).
+- **Echo cancellation was on but had nothing to cancel**: the run plays nothing through speakers. Its acoustic test needs the session's speaker run. The player feeds every block it plays, silence included, to the APM at 24 kHz, which the APM takes as it is: on a digital echo, 24 kHz and 16 kHz references both took the echo down by 46 dB.
+- **Not verified without the User:** the device path (`Microphone`, sounddevice at 16 kHz in 160-sample blocks), microphone permission, echo on the real speakers, recall and false wakes on the User's voice, and Smart Turn on real pauses.
+
+### Manual script, for the User
+
+Run `./jarvis` (or `uv run jarvis-hub --debug` to see each transition), in a quiet room on the MacBook's speakers, then again with `--headphones`. Tick each line.
+
+- [ ] Startup: "At your service, sir." plays, `[hub] Listening for "Hey Jarvis".` appears within about 10 s, then silence.
+- [ ] Say "Hey Jarvis", wait for the chime, ask "What time is it?". The words appear on screen after `»`, and the answer is spoken.
+- [ ] Stay silent. About 6 s after the answer ends, Jarvis goes idle without a word (`--debug`: `follow_up -> idle`).
+- [ ] Say "What's the weather?" with no Wake word: nothing happens, and `metrics.jsonl` shows no new Talker turn.
+- [ ] Say "Hey Jarvis, what are you working on?" in one breath: the turn on screen starts at "what", and it is answered.
+- [ ] Within 6 s of the answer, ask a follow-up with no Wake word: it is answered.
+- [ ] Say "That's all": "Very good, sir." and idle at once, with no Talker turn in `metrics.jsonl`.
+- [ ] Say "Ehi Jarvis, su cosa stai lavorando?": the reply is in Italian with the Italian voice. Note how often "Ehi Jarvis" and bare "Jarvis" wake it.
+- [ ] Ask something with a long answer and say "Hey Jarvis" while it speaks: it stops, chimes and listens.
+- [ ] Type a line while idle: the reply is text only and Jarvis does not chime or listen.
+- [ ] On speakers, let a long answer play: Jarvis must not hear itself (no turn appears on screen from its own voice).
