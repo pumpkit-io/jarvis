@@ -17,6 +17,7 @@ os.environ["JARVIS_AUDIO_DATA"] = str(SCRATCH / "data")
 os.environ["JARVIS_AUDIO_RESULTS"] = str(SCRATCH / "results")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import bench_smart_turn  # noqa: E402
 import common  # noqa: E402
 import report  # noqa: E402
 import session  # noqa: E402
@@ -131,6 +132,19 @@ def test_a_failed_or_empty_vpio_run_is_not_scored():
 
 def test_enter_click_is_trimmed_from_the_end_of_a_take():
     assert len(session.drop_enter_click(np.ones(SR, np.float32))) == SR - int(0.15 * SR)
+
+
+def test_end_of_turn_saving_comes_from_the_verdicts_and_counts_premature_cuts_apart():
+    complete = {"a": 0.9, "b": 0.9, "c": 0.2, "d": 0.8}
+    at_pause = {"x": 0.3, "y": 0.7, "z": 0.9, "w": 0.2}
+    pause_s = {"x": 1.0, "y": 1.2, "z": 0.4, "w": 2.5}
+    out = bench_smart_turn.end_of_turn(complete, at_pause, pause_s, infer_ms=15)
+    # Three turns end at 500 + 15 ms; "c" was judged incomplete and waits the 1.5 s extension too.
+    assert out["complete_judged_incomplete"] == "1/4"
+    assert out["end_ms_mean"] == 890
+    assert out["saved_ms_vs_fixed_silence"] == {800: -90, 1000: 110, 1500: 610}
+    # "y" is judged complete mid-pause; "w" outlasts the extension; "z" never reaches 500 ms of silence.
+    assert out["premature_cuts"] == {"smart_turn": "2/4", "fixed_800ms": "3/4", "fixed_1000ms": "3/4", "fixed_1500ms": "1/4"}
 
 
 def test_report_replaces_its_block_instead_of_adding_another():

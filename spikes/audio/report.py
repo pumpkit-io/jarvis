@@ -91,6 +91,12 @@ def smart_turn_block() -> list[str]:
             line += (f"; cut at a real pause judged incomplete {v['real_pause_judged_incomplete']}, "
                      f"whole pause takes judged complete {v['pause_takes_judged_complete']}")
         out.append(line + ".")
+        if "end_of_turn" in v:
+            e = v["end_of_turn"]
+            saved = ", ".join(f"{ms} ms against {t} ms" for t, ms in e["saved_ms_vs_fixed_silence"].items())
+            cuts = ", ".join(f"{k.replace('_', ' ')} {n}" for k, n in e["premature_cuts"].items())
+            out.append(f"  - End of turn {e['end_ms_mean']} ms on average ({e['complete_judged_incomplete']} complete turns "
+                       f"judged incomplete wait the 1.5 s extension): saves {saved}. Real pauses cut short: {cuts}.")
     pauses = [p for p in r.get("pause_s", {}).values() if p is not None]
     if r.get("pause_s"):
         out.append(f"- Pauses found in {len(pauses)}/{len(r['pause_s'])} pause takes"
