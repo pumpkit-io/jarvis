@@ -320,3 +320,36 @@ def test_resume_rewinds_across_as_many_short_clips_as_it_takes(
 
     # Back at sample 9, three clips before the one where the fade ended.
     np.testing.assert_array_equal(out[10:], ramp(19, 30))
+
+
+def test_resume_rewinds_no_further_than_two_seconds_of_finished_clips(
+    stream_and_player: tuple[FakeStream, SoundPlayer],
+) -> None:
+    stream, player = stream_and_player
+    for i in range(4):
+        player.play(clip(f"Clip {i}.", ramp(i * 1000, 1000)))
+    stream.pull(3500)  # Three seconds of clips have finished: the first is past the two-second history.
+
+    player.pause()
+    stream.pull(20)
+    player.resume(rewind_ms=10_000)
+    out = stream.pull(40)
+
+    # Back at the start of the second clip, the oldest one kept.
+    np.testing.assert_array_equal(out[20:], ramp(1020, 20))
+
+
+def test_resume_keeps_one_finished_clip_even_when_it_is_over_the_history_budget(
+    stream_and_player: tuple[FakeStream, SoundPlayer],
+) -> None:
+    stream, player = stream_and_player
+    player.play(clip("Long.", ramp(0, 3000)))
+    player.play(clip("Short.", ramp(3000, 500)))
+    stream.pull(3100)
+
+    player.pause()
+    stream.pull(20)
+    player.resume(rewind_ms=10_000)
+    out = stream.pull(40)
+
+    np.testing.assert_array_equal(out[20:], ramp(20, 20))
