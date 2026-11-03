@@ -416,3 +416,46 @@ async def test_a_reply_stopped_by_the_wake_word_does_not_end_the_next_turn(rig_f
 
     # The story's playback ended with the stop; the CI question is still waiting for its reply.
     assert rig.state == "thinking"
+
+
+async def test_news_that_arrives_while_the_user_speaks_waits_until_their_reply_has_played(rig_for: MakeRig) -> None:
+    request = "Open a PR fixing typo X in pumpkit"
+    brief = "Fix the typo in pumpkit's README, then open a PR."
+    spawn = {
+        "repo": "pumpkit",
+        "title": "Fix typo X in pumpkit",
+        "brief": brief,
+        "model": "sonnet",
+        "effort": "medium",
+        "writes": True,
+        "branch_kind": "fix",
+    }
+    report = {"task_id": "T1", "spoken": "The typo fix is up.", "needs_user": False}
+    finish, news_streamed = asyncio.Event(), asyncio.Event()
+    rig: Rig = await rig_for(
+        [Text("Right away, sir."), Tool("delegate", {"request": request, "context": ""})],
+        [Text("The typo fix is up, sir."), Gate(news_streamed)],
+        [Text("Green, sir.")],
+        orchestrator=[[Tool("spawn_subagent", spawn)], [Tool("report", report)]],
+        subagents={brief: [Gate(finish), Text("Opened pumpkit#43.")]},
+    )
+    rig.audio.wake()
+    rig.audio.say(request)
+    await until(lambda: rig.state == "follow_up" and len(rig.backend.all_sessions("subagent")) == 1)
+    await rig.advance(6)
+    assert rig.state == "idle"
+
+    rig.audio.wake()
+    await rig.settle()
+    rig.audio.speech()
+    finish.set()
+    await until(lambda: ("reply", "The typo fix is up, sir.") in rig.output.log)
+    rig.audio.say("Is the CI green?")
+    await until(lambda: rig.state == "thinking")
+    news_streamed.set()
+    await until(lambda: "Green, sir." in rig.player.texts)
+    await until(lambda: "The typo fix is up, sir." in rig.player.texts)
+    await until(lambda: rig.state == "follow_up")
+
+    assert [t for t in rig.player.texts if t][-2:] == ["Green, sir.", "The typo fix is up, sir."]
+    assert rig.states()[-6:] == ["listening", "thinking", "speaking", "follow_up", "speaking", "follow_up"]

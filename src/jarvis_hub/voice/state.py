@@ -56,16 +56,18 @@ class Heard:
 
 @dataclass(frozen=True)
 class ReplyAudio:
-    """A reply's first audio started playing."""
+    """A reply's first audio started playing. `answers` is the `SendTurn.at` of the turn it answers, if any."""
 
     at: float
+    answers: float | None = None
 
 
 @dataclass(frozen=True)
 class ReplyDone:
-    """A reply has finished playing, or ended without any audio."""
+    """A reply has finished playing, or ended without any audio. `answers` as for `ReplyAudio`."""
 
     at: float
+    answers: float | None = None
 
 
 @dataclass(frozen=True)
@@ -100,6 +102,8 @@ class Say:
 
 @dataclass(frozen=True)
 class SendTurn:
+    """`at`, when the turn was heard, also tags the reply begun for it."""
+
     text: str
     lang: Lang | None
     at: float
@@ -125,6 +129,8 @@ class Voice:
     in_turn: bool = False
     # Of the Follow-up window, the time left when that turn started; a turn of noise gets it back.
     window_left: float | None = None
+    # The `at` of the spoken turn sent and not yet answered: only its reply moves `thinking` on.
+    awaiting: float | None = None
 
 
 # Said on their own, after punctuation and the wake phrase are gone. Anything longer goes to the Talker.
@@ -195,15 +201,18 @@ def step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Action
             return voice, []
         case Heard(text, lang, at):
             return _heard(voice, text, lang, at, timing)
-        case ReplyAudio():
+        case ReplyAudio(_, answers):
             if voice.state == "idle":
                 return replace(voice, state="announce", deadline=None), []
-            if voice.state in ("thinking", "follow_up"):
+            if voice.state == "follow_up" or (voice.state == "thinking" and answers == voice.awaiting):
                 return replace(voice, state="speaking", deadline=None), []
             return voice, []
-        case ReplyDone(at):
+        case ReplyDone(at, answers):
             if voice.state not in ("thinking", "speaking", "announce"):
                 return voice, []
+            if voice.state == "thinking" and answers != voice.awaiting:
+                return voice, []
+            voice = replace(voice, awaiting=None)
             if voice.ending:
                 return replace(voice, state="idle", deadline=None, ending=False), []
             window = timing.announce_follow_up_s if voice.state == "announce" else timing.follow_up_s
@@ -222,7 +231,7 @@ def _wake(voice: Voice, at: float, timing: Timing) -> tuple[Voice, list[Action]]
     # A hit inside the User's turn is "Jarvis" said in it, or the phrase that opened it: the turn goes on.
     if at < voice.chime_until or voice.in_turn:
         return voice, []
-    listening = replace(voice, state="listening", deadline=at + timing.listen_s, ending=False)
+    listening = replace(voice, state="listening", deadline=at + timing.listen_s, ending=False, awaiting=None)
     if voice.state == "listening":
         return listening, []
     chimed = replace(listening, chime_until=at + timing.chime_s)
@@ -242,4 +251,4 @@ def _heard(voice: Voice, text: str, lang: Lang | None, at: float, timing: Timing
         return replace(heard, state="listening", deadline=at + timing.listen_s), []
     if (stop_lang := stop_phrase(turn)) is not None:
         return replace(heard, state="idle", deadline=None, ending=False), [Say("very_good", stop_lang)]
-    return replace(heard, state="thinking", deadline=None, ending=False), [SendTurn(turn, lang, at)]
+    return replace(heard, state="thinking", deadline=None, ending=False, awaiting=at), [SendTurn(turn, lang, at)]
