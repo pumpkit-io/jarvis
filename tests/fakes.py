@@ -9,8 +9,6 @@ from typing import Any
 
 import numpy as np
 
-from jarvis_hub.hub import WARM_UP, Hub, Line
-from jarvis_hub.voice.player import Clip, Samples
 from jarvis_hub.agents.backend import (
     AgentEvent,
     SessionSpec,
@@ -20,6 +18,8 @@ from jarvis_hub.agents.backend import (
     TurnEnd,
     Usage,
 )
+from jarvis_hub.hub import WARM_UP, Hub, Line
+from jarvis_hub.voice.player import Clip, Samples
 
 
 class FakeClock:
@@ -366,9 +366,11 @@ class RecordingPlayer:
         self._heard: list[str] = []
         self.closed = False
 
-    def play(self, clip: Clip) -> None:
+    def play(self, clip: Clip, *, starts_reply: bool = False) -> None:
         self.clips.append(clip)
         self.events.append(f"play {clip.text}")
+        if starts_reply:
+            self._heard = []
         if self.hold:
             self._queued.append(clip)
         else:

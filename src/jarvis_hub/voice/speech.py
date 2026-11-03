@@ -255,6 +255,7 @@ class Speech:
 
     def _play(self, clip: Clip, reply: _Reply | None, *, sentence: bool) -> None:
         starts = self._clock.now() + self._player.pending()
+        starts_reply = reply is not None and reply.first_audio is None
         if reply is not None:
             if reply.first_audio is None:
                 reply.first_audio = starts
@@ -263,7 +264,7 @@ class Speech:
             elif sentence and self._player.pending() == 0:
                 reply.gaps += 1
             reply.audio_s += clip.seconds
-        self._player.play(clip)
+        self._player.play(clip, starts_reply=starts_reply)
 
     async def _hold_the_line(self, reply: _Reply, heard_at: float) -> None:
         await self._clock.sleep(max(0.0, heard_at + self._holding_line_after - self._clock.now()))

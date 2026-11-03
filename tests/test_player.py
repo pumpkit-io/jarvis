@@ -86,7 +86,7 @@ def test_pause_fades_out_then_holds_silence(stream_and_player: tuple[FakeStream,
     assert np.all(np.diff(fade[:10]) < 0)
     np.testing.assert_array_equal(fade[10:], 0)
     np.testing.assert_array_equal(stream.pull(200), 0)
-    assert player.pending() == pytest.approx(0.89)
+    assert player.pending() == pytest.approx(0.891)
 
 
 def test_resume_rewinds_and_fades_back_in(stream_and_player: tuple[FakeStream, SoundPlayer]) -> None:
@@ -94,15 +94,15 @@ def test_resume_rewinds_and_fades_back_in(stream_and_player: tuple[FakeStream, S
     player.play(clip("A long sentence.", ramp(0, 1000)))
     stream.pull(500)
     player.pause()
-    stream.pull(10)  # The fade plays samples 500 to 509, then silence.
+    stream.pull(10)  # The fade plays samples 500 to 508, then silence.
     stream.pull(50)
 
     player.resume(rewind_ms=300)
     out = stream.pull(40)
 
-    # Back at sample 210, 300 ms before the fade ended, rising from silence.
-    assert out[9] < ramp(219, 1)[0]
-    np.testing.assert_array_equal(out[10:], ramp(220, 30))
+    # Back at sample 209, 300 ms before the fade ended, rising from silence.
+    assert out[9] < ramp(218, 1)[0]
+    np.testing.assert_array_equal(out[10:], ramp(219, 30))
 
 
 def test_stop_fades_out_and_flushes_everything_queued(stream_and_player: tuple[FakeStream, SoundPlayer]) -> None:
@@ -138,16 +138,43 @@ def test_reports_the_text_actually_played(stream_and_player: tuple[FakeStream, S
     assert player.played() == "Right away, sir. I have opened the"
 
 
-def test_a_new_stretch_of_speech_starts_a_new_record(stream_and_player: tuple[FakeStream, SoundPlayer]) -> None:
+def test_a_new_reply_starts_a_new_record(stream_and_player: tuple[FakeStream, SoundPlayer]) -> None:
     stream, player = stream_and_player
-    player.play(clip("First reply.", ramp(0, 100)))
+    player.play(clip("First reply.", ramp(0, 100)), starts_reply=True)
     stream.pull(200)
     assert player.played() == "First reply."
 
-    player.play(clip("Second reply.", ramp(0, 100)))
+    player.play(clip("Second reply.", ramp(0, 100)), starts_reply=True)
     stream.pull(100)
 
     assert player.played() == "Second reply."
+
+
+def test_a_new_reply_queued_behind_another_starts_its_record_when_it_plays(
+    stream_and_player: tuple[FakeStream, SoundPlayer],
+) -> None:
+    stream, player = stream_and_player
+    player.play(clip("First reply.", ramp(0, 100)), starts_reply=True)
+    player.play(clip("Second reply.", ramp(0, 100)), starts_reply=True)
+    stream.pull(50)
+    assert player.played() == "First"
+
+    stream.pull(100)
+
+    assert player.played() == "Second"
+    stream.pull(50)
+    assert player.played() == "Second reply."
+
+
+def test_a_pause_between_sentences_keeps_the_record(stream_and_player: tuple[FakeStream, SoundPlayer]) -> None:
+    stream, player = stream_and_player
+    player.play(clip("One moment, sir.", ramp(0, 100)), starts_reply=True)
+    stream.pull(300)
+
+    player.play(clip("Here you are.", ramp(0, 100)))
+    stream.pull(100)
+
+    assert player.played() == "One moment, sir. Here you are."
 
 
 def test_close_closes_the_stream(stream_and_player: tuple[FakeStream, SoundPlayer]) -> None:
@@ -169,3 +196,74 @@ def test_resume_cannot_undo_a_stop(stream_and_player: tuple[FakeStream, SoundPla
     stream.pull(20)
     np.testing.assert_array_equal(stream.pull(100), 0)
     assert player.pending() == 0
+
+
+def test_a_clip_queued_while_a_stop_fades_out_still_plays(stream_and_player: tuple[FakeStream, SoundPlayer]) -> None:
+    stream, player = stream_and_player
+    player.play(clip("One.", np.full(500, 0.5, dtype=np.float32)))
+    stream.pull(100)
+
+    player.stop()
+    player.play(clip("Next reply.", np.full(50, 0.25, dtype=np.float32)), starts_reply=True)
+    stream.pull(10)
+
+    np.testing.assert_array_equal(stream.pull(50), 0.25)
+
+
+def test_a_pause_keeps_every_sample_the_fade_did_not_play(stream_and_player: tuple[FakeStream, SoundPlayer]) -> None:
+    stream, player = stream_and_player
+    player.play(clip("A long sentence.", ramp(0, 1000)))
+    stream.pull(100)
+
+    player.pause()
+    fade = stream.pull(20)
+
+    assert np.count_nonzero(fade) == 9
+    assert player.pending() == pytest.approx(0.891)
+
+
+def test_a_fade_out_across_two_clips_holds_the_place_in_the_second(
+    stream_and_player: tuple[FakeStream, SoundPlayer],
+) -> None:
+    stream, player = stream_and_player
+    player.play(clip("One.", ramp(0, 100)))
+    player.play(clip("Two.", ramp(100, 100)))
+    stream.pull(95)
+
+    player.pause()
+    stream.pull(20)  # Five samples of the first clip and four of the second are heard while the gain falls.
+    player.resume(rewind_ms=0)
+    out = stream.pull(20)
+
+    np.testing.assert_array_equal(out[10:], ramp(114, 10))
+
+
+def test_resume_rewinds_into_the_clip_before(stream_and_player: tuple[FakeStream, SoundPlayer]) -> None:
+    stream, player = stream_and_player
+    player.play(clip("One.", ramp(0, 100)))
+    player.play(clip("Two.", ramp(100, 100)))
+    stream.pull(105)
+
+    player.pause()
+    stream.pull(20)
+    player.resume(rewind_ms=50)
+    out = stream.pull(30)
+
+    # The fade ended after sample 113, so playback goes back to sample 64, in the first clip.
+    np.testing.assert_array_equal(out[10:], ramp(74, 20))
+    stream.pull(50)
+    assert player.played() == "One."
+
+
+def test_a_stop_whose_clips_end_during_the_fade_leaves_the_player_ready(
+    stream_and_player: tuple[FakeStream, SoundPlayer],
+) -> None:
+    stream, player = stream_and_player
+    player.play(clip("One.", np.full(100, 0.5, dtype=np.float32)))
+    stream.pull(97)
+
+    player.stop()
+    stream.pull(20)
+    player.play(clip("Next reply.", np.full(50, 0.25, dtype=np.float32)), starts_reply=True)
+
+    np.testing.assert_array_equal(stream.pull(50), 0.25)

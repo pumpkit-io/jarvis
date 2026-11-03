@@ -462,3 +462,16 @@ async def test_a_link_cut_between_slow_deltas_stays_whole(
     await speech.idle()
 
     assert player.texts == ["It is on github.com/pumpkit.io today, sir."]
+
+
+async def test_what_was_played_covers_the_latest_reply_only(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, speech: Speech
+) -> None:
+    backend = FakeBackend(clock, [[Text("Good evening, sir.")], [Text("All quiet, sir.")]])
+    hub = speaking_hub(backend, output, metrics, speech)
+
+    await hub.start()
+    await hub.run(lines(clock, "Hello", "Anything new?"))
+    await speech.idle()
+
+    assert speech.played() == "All quiet, sir."
