@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import bench_aec  # noqa: E402
 import bench_smart_turn  # noqa: E402
+import bench_stt  # noqa: E402
 import bench_wake  # noqa: E402
 import common  # noqa: E402
 import report  # noqa: E402
@@ -373,6 +374,17 @@ def test_an_orphan_on_the_turbo_port_is_named_and_not_measured():
         session.TURBO_PORT, session.TURBO_MODEL, session.WHISPER_SERVER = saved
         server.shutdown()
     assert f"pid {os.getpid()}" in said.getvalue()
+
+
+def test_the_turbo_port_is_measured_only_when_it_is_the_server_the_session_started():
+    assert "nothing" in bench_stt.server_skip("server-2023", listener_pid=None, turbo_pid=None)
+    assert "not started by the session" in bench_stt.server_skip("server-2023", listener_pid=999, turbo_pid=None)
+    assert "999" in bench_stt.server_skip("server-2023", listener_pid=999, turbo_pid=123)
+    assert bench_stt.server_skip("server-2023", listener_pid=123, turbo_pid=123) is None
+    assert bench_stt.server_skip("server-2022", listener_pid=555, turbo_pid=None) is None
+    stt_cmd = session.benches(SCRATCH / "benches", turbo_pid=123)[0]
+    assert stt_cmd[0] == "bench_stt.py" and stt_cmd[-2:] == ["--turbo-pid", "123"]
+    assert "--turbo-pid" not in session.benches(SCRATCH / "benches")[0]
 
 
 def test_a_bench_that_hangs_is_stopped_with_everything_it_started():

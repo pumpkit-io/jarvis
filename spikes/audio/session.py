@@ -530,11 +530,11 @@ def start_turbo_server() -> subprocess.Popen | None:
         raise
 
 
-def benches(recordings: Path) -> list[list[str]]:
-    """The analysis commands, with the headphones run only when the User recorded it."""
+def benches(recordings: Path, turbo_pid: int | None = None) -> list[list[str]]:
+    """The analysis commands, with the headphones run only when the User recorded it and :2023 only as the session's server."""
     run, phones = recordings / "speaker-run", recordings / "headphones-run"
     cmds = [
-        ["bench_stt.py", "--source", "recordings"],
+        ["bench_stt.py", "--source", "recordings"] + (["--turbo-pid", str(turbo_pid)] if turbo_pid else []),
         ["bench_lang.py", "--source", "recordings"],
         ["bench_wake.py", "recall", "--source", "recordings"],
         ["bench_wake.py", "false-accepts", f"{run}/video.wav", "--name", "false-accepts-video"],
@@ -571,7 +571,7 @@ def analyse() -> None:
     try:
         turbo = start_turbo_server()
         with log.open("w") as out:
-            for cmd in benches(RECORDINGS):
+            for cmd in benches(RECORDINGS, turbo.pid if turbo else None):
                 print(f"  $ {' '.join(cmd)}", flush=True)
                 code = run_bench([sys.executable, str(HERE / cmd[0])] + cmd[1:], out, BENCH_TIMEOUT_S)
                 if code is None:
