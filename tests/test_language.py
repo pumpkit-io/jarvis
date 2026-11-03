@@ -16,6 +16,9 @@ from jarvis_hub.voice.language import Lang, detect_language, voice_for
         ("Chiudi i ticket vecchi", "en", "it"),
         ("CI is green", "it", "en"),
         ("C'mon, run it", "it", "en"),
+        ("Ok. I test sono verdi", "en", "it"),
+        ("Ok. I think the tests are green", "it", "en"),
+        ("Yes, I can do that", "it", "en"),
         ("C'è una PR aperta", "en", "it"),
         ("Fammi un po'", "en", "it"),
         # Too short or mixed to tell: the previous language stays.

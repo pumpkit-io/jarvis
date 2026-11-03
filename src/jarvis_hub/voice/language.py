@@ -49,11 +49,13 @@ def warm_up() -> None:
 def detect_language(text: str, previous: Lang) -> Lang:
     """The language of `text`, or `previous` when detection is not confident."""
     found = _WORDS.findall(text)
-    # Acronyms such as "CI" and "IT" are not the Italian words they spell; "I" is English past the first word,
-    # where Italian's article "i" would be lower case.
+    # Acronyms such as "CI" and "IT" are not the Italian words they spell. A capital "I" past the first word is
+    # English, unless Italian function words are present: after a full stop "I test sono verdi" is the article.
     words = [w.lower() for w in found if not (len(w) > 1 and w.isupper())]
-    en = sum(w in _FUNCTION_WORDS["en"] for w in words) + found[1:].count("I")
+    en = sum(w in _FUNCTION_WORDS["en"] for w in words)
     it = sum(w in _FUNCTION_WORDS["it"] or bool(_ELISION.match(w)) for w in words)
+    if it == 0:
+        en += found[1:].count("I")
     if en != it:
         return "en" if en > it else "it"
     values = _detector().compute_language_confidence_values(text)
