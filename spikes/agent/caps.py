@@ -64,7 +64,9 @@ async def two_turns_streaming_and_subscription():
         server = await c.get_server_info()
     init = init_of(t1)
     deltas = [d for d in map(text_delta, t1 + t2) if d]
-    rate = [m.rate_limit_info.raw for m in t1 + t2 if isinstance(m, RateLimitEvent)]
+    # Keep only the window type and status: the raw event carries utilization and overage state, and the repo is public.
+    rate = [{k: m.rate_limit_info.raw.get(k) for k in ("rateLimitType", "status")}
+            for m in t1 + t2 if isinstance(m, RateLimitEvent)]
     r2 = result_of(t2)
     results["subscription"] = {
         "apiKeySource": init.get("apiKeySource"),

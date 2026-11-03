@@ -30,11 +30,11 @@ async def probe(model, effort, thinking, sem):
         try:
             msgs = [m async for m in query(prompt=PROMPT, options=options(
                 model=model, effort=effort, thinking=thinking, stderr=stderr.append))]
+            r = next(m for m in msgs if isinstance(m, ResultMessage))
+            init = next(m.data for m in msgs if isinstance(m, SystemMessage) and m.subtype == "init")
         except Exception as e:
             row.update(ok=False, error=repr(e)[:300], stderr=stderr[-5:])
             return row
-        r = next(m for m in msgs if isinstance(m, ResultMessage))
-        init = next(m.data for m in msgs if isinstance(m, SystemMessage) and m.subtype == "init")
         details = (r.usage or {}).get("output_tokens_details") or {}
         row.update(
             ok=not r.is_error,

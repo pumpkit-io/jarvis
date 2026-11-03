@@ -101,7 +101,7 @@ def main():
     if not hooks:
         sys.exit(f"session {chosen} not in the hook log; see --list-sessions")
     since, until = hooks[0]["t"] - 1, hooks[-1]["t"] + 60
-    silence = (args.silence_ms or silence_threshold_ms(args.conversations, since, until)) / 1000
+    silence = (args.silence_ms if args.silence_ms is not None else silence_threshold_ms(args.conversations, since, until)) / 1000
 
     is_converse = lambda h: (h.get("tool") or "").endswith("converse")
     pre = sorted(h["t"] for h in hooks if h["event"] == "PreToolUse" and is_converse(h))

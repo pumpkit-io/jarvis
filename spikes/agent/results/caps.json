@@ -7,27 +7,11 @@
   "apiKeySource": "none",
   "rate_limit_events": [
    {
-    "status": "allowed",
-    "resetsAt": 1793721000,
     "rateLimitType": "five_hour",
-    "overageStatus": "rejected",
-    "overageDisabledReason": "out_of_credits",
-    "isUsingOverage": false,
-    "unifiedWindows": {
-     "five_hour": {
-      "utilization": 0.17,
-      "resetsAt": 1793721000,
-      "status": "allowed"
-     },
-     "seven_day": {
-      "utilization": 0.73,
-      "resetsAt": 1794052800,
-      "status": "allowed"
-     }
-    }
+    "status": "allowed"
    }
   ],
-  "total_cost_usd_reported": 0.0023229,
+  "total_cost_usd_reported": 0.0009594100000000001,
   "account": {
    "subscriptionType": "Claude Max",
    "apiProvider": "firstParty"
@@ -40,8 +24,8 @@
  "stream_deltas": {
   "count": 4,
   "first": [
-   "Got it,",
-   " I'll remember the",
+   "Got it, I'll rem",
+   "ember the",
    " number 41."
   ]
  },
@@ -104,9 +88,10 @@
   "claude_code_version": "2.1.317"
  },
  "interrupt": {
+  "chars_at_interrupt": 41,
   "chars_before_result": 89,
   "last_line_seen": "33",
-  "interrupt_to_result_ms": 10,
+  "interrupt_to_result_ms": 11,
   "result_subtype": "error_during_execution",
   "terminal_reason": "aborted_streaming",
   "next_turn_reply": "READY"
@@ -115,7 +100,7 @@
   "reply": "Zorblax",
   "usage": {
    "input_tokens": 2,
-   "cache_creation_input_tokens": 900,
+   "cache_creation_input_tokens": 904,
    "cache_read_input_tokens": 0,
    "output_tokens": 7,
    "output_tokens_details": {
@@ -127,7 +112,7 @@
    },
    "service_tier": "standard",
    "cache_creation": {
-    "ephemeral_1h_input_tokens": 900,
+    "ephemeral_1h_input_tokens": 904,
     "ephemeral_5m_input_tokens": 0
    },
    "inference_geo": "global",
@@ -136,10 +121,10 @@
      "input_tokens": 2,
      "output_tokens": 7,
      "cache_read_input_tokens": 0,
-     "cache_creation_input_tokens": 900,
+     "cache_creation_input_tokens": 904,
      "cache_creation": {
       "ephemeral_5m_input_tokens": 0,
-      "ephemeral_1h_input_tokens": 900
+      "ephemeral_1h_input_tokens": 904
      },
      "type": "message"
     }
@@ -160,7 +145,7 @@
    "mcp_servers": [],
    "slash_commands_n": 56,
    "hook_events": [],
-   "input_plus_cache_tokens": 879
+   "input_plus_cache_tokens": 883
   },
   "omitted": {
    "plugins": [
@@ -195,7 +180,7 @@
     "hook_started",
     "hook_response"
    ],
-   "input_plus_cache_tokens": 66222
+   "input_plus_cache_tokens": 66262
   }
  },
  "in_process_tool": {

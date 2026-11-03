@@ -122,10 +122,13 @@ async def run_config(name, cfg):
     )
     async with ClaudeSDKClient(opts) as c:
         warm = await turn(c, "en", "Hello.", "talk", 0)  # warm-up, not counted
-        rows, prev = [], warm["api_ms_cumulative"] or 0
-        for lang, text, kind in UTTERANCES:
-            rows.append(await turn(c, lang, text, kind, prev))
-            prev = rows[-1]["api_ms_cumulative"] or prev
+        rows, prev, failure = [], warm["api_ms_cumulative"] or 0, None
+        try:
+            for lang, text, kind in UTTERANCES:
+                rows.append(await turn(c, lang, text, kind, prev))
+                prev = rows[-1]["api_ms_cumulative"] or prev
+        except Exception as e:  # keep the turns already measured
+            failure = repr(e)
     ok = [r for r in rows if not r["is_error"]]
     fd = [r["first_delta_ms"] for r in ok]
     fs = [r["first_sentence_ms"] for r in ok]
@@ -141,7 +144,7 @@ async def run_config(name, cfg):
             k: pct([r["first_sentence_ms"] for r in ok if r["kind"] == k], 0.5) for k in ("talk", "work")
         },
     }
-    return {"config": name, "settings": cfg, "summary": summary, "rows": rows}
+    return {"config": name, "settings": cfg, "summary": summary, "rows": rows, **({"error": failure} if failure else {})}
 
 
 async def main():
@@ -149,7 +152,7 @@ async def main():
     for name, cfg in CONFIGS.items():
         try:
             out.append(await run_config(name, cfg))
-        except Exception as e:  # spike: keep the configs that finished
+        except Exception as e:
             out.append({"config": name, "settings": cfg, "error": repr(e)})
         write_json("latency.json", {"configs": out})  # keep finished configs if a later one fails
 

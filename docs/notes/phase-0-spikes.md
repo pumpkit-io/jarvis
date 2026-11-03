@@ -31,9 +31,9 @@ Scripts: `spikes/agent/caps.py`, `matrix.py`, `latency.py`, and the baseline har
 
 - the `init` message reports `apiKeySource: "none"`;
 - `get_server_info()["account"]` reports `subscriptionType: "Claude Max"`, `apiProvider: "firstParty"`;
-- the stream carries `RateLimitEvent`s for the subscription windows (`five_hour` at 17%, `seven_day` at 73% during the run), with `overageStatus: "rejected"`, so nothing spilled into paid overage.
+- the stream carries a `RateLimitEvent` for the subscription's `five_hour` window with `status: "allowed"`. The committed results keep only the window type and status: the raw event also holds utilization and overage fields, which `caps.py` drops because the repo is public.
 
-`ResultMessage.total_cost_usd` is still filled in (about $0.002 for a two-turn Haiku chat). It is a notional figure, not a charge. The Hub should log usage from `usage` and the rate-limit events, and must not present `total_cost_usd` as spend.
+`ResultMessage.total_cost_usd` is still filled in (about $0.001 for a two-turn Haiku chat). It is a notional figure, not a charge. The Hub should log usage from `usage` and the rate-limit events, and must not present `total_cost_usd` as spend.
 
 ### SDK capabilities
 
@@ -41,9 +41,9 @@ All with `ClaudeSDKClient`, one session, two or more turns.
 
 - **Two turns.** Turn 2 recalled turn 1 ("41, plus one" gave "42"), same `session_id`.
 - **Text deltas.** `include_partial_messages=True` yields `StreamEvent`s whose `event` is the raw API event; text arrives as `content_block_delta` with `delta.type == "text_delta"`.
-- **Interrupt.** Asked to count to 300, `interrupt()` was called once more than 40 characters had streamed (about 41, at "14"), yet 89 characters had arrived by the time the `ResultMessage` came (last line "33"), so about 48 characters of deltas arrived after the call. The `ResultMessage` followed 10 ms after `interrupt()`, with `subtype: "error_during_execution"` and `terminal_reason: "aborted_streaming"`. The next `query()` on the same client answered normally. The Hub should read `terminal_reason`, not `is_error`, to tell an interrupt from a failure. For Barge-in this means the Hub must drop every text delta that arrives after it calls `interrupt()` and stop its TTS queue itself; it cannot rely on the stream going quiet at once. (The 41 is inferred from the trigger and the counting pattern; `caps.py` now also records `chars_at_interrupt`, which the committed run predates.)
-- **String system prompt.** `system_prompt="Your name is Zorblax…"` gave "Zorblax", and the whole request was 902 input tokens: Claude Code's default prompt is gone.
-- **`setting_sources=[]`.** Run in this repo, whose project settings carry the SessionStart hook: no hook ran, no user plugins (sdlc, voicemode and the rest), no MCP servers, 56 slash commands; request size 879 tokens. With `setting_sources` omitted: the hook ran, 10 plugins, 9 MCP servers (VoiceMode, PostHog, Pumpkit, claude.ai connectors), 119 slash commands, 66,222 tokens. Still present with `[]`: four built-in plugins (`cc-plugin-*`), 20 bundled skills and the five built-in agent types. They are inert for the Talker, which has no Skill or Agent tool. For the Orchestrator, pass `skills=[]` if the bundled skill listing should stay out of its prompt.
+- **Interrupt.** Asked to count to 300, `interrupt()` was called once more than 40 characters had streamed (`chars_at_interrupt` 41), yet 89 characters had arrived by the time the `ResultMessage` came (last line "33"), so 48 characters of deltas arrived after the call. The `ResultMessage` followed 11 ms after `interrupt()`, with `subtype: "error_during_execution"` and `terminal_reason: "aborted_streaming"`. The next `query()` on the same client answered normally. The Hub should read `terminal_reason`, not `is_error`, to tell an interrupt from a failure. For Barge-in this means the Hub must drop every text delta that arrives after it calls `interrupt()` and stop its TTS queue itself; it cannot rely on the stream going quiet at once.
+- **String system prompt.** `system_prompt="Your name is Zorblax…"` gave "Zorblax", and the whole request was 906 input tokens: Claude Code's default prompt is gone.
+- **`setting_sources=[]`.** Run in this repo, whose project settings carry the SessionStart hook: no hook ran, no user plugins (sdlc, voicemode and the rest), no MCP servers, 56 slash commands; request size 883 tokens. With `setting_sources` omitted: the hook ran, 10 plugins, 9 MCP servers (VoiceMode, PostHog, Pumpkit, claude.ai connectors), 119 slash commands, 66,262 tokens. Still present with `[]`: four built-in plugins (`cc-plugin-*`), 20 bundled skills and the five built-in agent types. They are inert for the Talker, which has no Skill or Agent tool. For the Orchestrator, pass `skills=[]` if the bundled skill listing should stay out of its prompt.
 - **In-process tool.** A `@tool` registered through `create_sdk_mcp_server("jarvis", …)` was called as `mcp__jarvis__lookup_code`; the Python handler ran in-process and its result reached the reply.
 - **No built-in tools.** With `tools=[]` and that server, `init.tools` was exactly `["mcp__jarvis__lookup_code"]`. Asked to run `ls`, the model answered "NO_SHELL" without any tool call.
 
@@ -66,7 +66,7 @@ Haiku thought 24–156 tokens per cell (max at 114–156). Opus at `max` thought
 
 ### Talker latency
 
-`latency.py`: one warm `ClaudeSDKClient` per configuration, a short Jarvis-style system prompt kept byte-identical across turns, the in-process `delegate` and `status` tools, `tools=[]`, `setting_sources=[]`, one warm-up turn not counted, then the same 20 utterances (10 English, 10 Italian: small talk, "open a PR", "what's running", "stop", "aspetta, apri invece una issue" and so on), each tagged `talk` or `work` by what the User asks for, not by what the model did. Time is measured from `client.query()` to the first text delta and to the end of the first sentence (`.?!` followed by a space, or the end of a text block). Prompt caching held: cache reads grew turn by turn from the second turn. `api_ms` in the results is the per-turn delta of `duration_api_ms`, which is cumulative on a persistent client (the first counted turn has none, as the warm-up total was not kept).
+`latency.py`: one warm `ClaudeSDKClient` per configuration, a short Jarvis-style system prompt kept byte-identical across turns, the in-process `delegate` and `status` tools, `tools=[]`, `setting_sources=[]`, one warm-up turn not counted, then the same 20 utterances (10 English, 10 Italian: small talk, "open a PR", "what's running", "stop", "aspetta, apri invece una issue" and so on), each tagged `talk` or `work` by what the User asks for, not by what the model did. Time is measured from `client.query()` to the first text delta and to the end of the first sentence (`.?!` followed by a space, or the end of a text block). Cache reads (`cache_read` in the rows) alternate between about 11-15k tokens on turns without a tool call and about 22-29k on turns with one, so a tool turn appears to sum two API calls; each series grows slowly. `api_ms` in the results is the per-turn delta of `duration_api_ms`, which is cumulative on a persistent client (the first counted turn has none, as the warm-up total was not kept).
 
 | Talker | First delta p50 | p90 | First sentence p50 | p90 | Tool called before any text |
 |---|---|---|---|---|---|
@@ -82,11 +82,20 @@ Split by kind of utterance, the same 10 in each group for both models (first sen
 
 Over the 9 work utterances that Haiku answered with a tool call first (leaving out "aspetta, apri invece una issue"), Haiku is 1.82 s and Sonnet 0.82 s.
 
-**Verdict.** Neither meets the ≤ 1.0 s p50 target. Haiku is faster when it only talks, but it called a tool before saying anything on 9 of the 10 work turns (every delegation but one), despite the prompt's speak-first rule, so the User would wait for the tool round trip (p50 about 1.75 s) before hearing "Right away, sir". Sonnet spoke first on every delegation (0.5–1.4 s) and called a tool first only on the two `status` turns; its work p50 is 0.94 s. Overall it came within 60 ms of the target.
+The first counted turn is slow for both models and sits inside the headline numbers above, which are kept as recorded. Without it (19 turns):
+
+| Talker | First delta p50 | p90 | First sentence p50 | p90 |
+|---|---|---|---|---|
+| Haiku | 0.97 s | 2.06 s | 1.06 s | 2.06 s |
+| Sonnet | 0.66 s | 2.26 s | 1.06 s | 2.26 s |
+
+Without it Haiku is at 1.06 s p50, still above the target. Sonnet's p50 is unchanged at 1.06 s (1.055 s).
+
+**Verdict.** Neither meets the ≤ 1.0 s p50 target. Haiku is faster when it only talks, but it called a tool before saying anything on 9 of the 10 work turns: 6 delegations, the 2 `status` turns (where a tool first is expected) and the cancel. That ignores the prompt's speak-first rule on delegations, so the User would wait for the tool round trip (work p50 about 1.75 s) before hearing "Right away, sir". Sonnet spoke first on all 6 true delegations (0.52–1.06 s) and called a tool first only on the two `status` turns. Its two slower speak-first work turns were the "Cancel the last task" refusal (1.4 s) and the "Aspetta" clarifying question (1.5 s). Its work p50 is 0.94 s, and overall it missed the target by 62 ms.
 
 **Recommendation:** make Sonnet at `effort="low"`, thinking disabled, the Talker default, replacing the Haiku default in the Spec, because the speak-first rule is what keeps acknowledgments under a second. Keep the model in `JARVIS_TALKER_MODEL` and rerun this script against the real Talker prompt in Ticket #7: if a firmer speak-first prompt fixes Haiku, Haiku wins back the default. The Phase 2 mitigations still apply to close the remaining gap: early first-clause emission and the 1.2 s cached filler. The cost: Sonnet draws more of the Max limits than Haiku per Talker turn.
 
-Two findings for the sentence splitter (Ticket on spoken replies): text blocks before and after a tool call arrive with no space between them ("Right away, sir.The task is underway"), so the end of a text block must count as a sentence end; and the first turn of a session is slow (2.3–3.1 s) while the conversation cache is cold, so the Hub should warm the Talker at launch.
+Two findings for the sentence splitter (Ticket on spoken replies): text blocks before and after a tool call arrive with no space between them ("Right away, sir.The task is underway"), so the end of a text block must count as a sentence end; and the first counted turn of a session is slow (2.3 s Sonnet, 3.1 s Haiku). `latency.py` already sends a warm-up turn before it, yet that first counted turn still read only 1,052 tokens from the cache, against 11-12k on the next turns with no tool call. So the warm-up as done did not warm the cache, and the cause is unknown. Open question for Ticket #7: find what warms the Talker's cache at launch, and measure the first real turn against it.
 
 ### Baseline: today's launcher
 
@@ -101,7 +110,7 @@ and splits the gap into silence tail, STT, tool return, model time (PostToolUse 
 
 Steps for the session. `./jarvis` follows its symlink and starts in the main checkout, where `spikes/` only exists after merge, so give absolute paths. From any directory, with `WT` the absolute path of the checkout holding this branch:
 
-1. `JARVIS_BASELINE_DIR=$WT/spikes/agent/baseline jarvis --settings $WT/spikes/agent/baseline/settings.json`. The settings add `PreToolUse` and `PostToolUse` hooks that run `python3 "$JARVIS_BASELINE_DIR/hook.py"` and append timestamps and the session id to `hooks.jsonl` beside it (gitignored). The hook command was run the way `settings.json` runs it, from `/` with that variable set, and wrote both entries.
+1. `JARVIS_BASELINE_DIR=$WT/spikes/agent/baseline jarvis --settings $WT/spikes/agent/baseline/settings.json`. The settings add `PreToolUse` and `PostToolUse` hooks that run `python3 "$JARVIS_BASELINE_DIR/hook.py"` and append timestamps and the session id to `hooks.jsonl` beside it (gitignored). Without `JARVIS_BASELINE_DIR` set (or pointing at a folder with no `hook.py`) the command prints a warning to stderr and exits 0, so a missing variable cannot block tool calls; it also means nothing is logged. The hook command was run the way `settings.json` runs it, from `/` with that variable set, and wrote both entries.
 2. Talk for about 10 turns of ordinary conversation, English and Italian, with no repo work, so the model needs no tools between turns. Then exit. Each launch is its own session in the hook log.
 3. `python3 $WT/spikes/agent/baseline/analyze.py`. It analyses the most recent session only (`--list-sessions` shows all, `--session <id>` picks one, `--session all` takes everything), reads `~/.voicemode/logs/events/` for that session's time window, and prints the hooked-call count, each turn and the p50 and p90. It exits with an error when the hook log is empty or missing, rather than analysing every VoiceMode event ever logged.
 4. Record the totals here.
