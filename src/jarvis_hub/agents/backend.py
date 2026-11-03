@@ -1,13 +1,11 @@
-"""The seam between the Hub and the agent sessions it runs (Talker now; Orchestrator and Subagents later).
-
-A backend opens sessions from a SessionSpec. A session takes one message at a time and streams that turn
-as AgentEvents, always ending with exactly one TurnEnd.
-"""
+"""The seam between the Hub and its agent sessions: each turn streams as AgentEvents ending in exactly one TurnEnd."""
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
+
+from jarvis_hub.config import Effort
 
 ToolHandler = Callable[[dict[str, Any]], Awaitable[str]]
 
@@ -26,7 +24,7 @@ class HubTool:
 class SessionSpec:
     role: str
     model: str
-    effort: str
+    effort: Effort
     thinking: bool
     system_prompt: str
     cwd: Path
@@ -59,8 +57,6 @@ class ToolCall:
 
 @dataclass(frozen=True)
 class TurnEnd:
-    """`interrupted` comes from the session's terminal reason, never from its error flag."""
-
     outcome: Literal["completed", "interrupted", "failed"]
     usage: Usage = Usage()
     error: str | None = None

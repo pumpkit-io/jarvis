@@ -4,11 +4,12 @@ Every outside dependency is injected (agent backend, clock, output, metrics) so 
 this one code path; voice mode will add audio adapters around it.
 """
 
+import asyncio
 import re
 from collections.abc import AsyncIterator
 from dataclasses import asdict
 from html import escape
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from jarvis_hub.agents.backend import (
     AgentBackend,
@@ -43,7 +44,7 @@ class Metrics(Protocol):
     def record(self, entry: dict[str, Any]) -> None: ...
 
 
-# Sent once at launch so the first real turn finds the prompt prefix cached; its reply is never shown.
+# Sent once at launch, in the background, so the first real turn finds the prompt cached (ADR 0006); never shown.
 WARM_UP = '<event source="hub">Session start. Reply with one word.</event>'
 
 # The Phase 0 definition, kept so Hub numbers compare with the spike's: the end of a delta counts too.
@@ -71,18 +72,23 @@ class Hub:
         self._output = output
         self._metrics = metrics
         self._talker: AgentSession | None = None
+        self._starting: asyncio.Task[None] | None = None
         self._replying = False
         self._interrupting = False
 
     async def start(self) -> None:
-        """Open the launch's one Talker session and warm it before the User's first turn."""
-        self._talker = await self._backend.open(self._spec)
-        await self._turn(WARM_UP, kind="warm_up", show=False)
+        """Open the launch's one Talker session and warm it in the background; a turn typed meanwhile waits."""
+        self._starting = asyncio.create_task(self._open_and_warm())
 
     async def run(self, inputs: AsyncIterator[str]) -> None:
+        """Turns from typed lines until the input ends, or until the Talker turns out unable to start."""
         async for line in inputs:
-            if line.strip():
-                await self._turn(user_message(line.strip()), kind="user", show=True)
+            if not line.strip():
+                continue
+            arrived = self._clock.now()
+            if not await self._started():
+                return
+            await self._turn(user_message(line.strip()), kind="user", arrived=arrived)
 
     async def interrupt(self) -> bool:
         """Stop the reply in progress, if any. Returns whether there was one."""
@@ -93,12 +99,29 @@ class Hub:
         return True
 
     async def close(self) -> None:
+        if self._starting is not None:
+            self._starting.cancel()
+            await asyncio.wait([self._starting])
         if self._talker is not None:
             await self._talker.close()
             self._talker = None
 
-    async def _turn(self, message: str, *, kind: str, show: bool) -> None:
-        assert self._talker is not None, "start() first"
+    async def _open_and_warm(self) -> None:
+        self._talker = await self._backend.open(self._spec)
+        await self._turn(WARM_UP, kind="warm_up", arrived=self._clock.now())
+
+    async def _started(self) -> bool:
+        assert self._starting is not None, "start() first"
+        try:
+            await asyncio.shield(self._starting)
+        except Exception as e:
+            self._output.notice(f"The Talker could not start: {e}")
+            return False
+        return True
+
+    async def _turn(self, message: str, *, kind: Literal["warm_up", "user"], arrived: float) -> None:
+        assert self._talker is not None
+        show = kind == "user"
         t0 = self._clock.now()
         shown, block = "", ""
         first_delta: float | None = None
@@ -106,11 +129,13 @@ class Hub:
         tool_before_text = False
         after_block = False
         end = TurnEnd("failed", error="the session ended without a result")
-        self._replying, self._interrupting = True, False
+        self._replying, self._interrupting = show, False
         try:
             async for event in self._talker.send(message):
                 match event:
-                    case TextDelta(text) if not self._interrupting:
+                    case TextDelta(text):
+                        if self._interrupting:
+                            continue
                         if first_delta is None:
                             first_delta = self._clock.now()
                         if after_block and shown and not shown[-1].isspace() and not text[:1].isspace():
@@ -131,17 +156,17 @@ class Hub:
                             tool_before_text = True
                     case TurnEnd():
                         end = event
-                    case _:
-                        pass
         finally:
             self._replying = False
+        if end.outcome == "interrupted" and not self._interrupting:
+            end = TurnEnd("failed", end.usage, "the turn stopped without the Hub interrupting it")
         if show:
             self._output.reply_end()
         if end.outcome == "failed":
             self._output.notice(f"The Talker failed: {end.error}")
 
         def ms(t: float | None) -> int | None:
-            return None if t is None else round((t - t0) * 1000)
+            return None if t is None else round((t - arrived) * 1000)
 
         self._metrics.record(
             {
@@ -149,6 +174,7 @@ class Hub:
                 "role": self._spec.role,
                 "model": self._spec.model,
                 "effort": self._spec.effort,
+                "wait_ms": ms(t0),
                 "first_delta_ms": ms(first_delta),
                 "first_sentence_ms": ms(first_sentence),
                 "total_ms": ms(self._clock.now()),

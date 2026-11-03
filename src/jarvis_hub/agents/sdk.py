@@ -2,19 +2,19 @@
 
 import json
 from collections.abc import AsyncIterator, Callable
-from typing import Any, cast
+from typing import Any
 
 from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ClaudeSDKError,
     ResultMessage,
+    SdkMcpTool,
     StreamEvent,
     create_sdk_mcp_server,
     tool,
 )
-from claude_agent_sdk import SdkMcpTool
-from claude_agent_sdk.types import EffortLevel, McpServerConfig, ThinkingConfig
+from claude_agent_sdk.types import McpServerConfig, ThinkingConfig
 
 from jarvis_hub.agents.backend import (
     AgentEvent,
@@ -28,7 +28,7 @@ from jarvis_hub.agents.backend import (
 )
 
 TOOL_SERVER = "jarvis"
-# How the CLI reports a turn stopped by interrupt(); the result's is_error is set for these too.
+# How the CLI reports a turn stopped by interrupt(); is_error is set for these too, so it cannot tell them apart.
 INTERRUPTED_REASONS = {"aborted_streaming", "aborted_tools"}
 
 
@@ -49,7 +49,7 @@ def options_for(spec: SessionSpec, cli_path: str, stderr: Callable[[str], None] 
         cli_path=cli_path,
         cwd=spec.cwd,
         model=spec.model,
-        effort=cast(EffortLevel, spec.effort),
+        effort=spec.effort,
         thinking=thinking,
         system_prompt=spec.system_prompt,
         setting_sources=[],

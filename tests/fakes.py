@@ -56,7 +56,19 @@ class Fail:
     error: str
 
 
-Step = Wait | Text | Tool | AwaitInterrupt | Fail | Usage
+@dataclass(frozen=True)
+class Gate:
+    """Blocks the turn until the test sets the event."""
+
+    event: asyncio.Event
+
+
+@dataclass(frozen=True)
+class Abort:
+    """Ends the turn as interrupted although nobody called interrupt(), as when the CLI aborts on its own."""
+
+
+Step = Wait | Text | Tool | AwaitInterrupt | Gate | Fail | Abort | Usage
 
 
 class FakeSession:
@@ -64,7 +76,6 @@ class FakeSession:
         self.backend = backend
         self.spec = spec
         self.received: list[str] = []
-        self.tool_results: list[str] = []
         self.closed = False
         self._interrupted = asyncio.Event()
 
@@ -79,7 +90,7 @@ class FakeSession:
                 in_text = True
                 yield TextDelta(step.text)
                 continue
-            if in_text and isinstance(step, (Tool, Fail)):
+            if in_text and isinstance(step, (Tool, Fail, Abort)):
                 in_text = False
                 yield TextEnd()
             match step:
@@ -87,13 +98,15 @@ class FakeSession:
                     self.backend.clock.advance(seconds)
                 case Tool(name, args):
                     yield ToolCall(name, args)
-                    handler = next((t.handler for t in self.spec.tools if t.name == name), None)
-                    if handler is not None:
-                        self.tool_results.append(await handler(args))
                 case AwaitInterrupt():
                     await self._interrupted.wait()
+                case Gate(event):
+                    await event.wait()
                 case Fail(error):
                     yield TurnEnd("failed", usage, error)
+                    return
+                case Abort():
+                    yield TurnEnd("interrupted", usage)
                     return
                 case Usage():
                     usage = step
@@ -116,13 +129,17 @@ class FakeBackend:
         clock: FakeClock,
         scripts: Iterable[Sequence[Step]] = (),
         warm_up: Sequence[Step] = (Text("Ready."),),
+        open_error: Exception | None = None,
     ) -> None:
         self.clock = clock
         self.scripts = list(scripts)
         self.warm_up = warm_up
+        self.open_error = open_error
         self.sessions: list[FakeSession] = []
 
     async def open(self, spec: SessionSpec) -> FakeSession:
+        if self.open_error is not None:
+            raise self.open_error
         session = FakeSession(self, spec)
         self.sessions.append(session)
         return session

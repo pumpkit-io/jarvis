@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import io
 import json
 import os
 import shutil
@@ -13,13 +14,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TextIO
 
-from jarvis_hub.agents.backend import AgentBackend, SessionSpec
+from jarvis_hub.agents.backend import AgentBackend
 from jarvis_hub.agents.sdk import SdkBackend
-from jarvis_hub.config import ConfigError, load_settings
-from jarvis_hub.hub import Clock, Hub, Metrics
+from jarvis_hub.config import ConfigError, Settings, load_settings
+from jarvis_hub.hub import Clock, Hub
 from jarvis_hub.talker import talker_spec
 
 PROMPT = "› "
+
+# Each of these sends model calls past the Max subscription (ADR 0002).
+BILLING_SWITCHES = {
+    "ANTHROPIC_API_KEY": "every model call would be billed to the API",
+    "ANTHROPIC_AUTH_TOKEN": "every model call would authenticate with that token",
+    "CLAUDE_CODE_USE_BEDROCK": "every model call would go to Amazon Bedrock",
+    "CLAUDE_CODE_USE_VERTEX": "every model call would go to Google Vertex AI",
+}
 
 
 class MonotonicClock:
@@ -57,26 +66,34 @@ class TerminalOutput:
         self._stderr.flush()
 
 
-def guard_api_key(environ: MutableMapping[str, str]) -> str | None:
-    """Drop ANTHROPIC_API_KEY so no session bills the API instead of the Max subscription (ADR 0002)."""
-    if environ.pop("ANTHROPIC_API_KEY", None) is None:
-        return None
-    return (
-        "WARNING: ANTHROPIC_API_KEY is set in this shell. With it, every model call would be billed to the API, "
-        "not your Max subscription. The Hub removed it from its own environment for this run; unset it in your "
-        "shell profile."
-    )
+def _guard_billing(environ: MutableMapping[str, str], stderr: TextIO) -> None:
+    """Remove every billing switch from the environment the sessions inherit, with a loud warning for each."""
+    loud, reset = ("\033[1;41;97m", "\033[0m") if stderr.isatty() else ("", "")
+    for name, effect in BILLING_SWITCHES.items():
+        if environ.pop(name, None) is None:
+            continue
+        stderr.write(
+            f"{loud}WARNING: {name} is set in this shell, so {effect} instead of using your Max subscription. "
+            f"The Hub removed it from its own environment for this run; unset it in your shell profile.{reset}\n"
+        )
+    stderr.flush()
 
 
 async def _typed_lines(stdin: TextIO, stdout: TextIO, interactive: bool) -> AsyncIterator[str]:
     # A daemon thread, so a blocked read never keeps the process alive at exit.
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[str | None] = asyncio.Queue()
+    if isinstance(stdin, io.TextIOWrapper):
+        stdin.reconfigure(errors="replace")
 
     def read() -> None:
-        for line in stdin:
-            loop.call_soon_threadsafe(queue.put_nowait, line.rstrip("\n"))
-        loop.call_soon_threadsafe(queue.put_nowait, None)
+        try:
+            for line in stdin:
+                loop.call_soon_threadsafe(queue.put_nowait, line.rstrip("\n"))
+        except OSError:
+            pass  # A terminal that went away ends the conversation like the end of input.
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, None)
 
     threading.Thread(target=read, daemon=True).start()
     while (line := await queue.get()) is not None:
@@ -87,28 +104,29 @@ async def _typed_lines(stdin: TextIO, stdout: TextIO, interactive: bool) -> Asyn
 
 async def text_mode(
     *,
-    talker: SessionSpec,
+    settings: Settings,
+    environ: MutableMapping[str, str],
     backend: AgentBackend,
+    clock: Clock,
     stdin: TextIO,
     stdout: TextIO,
     stderr: TextIO,
-    metrics: Metrics,
-    clock: Clock,
 ) -> None:
     """A terminal conversation with the Talker: typed lines in, streamed replies out, until end of input."""
+    _guard_billing(environ, stderr)
     interactive = stdin.isatty()
     hub = Hub(
-        talker=talker,
+        talker=talker_spec(settings),
         backend=backend,
         clock=clock,
         output=TerminalOutput(stdout, stderr, prompt=interactive),
-        metrics=metrics,
+        metrics=JsonlMetrics(settings.runtime_dir / "metrics.jsonl"),
     )
-    await hub.start()
-    if interactive:
-        stdout.write(PROMPT)
-        stdout.flush()
     try:
+        await hub.start()
+        if interactive:
+            stdout.write(PROMPT)
+            stdout.flush()
         await hub.run(_typed_lines(stdin, stdout, interactive))
     finally:
         await hub.close()
@@ -119,10 +137,6 @@ def main() -> None:
     parser.add_argument("--text", action="store_true", help="talk by typing, with no audio")
     args = parser.parse_args()
 
-    warning = guard_api_key(os.environ)
-    if warning:
-        loud = "\033[1;41;97m" if sys.stderr.isatty() else ""
-        sys.stderr.write(f"{loud}{warning}{chr(27) + '[0m' if loud else ''}\n")
     if not args.text:
         sys.exit("jarvis-hub: only text mode exists so far; run `jarvis-hub --text`.")
     cli = shutil.which("claude")
@@ -133,19 +147,17 @@ def main() -> None:
     except ConfigError as e:
         sys.exit(f"jarvis-hub: {e}")
 
-    talker = talker_spec(settings)
-    metrics = JsonlMetrics(settings.runtime_dir / "metrics.jsonl")
     # Ctrl-C reaches the claude CLI too (same process group), so it ends the conversation rather than a reply.
     try:
         asyncio.run(
             text_mode(
-                talker=talker,
+                settings=settings,
+                environ=os.environ,
                 backend=SdkBackend(cli),
+                clock=MonotonicClock(),
                 stdin=sys.stdin,
                 stdout=sys.stdout,
                 stderr=sys.stderr,
-                metrics=metrics,
-                clock=MonotonicClock(),
             )
         )
     except KeyboardInterrupt:

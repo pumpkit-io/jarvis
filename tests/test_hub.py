@@ -7,10 +7,12 @@ import pytest
 from jarvis_hub.agents.backend import SessionSpec, Usage
 from jarvis_hub.hub import Hub
 from tests.fakes import (
+    Abort,
     AwaitInterrupt,
     Fail,
     FakeBackend,
     FakeClock,
+    Gate,
     RecordingMetrics,
     RecordingOutput,
     Text,
@@ -100,7 +102,7 @@ async def test_blank_lines_are_not_turns(clock: FakeClock, output: RecordingOutp
     await hub.run(lines("", "   "))
 
     assert output.log == []
-    assert [m for m in backend.sessions[0].received if m.startswith("<user")] == []
+    assert [m for s in backend.sessions for m in s.received if m.startswith("<user")] == []
 
 
 async def test_start_warms_the_talker_without_showing_its_reply(
@@ -117,6 +119,55 @@ async def test_start_warms_the_talker_without_showing_its_reply(
     assert output.replies == ["Evening, sir."]
     assert metrics.records[0]["kind"] == "warm_up"
     assert metrics.records[0]["first_delta_ms"] == 2000
+
+
+async def test_the_warm_up_runs_in_the_background_and_an_early_turn_waits_for_it(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    release = asyncio.Event()
+    backend = FakeBackend(
+        clock, [[Wait(0.4), Text("Evening, sir.")]], warm_up=[Gate(release), Wait(1.5), Text("Ready.")]
+    )
+    hub = make_hub(backend, clock, output, metrics)
+
+    await asyncio.wait_for(hub.start(), timeout=1)
+    running = asyncio.create_task(hub.run(lines("Hello")))
+    await asyncio.sleep(0.01)
+    assert [m for m in backend.sessions[0].received if m.startswith("<user")] == []
+    release.set()
+    await asyncio.wait_for(running, timeout=1)
+
+    assert output.replies == ["Evening, sir."]
+    turn = metrics.records[-1]
+    assert (turn["kind"], turn["wait_ms"], turn["first_sentence_ms"]) == ("user", 1500, 1900)
+
+
+async def test_ending_during_the_warm_up_stops_it_and_closes_the_session(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    backend = FakeBackend(clock, warm_up=[Gate(asyncio.Event()), Text("Ready.")])
+    hub = make_hub(backend, clock, output, metrics)
+
+    await hub.start()
+    await asyncio.sleep(0.01)
+    await asyncio.wait_for(hub.close(), timeout=1)
+
+    assert backend.sessions[0].closed
+    assert output.log == []
+
+
+async def test_a_talker_that_cannot_start_is_reported_and_ends_the_conversation(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    backend = FakeBackend(clock, open_error=RuntimeError("claude CLI not logged in"))
+    hub = make_hub(backend, clock, output, metrics)
+
+    await hub.start()
+    await hub.run(lines("Hello", "Hello?"))
+    await hub.close()
+
+    assert output.notices == ["The Talker could not start: claude CLI not logged in"]
+    assert output.replies == []
 
 
 async def test_each_turn_records_latency_from_the_message_to_the_first_sentence(
@@ -216,6 +267,19 @@ async def test_interrupt_with_no_reply_running_does_nothing(
     hub = make_hub(FakeBackend(clock), clock, output, metrics)
     await hub.start()
     assert await hub.interrupt() is False
+
+
+async def test_a_turn_stopped_without_the_hub_asking_is_a_failure(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    backend = FakeBackend(clock, [[Text("One, two, "), Abort()]])
+    hub = make_hub(backend, clock, output, metrics)
+
+    await hub.start()
+    await hub.run(lines("Count to a hundred"))
+
+    assert output.notices == ["The Talker failed: the turn stopped without the Hub interrupting it"]
+    assert metrics.records[-1]["outcome"] == "failed"
 
 
 async def test_a_failed_turn_is_reported_and_the_conversation_goes_on(
