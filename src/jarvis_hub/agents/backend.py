@@ -109,6 +109,8 @@ class TurnEnd:
     error: str | None = None
     # Left out when the backend could not tell, which never triggers a restart.
     context: Context | None = None
+    # Why the context is left out, when the backend had a report but could not read the window from it.
+    no_context: str | None = None
 
 
 AgentEvent = TextDelta | TextEnd | ToolCall | TurnEnd

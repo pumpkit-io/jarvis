@@ -117,6 +117,10 @@ TalkerKind = Literal["warm_up", "restart", "user", "event"]
 
 # How many of the latest exchanges a restarted Talker is told about.
 RECENT_EXCHANGES = 6
+# Turns a failed restart waits before trying again: each try costs a model call.
+RESTART_RETRY_AFTER = 5
+# How long a closing Hub lets a Talker open run on, so the session it opens can be closed and not left running.
+OPEN_GRACE = 10.0
 
 # An Orchestrator turn is a look-up of a few commands; one running this long is stuck.
 ORCHESTRATOR_TIMEOUT = 600.0
@@ -235,14 +239,16 @@ class Hub:
         self._orchestrator_timeout = orchestrator_timeout
         self._speech: Speech = speech if speech is not None else _Silent()
         self._restart_at = talker_restart_at
-        # The Talker's context at its latest request, and the exchanges a restarted one is seeded with.
-        self._context: Context | None = None
+        # The exchanges a restarted Talker is seeded with.
         self._exchanges: deque[tuple[str, str]] = deque(maxlen=RECENT_EXCHANGES)
         # The language of the latest line read, and of the latest User turn the Talker took: replies follow it.
         self._read_lang: Lang = "en"
         self._lang: Lang = "en"
         self._tasks = Tasks()
         self._talker: AgentSession | None = None
+        # Turns left before a failed restart is tried again, and whether the User has heard of the failure.
+        self._restart_wait = 0
+        self._restart_failing = False
         self._orchestrator: AgentSession | None = None
         self._talker_inbox: asyncio.Queue[_TalkerInput] = asyncio.Queue()
         # One queue, so the Orchestrator's single session takes one message at a time.
@@ -329,9 +335,8 @@ class Hub:
 
     async def _talk(self) -> None:
         try:
-            self._talker = await self._backend.open(self._talker_spec)
-            end = await self._turn(WARM_UP, kind="warm_up", arrived=self._clock.now())
-            self._context = end.context
+            self._talker = await self._open_talker()
+            await self._turn(WARM_UP, kind="warm_up", arrived=self._clock.now())
         except Exception as e:
             self._output.notice(f"The Talker could not start: {e}")
             return
@@ -347,26 +352,42 @@ class Hub:
                     self._output.show(item.details)
                 self._user_text = item.heard if item.kind == "user" else None
                 end = await self._turn(item.message, kind=item.kind, arrived=item.arrived)
-                self._context = end.context or self._context
             finally:
                 self._user_text = None
                 self._handled()
-            await self._restart_if_full()
+            await self._restart_if_full(end.context)
 
-    async def _restart_if_full(self) -> None:
+    async def _open_talker(self) -> AgentSession:
+        """Open a Talker session. A cancel that lands meanwhile lets the open finish and closes what it opened."""
+        opening = asyncio.ensure_future(self._backend.open(self._talker_spec))
+        try:
+            return await asyncio.shield(opening)
+        except asyncio.CancelledError:
+            done, _ = await asyncio.wait([opening], timeout=OPEN_GRACE)
+            if not done:
+                opening.cancel()
+            elif not opening.cancelled() and opening.exception() is None:
+                with contextlib.suppress(Exception):
+                    await opening.result().close()
+            raise
+
+    async def _restart_if_full(self, context: Context | None) -> None:
         """Between turns, swap in a fresh Talker once the context passes the threshold (ADR 0006's warm-up, again).
 
-        The new session reads the seed in the background like the launch warm-up, so a line typed meanwhile waits
-        for it in the inbox. Whatever fails leaves the old session talking, and the next turn tries again.
+        Only this turn's context decides: an older reading may be stale. The new session reads the seed in the
+        background like the launch warm-up, so a line typed meanwhile waits for it in the inbox. Whatever fails
+        leaves the old session talking, and the restart waits RESTART_RETRY_AFTER turns before trying again.
         """
-        context = self._context
+        if self._restart_wait:
+            self._restart_wait -= 1
+            return
         if context is None or context.used < self._restart_at:
             return
         old = self._talker
         try:
-            session = await self._backend.open(self._talker_spec)
+            session = await self._open_talker()
         except Exception as e:
-            self._output.notice(f"The Talker could not restart, so the old session goes on: {e}")
+            self._restart_failed(str(e))
             return
         try:
             seed = restart_message(self._tasks.open_status(self._clock.now(), self._subagents.lines), self._exchanges)
@@ -378,12 +399,18 @@ class Hub:
         if end.outcome != "completed":
             with contextlib.suppress(Exception):
                 await session.close()
-            self._output.notice("The Talker could not restart, so the old session goes on.")
+            self._restart_failed(end.error or end.outcome)
             return
-        self._talker, self._context = session, end.context
+        self._talker, self._restart_failing = session, False
         if old is not None:
             with contextlib.suppress(Exception):
                 await old.close()
+
+    def _restart_failed(self, error: str) -> None:
+        self._restart_wait = RESTART_RETRY_AFTER
+        if not self._restart_failing:
+            self._output.notice(f"The Talker could not restart, so the old session goes on: {error}")
+        self._restart_failing = True
 
     async def _turn(
         self, message: str, *, kind: TalkerKind, arrived: float, session: AgentSession | None = None
@@ -441,7 +468,8 @@ class Hub:
             end = TurnEnd("failed", end.usage, "the turn stopped without the Hub interrupting it")
         if show:
             self._output.reply_end()
-        if end.outcome == "failed":
+        # A failed restart has its own notice.
+        if end.outcome == "failed" and kind != "restart":
             self._output.notice(f"The Talker failed: {end.error}")
         if show and (shown.strip() or end.outcome != "failed"):
             self._exchanges.append((message, shown))
@@ -460,6 +488,7 @@ class Hub:
             total_ms=ms(self._clock.now()),
             tool_before_text=tool_before_text,
             **({"context_tokens": end.context.tokens, "context_window": end.context.window} if end.context else {}),
+            **({"no_context": end.no_context} if end.no_context else {}),
         )
         return end
 

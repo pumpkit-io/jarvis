@@ -224,8 +224,9 @@ async def test_max_turns_caps_each_message_not_the_whole_session() -> None:
     assert outcomes == ["completed", "completed", "completed"]
 
 
-async def test_a_turn_reports_the_context_it_filled_against_the_models_window() -> None:
-    session = await open_session(spec("Answer in one short sentence."))
+@pytest.mark.parametrize("model", ["sonnet", "sonnet[1m]", "haiku"])
+async def test_a_turn_reports_the_context_it_filled_against_the_models_window(model: str) -> None:
+    session = await open_session(replace(spec("Answer in one short sentence."), model=model))
     try:
         events = await collect(session, "Say hello.")
     finally:

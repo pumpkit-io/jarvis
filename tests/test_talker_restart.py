@@ -5,11 +5,13 @@ import asyncio
 import pytest
 
 from jarvis_hub.agents.backend import Context
+from jarvis_hub.hub import RESTART_RETRY_AFTER
 from tests.fakes import (
     Fail,
     FakeBackend,
     FakeClock,
     Gate,
+    NoContext,
     RecordingMetrics,
     RecordingOutput,
     Text,
@@ -207,7 +209,7 @@ async def test_only_the_last_few_exchanges_are_in_the_seed(
 async def test_a_restart_that_cannot_open_keeps_the_session_and_the_conversation_goes_on(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
 ) -> None:
-    backend = FakeBackend(clock, [[Text("One."), at(50)], [Text("Two.")]], restart_error=RuntimeError("no CLI"))
+    backend = FakeBackend(clock, [[Text("One."), at(50)], [Text("Two."), at(50)]], restart_error=RuntimeError("no CLI"))
     hub = make_hub(backend, output, metrics)
 
     await hub.start()
@@ -216,8 +218,109 @@ async def test_a_restart_that_cannot_open_keeps_the_session_and_the_conversation
 
     assert output.replies == ["One.", "Two."]
     assert len(backend.all_sessions("talker")) == 1
-    # Each turn boundary past the threshold tries again.
-    assert output.notices == ["The Talker could not restart, so the old session goes on: no CLI"] * 2
+    assert output.notices == ["The Talker could not restart, so the old session goes on: no CLI"]
+
+
+async def test_a_failed_restart_waits_some_turns_before_trying_again_and_tells_the_user_once(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    turns = RESTART_RETRY_AFTER + 2
+    backend = FakeBackend(clock, [[Text(f"{i}."), at(50)] for i in range(turns)], restart_error=RuntimeError("no CLI"))
+    hub = make_hub(backend, output, metrics)
+
+    await hub.start()
+    await hub.run(lines(clock, *[str(i) for i in range(turns)]))
+    await hub.close()
+
+    # The launch, then a try after the first turn and one more once the back-off has passed.
+    assert backend.talker_opens == 3
+    assert output.notices == ["The Talker could not restart, so the old session goes on: no CLI"]
+
+
+async def test_a_failed_seed_is_one_notice_and_waits_like_a_failed_open(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    backend = FakeBackend(clock, [[Text("One."), at(50)], [Text("Two."), at(50)]], seed_reply=[Fail("overloaded")])
+    hub = make_hub(backend, output, metrics)
+
+    await hub.start()
+    await hub.run(lines(clock, "a", "b"))
+    await hub.close()
+
+    assert backend.talker_opens == 2
+    assert output.notices == ["The Talker could not restart, so the old session goes on: overloaded"]
+
+
+async def test_a_turn_whose_context_is_unknown_is_logged_and_never_restarts_on_an_older_reading(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    turns = RESTART_RETRY_AFTER + 2
+    scripts = [[Text("0."), at(50)]] + [[Text(f"{i}."), NoContext("no entry")] for i in range(1, turns)]
+    backend = FakeBackend(clock, scripts, restart_error=RuntimeError("no CLI"))
+    hub = make_hub(backend, output, metrics)
+
+    await hub.start()
+    await hub.run(lines(clock, *[str(i) for i in range(turns)]))
+    await hub.close()
+
+    assert backend.talker_opens == 2
+    user_turns = [r for r in metrics.records if r["role"] == "talker" and r["kind"] == "user"]
+    assert [r.get("no_context") for r in user_turns] == [None] + ["no entry"] * (turns - 1)
+
+
+async def test_closing_the_hub_while_a_restart_opens_closes_the_session_once_it_has_opened(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    opened = asyncio.Event()
+    backend = FakeBackend(clock, [[Text("One."), at(50)]], restart_open_gate=opened)
+    hub = make_hub(backend, output, metrics)
+
+    await hub.start()
+    await hub.run(lines(clock, "a"))
+    await until(lambda: backend.talker_opens == 2)
+    closing = asyncio.create_task(hub.close())
+    await asyncio.sleep(0.01)
+    opened.set()
+    await asyncio.wait_for(closing, timeout=1)
+
+    old, new = backend.all_sessions("talker")
+    assert old.closed and new.closed
+    assert new.received == []
+
+
+async def test_the_seed_lists_each_open_tasks_subagents(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    release = asyncio.Event()
+    brief = "Fix the typo in pumpkit's README."
+    spawn = Tool(
+        "spawn_subagent",
+        {"repo": "pumpkit", "title": "Fix typo X in pumpkit", "brief": brief, "model": "sonnet", "effort": "medium",
+         "writes": True, "branch_kind": "fix"},
+    )
+    backend = FakeBackend(
+        clock,
+        [[Text("On it."), Tool("delegate", {"request": "Fix typo X", "context": ""})], [Text("Working."), at(50)]],
+        orchestrator=[[spawn], [Tool("report", {"task_id": "T1", "spoken": "Fixed."})]],
+        subagents={brief: [Gate(release), Text("Done.")]},
+    )
+    hub = make_hub(backend, output, metrics)
+    typist = Typist(clock)
+
+    await hub.start()
+    running = asyncio.create_task(hub.run(typist.lines()))
+    typist.type("Fix typo X")
+    await until(lambda: len(backend.all_sessions("subagent")) == 1)
+    typist.type("How is it going?")
+    await until(lambda: len(backend.all_sessions("talker")) == 2 and len(backend.all_sessions("talker")[1].received) > 0)
+    release.set()
+    typist.end()
+    await asyncio.wait_for(running, timeout=1)
+    await hub.close()
+
+    seed = backend.all_sessions("talker")[1].received[0]
+    assert "T1 working" in seed
+    assert "\n  S1 running" in seed and "pumpkit on fix/fix-typo-x-in-pumpkit: Fix typo X in pumpkit" in seed
 
 
 async def test_a_seed_the_new_session_fails_on_keeps_the_old_session_and_closes_the_new_one(

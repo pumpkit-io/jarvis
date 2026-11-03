@@ -1,6 +1,7 @@
 """The real agent backend: Claude Agent SDK sessions on the installed `claude` CLI and the User's Max login."""
 
 import json
+import re
 import shlex
 from collections.abc import AsyncIterator, Callable
 from typing import Any
@@ -14,6 +15,7 @@ from claude_agent_sdk import (
     ResultMessage,
     SdkMcpTool,
     StreamEvent,
+    SystemMessage,
     create_sdk_mcp_server,
     tool,
 )
@@ -163,21 +165,25 @@ def _prompt_tokens(usage: dict[str, Any]) -> int:
     return sum(usage.get(k, 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
 
 
-def _window(result: ResultMessage, model: str) -> int:
-    """The context window of the session's model, from the CLI's per-model report.
+def _model_id(name: str) -> str:
+    """`sonnet[1m]` and `claude-sonnet-5-5[1m]` report as `sonnet` and `claude-sonnet-5-5`."""
+    return re.sub(r"\[[^\]]*\]$", "", name.strip())
 
-    That report also lists the CLI's own Haiku requests, so the entry is found by the model's name, and failing
-    that is the one that took the most tokens.
+
+def _window(result: ResultMessage, model: str) -> int | None:
+    """The session model's context window from the CLI's per-model report, or None when no entry is surely it.
+
+    The report also lists the CLI's own Haiku requests, so a wrong guess could restart the Talker far too early.
     """
-    models = result.model_usage or {}
-    if not models:
-        return 0
-    named = [u for name, u in models.items() if model in name]
-    busiest = max(models.values(), key=lambda u: u["inputTokens"] + u["cacheReadInputTokens"] + u["cacheCreationInputTokens"])
-    return (named[0] if named else busiest)["contextWindow"]
+    models = {_model_id(name): u for name, u in (result.model_usage or {}).items()}
+    wanted = _model_id(model)
+    if wanted in models:
+        return models[wanted]["contextWindow"]
+    family = [u for name, u in models.items() if name.startswith(f"claude-{wanted}-")]
+    return family[0]["contextWindow"] if len(family) == 1 else None
 
 
-def turn_end(result: ResultMessage, model: str = "", last_request: dict[str, Any] | None = None) -> TurnEnd:
+def turn_end(result: ResultMessage, model: str, last_request: dict[str, Any] | None) -> TurnEnd:
     """`last_request` is the usage of the turn's final model request: the context as that request saw it.
 
     The result's own usage adds up every request of the turn, which would count the prompt once per tool round.
@@ -189,21 +195,28 @@ def turn_end(result: ResultMessage, model: str = "", last_request: dict[str, Any
         cache_read_tokens=raw.get("cache_read_input_tokens", 0),
         cache_creation_tokens=raw.get("cache_creation_input_tokens", 0),
     )
-    window = _window(result, model)
-    context = Context(_prompt_tokens(last_request), window) if last_request and window else None
+    context: Context | None = None
+    no_context: str | None = None
+    if last_request and result.model_usage:
+        window = _window(result, model)
+        if window:
+            context = Context(_prompt_tokens(last_request), window)
+        else:
+            no_context = f"no single model_usage entry is {model!r}: {', '.join(sorted(result.model_usage))}"
     if result.terminal_reason in INTERRUPTED_REASONS:
-        return TurnEnd("interrupted", usage, context=context)
+        return TurnEnd("interrupted", usage, context=context, no_context=no_context)
     if result.is_error:
         detail = "; ".join(result.errors or []) or result.result or result.subtype
         if result.api_error_status:
             detail = f"HTTP {result.api_error_status}: {detail}"
-        return TurnEnd("failed", usage, detail, context)
-    return TurnEnd("completed", usage, context=context)
+        return TurnEnd("failed", usage, detail, context, no_context)
+    return TurnEnd("completed", usage, context=context, no_context=no_context)
 
 
 class SdkSession:
-    def __init__(self, client: ClaudeSDKClient, model: str = "") -> None:
+    def __init__(self, client: ClaudeSDKClient, model: str) -> None:
         self._client = client
+        # The configured name, until the CLI's init message says which model it resolved it to.
         self._model = model
 
     async def send(self, message: str) -> AsyncIterator[AgentEvent]:
@@ -215,6 +228,8 @@ class SdkSession:
                 if isinstance(m, ResultMessage):
                     yield turn_end(m, self._model, last_request)
                     return
+                if isinstance(m, SystemMessage) and m.subtype == "init" and isinstance(m.data.get("model"), str):
+                    self._model = m.data["model"]
                 if not isinstance(m, StreamEvent) or m.parent_tool_use_id is not None:
                     continue
                 if m.event.get("type") == "message_start":

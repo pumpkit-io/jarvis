@@ -5,7 +5,7 @@ import threading
 from collections.abc import AsyncIterator, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -102,7 +102,14 @@ class Abort:
     """Ends the turn as interrupted although nobody called interrupt(), as when the CLI aborts on its own."""
 
 
-Step = Wait | Text | Tool | AwaitInterrupt | Gate | Set | Fail | Raise | Abort | Usage | Context
+@dataclass(frozen=True)
+class NoContext:
+    """The turn ends without a context, for this reason."""
+
+    reason: str
+
+
+Step = Wait | Text | Tool | AwaitInterrupt | Gate | Set | Fail | Raise | Abort | Usage | Context | NoContext
 
 
 @dataclass(frozen=True)
@@ -136,6 +143,7 @@ class FakeSession:
 
     async def _play(self, script: Sequence[Step]) -> AsyncIterator[AgentEvent]:
         usage, context, in_text = Usage(), None, False
+        no_context: str | None = None
         for step in script:
             await asyncio.sleep(0)
             if isinstance(step, Text):
@@ -171,9 +179,12 @@ class FakeSession:
                     usage = step
                 case Context():
                     context = step
+                case NoContext(reason):
+                    no_context = reason
         if in_text:
             yield TextEnd()
-        yield TurnEnd("interrupted" if self._interrupted.is_set() else "completed", usage, context=context)
+        outcome: Literal["completed", "interrupted"] = "interrupted" if self._interrupted.is_set() else "completed"
+        yield TurnEnd(outcome, usage, context=context, no_context=no_context)
 
     async def interrupt(self) -> None:
         # Like the CLI: the interrupt lands on whatever turn runs when it arrives, or on none.
@@ -204,6 +215,7 @@ class FakeBackend:
         warm_up: Sequence[Step] = (Text("Ready."),),
         seed_reply: Sequence[Step] = (Text("Ready."),),
         restart_error: Exception | None = None,
+        restart_open_gate: asyncio.Event | None = None,
         open_error: Exception | None = None,
         orchestrator: Iterable[Sequence[Step]] = (),
         orchestrator_open_error: Exception | None = None,
@@ -220,6 +232,9 @@ class FakeBackend:
         self.warm_up = warm_up
         self.seed_reply = seed_reply
         self.restart_error = restart_error
+        # Holds a restarted Talker's open until set: a CLI slow to start.
+        self.restart_open_gate = restart_open_gate
+        self.talker_opens = 0
         self.open_error = open_error
         self.orchestrator_open_error = orchestrator_open_error
         self.interrupt_gate = interrupt_gate
@@ -239,8 +254,12 @@ class FakeBackend:
             if self.subagent_open_error is not None:
                 raise self.subagent_open_error
         error = self.orchestrator_open_error if spec.role == "orchestrator" else self.open_error
-        if spec.role == "talker" and self.all_sessions("talker"):
-            error = self.restart_error
+        if spec.role == "talker":
+            self.talker_opens += 1
+            if self.all_sessions("talker"):
+                error = self.restart_error
+                if self.restart_open_gate is not None:
+                    await self.restart_open_gate.wait()
         if error is not None:
             raise error
         session = FakeSession(self, spec)
