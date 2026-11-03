@@ -8,7 +8,7 @@ from typing import TextIO
 import pytest
 
 from jarvis_hub.config import RoleModel, Settings
-from jarvis_hub.main import text_mode
+from jarvis_hub.main import TerminalOutput, text_mode
 from jarvis_hub.read_only import check
 from tests.fakes import FakeBackend, FakeClock, Gate, Text, Tool, Wait
 
@@ -245,3 +245,18 @@ async def test_a_show_log_that_cannot_be_written_does_not_stop_the_screen(tmp_pa
 
     assert "Plan" in stdout and stdout.endswith("Indeed.\n")
     assert stderr.startswith("[hub] Could not write the show log:")
+
+
+class ClosedPipe(io.StringIO):
+    def write(self, s: str) -> int:
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+def test_details_for_a_screen_that_is_gone_still_reach_the_show_log(tmp_path: Path) -> None:
+    stderr = io.StringIO()
+    output = TerminalOutput(ClosedPipe(), stderr, prompt=False, show_log=tmp_path / "show.log")
+
+    output.show("# Plan")
+
+    assert "# Plan" in (tmp_path / "show.log").read_text()
+    assert stderr.getvalue().startswith("[hub] Could not show the details on screen:")

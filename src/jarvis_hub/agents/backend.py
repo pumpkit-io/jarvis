@@ -29,6 +29,14 @@ class HubTool:
     handler: ToolHandler
 
 
+def object_schema(properties: dict[str, Any], required: tuple[str, ...] = ()) -> dict[str, Any]:
+    """A tool's input schema: an object with these properties."""
+    return {"type": "object", "properties": properties, "required": list(required)}
+
+
+STRING: dict[str, Any] = {"type": "string"}
+
+
 @dataclass(frozen=True)
 class SessionSpec:
     """One session's setup. Nothing outside it is allowed: no settings, no connectors, no unlisted tool."""

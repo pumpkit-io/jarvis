@@ -5,6 +5,7 @@ this one code path; voice mode will add audio adapters around it.
 """
 
 import asyncio
+import contextlib
 import json
 import re
 from collections.abc import AsyncIterator
@@ -16,14 +17,15 @@ from jarvis_hub.agents.backend import (
     AgentBackend,
     AgentEvent,
     AgentSession,
-    HubTool,
     SessionSpec,
     TextDelta,
     TextEnd,
     ToolCall,
     TurnEnd,
 )
-from jarvis_hub.tasks import FINISHED, Task, Tasks
+from jarvis_hub.orchestrator import orchestrator_tools
+from jarvis_hub.talker import talker_tools
+from jarvis_hub.tasks import Task, Tasks, no_task
 
 
 class Clock(Protocol):
@@ -72,6 +74,11 @@ _SENTENCE_END = re.compile(r"[.?!](\s|$)")
 
 TalkerKind = Literal["warm_up", "user", "event"]
 
+# An Orchestrator turn is a look-up of a few commands; one running this long is stuck.
+ORCHESTRATOR_TIMEOUT = 600.0
+# How long an interrupted turn has to end before the Hub gives up on its session.
+INTERRUPT_GRACE = 10.0
+
 
 def user_message(text: str) -> str:
     # Escaped so typed text can never close the tag or forge another one.
@@ -108,11 +115,24 @@ class _OrchestratorInput:
     arrived: float
 
 
-def _schema(properties: dict[str, Any], required: tuple[str, ...] = ()) -> dict[str, Any]:
-    return {"type": "object", "properties": properties, "required": list(required)}
+class _TurnGate:
+    """Lets an interrupt land only on the turn it was meant for, never on the one after."""
 
+    def __init__(self) -> None:
+        self.turn: int | None = None
+        self._lock = asyncio.Lock()
 
-_STRING = {"type": "string"}
+    async def interrupt(self, session: AgentSession, turn: int) -> bool:
+        if self.turn != turn:
+            return False
+        async with self._lock:
+            await session.interrupt()
+        return True
+
+    async def before_next_turn(self) -> None:
+        # Taking the lock waits out an interrupt still on its way to a turn that has ended.
+        async with self._lock:
+            pass
 
 
 class Hub:
@@ -125,13 +145,22 @@ class Hub:
         clock: Clock,
         output: Output,
         metrics: Metrics,
+        orchestrator_timeout: float = ORCHESTRATOR_TIMEOUT,
     ) -> None:
-        self._talker_spec = replace(talker, tools=self._talker_tools())
-        self._orchestrator_spec = replace(orchestrator, tools=self._orchestrator_tools())
+        tools = talker_tools(
+            delegate=self._delegate,
+            status=self._status,
+            cancel=self._cancel,
+            show=self._show,
+            end_conversation=self._end_conversation,
+        )
+        self._talker_spec = replace(talker, tools=tools)
+        self._orchestrator_spec = replace(orchestrator, tools=orchestrator_tools(report=self._report))
         self._backend = backend
         self._clock = clock
         self._output = output
         self._metrics = metrics
+        self._orchestrator_timeout = orchestrator_timeout
         self._tasks = Tasks()
         self._talker: AgentSession | None = None
         self._orchestrator: AgentSession | None = None
@@ -143,10 +172,9 @@ class Hub:
         self._settled = asyncio.Event()
         self._settled.set()
         self._turn_count = 0
-        self._reply_turn: int | None = None
+        self._talker_gate = _TurnGate()
         self._interrupted_turn: int | None = None
-        # Held while an interrupt is on its way, so it cannot land on the turn after the one it was meant for.
-        self._interrupt_lock = asyncio.Lock()
+        self._orchestrator_gate = _TurnGate()
         self._orchestrating: str | None = None
 
     async def start(self) -> None:
@@ -169,13 +197,11 @@ class Hub:
 
     async def interrupt(self) -> bool:
         """Stop the reply in progress, if any. Returns whether there was one."""
-        turn = self._reply_turn
+        turn = self._talker_gate.turn
         if turn is None or self._talker is None:
             return False
         self._interrupted_turn = turn
-        async with self._interrupt_lock:
-            await self._talker.interrupt()
-        return True
+        return await self._talker_gate.interrupt(self._talker, turn)
 
     async def close(self) -> None:
         for loop in self._loops:
@@ -193,17 +219,13 @@ class Hub:
     async def _read(self, inputs: AsyncIterator[Line]) -> None:
         async for line in inputs:
             if text := line.text.strip():
-                self._post_talker(_TalkerInput(user_message(text), "user", line.arrived, heard=text))
+                self._post(self._talker_inbox, _TalkerInput(user_message(text), "user", line.arrived, heard=text))
 
-    def _post_talker(self, item: _TalkerInput) -> None:
+    def _post(self, inbox: "asyncio.Queue[Any]", item: _TalkerInput | _OrchestratorInput) -> None:
+        """Queue an item; the Hub counts as settled again once every posted item is handled."""
         self._pending += 1
         self._settled.clear()
-        self._talker_inbox.put_nowait(item)
-
-    def _post_orchestrator(self, item: _OrchestratorInput) -> None:
-        self._pending += 1
-        self._settled.clear()
-        self._orchestrator_inbox.put_nowait(item)
+        inbox.put_nowait(item)
 
     def _handled(self) -> None:
         self._pending -= 1
@@ -220,8 +242,7 @@ class Hub:
         while True:
             item = await self._talker_inbox.get()
             try:
-                async with self._interrupt_lock:
-                    pass
+                await self._talker_gate.before_next_turn()
                 if item.heard:
                     self._output.heard(item.heard)
                 if item.details:
@@ -243,7 +264,7 @@ class Hub:
         tool_before_text = False
         after_block = False
         end = TurnEnd("failed", error="the session ended without a result")
-        self._reply_turn = turn if show else None
+        self._talker_gate.turn = turn if show else None
         try:
             async for event in self._guarded(self._talker.send(message)):
                 match event:
@@ -272,7 +293,7 @@ class Hub:
                     case TurnEnd():
                         end = event
         finally:
-            self._reply_turn = None
+            self._talker_gate.turn = None
         if end.outcome == "interrupted" and self._interrupted_turn != turn:
             end = TurnEnd("failed", end.usage, "the turn stopped without the Hub interrupting it")
         if show:
@@ -284,76 +305,108 @@ class Hub:
             return None if t is None else round((t - arrived) * 1000)
 
         self._record(
-            {
-                "kind": kind,
-                "role": self._talker_spec.role,
-                "model": self._talker_spec.model,
-                "effort": self._talker_spec.effort,
-                "wait_ms": ms(t0),
-                "first_delta_ms": ms(first_delta),
-                "first_sentence_ms": ms(first_sentence),
-                "total_ms": ms(self._clock.now()),
-                "tools": tools,
-                "tool_before_text": tool_before_text,
-                "outcome": end.outcome,
-                "usage": asdict(end.usage),
-            }
+            self._talker_spec,
+            kind,
+            end,
+            tools,
+            wait_ms=ms(t0),
+            first_delta_ms=ms(first_delta),
+            first_sentence_ms=ms(first_sentence),
+            total_ms=ms(self._clock.now()),
+            tool_before_text=tool_before_text,
         )
 
     async def _orchestrate(self) -> None:
         while True:
             item = await self._orchestrator_inbox.get()
             try:
+                await self._orchestrator_gate.before_next_turn()
                 await self._orchestrator_turn(item)
+            except Exception as e:
+                # Whatever went wrong on this Task, the next one in the queue still gets its turn.
+                error = f"{type(e).__name__}: {e}"
+                task = self._tasks.get(item.task_id)
+                if task is not None and task.state == "working":
+                    self._fail(task, error)
+                self._output.notice(f"The Orchestrator failed on {item.task_id}: {error}")
             finally:
                 self._handled()
 
     async def _orchestrator_turn(self, item: _OrchestratorInput) -> None:
         task = self._tasks.get(item.task_id)
-        if task is None or task.cancelled:
+        if task is None:
             return
         if self._orchestrator is None:
             try:
                 self._orchestrator = await self._backend.open(self._orchestrator_spec)
             except Exception as e:
-                self._fail(task, f"the Orchestrator could not start: {e}")
+                if task.take_message():
+                    self._fail(task, f"the Orchestrator could not start: {e}")
                 return
-        task.state = "working"
+        # Taken after the last await before the turn, so a cancel lands either before it or on the running turn.
+        if not task.take_message():
+            return
+        session = self._orchestrator
+        self._turn_count += 1
+        turn = self._turn_count
         reports = task.reports
         t0 = self._clock.now()
         tools: list[str] = []
-        end = TurnEnd("failed", error="the session ended without a result")
         self._orchestrating = task.id
+        consuming = asyncio.create_task(self._consume(task, session, item.message, turn, tools))
         try:
-            async for event in self._guarded(self._orchestrator.send(item.message)):
-                match event:
-                    case ToolCall(name):
-                        tools.append(name)
-                    case TurnEnd():
-                        end = event
-                    case _:
-                        pass
+            end = await self._within_time(consuming, session, turn)
         finally:
             self._orchestrating = None
+            self._orchestrator_gate.turn = None
+            if not consuming.done():
+                # A turn left mid-stream would feed its leftovers to the next message, so the session goes.
+                consuming.cancel()
+                await asyncio.wait([consuming])
+                self._orchestrator = None
+                with contextlib.suppress(Exception):
+                    await session.close()
         if not task.cancelled and task.reports == reports:
             if end.outcome == "completed":
                 self._fail(task, "the Orchestrator ended its turn without a report")
             else:
                 self._fail(task, end.error or "the Orchestrator's turn was stopped")
         self._record(
-            {
-                "kind": "task",
-                "role": self._orchestrator_spec.role,
-                "model": self._orchestrator_spec.model,
-                "effort": self._orchestrator_spec.effort,
-                "task": task.id,
-                "wait_ms": round((t0 - item.arrived) * 1000),
-                "total_ms": round((self._clock.now() - item.arrived) * 1000),
-                "tools": tools,
-                "outcome": end.outcome,
-                "usage": asdict(end.usage),
-            }
+            self._orchestrator_spec,
+            "task",
+            end,
+            tools,
+            task=task.id,
+            wait_ms=round((t0 - item.arrived) * 1000),
+            total_ms=round((self._clock.now() - item.arrived) * 1000),
         )
+
+    async def _consume(self, task: Task, session: AgentSession, message: str, turn: int, tools: list[str]) -> TurnEnd:
+        if task.cancelled:
+            return TurnEnd("interrupted")
+        # Interruptible only from here, as the message goes out: an interrupt reaching the session earlier is lost.
+        self._orchestrator_gate.turn = turn
+        end = TurnEnd("failed", error="the session ended without a result")
+        async for event in self._guarded(session.send(message)):
+            match event:
+                case ToolCall(name):
+                    tools.append(name)
+                case TurnEnd():
+                    end = event
+                case TextDelta() | TextEnd():
+                    pass
+        return end
+
+    async def _within_time(self, consuming: "asyncio.Task[TurnEnd]", session: AgentSession, turn: int) -> TurnEnd:
+        """The turn's end, or a failure once it runs past the timeout and the interrupt's grace."""
+        timeout = self._orchestrator_timeout
+        await asyncio.wait([consuming], timeout=timeout)
+        if consuming.done():
+            return consuming.result()
+        await self._orchestrator_gate.interrupt(session, turn)
+        await asyncio.wait([consuming], timeout=min(INTERRUPT_GRACE, timeout))
+        usage = consuming.result().usage if consuming.done() else TurnEnd("failed").usage
+        return TurnEnd("failed", usage, f"the Orchestrator took longer than {timeout:g} s")
 
     async def _guarded(self, events: AsyncIterator[AgentEvent]) -> AsyncIterator[AgentEvent]:
         """A session that raises ends its turn as failed, so one bad turn never stops the Hub."""
@@ -364,97 +417,43 @@ class Hub:
             yield TurnEnd("failed", error=f"{type(e).__name__}: {e}")
 
     def _fail(self, task: Task, reason: str) -> None:
-        task.state = "failed"
-        task.last_report = f"Failed: {reason}."
-        self._post_talker(
-            _TalkerInput(event_message("hub", f"{task.id} failed: {reason}.", task.id), "event", self._clock.now())
-        )
+        task.fail(reason)
+        message = event_message("hub", f"{task.id} failed: {reason}.", task.id)
+        self._post(self._talker_inbox, _TalkerInput(message, "event", self._clock.now()))
 
-    def _record(self, entry: dict[str, Any]) -> None:
+    def _record(self, spec: SessionSpec, kind: str, end: TurnEnd, tools: list[str], **fields: Any) -> None:
+        entry = {
+            "kind": kind,
+            "role": spec.role,
+            "model": spec.model,
+            "effort": spec.effort,
+            **fields,
+            "tools": tools,
+            "outcome": end.outcome,
+            "usage": asdict(end.usage),
+        }
         try:
             self._metrics.record(entry)
         except Exception as e:
             self._output.notice(f"Could not write metrics: {e}")
-
-    def _talker_tools(self) -> tuple[HubTool, ...]:
-        return (
-            HubTool(
-                "delegate",
-                "Hand work that needs the Org to the Orchestrator as a Task. Returns at once with the Task id, and "
-                "the result arrives later as an event, so there is nothing to add after calling it. "
-                "Pass task_id to continue a Task, such as answering its question.",
-                _schema(
-                    {
-                        "request": {**_STRING, "description": "What the User wants, in their words."},
-                        "context": {**_STRING, "description": "Anything from the conversation the request depends on."},
-                        "task_id": {**_STRING, "description": "The Task this continues, such as T3."},
-                    },
-                    ("request",),
-                ),
-                self._delegate,
-            ),
-            HubTool(
-                "status",
-                "List this session's Tasks: state, age, request and last report. Answered at once.",
-                _schema({}),
-                self._status,
-            ),
-            HubTool(
-                "cancel",
-                "Cancel a Task by id.",
-                _schema({"task_id": {**_STRING, "description": "Such as T3."}}, ("task_id",)),
-                self._cancel,
-            ),
-            HubTool(
-                "show",
-                "Put markdown on the User's screen, never spoken: lists, tables, plans, links, code.",
-                _schema({"markdown": _STRING}, ("markdown",)),
-                self._show,
-            ),
-            HubTool(
-                "end_conversation",
-                "The User is done for now: stop listening after this reply.",
-                _schema({}),
-                self._end_conversation,
-            ),
-        )
-
-    def _orchestrator_tools(self) -> tuple[HubTool, ...]:
-        return (
-            HubTool(
-                "report",
-                "Tell the User about a Task. The only way to reach them.",
-                _schema(
-                    {
-                        "task_id": _STRING,
-                        "spoken": {**_STRING, "description": "One sentence, written to be heard."},
-                        "details_markdown": {**_STRING, "description": "Details for the screen."},
-                        "needs_user": {"type": "boolean", "description": "True when the Task waits on the User."},
-                    },
-                    ("task_id", "spoken", "needs_user"),
-                ),
-                self._report,
-            ),
-        )
 
     async def _delegate(self, args: dict[str, Any]) -> str:
         request = str(args.get("request") or "").strip()
         context = str(args.get("context") or "").strip()
         if not request:
             return "request is required."
-        if args.get("task_id"):
+        continues = bool(args.get("task_id"))
+        if continues:
             task = self._tasks.get(args["task_id"])
             if task is None:
-                return f"There is no Task {args['task_id']}. Delegate without task_id to start a new one."
+                return f"{no_task(args['task_id'])} Delegate without task_id to start a new one."
             if task.cancelled:
                 return f"{task.id} was cancelled. Delegate without task_id to start a new one."
-            task.state = "queued"
-            continues = True
         else:
             task = self._tasks.create(request, self._clock.now())
-            continues = False
+        task.queue_message()
         message = task_message(task, request, context, continues=continues)
-        self._post_orchestrator(_OrchestratorInput(task.id, message, self._clock.now()))
+        self._post(self._orchestrator_inbox, _OrchestratorInput(task.id, message, self._clock.now()))
         return json.dumps({"task_id": task.id, "queued": True})
 
     async def _status(self, args: dict[str, Any]) -> str:
@@ -463,12 +462,12 @@ class Hub:
     async def _cancel(self, args: dict[str, Any]) -> str:
         task = self._tasks.get(args.get("task_id"))
         if task is None:
-            return f"There is no Task {args.get('task_id')}."
-        if task.state in FINISHED:
+            return no_task(args.get("task_id"))
+        if not task.cancel():
             return f"{task.id} is already {task.state}."
-        task.state = "cancelled"
-        if self._orchestrating == task.id and self._orchestrator is not None:
-            await self._orchestrator.interrupt()
+        turn = self._orchestrator_gate.turn
+        if self._orchestrating == task.id and turn is not None and self._orchestrator is not None:
+            await self._orchestrator_gate.interrupt(self._orchestrator, turn)
         return f"Cancelled {task.id}."
 
     async def _show(self, args: dict[str, Any]) -> str:
@@ -485,7 +484,9 @@ class Hub:
     async def _report(self, args: dict[str, Any]) -> str:
         task = self._tasks.get(args.get("task_id"))
         if task is None:
-            return f"There is no Task {args.get('task_id')}."
+            return no_task(args.get("task_id"))
+        if task.id != self._orchestrating:
+            return f"You are working on {self._orchestrating}: report on {self._orchestrating} only."
         if task.cancelled:
             return f"{task.id} was cancelled; the User will not hear this."
         spoken = str(args.get("spoken") or "").strip()
@@ -493,9 +494,7 @@ class Hub:
             return "spoken is required."
         details = str(args.get("details_markdown") or "").strip() or None
         needs_user = args.get("needs_user") in (True, "true")
-        task.state = "needs_user" if needs_user else "done"
-        task.last_report = spoken
-        task.reports += 1
+        task.report(spoken, needs_user=needs_user)
         message = event_message("orchestrator", spoken, task.id, needs_user=needs_user, details=details is not None)
-        self._post_talker(_TalkerInput(message, "event", self._clock.now(), details))
+        self._post(self._talker_inbox, _TalkerInput(message, "event", self._clock.now(), details))
         return "Reported to the User."

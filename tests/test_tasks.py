@@ -463,3 +463,171 @@ async def test_an_orchestrator_session_that_raises_fails_the_task_and_the_next_o
         '<event source="hub" task="T1" needs_user="false">T1 failed: ConnectionError: pipe closed.</event>',
         '<event source="orchestrator" task="T2" needs_user="false">CI is green.</event>',
     ]
+
+
+async def test_a_cancel_that_arrives_after_its_turn_ended_leaves_the_next_task_alone(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    finish, arrive, checked = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    backend = FakeBackend(
+        clock,
+        [
+            [Text("On it."), delegate()],
+            [Text("That too."), delegate("Is CI green on jarvis?")],
+            [Text("Cancelling."), Tool("cancel", {"task_id": "T1"})],
+            [Text("Noted.")],
+        ],
+        orchestrator=[
+            [Gate(finish), report("T1", "Too late.")],
+            [Text("Checking."), Gate(checked), report("T2", "CI is green.")],
+        ],
+        interrupt_gate=arrive,
+    )
+    hub = make_hub(backend, output, metrics)
+    typist = Typist(clock)
+
+    await hub.start()
+    running = asyncio.create_task(hub.run(typist.lines()))
+    typist.type(ASK_PRS)
+    typist.type("Is CI green on jarvis?")
+    await until(lambda: len(output.replies) == 2)
+    typist.type("Cancel the first one")
+    await until(lambda: ("reply", "Cancelling.") in output.log)
+    await asyncio.sleep(0.01)
+    finish.set()
+    await asyncio.sleep(0.01)
+    arrive.set()
+    await asyncio.sleep(0.01)
+    checked.set()
+    typist.end()
+    await asyncio.wait_for(running, 1)
+
+    t2 = next(r for r in metrics.records if r.get("task") == "T2")
+    assert t2["outcome"] == "completed"
+    assert '<event source="orchestrator" task="T2" needs_user="false">CI is green.</event>' in talker_messages(backend)
+
+
+async def test_a_report_on_a_task_other_than_the_one_in_hand_is_refused(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    backend = FakeBackend(
+        clock,
+        [[Text("On it."), delegate(), delegate("Is CI green on jarvis?")]],
+        orchestrator=[
+            [report("T2", "CI is green."), report("T1", "Two PRs are open.")],
+            [report("T2", "CI is green.")],
+        ],
+    )
+    hub = make_hub(backend, output, metrics)
+
+    await hub.start()
+    await hub.run(lines(clock, ASK_PRS))
+
+    [wrong, first, second] = [r.result for r in results(backend, "orchestrator", "report")]
+    assert wrong == "You are working on T1: report on T1 only."
+    assert (first, second) == ("Reported to the User.", "Reported to the User.")
+    events = [m for m in talker_messages(backend) if m.startswith("<event")]
+    assert [e.split('task="')[1][:2] for e in events] == ["T1", "T2"]
+
+
+async def test_following_up_on_a_running_task_keeps_it_working(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    release = asyncio.Event()
+    backend = FakeBackend(
+        clock,
+        [
+            [Text("On it."), delegate()],
+            [Text("Noted."), delegate("Count drafts too.", task_id="T1"), Tool("status"), Set(release)],
+        ],
+        orchestrator=[[Gate(release), report("T1", "Two are open.")], [report("T1", "Three, with the draft.")]],
+    )
+    hub = make_hub(backend, output, metrics)
+
+    await hub.start()
+    await hub.run(lines(clock, ASK_PRS, "Count drafts too"))
+
+    assert results(backend, "talker", "status")[0].result == f"T1 working, started 0 s ago: {ASK_PRS}"
+    assert len(backend.session("orchestrator").received) == 2
+
+
+async def test_an_orchestrator_turn_past_its_time_is_interrupted_and_fails_the_task(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    backend = FakeBackend(
+        clock,
+        [[Text("On it."), delegate()], [Text("That one stalled, sir.")], [Text("On it."), delegate("Is CI green?")]],
+        orchestrator=[[Text("Looking."), AwaitInterrupt()], [report("T2", "CI is green.")]],
+    )
+    hub = make_hub(backend, output, metrics, orchestrator_timeout=0.05)
+    typist = Typist(clock)
+
+    await hub.start()
+    running = asyncio.create_task(hub.run(typist.lines()))
+    typist.type(ASK_PRS)
+    await until(lambda: len(output.replies) == 2)
+    typist.type("Is CI green?")
+    typist.end()
+    await asyncio.wait_for(running, 1)
+
+    events = [m for m in talker_messages(backend) if m.startswith("<event")]
+    assert events == [
+        '<event source="hub" task="T1" needs_user="false">T1 failed: the Orchestrator took longer than 0.05 s.</event>',
+        '<event source="orchestrator" task="T2" needs_user="false">CI is green.</event>',
+    ]
+    assert len(backend.all_sessions("orchestrator")) == 1
+
+
+async def test_a_turn_that_ignores_the_interrupt_gets_its_session_replaced(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    never = asyncio.Event()
+    backend = FakeBackend(
+        clock,
+        [[Text("On it."), delegate()], [Text("That one stalled, sir.")], [Text("On it."), delegate("Is CI green?")]],
+        orchestrator=[[Gate(never)], [report("T2", "CI is green.")]],
+    )
+    hub = make_hub(backend, output, metrics, orchestrator_timeout=0.05)
+    typist = Typist(clock)
+
+    await hub.start()
+    running = asyncio.create_task(hub.run(typist.lines()))
+    typist.type(ASK_PRS)
+    await until(lambda: len(output.replies) == 2)
+    typist.type("Is CI green?")
+    typist.end()
+    await asyncio.wait_for(running, 1)
+
+    first, second = backend.all_sessions("orchestrator")
+    assert first.closed and not second.closed
+    assert second.received[0].startswith('<task id="T2">')
+    assert talker_messages(backend)[1].startswith('<event source="hub" task="T1" needs_user="false">T1 failed')
+
+
+async def test_an_error_in_the_hub_on_one_task_fails_it_and_the_next_task_still_runs(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    never = asyncio.Event()
+    backend = FakeBackend(
+        clock,
+        [[Text("On it."), delegate()], [Text("That one broke, sir.")], [Text("On it."), delegate("Is CI green?")]],
+        orchestrator=[[Gate(never)], [report("T2", "CI is green.")]],
+        interrupt_error=ConnectionError("pipe closed"),
+    )
+    hub = make_hub(backend, output, metrics, orchestrator_timeout=0.05)
+    typist = Typist(clock)
+
+    await hub.start()
+    running = asyncio.create_task(hub.run(typist.lines()))
+    typist.type(ASK_PRS)
+    await until(lambda: len(output.replies) == 2)
+    typist.type("Is CI green?")
+    typist.end()
+    await asyncio.wait_for(running, 1)
+
+    events = [m for m in talker_messages(backend) if m.startswith("<event")]
+    assert events == [
+        '<event source="hub" task="T1" needs_user="false">T1 failed: ConnectionError: pipe closed.</event>',
+        '<event source="orchestrator" task="T2" needs_user="false">CI is green.</event>',
+    ]
+    assert any("ConnectionError" in n for n in output.notices)

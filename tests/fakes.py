@@ -158,6 +158,8 @@ class FakeSession:
         # Like the CLI: the interrupt lands on whatever turn runs when it arrives, or on none.
         if self.backend.interrupt_gate is not None:
             await self.backend.interrupt_gate.wait()
+        if self.backend.interrupt_error is not None:
+            raise self.backend.interrupt_error
         if self._sending:
             self._interrupted.set()
 
@@ -180,6 +182,7 @@ class FakeBackend:
         orchestrator: Iterable[Sequence[Step]] = (),
         orchestrator_open_error: Exception | None = None,
         interrupt_gate: asyncio.Event | None = None,
+        interrupt_error: Exception | None = None,
     ) -> None:
         self.clock = clock
         self.scripts = list(scripts)
@@ -188,6 +191,7 @@ class FakeBackend:
         self.open_error = open_error
         self.orchestrator_open_error = orchestrator_open_error
         self.interrupt_gate = interrupt_gate
+        self.interrupt_error = interrupt_error
         self.sessions: list[FakeSession] = []
 
     async def open(self, spec: SessionSpec) -> FakeSession:
@@ -200,6 +204,9 @@ class FakeBackend:
 
     def session(self, role: str) -> FakeSession:
         return next(s for s in self.sessions if s.spec.role == role)
+
+    def all_sessions(self, role: str) -> list[FakeSession]:
+        return [s for s in self.sessions if s.spec.role == role]
 
     def next_script(self, role: str, message: str) -> Sequence[Step]:
         if role == "orchestrator":
@@ -270,8 +277,16 @@ ORCHESTRATOR = SessionSpec(
 )
 
 
-def make_hub(backend: FakeBackend, output: RecordingOutput, metrics: Any) -> Hub:
-    return Hub(talker=TALKER, orchestrator=ORCHESTRATOR, backend=backend, clock=backend.clock, output=output, metrics=metrics)
+def make_hub(backend: FakeBackend, output: RecordingOutput, metrics: Any, **options: Any) -> Hub:
+    return Hub(
+        talker=TALKER,
+        orchestrator=ORCHESTRATOR,
+        backend=backend,
+        clock=backend.clock,
+        output=output,
+        metrics=metrics,
+        **options,
+    )
 
 
 class Typist:

@@ -53,6 +53,12 @@ class JsonlMetrics:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+class _Console(Console):
+    def on_broken_pipe(self) -> None:
+        # Rich's default exits the whole process; the Hub loses only the screen.
+        raise BrokenPipeError("the terminal is gone")
+
+
 class TerminalOutput:
     """Replies and notices as plain text; shown details rendered as markdown and appended to the show log."""
 
@@ -61,7 +67,7 @@ class TerminalOutput:
         self._stderr = stderr
         self._prompt = prompt
         self._show_log = show_log
-        self._console = Console(file=stdout, highlight=False)
+        self._console = _Console(file=stdout, highlight=False)
         self._mid_reply = False
 
     def heard(self, text: str) -> None:
@@ -84,10 +90,13 @@ class TerminalOutput:
         self._stderr.flush()
 
     def show(self, markdown: str) -> None:
-        if self._mid_reply:
-            self._stdout.write("\n")
-        self._console.print(Markdown(markdown))
-        self._stdout.flush()
+        try:
+            if self._mid_reply:
+                self._stdout.write("\n")
+            self._console.print(Markdown(markdown))
+            self._stdout.flush()
+        except OSError as e:
+            self.notice(f"Could not show the details on screen: {e}")
         try:
             self._show_log.parent.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")

@@ -1,6 +1,6 @@
 """The Orchestrator's session: read-only tools, its Bash through the Hub's check (ADR 0007)."""
 
-from jarvis_hub.agents.backend import SessionSpec
+from jarvis_hub.agents.backend import STRING, HubTool, SessionSpec, ToolHandler, object_schema
 from jarvis_hub.config import Settings
 from jarvis_hub.prompts import render
 from jarvis_hub.read_only import check, describe_reads
@@ -33,4 +33,23 @@ def orchestrator_spec(settings: Settings) -> SessionSpec:
         read_tools=READ_TOOLS,
         bash_guard=check,
         max_turns=MAX_TURNS,
+    )
+
+
+def orchestrator_tools(*, report: ToolHandler) -> tuple[HubTool, ...]:
+    return (
+        HubTool(
+            "report",
+            "Tell the User about a Task. The only way to reach them.",
+            object_schema(
+                {
+                    "task_id": STRING,
+                    "spoken": {**STRING, "description": "One sentence, written to be heard."},
+                    "details_markdown": {**STRING, "description": "Details for the screen."},
+                    "needs_user": {"type": "boolean", "description": "True when the Task waits on the User."},
+                },
+                ("task_id", "spoken", "needs_user"),
+            ),
+            report,
+        ),
     )
