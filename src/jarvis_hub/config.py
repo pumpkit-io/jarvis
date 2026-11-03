@@ -33,7 +33,7 @@ class RoleModel:
 
 @dataclass(frozen=True)
 class VoiceSettings:
-    """Voice mode's windows, engines and thresholds; defaults from Ticket #12 and Phase 0 (docs/notes/phase-0-spikes.md)."""
+    """Voice mode's windows, engines and thresholds; Phase 0 measured the defaults (docs/notes/phase-0-spikes.md)."""
 
     follow_up_s: float = 6.0
     announce_follow_up_s: float = 4.0
@@ -47,6 +47,10 @@ class VoiceSettings:
     end_extend_ms: int = 1500
     smart_turn_threshold: float = 0.5
     preroll_ms: int = 1500
+    max_turn_s: float = 30.0
+    chime_guard_ms: int = 500
+    wake_refractory_ms: int = 2000
+    onset_pad_ms: int = 200
 
 
 @dataclass(frozen=True)
@@ -155,6 +159,10 @@ def load_settings(repo_dir: Path, environ: Mapping[str, str]) -> Settings:
         end_extend_ms=round(number("JARVIS_END_EXTEND_MS", 1500, 0, 10000)),
         smart_turn_threshold=number("JARVIS_SMART_TURN_THRESHOLD", 0.5, 0, 1),
         preroll_ms=round(number("JARVIS_PREROLL_MS", 1500, 0, 5000)),
+        max_turn_s=number("JARVIS_MAX_TURN_SECONDS", 30.0, 0, 600, low_open=True),
+        chime_guard_ms=round(number("JARVIS_CHIME_GUARD_MS", 500, 0, 5000)),
+        wake_refractory_ms=round(number("JARVIS_WAKE_REFRACTORY_MS", 2000, 0, 10000)),
+        onset_pad_ms=round(number("JARVIS_ONSET_PAD_MS", 200, 0, 1000)),
     )
     def fraction(name: str, default: float) -> float:
         raw = get(name, str(default))

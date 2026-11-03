@@ -71,7 +71,7 @@ async def test_voice_mode_wakes_hears_answers_aloud_and_idles(tmp_path: Path) ->
         return player
 
     stdin, stdout, stderr = HeldStdin(), io.StringIO(), io.StringIO()
-    config = settings(tmp_path, VoiceSettings(follow_up_s=3.0, end_silence_ms=400))
+    config = settings(tmp_path, VoiceSettings(follow_up_s=3.0, end_silence_ms=400, max_turn_s=20.0, onset_pad_ms=300))
     running = asyncio.create_task(
         voice_mode(
             settings=config,
@@ -99,7 +99,7 @@ async def test_voice_mode_wakes_hears_answers_aloud_and_idles(tmp_path: Path) ->
     assert player.texts == ["At your service, sir.", "", "Half past nine, sir."]
     [(choice, listening)] = chosen
     assert choice.aec == "off"
-    assert listening.end_silence_s == 0.4
+    assert (listening.end_silence_s, listening.max_turn_s, listening.onset_pad_s) == (0.4, 20.0, 0.3)
     assert microphone.closed and player.closed
     rows = [json.loads(line) for line in (config.runtime_dir / "metrics.jsonl").read_text().splitlines()]
     assert [r["to"] for r in rows if r["kind"] == "voice"] == ["listening", "thinking", "speaking", "follow_up", "idle"]

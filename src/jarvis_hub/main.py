@@ -67,9 +67,6 @@ class Voice:
     open_player: Callable[[int], Player]
 
 
-# The Hub's chime is 180 ms; the margin covers the output's latency.
-CHIME_GUARD_S = 0.5
-
 PlayedTap = Callable[[Samples, int], None]
 
 
@@ -97,7 +94,7 @@ def timing(voice: VoiceSettings) -> Timing:
         follow_up_s=voice.follow_up_s,
         announce_follow_up_s=voice.announce_follow_up_s,
         listen_s=voice.listen_s,
-        chime_s=CHIME_GUARD_S,
+        chime_s=voice.chime_guard_ms / 1000,
     )
 
 
@@ -109,6 +106,9 @@ def listening(voice: VoiceSettings) -> Listening:
         end_extend_s=voice.end_extend_ms / 1000,
         smart_turn_threshold=voice.smart_turn_threshold,
         preroll_s=voice.preroll_ms / 1000,
+        max_turn_s=voice.max_turn_s,
+        wake_refractory_s=voice.wake_refractory_ms / 1000,
+        onset_pad_s=voice.onset_pad_ms / 1000,
     )
 
 

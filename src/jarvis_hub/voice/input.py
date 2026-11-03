@@ -26,13 +26,6 @@ FRAME = SAMPLE_RATE // 100
 Pcm = NDArray[np.int16]
 InputEvent = WakeWord | SpeechStarted | Heard
 
-# VAD fires a little after the true onset, so a turn keeps this much from before it.
-ONSET_PAD_S = 0.2
-# One phrase scores high on several consecutive windows; later hits within this time are the same phrase.
-WAKE_REFRACTORY_S = 2.0
-# A turn this long ends whatever VAD says, so a noisy room cannot hold listening open.
-MAX_TURN_S = 30.0
-
 
 class EchoCanceller(Protocol):
     def process(self, frame: Pcm) -> Pcm:
@@ -101,6 +94,12 @@ class Listening:
     end_extend_s: float = 1.5
     smart_turn_threshold: float = 0.5
     preroll_s: float = 1.5
+    # A turn this long ends whatever VAD says, so a noisy room cannot hold listening open.
+    max_turn_s: float = 30.0
+    # One phrase scores high on several consecutive windows; later hits within this time are the same phrase.
+    wake_refractory_s: float = 2.0
+    # VAD fires a little after the true onset, so a turn keeps this much from before it.
+    onset_pad_s: float = 0.2
 
 
 @dataclass
@@ -109,6 +108,8 @@ class _Turn:
     frames: list[Pcm]
     # Smart Turn's verdicts, one per silence that reached `end_silence_s`.
     verdicts: list[float]
+    # The Wake word hit that opened the turn, inside its pre-roll; a later "Jarvis" is part of what the User says.
+    wake: float | None = None
     judged_silence: float | None = None
     smart_turn_ms: float = 0.0
 
@@ -119,10 +120,18 @@ class InputPipeline:
     Not thread-safe: one thread pushes frames and turns capture on and off.
     """
 
-    def __init__(self, engines: Engines, settings: Listening, record: Callable[[dict[str, Any]], None]) -> None:
+    def __init__(
+        self,
+        engines: Engines,
+        settings: Listening,
+        record: Callable[[dict[str, Any]], None],
+        clock: Callable[[], float] = time.perf_counter,
+    ) -> None:
         self._e = engines
         self._s = settings
         self._record = record
+        # Times Smart Turn and STT for the metrics.
+        self._clock = clock
         self._ring: deque[tuple[Pcm, float]] = deque(maxlen=max(1, round(settings.preroll_s * 100)))
         self._wake_buf = np.zeros(0, np.int16)
         self._vad_buf = np.zeros(0, np.int16)
@@ -148,7 +157,7 @@ class InputPipeline:
         while len(self._wake_buf) >= self._e.wake.chunk:
             chunk, self._wake_buf = self._wake_buf[: self._e.wake.chunk], self._wake_buf[self._e.wake.chunk :]
             ends = at - len(self._wake_buf) / SAMPLE_RATE
-            if self._e.wake.score(chunk) >= self._s.wake_threshold and ends - self._last_wake >= WAKE_REFRACTORY_S:
+            if self._e.wake.score(chunk) >= self._s.wake_threshold and ends - self._last_wake >= self._s.wake_refractory_s:
                 self._last_wake = ends
                 events.append(WakeWord(ends))
         self._vad_buf = np.concatenate([self._vad_buf, frame])
@@ -169,23 +178,23 @@ class InputPipeline:
         return events
 
     def _begin_turn(self, onset: float) -> _Turn:
-        start = onset - ONSET_PAD_S
+        start = onset - self._s.onset_pad_s
         # A frame's stamp is the time of its last sample, so it starts 10 ms earlier.
         frames = [f for f, t in self._ring if t - 0.01 >= start - 0.005]
         first = self._ring[-len(frames)][1] - 0.01 if frames else self._ring[-1][1]
-        return _Turn(first, frames, [])
+        return _Turn(first, frames, [], wake=self._last_wake if self._last_wake > first else None)
 
     def _end_of_turn(self, turn: _Turn, at: float) -> Heard | None:
         silence = at - self._last_speech
         speaking = self._last_speech > turn.start
-        too_long = at - turn.start >= MAX_TURN_S
+        too_long = at - turn.start >= self._s.max_turn_s
         if not too_long and (not speaking or silence < self._s.end_silence_s):
             return None
         if not too_long and turn.judged_silence != self._last_speech:
             turn.judged_silence = self._last_speech
-            began = time.perf_counter()
+            began = self._clock()
             p = self._e.turn.complete(self._audio(turn))
-            turn.smart_turn_ms += (time.perf_counter() - began) * 1000
+            turn.smart_turn_ms += (self._clock() - began) * 1000
             turn.verdicts.append(round(p, 3))
             if p < self._s.smart_turn_threshold:
                 return None
@@ -205,11 +214,11 @@ class InputPipeline:
         audio = self._audio(turn)
         text, stt_ms = "", 0.0
         # STT mishears the wake phrase ("A Jarvis", "Hey George"), so it is cut by time: it ended before the hit.
-        after = self._last_wake - turn.start if turn.start < self._last_wake <= at else 0.0
+        after = turn.wake - turn.start if turn.wake is not None else 0.0
         if self._e.gate.admits(audio):
-            began = time.perf_counter()
+            began = self._clock()
             text = self._e.stt.transcribe(audio, after=after).strip()
-            stt_ms = (time.perf_counter() - began) * 1000
+            stt_ms = (self._clock() - began) * 1000
         self._record(
             {
                 "kind": "turn",

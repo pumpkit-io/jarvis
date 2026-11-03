@@ -1,5 +1,7 @@
 """The microphone pipeline on 10 ms frames, with stand-in engines: what it reports and what each engine is given."""
 
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -91,11 +93,11 @@ class Rig:
         return [e for e in self.events if isinstance(e, Heard)]
 
 
-def rig(verdicts: list[float] | None = None, **settings: float) -> Rig:
+def rig(verdicts: list[float] | None = None, clock: Callable[[], float] = time.perf_counter, **settings: float) -> Rig:
     turn, stt, echo = ScriptedTurn(list(verdicts or [])), ScriptedStt(), PassThrough()
     engines = Engines(echo=echo, wake=MarkerWake(), vad=LoudVad(), turn=turn, stt=stt, gate=Everyone())
     records: list[dict[str, object]] = []
-    pipeline = InputPipeline(engines, Listening(**settings), record=records.append)
+    pipeline = InputPipeline(engines, Listening(**settings), record=records.append, clock=clock)
     return Rig(pipeline, turn, stt, echo, records=records)
 
 
@@ -264,3 +266,54 @@ def test_a_turn_without_the_wake_word_is_transcribed_whole() -> None:
     r.feed("silence", 0.6)
 
     assert r.stt.after == [0.0]
+
+
+def test_jarvis_said_later_in_the_turn_cuts_nothing_more() -> None:
+    r = rig()
+    r.feed("silence", 1.0)
+    r.feed("speech", 0.6)
+    r.feed("wake", 0.1)
+    r.pipeline.capture(True)
+    r.feed("speech", 2.5)
+    # "...tell Ada that Jarvis will handle the deploy": a second hit, well past the refractory time.
+    r.feed("wake", 0.1)
+    r.feed("speech", 0.5)
+    r.feed("silence", 0.6)
+
+    assert len([e for e in r.events if isinstance(e, WakeWord)]) == 2
+    assert r.stt.after == [pytest.approx(0.88, abs=0.02)]  # pyright: ignore[reportUnknownMemberType]
+
+
+def test_a_turn_ends_at_the_longest_turn_setting_whatever_vad_says() -> None:
+    r = rig(max_turn_s=3.0)
+    r.pipeline.capture(True)
+    r.feed("speech", 2.9)
+    assert r.heard() == []
+    r.feed("speech", 0.2)
+    assert len(r.heard()) == 1
+
+
+def test_the_pad_before_the_onset_and_the_wake_refractory_time_are_settings() -> None:
+    r = rig(onset_pad_s=0.5, wake_refractory_s=0.5)
+    r.feed("silence", 1.0)
+    r.feed("wake", 0.1)
+    r.feed("silence", 0.6)
+    r.feed("wake", 0.1)
+    r.pipeline.capture(True)
+    r.feed("speech", 1.0)
+    r.feed("silence", 0.6)
+
+    assert len([e for e in r.events if isinstance(e, WakeWord)]) == 2
+    # The second wake phrase is the onset: 1.1 s of speech, with 0.5 s before it and 0.5 s of silence after.
+    assert len(r.stt.heard[0]) / RATE == pytest.approx(0.5 + 1.1 + 0.5, abs=0.06)  # pyright: ignore[reportUnknownMemberType]
+
+
+def test_smart_turn_and_stt_are_timed_on_the_given_clock() -> None:
+    ticks = iter(range(0, 1000, 7))
+    r = rig(clock=lambda: next(ticks) / 1000)
+    r.pipeline.capture(True)
+    r.feed("speech", 1.0)
+    r.feed("silence", 0.6)
+
+    [row] = r.records
+    assert (row["smart_turn_ms"], row["stt_ms"]) == (7.0, 7.0)
