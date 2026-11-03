@@ -5,9 +5,11 @@ import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, TypeGuard, get_args
 
 DEFAULT_ORG = "pumpkit-io"
-EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+Effort = Literal["low", "medium", "high", "xhigh", "max"]
 
 _ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
 _QUOTED = re.compile(r"^\"([^\"]*)\"|^'([^']*)'")
@@ -20,7 +22,7 @@ class ConfigError(Exception):
 @dataclass(frozen=True)
 class RoleModel:
     model: str
-    effort: str
+    effort: Effort
     thinking: bool = False
 
 
@@ -35,11 +37,15 @@ class Settings:
     orchestrator: RoleModel
 
 
-def parse_env(text: str) -> dict[str, str]:
+def parse_env(data: bytes) -> dict[str, str]:
     """Read `NAME=value` lines without running anything: no expansion, no substitution.
 
     Quoted values end at the closing quote; unquoted ones lose a ` #` comment and trailing spaces.
     """
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError as e:
+        raise ConfigError(f".env is not UTF-8 text ({e.reason} at byte {e.start})") from None
     values: dict[str, str] = {}
     for line in text.splitlines():
         match = _ASSIGNMENT.match(line)
@@ -53,6 +59,10 @@ def parse_env(text: str) -> dict[str, str]:
             value = "" if value.startswith("#") else re.sub(r"\s#.*$", "", value).rstrip()
         values[name] = value
     return values
+
+
+def _is_effort(value: str) -> TypeGuard[Effort]:
+    return value in get_args(Effort)
 
 
 def main_checkout(repo_dir: Path) -> Path:
@@ -74,16 +84,16 @@ def load_settings(repo_dir: Path, environ: Mapping[str, str]) -> Settings:
     repo_dir = repo_dir.resolve()
     main = main_checkout(repo_dir)
     env_file = main / ".env"
-    values = parse_env(env_file.read_text()) if env_file.is_file() else {}
-    values.update({k: v for k, v in environ.items() if k.startswith("JARVIS_")})
+    values = parse_env(env_file.read_bytes()) if env_file.is_file() else {}
+    values.update({k: v for k, v in environ.items() if k.startswith("JARVIS_") and v})
 
     def get(name: str, default: str) -> str:
         return values.get(name) or default
 
-    def effort(name: str, default: str) -> str:
+    def effort(name: str, default: Effort) -> Effort:
         value = get(name, default)
-        if value not in EFFORTS:
-            raise ConfigError(f"{name}={value!r} is not one of {', '.join(EFFORTS)}")
+        if not _is_effort(value):
+            raise ConfigError(f"{name}={value!r} is not one of {', '.join(get_args(Effort))}")
         return value
 
     return Settings(

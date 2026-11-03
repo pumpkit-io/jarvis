@@ -25,6 +25,8 @@ from jarvis_hub.config import ConfigError, load_settings, parse_env
         ("1BAD=x\n", {}),
         ("JARVIS_USER_NAME=$(touch pwned)\n", {"JARVIS_USER_NAME": "$(touch pwned)"}),
         ('JARVIS_USER_NAME="$HOME"\n', {"JARVIS_USER_NAME": "$HOME"}),
+        (b"\xef\xbb\xbfJARVIS_USER_NAME=Ada\n", {"JARVIS_USER_NAME": "Ada"}),
+        ("JARVIS_USER_NAME=Niccolò\n", {"JARVIS_USER_NAME": "Niccolò"}),
     ],
     ids=[
         "double-quoted value",
@@ -43,10 +45,22 @@ from jarvis_hub.config import ConfigError, load_settings, parse_env
         "invalid name ignored",
         "command substitution kept literal",
         "no variable expansion",
+        "UTF-8 byte order mark before the first key",
+        "UTF-8 value",
     ],
 )
-def test_parse_env(text: str, expected: dict[str, str]) -> None:
-    assert parse_env(text) == expected
+def test_parse_env(text: str | bytes, expected: dict[str, str]) -> None:
+    assert parse_env(text if isinstance(text, bytes) else text.encode()) == expected
+
+
+@pytest.mark.parametrize(
+    "data",
+    [b"JARVIS_USER_NAME=Niccol\xf2\n", b"\xff\xfeJ\x00=\x00"],
+    ids=["Latin-1 value", "UTF-16 file"],
+)
+def test_parse_env_refuses_text_that_is_not_utf8(data: bytes) -> None:
+    with pytest.raises(ConfigError, match="not UTF-8"):
+        parse_env(data)
 
 
 def git(cwd: Path, *args: str) -> None:
@@ -103,11 +117,32 @@ def test_role_models_come_from_dotenv(checkout: Path) -> None:
     assert (settings.orchestrator.model, settings.orchestrator.effort) == ("opus", "high")
 
 
-def test_process_environment_overrides_dotenv(checkout: Path) -> None:
-    (checkout / ".env").write_text("JARVIS_TALKER_MODEL=sonnet\nJARVIS_USER_NAME=Ada\n")
-    settings = load_settings(checkout, environ={"JARVIS_TALKER_MODEL": "haiku"})
-    assert settings.talker.model == "haiku"
-    assert settings.user_name == "Ada"
+@pytest.mark.parametrize(
+    ("dotenv", "environ", "expected"),
+    [
+        ("JARVIS_TALKER_MODEL=sonnet\n", {"JARVIS_TALKER_MODEL": "haiku"}, "haiku"),
+        ("JARVIS_TALKER_MODEL=haiku\n", {"JARVIS_TALKER_MODEL": ""}, "haiku"),
+        ("", {"JARVIS_TALKER_MODEL": "opus"}, "opus"),
+        ("JARVIS_TALKER_MODEL=haiku\n", {"TALKER_MODEL": "opus"}, "haiku"),
+    ],
+    ids=[
+        "environment overrides .env",
+        "empty environment value leaves .env alone",
+        "environment without .env",
+        "only JARVIS_ names are read",
+    ],
+)
+def test_process_environment_over_dotenv(
+    checkout: Path, dotenv: str, environ: dict[str, str], expected: str
+) -> None:
+    (checkout / ".env").write_text(dotenv)
+    assert load_settings(checkout, environ=environ).talker.model == expected
+
+
+def test_a_dotenv_that_is_not_utf8_is_a_config_error(checkout: Path) -> None:
+    (checkout / ".env").write_bytes(b"JARVIS_USER_NAME=Niccol\xf2\n")
+    with pytest.raises(ConfigError, match="not UTF-8"):
+        load_settings(checkout, environ={})
 
 
 def test_empty_values_fall_back_to_defaults(checkout: Path) -> None:
