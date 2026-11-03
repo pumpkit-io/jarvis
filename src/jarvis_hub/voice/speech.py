@@ -112,7 +112,6 @@ class Speech:
         self._thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts")
         self._queue: asyncio.Queue[_Say | _Cached | _End] = asyncio.Queue()
         self._cache: dict[tuple[ClipName, Lang], Clip] = {}
-        self._lang: Lang = "en"
         self._reply: _Reply | None = None
         self._generation = 0
         self._synthesising = False
@@ -126,14 +125,12 @@ class Speech:
         self._loading = asyncio.get_running_loop().run_in_executor(self._thread, self._load)
         self._worker = asyncio.create_task(self._work(self._loading))
 
-    def say(self, name: ClipName) -> None:
-        """A cached line, in the language of the latest reply."""
-        self._queue.put_nowait(_Cached(name, self._lang))
+    def say(self, name: ClipName, lang: Lang) -> None:
+        self._queue.put_nowait(_Cached(name, lang))
 
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None) -> None:
         """A new reply in `lang`. With `heard_at`, when the User's turn ended, the holding line covers a slow start."""
         self._cancel_holding_line()
-        self._lang = lang
         self._reply = _Reply(turn, lang, self._clock.now(), heard_at)
         if heard_at is not None:
             self._holding_line = asyncio.create_task(self._hold_the_line(self._reply, heard_at))

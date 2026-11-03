@@ -192,10 +192,10 @@ async def test_cached_lines_are_synthesised_once_at_startup(
     await speech.idle()
     assert sorted(tts.calls) == sorted(STARTUP_LINES)
 
-    speech.say("very_good")
-    speech.say("startup")
-    speech.say("very_good")
-    speech.say("chime")
+    speech.say("very_good", "en")
+    speech.say("startup", "en")
+    speech.say("very_good", "en")
+    speech.say("chime", "en")
     await speech.idle()
 
     assert player.texts == ["Very good, sir.", "At your service, sir.", "Very good, sir.", ""]
@@ -204,18 +204,15 @@ async def test_cached_lines_are_synthesised_once_at_startup(
     assert sorted(tts.calls) == sorted(STARTUP_LINES)
 
 
-async def test_a_cached_line_is_said_in_the_current_language(
-    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, speech: Speech, player: RecordingPlayer
-) -> None:
-    backend = FakeBackend(clock, [[Text("Certo, signore.")]])
-    hub = speaking_hub(backend, output, metrics, speech)
-
-    await hub.start()
-    await hub.run(lines(clock, "Buonasera Jarvis, come va?"))
-    speech.say("very_good")
+async def test_a_cached_line_is_said_in_the_language_asked_for(speech: Speech, player: RecordingPlayer) -> None:
+    speech.say("very_good", "it")
+    speech.say("very_good", "en")
     await speech.idle()
 
-    assert player.texts == ["Certo, signore.", "Molto bene, signore."]
+    assert list(zip(player.texts, player.voices)) == [
+        ("Molto bene, signore.", "im_nicola"),
+        ("Very good, sir.", "am_liam"),
+    ]
 
 
 async def test_one_moment_plays_when_no_sentence_is_ready_shortly_after_the_turn(
@@ -364,7 +361,7 @@ async def test_without_a_voice_the_replies_still_arrive_as_text(
 ) -> None:
     speech = Speech(FakeTts(load_error=OSError("no model")), player, clock, metrics=metrics, notice=output.notice)
     speech.start()
-    speech.say("startup")
+    speech.say("startup", "en")
     backend = FakeBackend(clock, [[Text("Evening, sir.")]])
     hub = speaking_hub(backend, output, metrics, speech)
 
@@ -385,7 +382,7 @@ async def test_a_turn_typed_while_the_voice_loads_is_spoken_once_it_has(
     tts.hold.clear()
     speech = Speech(tts, player, clock, metrics=metrics, notice=output.notice)
     speech.start()
-    speech.say("startup")
+    speech.say("startup", "en")
     release = asyncio.Event()
     backend = FakeBackend(clock, [[Text("Evening, sir."), Gate(release)]])
     hub = speaking_hub(backend, output, metrics, speech)
@@ -475,3 +472,22 @@ async def test_what_was_played_covers_the_latest_reply_only(
     await speech.idle()
 
     assert speech.played() == "All quiet, sir."
+
+
+async def test_interrupting_after_the_text_has_ended_still_stops_the_speech(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, tts: FakeTts
+) -> None:
+    player = RecordingPlayer(hold=True)
+    speech = Speech(tts, player, clock, metrics=metrics, notice=output.notice)
+    speech.start()
+    backend = FakeBackend(clock, [[Text("A long answer, sir.")]])
+    hub = speaking_hub(backend, output, metrics, speech)
+
+    await hub.start()
+    await hub.run(lines(clock, "Talk to me"))
+    await until(lambda: player.texts == ["A long answer, sir."])
+    await hub.interrupt()
+
+    assert player.pending() == 0
+    assert "stop" in player.events
+    await speech.close()

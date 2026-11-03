@@ -195,7 +195,7 @@ async def text_mode(
         await asyncio.to_thread(language.warm_up)
         if speech is not None:
             speech.start()
-            speech.say("startup")
+            speech.say("startup", "en")
         if interactive:
             stdout.write(PROMPT)
             stdout.flush()

@@ -27,7 +27,6 @@ from jarvis_hub.orchestrator import orchestrator_tools
 from jarvis_hub.talker import talker_tools
 from jarvis_hub.tasks import Task, Tasks, no_task
 from jarvis_hub.voice.language import Lang, detect_language
-from jarvis_hub.voice.speech import Speech
 
 
 class Clock(Protocol):
@@ -58,6 +57,37 @@ class Output(Protocol):
 
 class Metrics(Protocol):
     def record(self, entry: dict[str, Any]) -> None: ...
+
+
+class Speech(Protocol):
+    """Says the Talker's replies aloud as they stream (`jarvis_hub.voice.speech.Speech`)."""
+
+    def begin(self, lang: Lang, *, turn: int, heard_at: float | None) -> None: ...
+
+    def feed(self, text: str) -> None: ...
+
+    def block_end(self) -> None: ...
+
+    def end(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+
+class _Silent:
+    def begin(self, lang: Lang, *, turn: int, heard_at: float | None) -> None:
+        pass
+
+    def feed(self, text: str) -> None:
+        pass
+
+    def block_end(self) -> None:
+        pass
+
+    def end(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
 
 
 @dataclass(frozen=True)
@@ -167,7 +197,7 @@ class Hub:
         self._output = output
         self._metrics = metrics
         self._orchestrator_timeout = orchestrator_timeout
-        self._speech = speech
+        self._speech: Speech = speech if speech is not None else _Silent()
         # The language of the latest line read, and of the latest User turn the Talker took: replies follow it.
         self._read_lang: Lang = "en"
         self._lang: Lang = "en"
@@ -206,13 +236,12 @@ class Hub:
         settling.cancel()
 
     async def interrupt(self) -> bool:
-        """Stop the reply in progress, if any. Returns whether there was one."""
+        """Stop the reply in progress and whatever is still being said. Returns whether a Talker turn was running."""
+        self._speech.stop()
         turn = self._talker_gate.turn
         if turn is None or self._talker is None:
             return False
         self._interrupted_turn = turn
-        if self._speech is not None:
-            self._speech.stop()
         return await self._talker_gate.interrupt(self._talker, turn)
 
     async def close(self) -> None:
@@ -281,9 +310,8 @@ class Hub:
         after_block = False
         end = TurnEnd("failed", error="the session ended without a result")
         self._talker_gate.turn = turn if show else None
-        speech = self._speech if show else None
-        if speech is not None:
-            speech.begin(self._lang, turn=turn, heard_at=arrived if kind == "user" else None)
+        speech = self._speech if show else _Silent()
+        speech.begin(self._lang, turn=turn, heard_at=arrived if kind == "user" else None)
         try:
             async for event in self._guarded(self._talker.send(message)):
                 match event:
@@ -301,11 +329,9 @@ class Hub:
                             first_sentence = self._clock.now()
                         if show:
                             self._output.reply(text)
-                        if speech is not None:
-                            speech.feed(text)
+                        speech.feed(text)
                     case TextEnd():
-                        if speech is not None:
-                            speech.block_end()
+                        speech.block_end()
                         if first_sentence is None and block.strip():
                             first_sentence = self._clock.now()
                         block, after_block = "", True
@@ -317,7 +343,7 @@ class Hub:
                         end = event
         finally:
             self._talker_gate.turn = None
-            if speech is not None and self._interrupted_turn != turn:
+            if self._interrupted_turn != turn:
                 speech.end()
         if end.outcome == "interrupted" and self._interrupted_turn != turn:
             end = TurnEnd("failed", end.usage, "the turn stopped without the Hub interrupting it")
