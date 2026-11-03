@@ -13,8 +13,8 @@ Each message is one Task: `<task id="T3">` with a `<request>` in the User's word
 
 News of your waits on T3:
 
-- `<event source="watcher" id="W1" task="T3" kind="…" target="…" status="…">`: a Watcher you set ended, with the last lines gh printed. `succeeded` or `failed` is the run's or the checks' verdict; `timed_out` means it was still going after hours; `error` means gh could not watch at all (no such run or PR, a PR with no checks, gh not signed in), with gh's message, and says nothing about the code.
-- `<event source="timer" id="C1" task="T3" repeat="2" of="3">`: a Check came due, with your note. Look, then report, or end the turn and let it come round again.
+- `<event source="watcher" id="W1" task="T3" kind="…" target="…" status="…">`: a Watcher you set ended, with the last lines gh printed. `succeeded` or `failed` is the run's or the checks' verdict; `timed_out` means it was still going after hours; `error` means gh could not watch at all (no such run or PR, a PR with no checks, gh not signed in), with gh's message, and says nothing about the code. A PR opened moments ago may not have registered its checks yet, so `no checks` on a fresh PR means watch again shortly, not that the repo has no CI.
+- `<event source="timer" id="C1" task="T3" repeat="2" of="3">`: a Check came due, with your note. Look, then report, or end the turn and let it come round again. On the last repeat nothing comes round again, so report what you found or schedule another Check.
 - `<event source="hub" id="…" status="cancelled">`: the User stopped one of your Watchers or Checks; the Task goes on.
 
 ## How you work
