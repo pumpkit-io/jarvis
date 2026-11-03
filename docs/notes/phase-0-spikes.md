@@ -256,15 +256,15 @@ Both are under the 4 GB audio-stack budget on the 18 GB machine. Using VoiceMode
 
 ## Talker in the Hub
 
-Ticket #7, run on 2026-11-03 on the M3: `claude-agent-sdk` 0.2.177 on Python 3.12, `claude` CLI 2.1.317 through `cli_path`, Talker on `sonnet` (resolved to `claude-sonnet-5-5`) at `effort="low"` with thinking disabled (ADR 0005), Max login, `ANTHROPIC_API_KEY` unset.
+Ticket #7, run on 2026-11-03 on the M3: `claude-agent-sdk` 0.2.177 on Python 3.12, `claude` CLI 2.1.317 through `cli_path`, Talker on `sonnet` (resolved to `claude-sonnet-5-5`) at `effort="low"` with thinking disabled (ADR 0005), Max login, `ANTHROPIC_API_KEY` unset. Every number below is in `docs/notes/talker-in-the-hub.json`, per turn, with no message text.
 
 ### The claude.ai connectors, and why Phase 0's turn 0 was slow
 
-`setting_sources=[]` does not keep out the claude.ai connectors of the logged-in account. They join the session after its first query: on this account the second turn's `init` listed 24 `mcp__claude_ai_*` tools (Claude Docs and Pumpkit, `post_now` among them) next to `tools=[]`. Their schemas add about 10k tokens to every request and change the prefix, so the turn after the first one misses the cache. In a probe on the Talker prompt without the fix, the warm-up wrote 1,284 tokens to the cache, the first real turn then wrote 10,253 and read nothing, and took 2.4 s to its first delta; later turns read 8.5-10.3k. That matches Phase 0: turn 0 slow, and talk turns reading 11-15k from the cache although the request was under 1k tokens. Phase 0's latency numbers therefore carried these extra tokens.
+`setting_sources=[]` does not keep out the claude.ai connectors of the logged-in account. They join the session after its first query: on this account the second query's `init` listed 24 `mcp__claude_ai_*` tools (Claude Docs and Pumpkit, `post_now` among them) next to `tools=[]`. Their schemas add about 10k tokens to every request and change the prefix, so the turn after the first one misses the cache. In a probe on the Talker prompt without the fix, the warm-up wrote 1,284 tokens to the cache, the first real turn then wrote 10,253 and read nothing, and took 2.43 s to its first delta; the next two turns read 8,546 and 10,277. That matches Phase 0: turn 0 slow, and talk turns reading 11-15k from the cache although the request was under 1k tokens. Phase 0's latency numbers therefore carried these extra tokens.
 
-`strict_mcp_config=True` (the CLI's `--strict-mcp-config`) removes them. The Hub sets it on every session. With it, `init.tools` is exactly the Hub's tools on every turn (`tests/test_real_model.py` checks two turns), and a Talker request is about 1.3k tokens at the start of a launch, growing with the conversation (3.6k by turn 20). Keeping the connectors out also matters beyond latency: the Talker could otherwise see tools such as Pumpkit's `post_now`, which the Boundary reserves for the User.
+`strict_mcp_config=True` (the CLI's `--strict-mcp-config`) removes them. The Hub sets it on every session. With it, `init.tools` is exactly the Hub's tools on every turn (`tests/test_real_model.py` checks two turns), and a Talker request is about 1.3k tokens at the start of a launch, growing with the conversation (3.6k by turn 20 of run 2 below). Keeping the connectors out also matters beyond latency: the Talker could otherwise see tools such as Pumpkit's `post_now`, which the Boundary reserves for the User.
 
-The CLI also makes one Haiku request of about 1,185 input tokens on the first query of each session (seen in `model_usage`); it is the CLI's own, outside our control, and did not delay the reply.
+The CLI also makes one Haiku request of 1,185 input tokens early in each session (seen in `model_usage`); it is the CLI's own, outside our control, and did not delay the reply.
 
 ### Does the warm-up warm the cache?
 
@@ -272,21 +272,28 @@ Yes, once the connectors are out. The Hub sends one `<event source="hub">` messa
 
 | | First real turn, first delta | Its cache read |
 |---|---|---|
-| No warm-up | 4.24 s, 1.16 s | 0 (wrote about 1,300) |
-| Warm-up first | 0.73 s, 0.84 s | about 720 |
+| No warm-up | 4.24 s, 1.16 s | 0 (wrote 1,303 and 1,301) |
+| Warm-up first | 0.73 s, 0.84 s | 721, 726 |
 
-The warm-up itself takes 1.3-1.7 s (up to 4.6 s seen) before the prompt appears, and reads about 1,284 tokens when the prompt was cached in the last few minutes. After it, the first real turn reads about 720 tokens: the system prompt and setup, not the warm-up exchange. The full previous request is read only from the second real turn on (1.3k and up), so something in the first user turn's request changes after it; it costs about 600 tokens of cache writes once and no visible latency. In both 20-turn runs below, the first real turn was as fast as the rest (first delta 0.73 s and 0.80 s).
+The warm-up itself reached its first delta in 1.26-1.67 s in the four probe launches that had one and the two runs below, and in 2.82 s and 4.59 s in two other launches. It read 1,284 tokens when the prompt had been cached a few minutes before. After it, the first real turn reads about 720 tokens: the system prompt and setup, not the warm-up exchange. The full previous request is read only from the second real turn on (1.3k and up), so something in the first user turn's request changes after it; it costs about 610 tokens of cache writes once and no visible latency. In both 20-turn runs below, the first real turn reached its first delta in 0.73 s and 0.80 s.
+
+The warm-up runs in the background (ADR 0006): the prompt appears at once, and a turn typed before the warm-up ends waits for it. Turn times count from when the line arrived, and `wait_ms` records the wait. In four launches with lines 1 and 2 of the small-talk file, two with the first line ready at launch and two with it 4 s later:
+
+| First line typed | Wait | First sentence |
+|---|---|---|
+| At launch | 1.70 s, 1.75 s | 2.72 s, 2.79 s |
+| 4 s after launch | 0, 0 | 1.03 s, 1.05 s |
 
 ### Small talk latency in text mode
 
-`env -u ANTHROPIC_API_KEY uv run jarvis-hub --text < docs/notes/talker-small-talk.txt` (20 lines, 10 English and 10 Italian, small talk only: the Talker has no tools yet), timed by the Hub from sending the message to the first text delta and to the end of the first sentence (`.?!` followed by a space or the end of a delta, or the end of a text block: Phase 0's definition). Per-turn rows go to `.jarvis/metrics.jsonl`. Run 1 used the first draft of `prompts/talker.md`; run 2 the committed one, which asks for a short opening sentence and states the User's name plainly (run 1's wording, "the voice of {user}'s assistant", left the model unsure what to call the User).
+`env -u ANTHROPIC_API_KEY uv run jarvis-hub --text < docs/notes/talker-small-talk.txt` (20 lines, 10 English and 10 Italian, small talk only: the Talker has no tools yet), timed by the Hub from sending the message to the first text delta and to the end of the first sentence (`.?!` followed by a space or the end of a delta, or the end of a text block: Phase 0's definition). Per-turn rows go to `.jarvis/metrics.jsonl`. Both runs had the warm-up on the start path, as in 07b423b, so no turn waited for it. Run 1 used the first draft of `prompts/talker.md`; run 2 the prompt as of 07b423b, which asks for a short opening sentence and states the User's name plainly (run 1's wording, "the voice of {user}'s assistant", left the model unsure what to call the User). The prompt's first line changed after both runs to drop "assistant", a term GLOSSARY.md avoids.
 
 | Run | First delta p50 | p90 | First sentence p50 | p90 | First sentence ≤ 1.0 s |
 |---|---|---|---|---|---|
 | 1 (first prompt draft) | 0.83 s | 1.55 s | 1.16 s | 1.84 s | 1 of 20 |
-| 2 (committed prompt) | 0.85 s | 3.21 s | 1.20 s | 3.73 s | 5 of 20 |
+| 2 (prompt as of 07b423b) | 0.85 s | 3.21 s | 1.20 s | 3.73 s | 5 of 20 |
 
-**Verdict: missed, narrowly.** Small talk reaches the first sentence in about 1.2 s at p50, against the target of about 1 s; the first delta arrives in about 0.85 s, so the model's time to first token is most of it. Run 2's p90 comes from four slow turns (2.7-8.1 s) during what looked like a slow patch on the API side; its middle 12 turns sat between 0.89 and 1.57 s. A shorter opening sentence helped the fast turns (5 under a second against 1) but not the median. What is left to close the gap belongs to the spoken-reply ticket: emitting the first clause early on `,;:` once it has six words, and the cached filler at 1.2 s. Haiku was 0.85 s on small talk in Phase 0 but fails the speak-first rule (ADR 0005). The Haiku rerun with a firmer speak-first prompt that #4 asked for needs `delegate`, so it moves to the Tasks ticket (#8).
+**Verdict: missed, and accepted by the User on 2026-11-03.** Small talk reaches the first sentence in 1.16-1.20 s at p50, against the target of about 1 s; the first delta arrives in 0.83-0.85 s, so the model's time to first token is most of it. Run 2's p90 comes from four slow turns (2.71-8.11 s) during what looked like a slow patch on the API side; its other 16 turns sat between 0.74 and 1.78 s. A shorter opening sentence helped the fast turns (5 at or under a second against 1) but not the median. The rest of the gap is #9's work: emitting the first clause early on `,;:` once it has six words, and the cached filler at 1.2 s. Haiku was 0.85 s on small talk in Phase 0 but fails the speak-first rule (ADR 0005). The Haiku rerun with a firmer speak-first prompt that #4 asked for needs `delegate`, so it moves to the Tasks ticket (#8).
 
 ### Interrupting from the keyboard
 

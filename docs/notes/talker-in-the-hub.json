@@ -1,0 +1,785 @@
+{
+ "about": "Numbers behind docs/notes/phase-0-spikes.md, section Talker in the Hub. Times in ms; p50 and p90 interpolate linearly between ranks. A turn's line is its line in docs/notes/talker-small-talk.txt.",
+ "setup": {
+  "date": "2026-11-03",
+  "claude_agent_sdk": "0.2.177",
+  "claude_cli": "2.1.317",
+  "python": "3.12",
+  "talker_model": "claude-sonnet-5-5",
+  "effort": "low",
+  "thinking": "disabled"
+ },
+ "connector_probe": {
+  "about": "One launch each way on the Talker prompt: warm-up, then three short typed turns.",
+  "launches": [
+   {
+    "strict_mcp_config": false,
+    "claude_ai_tools_per_turn": [
+     0,
+     24,
+     24,
+     24
+    ],
+    "turns": [
+     {
+      "turn": "warm-up",
+      "first_delta_ms": 1263,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 1284,
+      "haiku_input_tokens": null
+     },
+     {
+      "turn": "turn 1",
+      "first_delta_ms": 2432,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 10253,
+      "haiku_input_tokens": 1185
+     },
+     {
+      "turn": "turn 2",
+      "first_delta_ms": 717,
+      "cache_read_tokens": 8546,
+      "cache_creation_tokens": 1731,
+      "haiku_input_tokens": 1185
+     },
+     {
+      "turn": "turn 3",
+      "first_delta_ms": 653,
+      "cache_read_tokens": 10277,
+      "cache_creation_tokens": 47,
+      "haiku_input_tokens": 1185
+     }
+    ]
+   },
+   {
+    "strict_mcp_config": true,
+    "claude_ai_tools_per_turn": [
+     0,
+     0,
+     0,
+     0
+    ],
+    "turns": [
+     {
+      "turn": "warm-up",
+      "first_delta_ms": 1268,
+      "cache_read_tokens": 1284,
+      "cache_creation_tokens": 0,
+      "haiku_input_tokens": 1185
+     },
+     {
+      "turn": "turn 1",
+      "first_delta_ms": 815,
+      "cache_read_tokens": 699,
+      "cache_creation_tokens": 606,
+      "haiku_input_tokens": 1185
+     },
+     {
+      "turn": "turn 2",
+      "first_delta_ms": 747,
+      "cache_read_tokens": 1305,
+      "cache_creation_tokens": 41,
+      "haiku_input_tokens": 1185
+     },
+     {
+      "turn": "turn 3",
+      "first_delta_ms": 838,
+      "cache_read_tokens": 1346,
+      "cache_creation_tokens": 51,
+      "haiku_input_tokens": 1185
+     }
+    ]
+   }
+  ]
+ },
+ "warm_up_probe": {
+  "about": "Cold cache: a fresh nonce in the prompt each launch. Blocking warm-up, as in 07b423b.",
+  "launches": [
+   {
+    "warm_up": false,
+    "turns": [
+     {
+      "turn": "turn 1",
+      "first_delta_ms": 4242,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 1303
+     },
+     {
+      "turn": "turn 2",
+      "first_delta_ms": 679,
+      "cache_read_tokens": 718,
+      "cache_creation_tokens": 629
+     }
+    ]
+   },
+   {
+    "warm_up": true,
+    "turns": [
+     {
+      "turn": "warm-up",
+      "first_delta_ms": 1458,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 1306
+     },
+     {
+      "turn": "turn 1",
+      "first_delta_ms": 728,
+      "cache_read_tokens": 721,
+      "cache_creation_tokens": 609
+     },
+     {
+      "turn": "turn 2",
+      "first_delta_ms": 777,
+      "cache_read_tokens": 1330,
+      "cache_creation_tokens": 48
+     }
+    ]
+   },
+   {
+    "warm_up": false,
+    "turns": [
+     {
+      "turn": "turn 1",
+      "first_delta_ms": 1163,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 1301
+     },
+     {
+      "turn": "turn 2",
+      "first_delta_ms": 988,
+      "cache_read_tokens": 716,
+      "cache_creation_tokens": 631
+     }
+    ]
+   },
+   {
+    "warm_up": true,
+    "turns": [
+     {
+      "turn": "warm-up",
+      "first_delta_ms": 1330,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 1311
+     },
+     {
+      "turn": "turn 1",
+      "first_delta_ms": 841,
+      "cache_read_tokens": 726,
+      "cache_creation_tokens": 606
+     },
+     {
+      "turn": "turn 2",
+      "first_delta_ms": 1260,
+      "cache_read_tokens": 1332,
+      "cache_creation_tokens": 48
+     }
+    ]
+   }
+  ]
+ },
+ "warm_up_other_launches_first_delta_ms": [
+  2818,
+  4593
+ ],
+ "small_talk_runs": [
+  {
+   "run": "1, first prompt draft",
+   "warm_up": {
+    "first_delta_ms": 1488,
+    "first_sentence_ms": 1488,
+    "total_ms": 1792,
+    "cache_read_tokens": 1284,
+    "cache_creation_tokens": 0,
+    "input_tokens": 2,
+    "outcome": "completed"
+   },
+   "turns": [
+    {
+     "line": 1,
+     "first_delta_ms": 732,
+     "first_sentence_ms": 1123,
+     "total_ms": 1139,
+     "cache_read_tokens": 699,
+     "cache_creation_tokens": 617,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 2,
+     "first_delta_ms": 837,
+     "first_sentence_ms": 837,
+     "total_ms": 1121,
+     "cache_read_tokens": 1316,
+     "cache_creation_tokens": 55,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 3,
+     "first_delta_ms": 741,
+     "first_sentence_ms": 1043,
+     "total_ms": 1062,
+     "cache_read_tokens": 1371,
+     "cache_creation_tokens": 38,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 4,
+     "first_delta_ms": 948,
+     "first_sentence_ms": 1228,
+     "total_ms": 1583,
+     "cache_read_tokens": 1409,
+     "cache_creation_tokens": 44,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 5,
+     "first_delta_ms": 3040,
+     "first_sentence_ms": 3247,
+     "total_ms": 3610,
+     "cache_read_tokens": 1453,
+     "cache_creation_tokens": 82,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 6,
+     "first_delta_ms": 760,
+     "first_sentence_ms": 1022,
+     "total_ms": 1545,
+     "cache_read_tokens": 1535,
+     "cache_creation_tokens": 364,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 7,
+     "first_delta_ms": 771,
+     "first_sentence_ms": 1272,
+     "total_ms": 1285,
+     "cache_read_tokens": 1899,
+     "cache_creation_tokens": 85,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 8,
+     "first_delta_ms": 1451,
+     "first_sentence_ms": 1558,
+     "total_ms": 2017,
+     "cache_read_tokens": 1984,
+     "cache_creation_tokens": 58,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 9,
+     "first_delta_ms": 1801,
+     "first_sentence_ms": 1873,
+     "total_ms": 2417,
+     "cache_read_tokens": 2042,
+     "cache_creation_tokens": 125,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 10,
+     "first_delta_ms": 1461,
+     "first_sentence_ms": 1743,
+     "total_ms": 2082,
+     "cache_read_tokens": 2167,
+     "cache_creation_tokens": 181,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 11,
+     "first_delta_ms": 811,
+     "first_sentence_ms": 1084,
+     "total_ms": 1385,
+     "cache_read_tokens": 2348,
+     "cache_creation_tokens": 237,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 12,
+     "first_delta_ms": 892,
+     "first_sentence_ms": 1209,
+     "total_ms": 1224,
+     "cache_read_tokens": 2585,
+     "cache_creation_tokens": 73,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 13,
+     "first_delta_ms": 825,
+     "first_sentence_ms": 1184,
+     "total_ms": 1198,
+     "cache_read_tokens": 2658,
+     "cache_creation_tokens": 47,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 14,
+     "first_delta_ms": 774,
+     "first_sentence_ms": 1143,
+     "total_ms": 1478,
+     "cache_read_tokens": 2705,
+     "cache_creation_tokens": 59,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 15,
+     "first_delta_ms": 1522,
+     "first_sentence_ms": 1840,
+     "total_ms": 2568,
+     "cache_read_tokens": 2764,
+     "cache_creation_tokens": 103,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 16,
+     "first_delta_ms": 822,
+     "first_sentence_ms": 1105,
+     "total_ms": 1664,
+     "cache_read_tokens": 2867,
+     "cache_creation_tokens": 251,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 17,
+     "first_delta_ms": 751,
+     "first_sentence_ms": 1252,
+     "total_ms": 1255,
+     "cache_read_tokens": 3118,
+     "cache_creation_tokens": 117,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 18,
+     "first_delta_ms": 804,
+     "first_sentence_ms": 1088,
+     "total_ms": 1415,
+     "cache_read_tokens": 3235,
+     "cache_creation_tokens": 57,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 19,
+     "first_delta_ms": 903,
+     "first_sentence_ms": 1091,
+     "total_ms": 3582,
+     "cache_read_tokens": 3292,
+     "cache_creation_tokens": 105,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 20,
+     "first_delta_ms": 861,
+     "first_sentence_ms": 1136,
+     "total_ms": 1645,
+     "cache_read_tokens": 3397,
+     "cache_creation_tokens": 138,
+     "input_tokens": 4,
+     "outcome": "completed"
+    }
+   ],
+   "summary": {
+    "first_delta_p50_ms": 831,
+    "first_delta_p90_ms": 1550,
+    "first_sentence_p50_ms": 1164,
+    "first_sentence_p90_ms": 1843,
+    "first_sentence_at_most_1000_ms": 1,
+    "first_sentence_min_ms": 837,
+    "first_sentence_max_ms": 3247
+   }
+  },
+  {
+   "run": "2, prompt as of 07b423b",
+   "warm_up": {
+    "first_delta_ms": 1672,
+    "first_sentence_ms": 1672,
+    "total_ms": 1678,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 1316,
+    "input_tokens": 2,
+    "outcome": "completed"
+   },
+   "turns": [
+    {
+     "line": 1,
+     "first_delta_ms": 803,
+     "first_sentence_ms": 1283,
+     "total_ms": 1296,
+     "cache_read_tokens": 731,
+     "cache_creation_tokens": 616,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 2,
+     "first_delta_ms": 833,
+     "first_sentence_ms": 1108,
+     "total_ms": 1111,
+     "cache_read_tokens": 1347,
+     "cache_creation_tokens": 58,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 3,
+     "first_delta_ms": 685,
+     "first_sentence_ms": 992,
+     "total_ms": 1004,
+     "cache_read_tokens": 1405,
+     "cache_creation_tokens": 34,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 4,
+     "first_delta_ms": 747,
+     "first_sentence_ms": 1002,
+     "total_ms": 1469,
+     "cache_read_tokens": 1439,
+     "cache_creation_tokens": 44,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 5,
+     "first_delta_ms": 3556,
+     "first_sentence_ms": 3561,
+     "total_ms": 3932,
+     "cache_read_tokens": 1483,
+     "cache_creation_tokens": 86,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 6,
+     "first_delta_ms": 1308,
+     "first_sentence_ms": 1553,
+     "total_ms": 2234,
+     "cache_read_tokens": 1569,
+     "cache_creation_tokens": 403,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 7,
+     "first_delta_ms": 668,
+     "first_sentence_ms": 923,
+     "total_ms": 1230,
+     "cache_read_tokens": 1972,
+     "cache_creation_tokens": 89,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 8,
+     "first_delta_ms": 625,
+     "first_sentence_ms": 887,
+     "total_ms": 1359,
+     "cache_read_tokens": 2061,
+     "cache_creation_tokens": 75,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 9,
+     "first_delta_ms": 782,
+     "first_sentence_ms": 1005,
+     "total_ms": 1318,
+     "cache_read_tokens": 2136,
+     "cache_creation_tokens": 93,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 10,
+     "first_delta_ms": 1458,
+     "first_sentence_ms": 1573,
+     "total_ms": 2110,
+     "cache_read_tokens": 2229,
+     "cache_creation_tokens": 72,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 11,
+     "first_delta_ms": 3168,
+     "first_sentence_ms": 5294,
+     "total_ms": 5297,
+     "cache_read_tokens": 2301,
+     "cache_creation_tokens": 221,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 12,
+     "first_delta_ms": 7722,
+     "first_sentence_ms": 8112,
+     "total_ms": 8118,
+     "cache_read_tokens": 2522,
+     "cache_creation_tokens": 70,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 13,
+     "first_delta_ms": 2711,
+     "first_sentence_ms": 2711,
+     "total_ms": 3070,
+     "cache_read_tokens": 2592,
+     "cache_creation_tokens": 53,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 14,
+     "first_delta_ms": 1209,
+     "first_sentence_ms": 1296,
+     "total_ms": 1925,
+     "cache_read_tokens": 2645,
+     "cache_creation_tokens": 59,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 15,
+     "first_delta_ms": 1696,
+     "first_sentence_ms": 1765,
+     "total_ms": 2675,
+     "cache_read_tokens": 2704,
+     "cache_creation_tokens": 172,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 16,
+     "first_delta_ms": 727,
+     "first_sentence_ms": 1001,
+     "total_ms": 1521,
+     "cache_read_tokens": 2876,
+     "cache_creation_tokens": 233,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 17,
+     "first_delta_ms": 859,
+     "first_sentence_ms": 1066,
+     "total_ms": 1351,
+     "cache_read_tokens": 3109,
+     "cache_creation_tokens": 118,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 18,
+     "first_delta_ms": 736,
+     "first_sentence_ms": 741,
+     "total_ms": 1316,
+     "cache_read_tokens": 3227,
+     "cache_creation_tokens": 90,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 19,
+     "first_delta_ms": 1668,
+     "first_sentence_ms": 1777,
+     "total_ms": 2174,
+     "cache_read_tokens": 3317,
+     "cache_creation_tokens": 105,
+     "input_tokens": 4,
+     "outcome": "completed"
+    },
+    {
+     "line": 20,
+     "first_delta_ms": 710,
+     "first_sentence_ms": 969,
+     "total_ms": 1459,
+     "cache_read_tokens": 3422,
+     "cache_creation_tokens": 184,
+     "input_tokens": 4,
+     "outcome": "completed"
+    }
+   ],
+   "summary": {
+    "first_delta_p50_ms": 846,
+    "first_delta_p90_ms": 3207,
+    "first_sentence_p50_ms": 1196,
+    "first_sentence_p90_ms": 3734,
+    "first_sentence_at_most_1000_ms": 5,
+    "first_sentence_min_ms": 741,
+    "first_sentence_max_ms": 8112
+   }
+  }
+ ],
+ "background_warm_up": {
+  "about": "Warm-up off the start path. jarvis-hub --text with lines 1 and 2; turn times count from when the line arrived, wait_ms included.",
+  "launches": [
+   {
+    "first_line_typed": "at launch",
+    "warm_up": {
+     "wait_ms": 0,
+     "first_delta_ms": 1084,
+     "first_sentence_ms": 1370,
+     "total_ms": 1385,
+     "cache_read_tokens": 0,
+     "cache_creation_tokens": 1312,
+     "input_tokens": 2,
+     "outcome": "completed"
+    },
+    "turns": [
+     {
+      "wait_ms": 1696,
+      "line": 1,
+      "first_delta_ms": 2454,
+      "first_sentence_ms": 2720,
+      "total_ms": 3025,
+      "cache_read_tokens": 723,
+      "cache_creation_tokens": 620,
+      "input_tokens": 4,
+      "outcome": "completed"
+     },
+     {
+      "wait_ms": 0,
+      "line": 2,
+      "first_delta_ms": 755,
+      "first_sentence_ms": 1050,
+      "total_ms": 1076,
+      "cache_read_tokens": 1343,
+      "cache_creation_tokens": 76,
+      "input_tokens": 4,
+      "outcome": "completed"
+     }
+    ]
+   },
+   {
+    "first_line_typed": "at launch",
+    "warm_up": {
+     "wait_ms": 0,
+     "first_delta_ms": 1188,
+     "first_sentence_ms": 1188,
+     "total_ms": 1506,
+     "cache_read_tokens": 1312,
+     "cache_creation_tokens": 0,
+     "input_tokens": 2,
+     "outcome": "completed"
+    },
+    "turns": [
+     {
+      "wait_ms": 1752,
+      "line": 1,
+      "first_delta_ms": 2480,
+      "first_sentence_ms": 2791,
+      "total_ms": 3067,
+      "cache_read_tokens": 723,
+      "cache_creation_tokens": 621,
+      "input_tokens": 4,
+      "outcome": "completed"
+     },
+     {
+      "wait_ms": 0,
+      "line": 2,
+      "first_delta_ms": 609,
+      "first_sentence_ms": 852,
+      "total_ms": 871,
+      "cache_read_tokens": 1344,
+      "cache_creation_tokens": 63,
+      "input_tokens": 4,
+      "outcome": "completed"
+     }
+    ]
+   },
+   {
+    "first_line_typed": "4 s after launch",
+    "warm_up": {
+     "wait_ms": 0,
+     "first_delta_ms": 1356,
+     "first_sentence_ms": 1543,
+     "total_ms": 1562,
+     "cache_read_tokens": 1312,
+     "cache_creation_tokens": 0,
+     "input_tokens": 2,
+     "outcome": "completed"
+    },
+    "turns": [
+     {
+      "wait_ms": 0,
+      "line": 1,
+      "first_delta_ms": 733,
+      "first_sentence_ms": 1030,
+      "total_ms": 1404,
+      "cache_read_tokens": 1343,
+      "cache_creation_tokens": 0,
+      "input_tokens": 4,
+      "outcome": "completed"
+     },
+     {
+      "wait_ms": 0,
+      "line": 2,
+      "first_delta_ms": 660,
+      "first_sentence_ms": 660,
+      "total_ms": 933,
+      "cache_read_tokens": 1343,
+      "cache_creation_tokens": 83,
+      "input_tokens": 4,
+      "outcome": "completed"
+     }
+    ]
+   },
+   {
+    "first_line_typed": "4 s after launch",
+    "warm_up": {
+     "wait_ms": 0,
+     "first_delta_ms": 1211,
+     "first_sentence_ms": 1432,
+     "total_ms": 1449,
+     "cache_read_tokens": 1312,
+     "cache_creation_tokens": 0,
+     "input_tokens": 2,
+     "outcome": "completed"
+    },
+    "turns": [
+     {
+      "wait_ms": 0,
+      "line": 1,
+      "first_delta_ms": 782,
+      "first_sentence_ms": 1054,
+      "total_ms": 1317,
+      "cache_read_tokens": 1343,
+      "cache_creation_tokens": 0,
+      "input_tokens": 4,
+      "outcome": "completed"
+     },
+     {
+      "wait_ms": 0,
+      "line": 2,
+      "first_delta_ms": 652,
+      "first_sentence_ms": 931,
+      "total_ms": 948,
+      "cache_read_tokens": 1343,
+      "cache_creation_tokens": 85,
+      "input_tokens": 4,
+      "outcome": "completed"
+     }
+    ]
+   }
+  ]
+ }
+}
