@@ -13,10 +13,11 @@ from dataclasses import replace
 from claude_agent_sdk import AssistantMessage, ClaudeSDKClient, SystemMessage, UserMessage
 from claude_agent_sdk.types import ToolResultBlock, ToolUseBlock
 
-from jarvis_hub.agents.backend import AgentEvent, HubTool, SessionSpec, TextDelta, ToolCall, TurnEnd
+from jarvis_hub.agents.backend import AgentEvent, HubTool, Refused, SessionSpec, TextDelta, ToolCall, TurnEnd
 from jarvis_hub.agents.sdk import SdkBackend, SdkSession, options_for
 from jarvis_hub.config import load_settings
 from jarvis_hub.orchestrator import orchestrator_spec
+from jarvis_hub.subagents import Subagent, subagent_session
 
 pytestmark = pytest.mark.real_model
 
@@ -232,3 +233,45 @@ async def test_a_turn_reports_the_context_it_filled_against_the_models_window() 
     end = events[-1]
     assert isinstance(end, TurnEnd) and end.context is not None
     assert 0 < end.context.tokens < end.context.window
+
+
+async def test_a_subagent_skips_permissions_without_voice_tools_and_its_mcp_guard_refuses_a_connector(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    settings = load_settings(Path(__file__).resolve().parents[1], os.environ)
+    subagent = Subagent("S1", "T1", "scratch", "Probe", "brief", "haiku", "low", tmp_path, 0.0)
+    cli = shutil.which("claude")
+    assert cli is not None and "ANTHROPIC_API_KEY" not in os.environ
+    # A harmless read stands in for a write: the guard refuses it the way connector_check refuses post_now.
+    tool = "mcp__claude_ai_Claude_Docs__guide"
+
+    def guard(name: str) -> Refused | None:
+        return Refused("needs an Approval") if name == tool else None
+
+    spec = replace(subagent_session(settings, subagent), mcp_guard=guard)
+    inits: list[tuple[list[str], str]] = []
+    results: list[tuple[bool, str]] = []
+    called: set[str] = set()
+    # Two messages: the account's claude.ai connectors join the session after its first query.
+    messages = ("Reply with one word.", f"Call {tool} once with items ['topic.index'], then reply DONE.")
+    async with ClaudeSDKClient(options_for(spec, cli)) as client:
+        for message in messages:
+            await client.query(message)
+            async for m in client.receive_response():
+                if isinstance(m, SystemMessage) and m.subtype == "init":
+                    inits.append((m.data.get("tools", []), m.data.get("permissionMode", "")))
+                elif isinstance(m, AssistantMessage):
+                    called |= {b.id for b in m.content if isinstance(b, ToolUseBlock) and b.name == tool}
+                elif isinstance(m, UserMessage) and isinstance(m.content, list):
+                    results += [
+                        (bool(b.is_error), str(b.content))
+                        for b in m.content
+                        if isinstance(b, ToolResultBlock) and b.tool_use_id in called
+                    ]
+    for tools, mode in inits:
+        assert mode == "bypassPermissions"
+        assert {"Bash", "Edit", "Skill"} <= set(tools)
+        assert not [t for t in tools if "voicemode" in t], tools
+    assert tool in inits[-1][0]
+    assert results and all(is_error and "Approval" in content for is_error, content in results), results

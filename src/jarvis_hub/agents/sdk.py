@@ -32,6 +32,7 @@ from jarvis_hub.agents.backend import (
     BashGuard,
     Context,
     HubTool,
+    McpGuard,
     Refused,
     SessionSpec,
     TextDelta,
@@ -78,7 +79,48 @@ def _bash_hook(guard: BashGuard) -> HookCallback:
     return hook
 
 
+def _mcp_hook(guard: McpGuard) -> HookCallback:
+    async def hook(hook_input: HookInput, tool_use_id: str | None, context: HookContext) -> HookJSONOutput:
+        verdict = guard(str(hook_input.get("tool_name", "")))
+        if verdict is None:
+            return {}
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": verdict.reason,
+            }
+        }
+
+    return hook
+
+
+def _skipping_permissions(spec: SessionSpec, cli_path: str, stderr: Callable[[str], None] | None) -> ClaudeAgentOptions:
+    hooks: dict[HookEvent, list[HookMatcher]] = {}
+    if spec.mcp_guard:
+        # bypassPermissions skips every prompt but not hooks, so this deny holds; a hook that fails blocks the call.
+        hooks["PreToolUse"] = [HookMatcher(matcher="mcp__.*", hooks=[_mcp_hook(spec.mcp_guard)], on_failure="block")]
+    return ClaudeAgentOptions(
+        cli_path=cli_path,
+        cwd=spec.cwd,
+        model=spec.model,
+        effort=spec.effort,
+        thinking=None if spec.thinking else {"type": "disabled"},
+        system_prompt={"type": "preset", "preset": "claude_code", "append": spec.system_prompt},
+        # The user's settings bring the sdlc skills and plugins, the project's the repo's own CLAUDE.md.
+        setting_sources=["user", "project"],
+        disallowed_tools=list(spec.denied_tools),
+        permission_mode="bypassPermissions",
+        max_turns=spec.max_turns,
+        hooks=hooks or None,
+        include_partial_messages=True,
+        stderr=stderr,
+    )
+
+
 def options_for(spec: SessionSpec, cli_path: str, stderr: Callable[[str], None] | None = None) -> ClaudeAgentOptions:
+    if spec.skip_permissions:
+        return _skipping_permissions(spec, cli_path, stderr)
     mcp_servers: dict[str, McpServerConfig] = {}
     if spec.tools:
         mcp_servers[TOOL_SERVER] = create_sdk_mcp_server(TOOL_SERVER, tools=[_sdk_tool(t) for t in spec.tools])

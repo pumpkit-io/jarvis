@@ -13,6 +13,8 @@ DEFAULT_ORG = "pumpkit-io"
 DEFAULT_TALKER_RESTART_AT = 0.40
 
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
+# Lowest first, so a level's index orders it.
+EFFORTS: tuple[Effort, ...] = get_args(Effort)
 
 _ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
 _QUOTED = re.compile(r"^\"([^\"]*)\"|^'([^']*)'")
@@ -39,6 +41,9 @@ class Settings:
     talker: RoleModel
     orchestrator: RoleModel
     talker_restart_at: float = DEFAULT_TALKER_RESTART_AT
+    # No Subagent runs above this effort, whatever the User or the Orchestrator asks.
+    max_effort: Effort = "max"
+    max_subagents: int = 3
 
 
 def parse_env(data: bytes) -> dict[str, str]:
@@ -65,7 +70,7 @@ def parse_env(data: bytes) -> dict[str, str]:
     return values
 
 
-def _is_effort(value: str) -> TypeGuard[Effort]:
+def is_effort(value: str) -> TypeGuard[Effort]:
     return value in get_args(Effort)
 
 
@@ -96,7 +101,7 @@ def load_settings(repo_dir: Path, environ: Mapping[str, str]) -> Settings:
 
     def effort(name: str, default: Effort) -> Effort:
         value = get(name, default)
-        if not _is_effort(value):
+        if not is_effort(value):
             raise ConfigError(f"{name}={value!r} is not one of {', '.join(get_args(Effort))}")
         return value
 
@@ -109,6 +114,12 @@ def load_settings(repo_dir: Path, environ: Mapping[str, str]) -> Settings:
         if not 0 < value <= 1:
             raise ConfigError(f"{name}={raw!r} is not a fraction of the window above 0 and up to 1")
         return value
+
+    def count(name: str, default: int) -> int:
+        value = get(name, str(default))
+        if not value.isdigit() or int(value) < 1:
+            raise ConfigError(f"{name}={value!r} is not a whole number of at least 1")
+        return int(value)
 
     return Settings(
         user_name=values.get("JARVIS_USER_NAME") or None,
@@ -125,4 +136,6 @@ def load_settings(repo_dir: Path, environ: Mapping[str, str]) -> Settings:
             thinking=True,
         ),
         talker_restart_at=fraction("JARVIS_TALKER_RESTART_AT", DEFAULT_TALKER_RESTART_AT),
+        max_effort=effort("JARVIS_MAX_EFFORT", "max"),
+        max_subagents=count("JARVIS_MAX_SUBAGENTS", 3),
     )

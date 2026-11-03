@@ -19,16 +19,18 @@ from typing import Any, TextIO
 from rich.console import Console
 from rich.markdown import Markdown
 
-from jarvis_hub.agents.backend import AgentBackend
+from jarvis_hub.agents.backend import AgentBackend, SessionSpec
 from jarvis_hub.agents.sdk import SdkBackend
 from jarvis_hub.config import ConfigError, Settings, load_settings
 from jarvis_hub.hub import Clock, Hub, Line
 from jarvis_hub.orchestrator import orchestrator_spec
+from jarvis_hub.subagents import Subagent, SubagentSetup, subagent_session
 from jarvis_hub.talker import talker_spec
 from jarvis_hub.voice import language
 from jarvis_hub.voice.player import Player, SoundPlayer
 from jarvis_hub.voice.speech import Speech, SpeechClock
 from jarvis_hub.voice.tts import KokoroSynthesizer, Synthesizer
+from jarvis_hub.workspace import default_workspace
 
 PROMPT = "› "
 
@@ -159,6 +161,19 @@ async def _typed_lines(stdin: TextIO, clock: Clock) -> AsyncIterator[Line]:
         yield line
 
 
+def subagent_setup(settings: Settings) -> SubagentSetup:
+    def session(subagent: Subagent) -> SessionSpec:
+        return subagent_session(settings, subagent)
+
+    return SubagentSetup(
+        session=session,
+        workspace=default_workspace(settings.org, settings.org_dir),
+        log_dir=settings.runtime_dir / "subagents",
+        max_effort=settings.max_effort,
+        cap=settings.max_subagents,
+    )
+
+
 async def text_mode(
     *,
     settings: Settings,
@@ -194,6 +209,7 @@ async def text_mode(
         clock=clock,
         output=output,
         metrics=metrics,
+        subagents=subagent_setup(settings),
         speech=speech,
         talker_restart_at=settings.talker_restart_at,
     )

@@ -20,6 +20,7 @@ from jarvis_hub.agents.backend import (
     Usage,
 )
 from jarvis_hub.hub import WARM_UP, Hub, Line
+from jarvis_hub.subagents import Refusal, Subagent, SubagentSetup
 from jarvis_hub.voice.player import Clip, Samples
 
 
@@ -206,6 +207,7 @@ class FakeBackend:
         orchestrator_open_error: Exception | None = None,
         interrupt_gate: asyncio.Event | None = None,
         interrupt_error: Exception | None = None,
+        subagents: dict[str, Sequence[Step]] | None = None,
     ) -> None:
         self.clock = clock
         self.scripts = list(scripts)
@@ -218,6 +220,8 @@ class FakeBackend:
         self.interrupt_gate = interrupt_gate
         self.interrupt_error = interrupt_error
         self.sessions: list[FakeSession] = []
+        # A Subagent's script, by its brief.
+        self.subagent_scripts = dict(subagents or {})
 
     async def open(self, spec: SessionSpec) -> FakeSession:
         error = self.orchestrator_open_error if spec.role == "orchestrator" else self.open_error
@@ -238,6 +242,8 @@ class FakeBackend:
     def next_script(self, role: str, message: str) -> Sequence[Step]:
         if role == "orchestrator":
             return self.orchestrator_scripts.pop(0) if self.orchestrator_scripts else ()
+        if role == "subagent":
+            return self.subagent_scripts.get(message, (Text("Done."),))
         if message == WARM_UP:
             return self.warm_up
         if message.startswith("<event source=\"hub\" reason=\"restart\""):
@@ -306,7 +312,73 @@ ORCHESTRATOR = SessionSpec(
 )
 
 
-def make_hub(backend: FakeBackend, output: RecordingOutput, metrics: Any, **options: Any) -> Hub:
+class FakeWorkspace:
+    """Org repos are the names in `org`; a missing one is cloned. Worktrees are paths under /wt, never made."""
+
+    def __init__(self, org: Iterable[str] = ("pumpkit", "jarvis", "pumpkit-ops"), cloned: Iterable[str] = ()) -> None:
+        self.org = set(org)
+        self.cloned = set(cloned)
+        self.clones: list[str] = []
+        self.worktrees: list[tuple[str, str]] = []
+        self.locks: dict[Path, str] = {}
+        self.released: list[Path] = []
+        # What describe() says is on each worktree's branch.
+        self.on_branch: dict[Path, str] = {}
+
+    async def repo(self, name: str) -> tuple[str, Path]:
+        short = name.removeprefix("pumpkit-io/")
+        if short not in self.org:
+            raise Refusal(f"{name} is outside the Org pumpkit-io.")
+        if short not in self.cloned:
+            self.cloned.add(short)
+            self.clones.append(short)
+        return short, Path("/org") / short
+
+    async def worktree(self, clone: Path, branch: str, holder: str) -> tuple[Path, str]:
+        path = Path("/wt") / clone.name / branch.split("/")[-1]
+        self.worktrees.append((clone.name, branch))
+        self.locks[path] = holder
+        return path, branch
+
+    async def release(self, worktree: Path) -> None:
+        self.released.append(worktree)
+        self.locks.pop(worktree, None)
+
+    async def describe(self, worktree: Path) -> str:
+        return self.on_branch.get(worktree, "No commits beyond origin/main.")
+
+
+def subagent_spec(subagent: Subagent) -> SessionSpec:
+    return SessionSpec(
+        role="subagent",
+        model=subagent.model,
+        effort=subagent.effort,
+        thinking=True,
+        system_prompt="You do the work.",
+        cwd=subagent.cwd,
+        skip_permissions=True,
+    )
+
+
+def make_hub(
+    backend: FakeBackend,
+    output: RecordingOutput,
+    metrics: Any,
+    workspace: FakeWorkspace | None = None,
+    log_dir: Path | None = None,
+    max_effort: Any = "max",
+    cap: int = 3,
+    time_limit: float = 3600.0,
+    **options: Any,
+) -> Hub:
+    setup = SubagentSetup(
+        session=subagent_spec,
+        workspace=workspace or FakeWorkspace(),
+        log_dir=log_dir,
+        max_effort=max_effort,
+        cap=cap,
+        time_limit=time_limit,
+    )
     return Hub(
         talker=TALKER,
         orchestrator=ORCHESTRATOR,
@@ -314,6 +386,7 @@ def make_hub(backend: FakeBackend, output: RecordingOutput, metrics: Any, **opti
         clock=backend.clock,
         output=output,
         metrics=metrics,
+        subagents=setup,
         **options,
     )
 
