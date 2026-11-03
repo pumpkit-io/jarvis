@@ -80,6 +80,13 @@ def test_check_choice(model: str, effort: str, max_effort: Effort, words: list[s
         ("Ask Max about the deploy.", None),
         ("Make the effort to keep it small.", None),
         ("Give it extra high priority.", None),
+        ("Don't use xhigh.", None),
+        ("Non usare sforzo massimo.", None),
+        ("No max effort, please.", None),
+        ("Do not go to maximum effort on this.", None),
+        ("Never at max effort.", None),
+        ("Without xhigh effort, but give it max effort.", "max"),
+        ("No rush. Use max effort.", "max"),
     ],
     ids=lambda v: str(v),
 )

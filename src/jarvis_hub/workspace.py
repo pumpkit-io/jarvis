@@ -34,6 +34,11 @@ def is_org_remote(url: str, org: str, repo: str) -> bool:
     return re.fullmatch(rf"{prefix}{re.escape(org)}/{re.escape(repo)}(\.git)?/?", url.strip(), re.IGNORECASE) is not None
 
 
+def lock_key(clone: Path) -> str:
+    """One key per clone: its real path, case-folded because a case-insensitive disk reaches it by several spellings."""
+    return str(clone.resolve()).casefold()
+
+
 async def _run(*args: str, cwd: Path) -> tuple[int, str, str]:
     process = await asyncio.create_subprocess_exec(
         *args, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
@@ -60,7 +65,7 @@ class GitWorkspace:
             raise Refusal(f"{name} is outside the Org {self._org}; Subagents work only on {self._org} repos.")
         if not _NAME.fullmatch(short) or short in (".", ".."):
             raise Refusal(f"{name!r} is not a repo name.")
-        async with self._lock(short):
+        async with self._lock(self._org_dir / short):
             clone = self._org_dir / short
             if clone.exists() or clone.is_symlink():
                 await self._check_clone(clone, short)
@@ -80,7 +85,7 @@ class GitWorkspace:
     async def worktree(self, clone: Path, branch: str, holder: str) -> tuple[Path, str]:
         if self._script is None:
             raise Refusal("The sdlc worktrees script was not found; install the sdlc plugin.")
-        async with self._lock(clone.name):
+        async with self._lock(clone):
             for n in range(1, TRIES + 1):
                 candidate = branch if n == 1 else f"{branch}-{n}"
                 if await self._branch_exists(clone, candidate):
@@ -116,7 +121,7 @@ class GitWorkspace:
     async def scratch(self, clone: Path, name: str, holder: str) -> Path:
         if self._script is None:
             raise Refusal("The sdlc worktrees script was not found; install the sdlc plugin.")
-        async with self._lock(clone.name):
+        async with self._lock(clone):
             await _git(clone, "fetch", "-q", "origin")
             code, base, _ = await _git(clone, "rev-parse", "--verify", "--quiet", "origin/HEAD")
             base = base if code == 0 and base else "HEAD"
@@ -143,6 +148,11 @@ class GitWorkspace:
         code, common, err = await _git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir")
         if code != 0:
             return err or "it is no longer a git worktree."
+        # A detached HEAD that gained commits would leave them dangling once the worktree is gone.
+        _, new, _ = await _git(worktree, "log", "--oneline", "HEAD", "--not", "--branches", "--remotes")
+        if new:
+            listed = "\n".join(f"- {c}" for c in new.splitlines())
+            return f"it holds commits found on no branch or remote, which removing it would lose:\n{listed}"
         code, _, err = await _git(Path(common).parent, "worktree", "remove", str(worktree))
         return None if code == 0 else err or "git worktree remove failed."
 
@@ -177,8 +187,8 @@ class GitWorkspace:
                 return True
         return False
 
-    def _lock(self, repo: str) -> asyncio.Lock:
-        return self._locks.setdefault(repo, asyncio.Lock())
+    def _lock(self, clone: Path) -> asyncio.Lock:
+        return self._locks.setdefault(lock_key(clone), asyncio.Lock())
 
 
 def default_workspace(org: str, org_dir: Path) -> GitWorkspace:

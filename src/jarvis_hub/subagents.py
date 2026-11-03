@@ -245,7 +245,8 @@ class Subagents:
         for run in stuck:
             run.cancel()
         if stuck:
-            await asyncio.wait(stuck)
+            # A cancelled run still ends by describing and discarding its worktree; a hung git must not block shutdown.
+            await asyncio.wait(stuck, timeout=STOP_GRACE)
 
     async def _run(self, subagent: Subagent) -> None:
         end, text = TurnEnd("interrupted"), ""

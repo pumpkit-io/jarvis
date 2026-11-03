@@ -8,7 +8,7 @@ import pytest
 
 from jarvis_hub.config import load_settings
 from jarvis_hub.subagents import Refusal
-from jarvis_hub.workspace import GitWorkspace, find_worktree_script, is_org_remote
+from jarvis_hub.workspace import GitWorkspace, find_worktree_script, is_org_remote, lock_key
 
 SCRIPT = find_worktree_script(load_settings(Path(__file__).resolve().parents[1], {}).org_dir, Path.home())
 needs_script = pytest.mark.skipif(SCRIPT is None, reason="the sdlc worktrees script is not installed")
@@ -172,3 +172,22 @@ async def test_a_read_only_worktree_with_changes_is_kept_and_discard_says_why(cl
     (path / ".gitignore").write_text("changed\n")
     kept = await workspace.discard(path)
     assert kept and path.exists()
+
+
+@needs_script
+async def test_a_read_only_worktree_that_holds_new_commits_is_kept_and_discard_names_them(clone: Path) -> None:
+    workspace = GitWorkspace("pumpkit-io", clone.parent, SCRIPT)
+    path = await workspace.scratch(clone, "read-what-changed", "jarvis S1 (T1): What changed")
+    (path / "note.txt").write_text("found something\n")
+    git(path, "add", "note.txt")
+    git(path, "commit", "-qm", "note what changed")
+    sha = git(path, "rev-parse", "--short", "HEAD")
+
+    kept = await workspace.discard(path)
+
+    assert path.exists() and kept and "note what changed" in kept and sha in kept
+    assert git(path, "rev-parse", "--short", "HEAD") == sha
+
+
+def test_the_repo_lock_key_is_the_same_for_two_spellings_of_one_clone(clone: Path) -> None:
+    assert lock_key(clone) == lock_key(clone.parent / clone.name.upper())

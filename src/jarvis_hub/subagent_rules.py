@@ -20,6 +20,10 @@ ON_REQUEST: dict[Effort, re.Pattern[str]] = {
     ),
 }
 
+# A negation earlier in the same clause turns the request around: "don't use xhigh", "non usare sforzo massimo".
+NEGATION = re.compile(r"\b(don['\u2019]?t|do\s+not|never|no|not|without|non|senza|mai)\b", re.IGNORECASE)
+CLAUSE_END = re.compile(r"[.,;:!?\n]")
+
 # Pumpkit's tools that only read, under both names it reaches a session by: the claude.ai connector of the User's
 # account, and a `pumpkit` MCP server in the User's own config, such as a local Instance (ADR 0008).
 PUMPKIT_READS = ("get_post", "list_posts", "get_usage", "list_inspiration_authors", "list_past_communities")
@@ -34,8 +38,17 @@ READ_CONNECTOR_TOOLS = frozenset(
 
 def asked_effort(user_words: Sequence[str]) -> Effort | None:
     """The highest on-request effort the User's own words name, if any."""
-    asked: list[Effort] = [level for level, pattern in ON_REQUEST.items() if any(pattern.search(w) for w in user_words)]
+    asked: list[Effort] = [level for level, pattern in ON_REQUEST.items() if any(_requests(pattern, w) for w in user_words)]
     return max(asked, key=EFFORTS.index) if asked else None
+
+
+def _requests(pattern: re.Pattern[str], words: str) -> bool:
+    """Whether the words match the pattern somewhere that no negation in the same clause precedes."""
+    for match in pattern.finditer(words):
+        clause = CLAUSE_END.split(words[: match.start()])[-1]
+        if not NEGATION.search(clause):
+            return True
+    return False
 
 
 def check_choice(model: str, effort: str, *, max_effort: Effort, user_words: Sequence[str]) -> Refused | None:
