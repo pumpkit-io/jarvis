@@ -4,6 +4,7 @@ import pytest
 
 from jarvis_hub.voice.language import Lang
 from jarvis_hub.voice.state import (
+    AnnouncementBegins,
     Chime,
     ChimeStarted,
     EndConversation,
@@ -324,3 +325,15 @@ def test_an_event_reply_ending_while_a_spoken_turn_waits_does_not_end_that_turn(
 def test_audio_of_an_event_reply_while_a_spoken_turn_waits_is_not_its_answer() -> None:
     voice, _ = run(WakeWord(10.0), Heard("Is the CI green?", "en", 12.0), ReplyAudio(13.0))
     assert voice.state == "thinking"
+
+
+def test_an_announcement_begun_while_idle_is_one_the_wake_word_interrupts() -> None:
+    voice, actions = run(AnnouncementBegins(10.0), WakeWord(10.2))
+    assert voice.state == "listening"
+    assert actions == [Interrupt(), Chime()]
+
+
+@pytest.mark.parametrize("state", ["listening", "thinking", "speaking", "follow_up", "announce"])
+def test_an_announcement_begins_only_from_idle(state: VoiceState) -> None:
+    voice = Voice(state=state)
+    assert step(voice, AnnouncementBegins(10.0), TIMING) == (voice, [])

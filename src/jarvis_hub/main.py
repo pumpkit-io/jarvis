@@ -337,7 +337,7 @@ async def voice_mode(
         speak_typed=False,
         on_end_conversation=conversation.end_conversation,
         talker_restart_at=settings.talker_restart_at,
-        quiet=conversation.quiet,
+        floor=conversation,
     )
     try:
         await hub.start()

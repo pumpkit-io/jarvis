@@ -88,7 +88,7 @@ async def rig_for() -> AsyncIterator[MakeRig]:
             speech=voice.speech,
             speak_typed=False,
             on_end_conversation=voice.end_conversation,
-            quiet=voice.quiet,
+            floor=voice,
         )
         typist = Typist(clock)
         await hub.start()
@@ -420,213 +420,170 @@ async def test_a_reply_stopped_by_the_wake_word_does_not_end_the_next_turn(rig_f
     assert rig.state == "thinking"
 
 
-async def test_news_that_arrives_while_the_user_speaks_waits_until_their_reply_has_played(rig_for: MakeRig) -> None:
-    request = "Open a PR fixing typo X in pumpkit"
-    brief = "Fix the typo in pumpkit's README, then open a PR."
-    spawn = {
-        "repo": "pumpkit",
-        "title": "Fix typo X in pumpkit",
-        "brief": brief,
-        "model": "sonnet",
-        "effort": "medium",
-        "writes": True,
-        "branch_kind": "fix",
-    }
-    report = {"task_id": "T1", "spoken": "The typo fix is up.", "needs_user": False}
-    finish, news_streamed = asyncio.Event(), asyncio.Event()
-    rig: Rig = await rig_for(
-        [Text("Right away, sir."), Tool("delegate", {"request": request, "context": ""})],
-        [Text("The typo fix is up, sir."), Gate(news_streamed)],
-        [Text("Green, sir.")],
-        orchestrator=[[Tool("spawn_subagent", spawn)], [Tool("report", report)]],
-        subagents={brief: [Gate(finish), Text("Opened pumpkit#43.")]},
-    )
-    rig.audio.wake()
-    rig.audio.say(request)
-    await until(lambda: rig.state == "follow_up" and len(rig.backend.all_sessions("subagent")) == 1)
-    await rig.advance(6)
-    assert rig.state == "idle"
-
-    rig.audio.wake()
-    await rig.settle()
-    rig.audio.speech()
-    finish.set()
-    await until(lambda: ("reply", "The typo fix is up, sir.") in rig.output.log)
-    rig.audio.say("Is the CI green?")
-    await until(lambda: rig.state == "thinking")
-    news_streamed.set()
-    await until(lambda: "Green, sir." in rig.player.texts)
-    await until(lambda: "The typo fix is up, sir." in rig.player.texts)
-    await until(lambda: rig.state == "follow_up")
-
-    assert [t for t in rig.player.texts if t][-2:] == ["Green, sir.", "The typo fix is up, sir."]
-    assert rig.states()[-6:] == ["listening", "thinking", "speaking", "follow_up", "speaking", "follow_up"]
-
-
 NEWS = "The typo fix is up, sir."
-_REQUEST = "Open a PR fixing typo X in pumpkit"
-_BRIEF = "Fix the typo in pumpkit's README, then open a PR."
-_SPAWN = {
-    "repo": "pumpkit",
-    "title": "Fix typo X in pumpkit",
-    "brief": _BRIEF,
-    "model": "sonnet",
-    "effort": "medium",
-    "writes": True,
-    "branch_kind": "fix",
-}
-_DELEGATE: list[Step] = [Text("Right away, sir."), Tool("delegate", {"request": _REQUEST, "context": ""})]
+DOCS = "The docs are merged, sir."
+_REPORTS = ["The typo fix is up.", "The docs are merged."]
 
 
-async def news_rig(rig_for: MakeRig, finish: asyncio.Event, news: list[Step], *later: list[Step]) -> Rig:
-    """A rig whose Subagent ends on `finish`, and whose Talker then says `news`: delegated, and idle again."""
-    report = {"task_id": "T1", "spoken": "The typo fix is up.", "needs_user": False}
-    rig: Rig = await rig_for(
-        _DELEGATE,
-        news,
-        *later,
-        orchestrator=[[Tool("spawn_subagent", _SPAWN)], [Tool("report", report)]],
-        subagents={_BRIEF: [Gate(finish), Text("Opened pumpkit#43.")]},
-    )
+async def news_rig(rig_for: MakeRig, *scripts: list[Step], items: int = 1) -> tuple[Rig, list[asyncio.Event]]:
+    """A rig that delegated `items` Tasks and is idle again; setting `arrivals[i]` brings Task i's news to the Hub.
+
+    `scripts` are the Talker's turns after the delegation, in the order the Talker takes them.
+    """
+    arrivals = [asyncio.Event() for _ in range(items)]
+    delegating: list[Step] = [Text("Right away, sir.")]
+    delegating += [Tool("delegate", {"request": f"Task {i + 1}", "context": ""}) for i in range(items)]
+    reports = [
+        [Gate(arrival), Tool("report", {"task_id": f"T{i + 1}", "spoken": _REPORTS[i], "needs_user": False})]
+        for i, arrival in enumerate(arrivals)
+    ]
+    rig: Rig = await rig_for(delegating, *scripts, orchestrator=reports)
     rig.audio.wake()
-    rig.audio.say(_REQUEST)
-    await until(lambda: rig.state == "follow_up" and len(rig.backend.all_sessions("subagent")) == 1)
+    rig.audio.say("Fix the typo and merge the docs")
+    await until(lambda: rig.state == "follow_up")
     await rig.advance(6)
     assert rig.state == "idle"
-    return rig
+    return rig, arrivals
 
 
 def spoken(rig: Rig) -> list[str]:
     return [t for t in rig.player.texts if t]
 
 
-async def test_news_streamed_while_idle_but_not_yet_heard_waits_when_the_user_wakes(rig_for: MakeRig) -> None:
-    finish = asyncio.Event()
-    rig = await news_rig(rig_for, finish, [Text(NEWS)], [Text("Green, sir.")])
+def reports(rig: Rig) -> int:
+    return sum(r.name == "report" for s in rig.backend.all_sessions("orchestrator") for r in s.tool_results)
 
-    rig.tts.hold.clear()
-    finish.set()
-    await until(lambda: rig.output.replies[-1:] == [NEWS])
+
+async def arrive(rig: Rig, arrival: asyncio.Event) -> None:
+    """Lets the Orchestrator report, and waits until the Hub has the news."""
+    before = reports(rig)
+    arrival.set()
+    await until(lambda: reports(rig) > before)
     await rig.settle()
+
+
+@pytest.mark.parametrize("moment", ["listening", "thinking", "speaking"])
+async def test_news_that_arrives_while_the_user_has_the_floor_reaches_the_talker_once_jarvis_is_quiet(
+    rig_for: MakeRig, moment: str
+) -> None:
+    answer = asyncio.Event()
+    rig, [arrival] = await news_rig(rig_for, [Gate(answer), Text("Green, sir.")], [Text(NEWS)])
+
     rig.audio.wake()
     await until(lambda: rig.state == "listening")
-    rig.tts.hold.set()
-    rig.audio.say("Is the CI green?")
-    await until(lambda: NEWS in rig.player.texts)
-    await until(lambda: rig.state == "follow_up")
-
-    assert spoken(rig)[-2:] == ["Green, sir.", NEWS]
-    assert rig.player.texts.count(NEWS) == 1
-
-
-async def test_news_still_streaming_when_the_user_wakes_waits_until_their_reply_has_played(rig_for: MakeRig) -> None:
-    finish, more = asyncio.Event(), asyncio.Event()
-    rig = await news_rig(rig_for, finish, [Text(NEWS), Gate(more), Text(" Shall I merge it?")], [Text("Green, sir.")])
-
-    finish.set()
-    await until(lambda: ("reply", NEWS) in rig.output.log)
-    rig.audio.wake()
+    if moment == "listening":
+        await arrive(rig, arrival)
     rig.audio.say("Is the CI green?")
     await until(lambda: rig.state == "thinking")
-    more.set()
-    await until(lambda: "Shall I merge it?" in rig.player.texts)
+    if moment == "thinking":
+        await arrive(rig, arrival)
+    rig.player.hold = moment == "speaking"
+    answer.set()
+    if moment == "speaking":
+        await until(lambda: rig.state == "speaking")
+        await arrive(rig, arrival)
+        rig.player.hold = False
+        rig.player.finish()
+        await rig.advance(0.1)
     await until(lambda: rig.state == "follow_up")
-
-    assert spoken(rig)[-3:] == ["Green, sir.", NEWS, "Shall I merge it?"]
-
-
-async def test_news_begun_in_the_follow_up_window_waits_when_the_user_starts_speaking(rig_for: MakeRig) -> None:
-    finish, more = asyncio.Event(), asyncio.Event()
-    report = {"task_id": "T1", "spoken": "The typo fix is up.", "needs_user": False}
-    rig: Rig = await rig_for(
-        _DELEGATE,
-        [Text(NEWS), Gate(more)],
-        [Text("Green, sir.")],
-        orchestrator=[[Tool("spawn_subagent", _SPAWN)], [Tool("report", report)]],
-        subagents={_BRIEF: [Gate(finish), Text("Opened pumpkit#43.")]},
-    )
-    rig.audio.wake()
-    rig.audio.say(_REQUEST)
-    await until(lambda: rig.state == "follow_up" and len(rig.backend.all_sessions("subagent")) == 1)
-
-    finish.set()
-    await until(lambda: ("reply", NEWS) in rig.output.log)
-    rig.audio.say("Is the CI green?")
-    await until(lambda: rig.state == "thinking")
-    more.set()
-    await until(lambda: NEWS in rig.player.texts)
-    await until(lambda: rig.state == "follow_up")
-
-    assert spoken(rig)[-2:] == ["Green, sir.", NEWS]
-
-
-async def test_a_turn_the_user_moved_on_from_is_answered_on_screen_only(rig_for: MakeRig) -> None:
-    finish, more = asyncio.Event(), asyncio.Event()
-    rig = await news_rig(
-        rig_for, finish, [Text(NEWS), Gate(more)], [Text("Main is red, sir.")], [Text("Green, sir.")]
-    )
-
-    rig.audio.wake()
     await rig.settle()
-    finish.set()
-    await until(lambda: ("reply", NEWS) in rig.output.log)
-    rig.audio.say("Is main green?")
-    await until(lambda: rig.state == "thinking")
-    rig.clock.advance(1)
-    rig.audio.wake()
-    await until(lambda: rig.state == "listening")
-    rig.audio.say("Is the CI green?")
-    await until(lambda: rig.state == "thinking")
-    more.set()
-    await until(lambda: "Green, sir." in rig.player.texts)
-    await until(lambda: rig.state == "follow_up")
-    await rig.advance(1)
 
-    assert "Main is red, sir." in rig.output.replies
-    assert "Main is red, sir." not in rig.player.texts
-
-
-async def test_news_that_calls_end_conversation_leaves_the_users_reply_its_follow_up_window(rig_for: MakeRig) -> None:
-    finish, more = asyncio.Event(), asyncio.Event()
-    rig = await news_rig(
-        rig_for, finish, [Text(NEWS), Gate(more), Tool("end_conversation")], [Text("Green, sir.")]
-    )
-
-    rig.audio.wake()
-    await rig.settle()
-    finish.set()
-    await until(lambda: ("reply", NEWS) in rig.output.log)
-    rig.audio.say("Is the CI green?")
-    await until(lambda: rig.state == "thinking")
-    more.set()
-    await until(lambda: NEWS in rig.player.texts)
-    await until(lambda: rig.state == "follow_up")
-
-    assert rig.states()[-5:] == ["thinking", "speaking", "follow_up", "speaking", "follow_up"]
-
-
-async def test_news_held_for_a_wake_with_nothing_said_plays_once_jarvis_idles(rig_for: MakeRig) -> None:
-    finish = asyncio.Event()
-    rig = await news_rig(rig_for, finish, [Text(NEWS)])
-
-    rig.audio.wake()
-    await rig.settle()
-    finish.set()
-    await until(lambda: rig.output.replies[-1:] == [NEWS])
-    await rig.settle()
-    assert NEWS not in rig.player.texts
-
+    assert talker_kinds(rig)[-1] == "user"
+    assert NEWS not in rig.output.replies
     await rig.advance(6)
+    await until(lambda: NEWS in rig.player.texts and rig.state == "follow_up")
+
+    assert talker_kinds(rig)[-2:] == ["user", "event"]
+    assert spoken(rig)[-2:] == ["Green, sir.", NEWS]
+    assert rig.states()[-3:] == ["idle", "announce", "follow_up"]
+
+
+async def test_news_that_arrives_in_the_follow_up_window_waits_for_idle(rig_for: MakeRig) -> None:
+    rig, [arrival] = await news_rig(rig_for, [Text("Green, sir.")], [Text(NEWS)])
+
+    rig.audio.wake()
+    rig.audio.say("Is the CI green?")
+    await until(lambda: rig.state == "follow_up")
+    await arrive(rig, arrival)
+    await rig.advance(5)
+    assert NEWS not in rig.output.replies
+
+    await rig.advance(1)
     await until(lambda: NEWS in rig.player.texts)
     assert rig.states()[-3:] == ["idle", "announce", "follow_up"]
 
 
+async def test_several_news_items_wait_in_order_and_each_plays_once(rig_for: MakeRig) -> None:
+    rig, arrivals = await news_rig(rig_for, [Text("Green, sir.")], [Text(NEWS)], [Text(DOCS)], items=2)
+
+    rig.audio.wake()
+    await until(lambda: rig.state == "listening")
+    for arrival in arrivals:
+        await arrive(rig, arrival)
+    rig.audio.say("Is the CI green?")
+    await until(lambda: rig.state == "follow_up")
+    await rig.advance(6)
+    await until(lambda: NEWS in rig.player.texts and rig.state == "follow_up")
+    await rig.settle()
+    assert DOCS not in rig.output.replies
+    await rig.advance(4)
+    await until(lambda: DOCS in rig.player.texts and rig.state == "follow_up")
+
+    assert talker_kinds(rig)[-3:] == ["user", "event", "event"]
+    assert spoken(rig)[-3:] == ["Green, sir.", NEWS, DOCS]
+
+
+async def test_a_wake_cuts_unheard_news_and_the_news_after_it_still_plays(rig_for: MakeRig) -> None:
+    rig, arrivals = await news_rig(rig_for, [Text(NEWS)], [Text("Green, sir.")], [Text(DOCS)], items=2)
+
+    rig.tts.hold.clear()
+    await arrive(rig, arrivals[0])
+    await until(lambda: rig.output.replies[-1:] == [NEWS])
+    await arrive(rig, arrivals[1])
+    rig.audio.wake()
+    await until(lambda: rig.state == "listening")
+    rig.tts.hold.set()
+    rig.audio.say("Is the CI green?")
+    await until(lambda: "Green, sir." in rig.player.texts and rig.state == "follow_up")
+    await rig.advance(6)
+    await until(lambda: DOCS in rig.player.texts and rig.state == "follow_up")
+    await rig.advance(1)
+
+    assert talker_kinds(rig)[-3:] == ["event", "user", "event"]
+    assert NEWS not in rig.player.texts
+    assert spoken(rig)[-2:] == ["Green, sir.", DOCS]
+
+
+async def test_a_second_wake_stops_the_users_first_turn_and_leaves_waiting_news_whole(rig_for: MakeRig) -> None:
+    rig, [arrival] = await news_rig(
+        rig_for,
+        [Text("Main is"), AwaitInterrupt()],
+        [Text("Green, sir.")],
+        [Text(NEWS), Text(" Shall I merge it?")],
+    )
+
+    rig.audio.wake()
+    await until(lambda: rig.state == "listening")
+    await arrive(rig, arrival)
+    rig.audio.say("Is main green?")
+    await until(lambda: rig.state == "thinking" and rig.output.log[-1] == ("reply", "Main is"))
+    rig.clock.advance(1)
+    rig.audio.wake()
+    await until(lambda: rig.state == "listening")
+    rig.audio.say("Is the CI green?")
+    await until(lambda: "Green, sir." in rig.player.texts and rig.state == "follow_up")
+    await rig.advance(6)
+    await until(lambda: "Shall I merge it?" in rig.player.texts and rig.state == "follow_up")
+
+    assert talker_kinds(rig)[-3:] == ["user", "user", "event"]
+    assert spoken(rig)[-3:] == ["Green, sir.", NEWS, "Shall I merge it?"]
+
+
 async def test_news_the_user_wakes_over_is_stopped_and_not_said_again(rig_for: MakeRig) -> None:
-    finish = asyncio.Event()
-    rig = await news_rig(rig_for, finish, [Text(NEWS)], [Text("Green, sir.")])
+    rig, [arrival] = await news_rig(rig_for, [Text(NEWS)], [Text("Green, sir.")])
     rig.player.hold = True
 
-    finish.set()
+    await arrive(rig, arrival)
     await until(lambda: rig.state == "announce")
     rig.clock.advance(1)
     rig.audio.wake()
@@ -635,7 +592,73 @@ async def test_news_the_user_wakes_over_is_stopped_and_not_said_again(rig_for: M
     rig.player.finish()
     rig.audio.say("Is the CI green?")
     await until(lambda: rig.state == "follow_up")
-    await rig.advance(1)
+    await rig.advance(7)
 
     assert "stop" in rig.player.events
     assert spoken(rig)[-2:] == [NEWS, "Green, sir."]
+    assert rig.player.texts.count(NEWS) == 1
+
+
+async def test_news_waiting_for_a_wake_with_nothing_said_plays_once_jarvis_idles(rig_for: MakeRig) -> None:
+    rig, [arrival] = await news_rig(rig_for, [Text(NEWS)])
+
+    rig.audio.wake()
+    await until(lambda: rig.state == "listening")
+    await arrive(rig, arrival)
+    assert NEWS not in rig.output.replies
+
+    await rig.advance(6)
+    await until(lambda: NEWS in rig.player.texts)
+    assert rig.states()[-3:] == ["idle", "announce", "follow_up"]
+
+
+async def test_news_that_calls_end_conversation_keeps_its_follow_up_window(rig_for: MakeRig) -> None:
+    rig, [arrival] = await news_rig(rig_for, [Text(NEWS), Tool("end_conversation")])
+
+    await arrive(rig, arrival)
+    await until(lambda: NEWS in rig.player.texts and rig.state == "follow_up")
+
+    assert rig.states()[-3:] == ["idle", "announce", "follow_up"]
+
+
+async def test_a_full_talker_restarts_before_waiting_news_and_the_news_goes_to_the_new_session(
+    rig_for: MakeRig,
+) -> None:
+    rig, [arrival] = await news_rig(rig_for, [Text("Green, sir."), FULL], [Text(NEWS)])
+
+    rig.audio.wake()
+    await until(lambda: rig.state == "listening")
+    await arrive(rig, arrival)
+    rig.audio.say("Is the CI green?")
+    await until(lambda: rig.state == "follow_up")
+    await rig.settle()
+    assert len(rig.backend.all_sessions("talker")) == 1
+
+    await rig.advance(6)
+    await until(lambda: NEWS in rig.player.texts)
+
+    assert talker_kinds(rig)[-3:] == ["user", "restart", "event"]
+    _, new = rig.backend.all_sessions("talker")
+    assert new.received[-1].startswith('<event source="orchestrator" task="T1"')
+
+
+async def test_a_turn_the_user_moved_on_from_is_answered_on_screen_only(rig_for: MakeRig) -> None:
+    typed_done = asyncio.Event()
+    rig: Rig = await rig_for(
+        [Gate(typed_done), Text("Typed answer, sir.")], [Text("Main is red, sir.")], [Text("Green, sir.")]
+    )
+
+    rig.typist.type("Summarise the logs")
+    await rig.settle()
+    rig.audio.wake()
+    rig.audio.say("Is main green?")
+    await until(lambda: rig.state == "thinking")
+    rig.clock.advance(1)
+    rig.audio.wake()
+    rig.audio.say("Is the CI green?")
+    await until(lambda: rig.state == "thinking" and len(rig.user_messages()) == 1)
+    typed_done.set()
+    await until(lambda: "Green, sir." in rig.player.texts and rig.state == "follow_up")
+
+    assert "Main is red, sir." in rig.output.replies
+    assert "Main is red, sir." not in rig.player.texts

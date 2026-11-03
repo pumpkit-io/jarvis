@@ -78,13 +78,30 @@ class EndConversation:
 
 
 @dataclass(frozen=True)
+class AnnouncementBegins:
+    """The Hub is starting news on the Talker, which it does only while idle: a Wake word from now on interrupts it."""
+
+    at: float
+
+
+@dataclass(frozen=True)
 class Tick:
     at: float
 
 
 # What the audio input reports.
 InputEvent = WakeWord | SpeechStarted | Heard
-Event = WakeWord | ChimeStarted | SpeechStarted | Heard | ReplyAudio | ReplyDone | EndConversation | Tick
+Event = (
+    WakeWord
+    | ChimeStarted
+    | SpeechStarted
+    | Heard
+    | ReplyAudio
+    | ReplyDone
+    | EndConversation
+    | AnnouncementBegins
+    | Tick
+)
 
 
 @dataclass(frozen=True)
@@ -222,6 +239,10 @@ def step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Action
         case EndConversation():
             if voice.state in ("thinking", "speaking", "announce"):
                 return replace(voice, ending=True), []
+            return voice, []
+        case AnnouncementBegins():
+            if voice.state == "idle":
+                return replace(voice, state="announce", deadline=None), []
             return voice, []
         case Tick(at):
             if voice.deadline is not None and at >= voice.deadline:

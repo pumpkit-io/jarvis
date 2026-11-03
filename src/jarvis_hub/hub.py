@@ -9,7 +9,7 @@ import contextlib
 import json
 import re
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, replace
 from html import escape
 from typing import Any, Literal, Protocol
@@ -78,6 +78,18 @@ class Speech(Protocol):
     def end(self) -> None: ...
 
     def stop(self) -> None: ...
+
+
+class Floor(Protocol):
+    """Voice mode's say over when the Talker may take a turn the User did not ask for (`VoiceMode`)."""
+
+    async def quiet(self) -> None:
+        """Returns once Jarvis is idle with nothing playing."""
+        ...
+
+    def announce(self) -> bool:
+        """Claims the voice for news if Jarvis is still idle, so a Wake word interrupts it; False if not idle."""
+        ...
 
 
 class _Silent:
@@ -220,7 +232,7 @@ class Hub:
         speak_typed: bool = True,
         on_end_conversation: Callable[[], None] | None = None,
         talker_restart_at: float = DEFAULT_TALKER_RESTART_AT,
-        quiet: Callable[[], Awaitable[None]] | None = None,
+        floor: Floor | None = None,
     ) -> None:
         tools = talker_tools(
             delegate=self._delegate,
@@ -249,8 +261,8 @@ class Hub:
         self._speak_typed = speak_typed
         self._on_end_conversation = on_end_conversation
         self._restart_at = talker_restart_at
-        # In voice mode, returns once Jarvis is idle with nothing playing: a restart never delays a reply or a turn.
-        self._quiet = quiet
+        # In voice mode a restart and news wait for Jarvis to be quiet, so they never delay or talk over the User.
+        self._floor = floor
         # The exchanges a restarted Talker is seeded with.
         self._exchanges: deque[tuple[str, str]] = deque(maxlen=RECENT_EXCHANGES)
         # The language of the latest line read, and of the latest User turn the Talker took: replies follow it.
@@ -263,6 +275,10 @@ class Hub:
         self._restart_failing = False
         self._orchestrator: AgentSession | None = None
         self._talker_inbox: asyncio.Queue[_TalkerInput] = asyncio.Queue()
+        # Voice mode's news, in arrival order, for when Jarvis is quiet; text mode puts it in the inbox.
+        self._news: deque[_TalkerInput] = deque()
+        # Set whenever a line or news is posted for the Talker.
+        self._arrived = asyncio.Event()
         # One queue, so the Orchestrator's single session takes one message at a time.
         self._orchestrator_inbox: asyncio.Queue[_OrchestratorInput] = asyncio.Queue()
         self._loops: list[asyncio.Task[None]] = []
@@ -346,6 +362,16 @@ class Hub:
         self._pending += 1
         self._settled.clear()
         inbox.put_nowait(item)
+        self._arrived.set()
+
+    def _post_news(self, item: _TalkerInput) -> None:
+        if self._floor is None:
+            self._post(self._talker_inbox, item)
+            return
+        self._pending += 1
+        self._settled.clear()
+        self._news.append(item)
+        self._arrived.set()
 
     def _handled(self) -> None:
         self._pending -= 1
@@ -361,9 +387,12 @@ class Hub:
             return
         upcoming: _TalkerInput | None = None
         while True:
-            item, upcoming = upcoming or await self._talker_inbox.get(), None
-            try:
+            if upcoming is None:
+                item = await self._next_input()
+            else:
+                item, upcoming = upcoming, None
                 await self._talker_gate.before_next_turn()
+            try:
                 if item.lang:
                     self._lang = item.lang
                 if item.heard:
@@ -376,6 +405,47 @@ class Hub:
                 self._user_text = None
                 self._handled()
             upcoming = await self._restart_if_full(end.context)
+
+    async def _next_input(self) -> _TalkerInput:
+        """The User's next line first; in voice mode, news only once Jarvis is quiet (the announcement policy).
+
+        From the `announce` claim to the turn's start nothing awaits, so a Wake word lands before the claim, which
+        then fails, or after it, on the news turn.
+        """
+        if self._floor is None:
+            await self._talker_gate.before_next_turn()
+            return await self._talker_inbox.get()
+        quiet = False
+        while True:
+            await self._talker_gate.before_next_turn()
+            if not self._talker_inbox.empty():
+                return self._talker_inbox.get_nowait()
+            if self._news and quiet and self._floor.announce():
+                return self._news.popleft()
+            quiet = await self._line_or_quiet()
+
+    async def _line_or_quiet(self) -> bool:
+        """Waits for a User line, or for news and Jarvis being quiet; returns whether Jarvis was quiet."""
+        line = asyncio.ensure_future(self._a_line())
+        quiet = asyncio.ensure_future(self._news_and_quiet())
+        try:
+            await asyncio.wait([line, quiet], return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            line.cancel()
+            quiet.cancel()
+        return quiet.done() and not quiet.cancelled()
+
+    async def _a_line(self) -> None:
+        while self._talker_inbox.empty():
+            self._arrived.clear()
+            await self._arrived.wait()
+
+    async def _news_and_quiet(self) -> None:
+        while not self._news:
+            self._arrived.clear()
+            await self._arrived.wait()
+        assert self._floor is not None
+        await self._floor.quiet()
 
     async def _open_talker(self) -> AgentSession:
         """Open a Talker session. A cancel that lands meanwhile lets the open finish and closes what it opened."""
@@ -433,9 +503,9 @@ class Hub:
 
     async def _quiet_or_next(self) -> _TalkerInput | None:
         """Waits for voice mode to go quiet, unless the inbox's next item comes first; then returns that item."""
-        if self._quiet is None:
+        if self._floor is None:
             return None
-        quiet = asyncio.ensure_future(self._quiet())
+        quiet = asyncio.ensure_future(self._floor.quiet())
         getting = asyncio.ensure_future(self._talker_inbox.get())
         try:
             await asyncio.wait([quiet, getting], return_when=asyncio.FIRST_COMPLETED)
@@ -649,7 +719,7 @@ class Hub:
         if live:
             text = f"The Orchestrator failed on {task.id}: {reason}. Its Subagents keep working and still report."
         message = event_message("hub", text, task.id)
-        self._post(self._talker_inbox, _TalkerInput(message, "event", self._clock.now()))
+        self._post_news(_TalkerInput(message, "event", self._clock.now()))
 
     def _record(self, spec: SessionSpec, kind: str, end: TurnEnd, tools: list[str], **fields: Any) -> None:
         entry = {
@@ -732,7 +802,7 @@ class Hub:
         needs_user = args.get("needs_user") in (True, "true")
         task.report(spoken, needs_user=needs_user, subagents_live=bool(self._subagents.live(task.id)))
         message = event_message("orchestrator", spoken, task.id, needs_user=needs_user, details=details is not None)
-        self._post(self._talker_inbox, _TalkerInput(message, "event", self._clock.now(), details))
+        self._post_news(_TalkerInput(message, "event", self._clock.now(), details))
         return "Reported to the User."
 
     async def _spawn_subagent(self, args: dict[str, Any]) -> str:
@@ -779,7 +849,7 @@ class Hub:
             elif subagent.writes:
                 # The Orchestrator hears nothing more of a cancelled Task, so the Hub says what its branch keeps.
                 message = event_message("hub", kept_line(subagent), task.id, details=True)
-                self._post(self._talker_inbox, _TalkerInput(message, "event", self._clock.now(), subagent.report))
+                self._post_news(_TalkerInput(message, "event", self._clock.now(), subagent.report))
         finally:
             self._handled()
 

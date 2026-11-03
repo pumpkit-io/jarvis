@@ -676,3 +676,38 @@ async def test_an_error_in_the_hub_on_one_task_fails_it_and_the_next_task_still_
         '<event source="orchestrator" task="T2" needs_user="false">CI is green.</event>',
     ]
     assert any("ConnectionError" in n for n in output.notices)
+
+
+async def test_in_text_mode_news_reaches_the_talker_in_the_order_it_arrives(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    reported, second_done = asyncio.Event(), asyncio.Event()
+    backend = FakeBackend(
+        clock,
+        [
+            [Text("Checking now, sir."), delegate()],
+            [Gate(reported), Text("Working on it, sir."), Set(second_done)],
+            [Text("Two are open, sir.")],
+            [Text("Good night, sir.")],
+        ],
+        orchestrator=[[report("T1", "Two PRs are open in pumpkit."), Set(reported)]],
+    )
+    hub = make_hub(backend, output, metrics)
+    typist = Typist(clock)
+
+    await hub.start()
+    running = asyncio.create_task(hub.run(typist.lines()))
+    typist.type(ASK_PRS)
+    typist.type("Anything else?")
+    await until(lambda: reported.is_set())
+    typist.type("Good night")
+    await until(lambda: second_done.is_set())
+    typist.end()
+    await running
+
+    assert [m.split(">")[0] for m in talker_messages(backend)] == [
+        '<user lang="en" typed="true"',
+        '<user lang="en" typed="true"',
+        '<event source="orchestrator" task="T1" needs_user="false"',
+        '<user lang="en" typed="true"',
+    ]
