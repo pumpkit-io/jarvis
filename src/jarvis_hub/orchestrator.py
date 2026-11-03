@@ -36,7 +36,13 @@ def orchestrator_spec(settings: Settings) -> SessionSpec:
     )
 
 
-def orchestrator_tools(*, report: ToolHandler) -> tuple[HubTool, ...]:
+def orchestrator_tools(
+    *,
+    report: ToolHandler,
+    spawn_subagent: ToolHandler,
+    list_subagents: ToolHandler,
+    cancel_subagent: ToolHandler,
+) -> tuple[HubTool, ...]:
     return (
         HubTool(
             "report",
@@ -51,5 +57,36 @@ def orchestrator_tools(*, report: ToolHandler) -> tuple[HubTool, ...]:
                 ("task_id", "spoken", "needs_user"),
             ),
             report,
+        ),
+        HubTool(
+            "spawn_subagent",
+            "Start a Subagent on the Task you are on: its own session, in an Org repo, cloned first if missing. "
+            "With writes, it works in a new worktree on a branch of its own. Returns at once; its report arrives "
+            "later as an event.",
+            object_schema(
+                {
+                    "repo": {**STRING, "description": "An Org repo, such as pumpkit."},
+                    "title": {**STRING, "description": "A few words naming the work; it also names the branch."},
+                    "brief": {**STRING, "description": "Everything the Subagent needs, written like a peer's brief."},
+                    "model": {**STRING, "enum": ["haiku", "sonnet", "opus"]},
+                    "effort": {**STRING, "enum": ["low", "medium", "high", "xhigh", "max"]},
+                    "writes": {"type": "boolean", "description": "True when it changes the repo."},
+                    "branch_kind": {**STRING, "enum": ["feat", "fix", "chore"], "description": "With writes."},
+                },
+                ("repo", "title", "brief", "model", "effort", "writes"),
+            ),
+            spawn_subagent,
+        ),
+        HubTool(
+            "list_subagents",
+            "Every Subagent this session: state, age, model, effort, repo, branch, folder, log, last report.",
+            object_schema({}),
+            list_subagents,
+        ),
+        HubTool(
+            "cancel_subagent",
+            "Stop a Subagent. Its worktree and branch are kept, and its report says what is on the branch.",
+            object_schema({"subagent_id": {**STRING, "description": "Such as S2."}}, ("subagent_id",)),
+            cancel_subagent,
         ),
     )

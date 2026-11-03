@@ -1,6 +1,7 @@
 """The Hub's record of every Task this launch: what the Talker asks about, answered without a model call."""
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Literal
 
 TaskState = Literal["queued", "working", "needs_user", "done", "failed", "cancelled"]
@@ -19,6 +20,10 @@ class Task:
     reports: int = 0
     # Messages for this Task still in the Orchestrator's queue.
     waiting: int = 0
+    # Subagents of this Task not yet ended; the Task keeps working while any runs.
+    subagents: int = 0
+    # The User's words for this Task: its request and every follow-up.
+    words: list[str] = field(default_factory=lambda: [])
 
     @property
     def cancelled(self) -> bool:
@@ -43,8 +48,10 @@ class Task:
         self.reports += 1
         if self.waiting:
             self.state = "queued"
+        elif needs_user:
+            self.state = "needs_user"
         else:
-            self.state = "needs_user" if needs_user else "done"
+            self.state = "working" if self.subagents else "done"
 
     def fail(self, reason: str) -> None:
         self.last_report = f"Failed: {reason}."
@@ -63,15 +70,15 @@ class Tasks:
         self._tasks: dict[str, Task] = {}
 
     def create(self, request: str, now: float) -> Task:
-        task = Task(id=f"T{len(self._tasks) + 1}", request=request, created=now)
+        task = Task(id=f"T{len(self._tasks) + 1}", request=request, created=now, words=[request])
         self._tasks[task.id] = task
         return task
 
     def get(self, task_id: object) -> Task | None:
         return self._tasks.get(str(task_id).strip().upper()) if task_id else None
 
-    def status(self, now: float) -> str:
-        """One line per Task, newest first, for the Talker to read out of."""
+    def status(self, now: float, subagents: Callable[[str], list[str]] = lambda task_id: []) -> str:
+        """One line per Task, newest first, then a line per Subagent of it, for the Talker to read out of."""
         if not self._tasks:
             return "No Tasks this session."
         lines: list[str] = []
@@ -80,6 +87,7 @@ class Tasks:
             if task.last_report:
                 line += f" | Last report: {task.last_report}"
             lines.append(line)
+            lines += [f"  {sub}" for sub in subagents(task.id)]
         return "\n".join(lines)
 
 

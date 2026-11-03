@@ -17,6 +17,8 @@ class Refused:
 
 # Parses a Bash command into the words to run, or refuses it; the backend runs those words and nothing else.
 BashGuard = Callable[[str], Sequence[str] | Refused]
+# Decides each MCP tool call by the tool's full name: None lets it run.
+McpGuard = Callable[[str], Refused | None]
 
 
 @dataclass(frozen=True)
@@ -39,7 +41,8 @@ STRING: dict[str, Any] = {"type": "string"}
 
 @dataclass(frozen=True)
 class SessionSpec:
-    """One session's setup. Nothing outside it is allowed: no settings, no connectors, no unlisted tool."""
+    """One session's setup. Unless it skips permissions, nothing outside it is allowed: no settings, no connectors,
+    no unlisted tool."""
 
     role: str
     model: str
@@ -56,6 +59,11 @@ class SessionSpec:
     bash_guard: BashGuard | None = None
     # Model turns allowed per message.
     max_turns: int | None = None
+    # Runs as a Subagent: the User's and the repo's settings and skills, every tool without asking (ADR 0001)
+    # except denied_tools, and MCP tools only as mcp_guard allows (ADR 0008).
+    skip_permissions: bool = False
+    denied_tools: Sequence[str] = ()
+    mcp_guard: McpGuard | None = None
 
 
 @dataclass(frozen=True)
