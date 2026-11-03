@@ -10,10 +10,11 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from html import escape
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from jarvis_hub.agents.backend import Refused
 from jarvis_hub.read_only import Argv, confined
+from jarvis_hub.state import Fields, TimeShift, numbered
 from jarvis_hub.tasks import ago
 
 WATCH_KINDS: dict[str, str] = {"ci_run": "CI run", "pr_checks": "checks on PR"}
@@ -140,6 +141,11 @@ class Check:
 
 Wait = Watcher | Check
 
+_WATCHER = Fields(("id", "task_id", "kind", "created"), times=frozenset({"created"}))
+_CHECK = Fields(
+    ("id", "task_id", "note", "created", "due", "interval", "max_repeats", "repeats"), times=frozenset({"created", "due"})
+)
+
 
 def watcher_event(watcher: Watcher) -> str:
     """The Orchestrator's news that a Watcher ended, with the last of what its command printed."""
@@ -195,6 +201,7 @@ class Waits:
         self._runs: dict[str, asyncio.Task[None]] = {}
         self._watchers = 0
         self._checks = 0
+        self._closing = False
 
     def watch(self, task_id: str, kind: str, target: str) -> Watcher | Refused:
         command = watch_command(kind, target, self._setup.org)
@@ -240,7 +247,11 @@ class Waits:
         if wait.state != "waiting":
             return f"{wait.id} is already {wait.state.replace('_', ' ')}."
         wait.state = "cancelled"
-        self._runs[wait.id].cancel()
+        if (run := self._runs.get(wait.id)) is not None:
+            run.cancel()
+        elif isinstance(wait, Watcher):
+            # Restored and not yet resumed: no run will report its end, so it is reported here.
+            self._watcher_stopped(wait)
         return wait
 
     def cancel_task(self, task_id: str) -> None:
@@ -254,19 +265,72 @@ class Waits:
         now = self._clock.now()
         return [w.line(now) for w in self._all.values() if w.task_id == task_id]
 
-    async def close(self) -> list[Check]:
-        """Stops every wait; returns the Checks that were still to come."""
-        dropped = [w for w in self._all.values() if isinstance(w, Check) and w.state == "waiting"]
-        # Marked first, so a Watcher cancelled before its run began is not reported as still waiting.
-        for wait in self._all.values():
-            if wait.state == "waiting":
-                wait.state = "cancelled"
+    async def close(self) -> None:
+        """Stops every wait's run and reports none of them: a wait still waiting stays so, kept for the next launch."""
+        self._closing = True
         runs = [run for run in self._runs.values() if not run.done()]
         for run in runs:
             run.cancel()
         if runs:
             await asyncio.wait(runs)
-        return dropped
+
+    def dump(self, to_wall: TimeShift) -> list[dict[str, Any]]:
+        """The waits still waiting, for the state file."""
+        records: list[dict[str, Any]] = []
+        for w in self._all.values():
+            if isinstance(w, Watcher) and w.state == "waiting":
+                records.append({**_WATCHER.dump(w, to_wall), "target": w.command.target})
+            elif isinstance(w, Check) and w.state == "waiting":
+                records.append(_CHECK.dump(w, to_wall))
+        return records
+
+    def load(self, records: list[dict[str, Any]], from_wall: TimeShift) -> tuple[list[Wait], list[str]]:
+        """Saved waits, checked whole and not yet restored, and a line per wait that cannot be. A wall clock set
+        back while the Hub was down never stretches a Watcher's limit or a Check's wait."""
+        now = self._clock.now()
+        waits: list[Wait] = []
+        problems: list[str] = []
+        for r in records:
+            if "kind" in r:
+                values = _WATCHER.load(r, from_wall)
+                numbered(values["id"], "W")
+                command = watch_command(values["kind"], r["target"], self._setup.org)
+                if isinstance(command, Refused):
+                    problems.append(f"{values['id']} on {values['task_id']} could not be restored: {command.reason}")
+                    continue
+                values["created"] = min(values["created"], now)
+                waits.append(Watcher(**values, command=command))
+            else:
+                check = Check(**_CHECK.load(r, from_wall))
+                numbered(check.id, "C")
+                if not all(isinstance(r[k], (int, float)) for k in ("interval", "max_repeats", "repeats")):
+                    raise ValueError(f"{check.id} has a count or interval that is not a number")
+                check.created, check.due = min(check.created, now), min(check.due, now + check.interval)
+                waits.append(check)
+        return waits, problems
+
+    def restore(self, waits: list[Wait]) -> None:
+        """Takes back loaded waits without starting them, so the recovery message can go first: see `resume`."""
+        for wait in waits:
+            self._all[wait.id] = wait
+            if isinstance(wait, Watcher):
+                self._watchers = max(self._watchers, numbered(wait.id, "W"))
+            else:
+                self._checks = max(self._checks, numbered(wait.id, "C"))
+
+    def resume(self) -> None:
+        """Starts the restored waits: a Watcher reruns its gh command, checked anew, within what is left of its
+        limit; a Check keeps its due time, so one overdue fires at once, once."""
+        if self._closing:
+            return
+        for wait in self._all.values():
+            if wait.state != "waiting" or wait.id in self._runs:
+                continue
+            if isinstance(wait, Watcher):
+                self._start(wait, self._run_watcher(wait))
+                self._runs[wait.id].add_done_callback(lambda _, w=wait: self._watcher_stopped(w))
+            else:
+                self._start(wait, self._run_check(wait))
 
     def _waiting(self, kind: type[Watcher] | type[Check]) -> list[Wait]:
         return [w for w in self._all.values() if isinstance(w, kind) and w.state == "waiting"]
@@ -278,7 +342,8 @@ class Waits:
     async def _run_watcher(self, watcher: Watcher) -> None:
         try:
             running = asyncio.ensure_future(self._view_then_watch(watcher))
-            limit = asyncio.ensure_future(self._clock.sleep(self._setup.watch_limit))
+            left = self._setup.watch_limit - (self._clock.now() - watcher.created)
+            limit = asyncio.ensure_future(self._clock.sleep(left))
             try:
                 await asyncio.wait([running, limit], return_when=asyncio.FIRST_COMPLETED)
             finally:
@@ -293,7 +358,8 @@ class Waits:
             else:
                 watcher.state, watcher.output = running.result()
         except asyncio.CancelledError:
-            watcher.state = "cancelled"
+            if not self._closing:
+                watcher.state = "cancelled"
             raise
 
     async def _view_then_watch(self, watcher: Watcher) -> tuple[WatcherState, str]:
@@ -307,6 +373,8 @@ class Waits:
         return ("error" if _NO_CHECKS in printed else "failed"), printed
 
     def _watcher_stopped(self, watcher: Watcher) -> None:
+        if self._closing:
+            return
         watcher.ended = self._clock.now()
         self._on_watcher_end(watcher)
 

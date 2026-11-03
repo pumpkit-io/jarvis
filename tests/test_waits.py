@@ -485,7 +485,7 @@ async def test_the_orchestrator_cannot_cancel_a_wait_of_another_task(
     await hub.close()
 
     assert results(backend, "orchestrator", "cancel_wait")[0].result == "There is no Watcher or Check C1 on T2."
-    assert output.notices == ["C1 dropped; Checks aren't kept across restarts yet."]
+    assert output.notices == []
 
 
 async def test_a_task_that_reported_and_then_cancelled_its_last_wait_is_done(
@@ -590,7 +590,7 @@ async def test_a_checks_first_wait_and_repeats_are_clamped_and_anything_else_is_
         assert not isinstance(check, Refused) and (check.interval, check.max_repeats) == expected
 
 
-async def test_closing_before_a_watcher_ran_reports_it_cancelled() -> None:
+async def test_closing_reports_no_watcher_and_leaves_each_waiting_for_the_next_launch() -> None:
     ended: list[str] = []
     waits = Waits(
         setup=WaitSetup(org="pumpkit-io", runner=StubRunner()),
@@ -599,10 +599,10 @@ async def test_closing_before_a_watcher_ran_reports_it_cancelled() -> None:
         on_check=print,
     )
 
-    waits.watch("T1", "ci_run", "pumpkit#1")
+    watcher = waits.watch("T1", "ci_run", "pumpkit#1")
     await waits.close()
 
-    assert ended == ["cancelled"]
+    assert ended == [] and not isinstance(watcher, Refused) and watcher.state == "waiting"
 
 
 async def test_cancelling_a_confined_command_kills_the_children_it_started(tmp_path: Path) -> None:

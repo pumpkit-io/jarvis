@@ -691,7 +691,7 @@ async def test_a_run_cut_off_at_close_still_releases_its_lock_and_ends(
     async with asyncio.timeout(1):
         await subagents.close()
 
-    assert [s.state for s in ended] == ["cancelled"]
+    assert [s.state for s in ended] == ["interrupted"]
     assert workspace.released == [subagent.cwd] and not workspace.locks
 
 
@@ -717,3 +717,35 @@ async def test_close_does_not_wait_forever_on_a_cancelled_run_whose_describe_han
 
     async with asyncio.timeout(1):
         await subagents.close()
+
+
+async def test_a_restored_subagent_releases_by_the_holder_saved_not_one_worked_out_again(
+    clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = FakeWorkspace()
+
+    def new() -> Subagents:
+        return Subagents(
+            setup=SubagentSetup(session=subagent_spec, workspace=workspace),
+            backend=FakeBackend(clock),
+            clock=clock,
+            on_end=lambda s: None,
+            on_over_time=lambda s: None,
+        )
+
+    first = new()
+    args = {"repo": "pumpkit", "title": "T", "brief": "b", "model": "haiku", "effort": "low", "writes": True}
+    subagent = await first.prepare("T1", args, [])
+    assert isinstance(subagent, Subagent)
+    saved = json.loads(json.dumps(first.dump({"T1"}, lambda t: t)))
+
+    def newer_format(subagent_id: str, task_id: str, title: str) -> str:
+        return "a holder in a newer format"
+
+    monkeypatch.setattr("jarvis_hub.subagents.lock_holder", newer_format)
+
+    second = new()
+    [cut_off] = second.restore(Subagents.load(saved, lambda t: t))
+    await second.free_interrupted(cut_off)
+
+    assert workspace.released == [subagent.cwd] and not workspace.locks
