@@ -5,7 +5,9 @@
 
 A run dir holds `reference.wav` (what played) and `mic.wav` (raw mic, sample-aligned
 with the reference by a duplex stream), optionally `vpio.wav` (macOS Voice Processing
-I/O output from vpio_playrec.swift) and `segments.json` marking where the User spoke.
+I/O output from vpio_playrec.swift) and `segments.json`: where the User spoke and the
+Jarvis-only window in mic.wav's seconds, and the same under "vpio" in vpio.wav's own
+seconds (or "vpio": {"failed": reason}).
 """
 
 import argparse
@@ -70,22 +72,25 @@ def analyse(run: Path) -> dict:
     ref = load_16k(run / "reference.wav")
     mic = load_16k(run / "mic.wav")
     segments = json.loads((run / "segments.json").read_text()) if (run / "segments.json").exists() else {}
-    user = segments.get("user_speech", [])
-    jarvis_only = [(0.0, user[0][0])] if user else [(0.0, len(mic) / SR)]
 
-    def score(audio: np.ndarray, spans: list = user) -> dict:
+    def score(audio: np.ndarray, marks: dict) -> dict:
+        user = marks.get("user_speech", [])
+        jarvis_only = marks.get("jarvis_only") or ([0.0, user[0][0]] if user else [0.0, len(audio) / SR])
         probs = vad_probs(audio)
-        out = {"jarvis_only": triggers(probs, *jarvis_only[0])}
-        if spans:
-            hits = [triggers(probs, s, e)["triggers"] > 0 for s, e in spans]
+        out = {"jarvis_only_s": jarvis_only, "jarvis_only": triggers(probs, *jarvis_only)}
+        if user:
+            hits = [triggers(probs, s, e)["triggers"] > 0 for s, e in user]
             out["user_barge_ins_detected"] = f"{sum(hits)}/{len(hits)}"
         return out
 
-    result = {"run": str(run), "seconds": round(len(mic) / SR, 1), "raw_mic": score(mic), "webrtc": {}}
+    result = {"run": run.name, "seconds": round(len(mic) / SR, 1), "raw_mic": score(mic, segments), "webrtc": {}}
     for delay in DELAYS_MS:
-        result["webrtc"][f"delay={delay}ms"] = score(webrtc_aec(mic, ref, delay))
-    if (run / "vpio.wav").exists():
-        result["macos_vpio"] = score(load_16k(run / "vpio.wav"), segments.get("user_speech_vpio", user))
+        result["webrtc"][f"delay={delay}ms"] = score(webrtc_aec(mic, ref, delay), segments)
+    vpio = segments.get("vpio", {})
+    if vpio.get("failed"):
+        result["macos_vpio"] = {"failed": vpio["failed"]}
+    elif (run / "vpio.wav").exists() and vpio:
+        result["macos_vpio"] = score(load_16k(run / "vpio.wav"), vpio)
     return result
 
 

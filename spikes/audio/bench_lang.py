@@ -12,7 +12,7 @@ import time
 
 from lingua import Language, LanguageDetectorBuilder
 
-from common import RESULTS, p50, write_result
+from common import full_results_dir, p50, write_result
 
 
 def main() -> None:
@@ -22,7 +22,7 @@ def main() -> None:
     detector = LanguageDetectorBuilder.from_languages(Language.ENGLISH, Language.ITALIAN).with_preloaded_language_models().build()
     code = {Language.ENGLISH: "en", Language.ITALIAN: "it"}
     result = {"source": args.source, "engines": {}}
-    for path in sorted(RESULTS.glob(f"stt-*-{args.source}.json")):
+    for path in sorted(full_results_dir(args.source).glob(f"stt-*-{args.source}.json")):
         stt = json.loads(path.read_text())
         wrong, times = [], []
         for clip_id, clip in stt["clips"].items():
@@ -32,7 +32,8 @@ def main() -> None:
             if code.get(guess) != clip["lang"]:
                 wrong.append(f"{clip_id}: {clip['hyp']!r} -> {code.get(guess)}")
         result["engines"][stt["engine"]] = {"correct": f"{len(stt['clips']) - len(wrong)}/{len(stt['clips'])}",
-                                            "ms_p50": round(p50(times), 2), "wrong": wrong}
+                                            "ms_p50": round(p50(times), 2),
+                                            "wrong_ids": [w.split(":")[0] for w in wrong], "wrong": wrong}
     print(json.dumps(result, indent=2, ensure_ascii=False))
     print(f"-> {write_result(f'lang-{args.source}', result)}")
 

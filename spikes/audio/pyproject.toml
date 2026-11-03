@@ -15,6 +15,7 @@ dependencies = [
   "sounddevice",
   "soundfile",
   "numpy",
+  "scipy",
   "psutil",
   "httpx",
   "huggingface-hub",
