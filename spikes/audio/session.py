@@ -33,6 +33,8 @@ WHISPER_SERVER = Path.home() / ".voicemode/services/whisper/build/bin/whisper-se
 TURBO_PORT = 2023
 SERVER_READY_TIMEOUT_S = 120
 PLAYING_AT_TIMEOUT_S = 30
+# A wedged STT server can hold a request open for good; no bench needs this long on the session's audio.
+BENCH_TIMEOUT_S = 40 * 60
 STEPS = ["preflight", "baseline", "clips", "pauses", "wake", "speakers", "headphones", "room", "analyse"]
 
 # What the User says over Jarvis in the second half of the speaker run.
@@ -529,6 +531,22 @@ def benches(recordings: Path) -> list[list[str]]:
     return cmds
 
 
+def run_bench(argv: list[str], out, timeout_s: float) -> int | None:
+    """Run one bench; its exit code, or None when it ran past `timeout_s` and was stopped with every process it started."""
+    proc = subprocess.Popen(argv, cwd=HERE, stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        return proc.wait(timeout_s)
+    except subprocess.TimeoutExpired:
+        return None
+    finally:
+        # The bench runs in its own process group, so this also ends any engine process it left behind.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+
+
 def analyse() -> None:
     say("Analysis. This runs on its own for about 18 minutes; you can leave.")
     log = DATA / "analysis.log"
@@ -539,9 +557,10 @@ def analyse() -> None:
         with log.open("w") as out:
             for cmd in benches(RECORDINGS):
                 print(f"  $ {' '.join(cmd)}", flush=True)
-                code = subprocess.run([sys.executable, str(HERE / cmd[0])] + cmd[1:], cwd=HERE, check=False,
-                                      stdout=out, stderr=subprocess.STDOUT).returncode
-                if code:
+                code = run_bench([sys.executable, str(HERE / cmd[0])] + cmd[1:], out, BENCH_TIMEOUT_S)
+                if code is None:
+                    failed.append(f"{' '.join(cmd)} (stopped after {BENCH_TIMEOUT_S // 60} min)")
+                elif code:
                     failed.append(f"{' '.join(cmd)} (exit {code})")
     finally:
         stop(turbo)

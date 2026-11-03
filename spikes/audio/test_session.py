@@ -355,6 +355,20 @@ def test_an_orphan_on_the_turbo_port_is_named_and_not_measured():
     assert f"pid {os.getpid()}" in said.getvalue()
 
 
+def test_a_bench_that_hangs_is_stopped_with_everything_it_started():
+    child = SCRATCH / "bench-child.pid"
+    script = f"import subprocess, time; p = subprocess.Popen(['sleep', '60']); open({str(child)!r}, 'w').write(str(p.pid)); time.sleep(60)"
+    t = time.monotonic()
+    with open(SCRATCH / "bench.log", "w") as log:
+        assert session.run_bench([sys.executable, "-c", script], log, timeout_s=2) is None
+    assert time.monotonic() - t < 15
+    time.sleep(0.2)
+    pid = int(child.read_text())
+    assert subprocess.run(["kill", "-0", str(pid)], capture_output=True).returncode != 0, "the bench's child survived"
+    with open(SCRATCH / "bench.log", "w") as log:
+        assert session.run_bench([sys.executable, "-c", "raise SystemExit(4)"], log, timeout_s=10) == 4
+
+
 def test_the_headphones_run_is_analysed_only_when_it_was_recorded():
     recordings = SCRATCH / "benches"
     assert not any("headphones-run" in " ".join(cmd) for cmd in session.benches(recordings))
