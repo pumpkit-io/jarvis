@@ -515,8 +515,9 @@ async def test_news_that_arrives_in_the_follow_up_window_waits_for_idle(rig_for:
     assert rig.states()[-3:] == ["idle", "announce", "follow_up"]
 
 
-async def test_several_news_items_wait_in_order_and_each_plays_once(rig_for: MakeRig) -> None:
-    rig, arrivals = await news_rig(rig_for, [Text("Green, sir.")], [Text(NEWS)], [Text(DOCS)], items=2)
+async def test_news_that_queued_up_meanwhile_is_one_announcement_in_arrival_order(rig_for: MakeRig) -> None:
+    both = "Both are done, sir."
+    rig, arrivals = await news_rig(rig_for, [Text("Green, sir.")], [Text(both)], items=2)
 
     rig.audio.wake()
     await until(lambda: rig.state == "listening")
@@ -525,14 +526,18 @@ async def test_several_news_items_wait_in_order_and_each_plays_once(rig_for: Mak
     rig.audio.say("Is the CI green?")
     await until(lambda: rig.state == "follow_up")
     await rig.advance(6)
-    await until(lambda: NEWS in rig.player.texts and rig.state == "follow_up")
-    await rig.settle()
-    assert DOCS not in rig.output.replies
-    await rig.advance(4)
-    await until(lambda: DOCS in rig.player.texts and rig.state == "follow_up")
+    await until(lambda: both in rig.player.texts and rig.state == "follow_up")
 
-    assert talker_kinds(rig)[-3:] == ["user", "event", "event"]
-    assert spoken(rig)[-3:] == ["Green, sir.", NEWS, DOCS]
+    assert talker_kinds(rig)[-2:] == ["user", "event"]
+    news = rig.backend.session("talker").received[-1].splitlines()
+    assert [line[: line.index(">") + 1] for line in news] == [
+        '<event source="orchestrator" task="T1" needs_user="false">',
+        '<event source="orchestrator" task="T2" needs_user="false">',
+    ]
+    assert rig.player.texts[-3:] == ["Green, sir.", "", both]
+    await rig.advance(4)
+    assert rig.state == "idle"
+    assert talker_kinds(rig)[-1] == "event"
 
 
 async def test_a_wake_cuts_unheard_news_and_the_news_after_it_still_plays(rig_for: MakeRig) -> None:

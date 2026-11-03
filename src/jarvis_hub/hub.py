@@ -188,6 +188,19 @@ class _TalkerInput:
     lang: Lang | None = None
     typed: bool = True
     spoken: bool = True
+    # How many posted items this one carries: news is merged into one turn, and each item counts as handled.
+    count: int = 1
+
+
+def _merged(items: "list[_TalkerInput]") -> _TalkerInput:
+    """Items as one turn, in order: the first item's kind and arrival, every message, every detail."""
+    details = "\n\n".join(item.details for item in items if item.details)
+    return replace(
+        items[0],
+        message="\n".join(item.message for item in items),
+        details=details or None,
+        count=sum(item.count for item in items),
+    )
 
 
 @dataclass(frozen=True)
@@ -416,7 +429,8 @@ class Hub:
                 end = await self._turn(item.message, kind=item.kind, arrived=item.arrived, spoken=item.spoken)
             finally:
                 self._user_text = None
-                self._handled()
+                for _ in range(item.count):
+                    self._handled()
             upcoming = await self._restart_if_full(end.context)
 
     async def _next_input(self) -> _TalkerInput:
@@ -437,7 +451,10 @@ class Hub:
             if self._news and self._input_ended.is_set():
                 return replace(self._news.popleft(), spoken=False)
             if self._news and quiet and self._floor.announce():
-                return self._news.popleft()
+                # Everything waiting goes as one Announcement rather than one Follow-up window each.
+                news = list(self._news)
+                self._news.clear()
+                return _merged(news)
             quiet = await self._line_or_quiet()
 
     async def _line_or_quiet(self) -> bool:
