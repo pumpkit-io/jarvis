@@ -1,7 +1,7 @@
 """The Hub core: turns User input into Talker turns, hands Tasks to the Orchestrator, and relays its reports.
 
 Every outside dependency is injected (agent backend, clock, output, metrics, speech) so tests and text mode
-share this one code path; voice mode will add audio adapters around it.
+share this one code path.
 """
 
 import asyncio

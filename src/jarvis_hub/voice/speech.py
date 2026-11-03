@@ -89,9 +89,8 @@ class _End:
 
 
 class Speech:
-    """`begin` a reply, `feed` it the Talker's text as it streams and `block_end` at each text block's end,
-    then `end` it. `stop` drops whatever is unsaid. A sentence that fails to synthesise is skipped with a notice;
-    if the voice cannot load at all, speech stays off and the replies go on as text."""
+    """`begin` a reply, `feed` it the Talker's text, `block_end` each text block and `end` it; `stop` drops the rest.
+    A sentence that fails to synthesise is skipped with a notice; if the voice fails to load, replies are text only."""
 
     def __init__(
         self,
