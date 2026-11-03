@@ -135,43 +135,15 @@
  },
  "setting_sources": {
   "empty": {
-   "plugins": [
-    "cc-plugin-agents-md",
-    "cc-plugin-telemetry",
-    "cc-plugin-privacy",
-    "cc-plugin-plugin-authoring"
-   ],
    "skills_n": 20,
-   "mcp_servers": [],
    "slash_commands_n": 56,
    "hook_events": [],
-   "input_plus_cache_tokens": 883
+   "input_plus_cache_tokens": 883,
+   "plugins_n": 4,
+   "mcp_servers_n": 0
   },
   "omitted": {
-   "plugins": [
-    "swift-lsp",
-    "pyright-lsp",
-    "playwright-skill",
-    "sdlc-spec-toolkit",
-    "sdlc",
-    "voicemode",
-    "cc-plugin-agents-md",
-    "cc-plugin-telemetry",
-    "cc-plugin-privacy",
-    "cc-plugin-plugin-authoring"
-   ],
    "skills_n": 76,
-   "mcp_servers": [
-    "plugin:voicemode:voicemode",
-    "digitalocean",
-    "posthog",
-    "pumpkit",
-    "claude.ai Claude Docs",
-    "claude.ai Pumpkit",
-    "claude.ai Google Drive",
-    "claude.ai Gmail",
-    "claude.ai Google Calendar"
-   ],
    "slash_commands_n": 119,
    "hook_events": [
     "hook_started",
@@ -180,7 +152,9 @@
     "hook_started",
     "hook_response"
    ],
-   "input_plus_cache_tokens": 66262
+   "input_plus_cache_tokens": 66262,
+   "plugins_n": 10,
+   "mcp_servers_n": 9
   }
  },
  "in_process_tool": {

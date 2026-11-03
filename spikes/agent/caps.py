@@ -143,9 +143,10 @@ async def setting_sources_compare():
         hooks = [m.data.get("hook_event_name") or m.subtype for m in msgs
                  if isinstance(m, SystemMessage) and m.subtype.startswith("hook")]
         out[label] = {
-            "plugins": [p.get("name") for p in init.get("plugins", [])],
+            # Counts only: the names would list the User's own plugins and connectors in a public repo.
+            "plugins_n": len(init.get("plugins", [])),
             "skills_n": len(init.get("skills", [])),
-            "mcp_servers": [s.get("name") for s in init.get("mcp_servers", [])],
+            "mcp_servers_n": len(init.get("mcp_servers", [])),
             "slash_commands_n": len(init.get("slash_commands", [])),
             "hook_events": hooks,
             "input_plus_cache_tokens": sum(result_of(msgs).usage.get(k, 0) for k in

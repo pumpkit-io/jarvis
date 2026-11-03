@@ -8,6 +8,7 @@ and the gap is split into silence tail, STT, tool return, model, and TTS time to
 Run: python3 analyze.py [--session ID | --session all] [--list-sessions] [--hooks hooks.jsonl]
                         [--events ~/.voicemode/logs/events] [--silence-ms N]
 The hook log holds every recorded session; by default the analysis covers only the most recent one.
+Turns whose split comes out negative (a hook entry missing or misordered) are skipped and counted.
 It exits with an error when the hook log is missing or has no entries, because without it the analysis
 would cover every VoiceMode event ever logged.
 """
@@ -64,8 +65,40 @@ def converse_calls(events):
     return calls
 
 
-def first_after(times, t):
-    return next((x for x in times if x >= t), None)
+def first_after(times, t, limit=float("inf")):
+    return next((x for x in times if t <= x <= limit), None)
+
+
+def compute_turns(calls, pre, post, other_pre, silence):
+    """Split each spoken turn between consecutive converse calls; returns (turns, skipped).
+
+    A hook entry can be missing (a timeout, a failed call), so both hook lookups stop at the next call's
+    start: otherwise they could land on a later call's hook and shift the split. A turn whose pieces still
+    come out negative is skipped and counted.
+    """
+    turns, skipped = [], 0
+    for a, b in zip(calls, calls[1:]):
+        if "STT_COMPLETE" not in a or "TTS_FIRST_AUDIO" not in b:
+            continue  # no speech heard, or the next call did not speak
+        if b["start"] - a["TOOL_REQUEST_END"] > MAX_GAP_S:
+            continue  # the two calls belong to different sessions
+        end_speech = a["RECORDING_END"] - silence
+        returned = first_after(post, a["STT_COMPLETE"], b["start"]) or a["TOOL_REQUEST_END"]
+        next_pre = first_after(pre, returned, b["start"]) or b["start"]
+        turn = {
+            "total": b["TTS_FIRST_AUDIO"] - end_speech,
+            "silence_tail": silence,
+            "stt": a["STT_COMPLETE"] - a["RECORDING_END"],
+            "tool_return": returned - a["STT_COMPLETE"],
+            "model": next_pre - returned,
+            "tts_first_audio": b["TTS_FIRST_AUDIO"] - next_pre,
+            "other_tools": sum(returned <= t <= next_pre for t in other_pre),
+        }
+        if min(turn[k] for k in ("total", "stt", "tool_return", "model", "tts_first_audio")) < 0:
+            skipped += 1
+            continue
+        turns.append(turn)
+    return turns, skipped
 
 
 def pct(xs, p):
@@ -81,7 +114,7 @@ def main():
     ap.add_argument("--events", default=os.path.expanduser("~/.voicemode/logs/events"))
     ap.add_argument("--conversations", default=os.path.expanduser("~/.voicemode/logs/conversations"))
     ap.add_argument("--silence-ms", type=float)
-    ap.add_argument("--session", help="session id from --list-sessions, or 'all'; default: the most recent session")
+    ap.add_argument("--session", help="session id from --list-sessions, or 'all'; default: the most recent session. 'all' covers the span from the first to the last hook entry, so unhooked VoiceMode sessions inside it are included")
     ap.add_argument("--list-sessions", action="store_true")
     args = ap.parse_args()
 
@@ -105,31 +138,16 @@ def main():
 
     is_converse = lambda h: (h.get("tool") or "").endswith("converse")
     pre = sorted(h["t"] for h in hooks if h["event"] == "PreToolUse" and is_converse(h))
-    post = sorted(h["t"] for h in hooks if h["event"] == "PostToolUse" and is_converse(h))
+    # A converse call that errors fires PostToolUseFailure instead of PostToolUse.
+    post = sorted(h["t"] for h in hooks if h["event"] in ("PostToolUse", "PostToolUseFailure") and is_converse(h))
     other_pre = sorted(h["t"] for h in hooks if h["event"] == "PreToolUse" and not is_converse(h))
 
     calls = converse_calls(load_events(args.events, since, until))
-    turns = []
-    for a, b in zip(calls, calls[1:]):
-        if "STT_COMPLETE" not in a or "TTS_FIRST_AUDIO" not in b:
-            continue  # no speech heard, or the next call did not speak
-        if b["start"] - a["TOOL_REQUEST_END"] > MAX_GAP_S:
-            continue  # the two calls belong to different sessions
-        end_speech = a["RECORDING_END"] - silence
-        returned = first_after(post, a["STT_COMPLETE"]) or a["TOOL_REQUEST_END"]
-        next_pre = first_after(pre, returned) or b["start"]
-        turns.append({
-            "total": b["TTS_FIRST_AUDIO"] - end_speech,
-            "silence_tail": silence,
-            "stt": a["STT_COMPLETE"] - a["RECORDING_END"],
-            "tool_return": returned - a["STT_COMPLETE"],
-            "model": next_pre - returned,
-            "tts_first_audio": b["TTS_FIRST_AUDIO"] - next_pre,
-            "other_tools": sum(returned <= t <= next_pre for t in other_pre),
-        })
+    turns, skipped = compute_turns(calls, pre, post, other_pre, silence)
 
     print(f"session {chosen}: {len(hooks)} hook entries ({len(pre)} converse calls hooked, {len(other_pre)} other tool calls), "
-          f"silence threshold {silence * 1000:.0f} ms, {len(turns)} turns")
+          f"silence threshold {silence * 1000:.0f} ms, {len(turns)} turns, "
+          f"{skipped} skipped with inconsistent timings")
     print("total_s  silence  stt  return  model  tts  other_tools")
     for t in turns:
         print(f"{t['total']:6.2f}  {t['silence_tail']:6.2f}  {t['stt']:4.2f}  {t['tool_return']:5.2f}  "
