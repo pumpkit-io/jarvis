@@ -22,7 +22,7 @@ _CODES: dict[Language, Lang] = {Language.ENGLISH: "en", Language.ITALIAN: "it"}
 _FUNCTION_WORDS: dict[Lang, frozenset[str]] = {
     "en": frozenset(
         "the an is are was were of for to what which on and my you your it this that these please with how "
-        "has have do does can could would should i i'm it's what's there be at from all any still why who "
+        "has have do does can could would should i'm it's what's there be at from all any still why who "
         "when where not just".split()
     ),
     "it": frozenset(
@@ -31,7 +31,8 @@ _FUNCTION_WORDS: dict[Lang, frozenset[str]] = {
         "anche sì grazie ancora tutto tutti fammi dimmi quando chi".split()
     ),
 }
-_ELISION = re.compile(r"^(?:l|dell|all|nell|dall|sull|un|c|d|quest|po)'", re.IGNORECASE)
+# An elided article or preposition before a vowel ("l'issue", "c'è"), never English's "c'mon"; or "po'".
+_ELISION = re.compile(r"^(?:(?:l|dell|all|nell|dall|sull|un|c|d|quest)'[aeiouhàèéìòù]|po'$)", re.IGNORECASE)
 _WORDS = re.compile(r"[\w']+")
 
 
@@ -47,8 +48,11 @@ def warm_up() -> None:
 
 def detect_language(text: str, previous: Lang) -> Lang:
     """The language of `text`, or `previous` when detection is not confident."""
-    words = [w.lower() for w in _WORDS.findall(text)]
-    en = sum(w in _FUNCTION_WORDS["en"] for w in words)
+    found = _WORDS.findall(text)
+    # Acronyms such as "CI" and "IT" are not the Italian words they spell; "I" is English past the first word,
+    # where Italian's article "i" would be lower case.
+    words = [w.lower() for w in found if not (len(w) > 1 and w.isupper())]
+    en = sum(w in _FUNCTION_WORDS["en"] for w in words) + found[1:].count("I")
     it = sum(w in _FUNCTION_WORDS["it"] or bool(_ELISION.match(w)) for w in words)
     if en != it:
         return "en" if en > it else "it"
