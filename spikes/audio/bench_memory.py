@@ -1,9 +1,6 @@
-"""Memory with the whole audio stack loaded in one process, plus three idle `claude` processes.
+"""Memory with the whole audio stack loaded in one process, against the 4 GB audio-stack budget.
 
-    uv run bench_memory.py [--stt parakeet|mlx-whisper]
-
-The `claude` share is the median footprint of the `claude` processes already running,
-times three, so no new session is started.
+The `claude` processes already running, busy or idle, are recorded for reference only; bench_claude_idle.py measures idle ones.
 """
 
 import argparse
