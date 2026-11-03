@@ -71,7 +71,7 @@ def preflight() -> None:
 
 
 def baseline() -> None:
-    say("Baseline (Ticket #4). This step runs Ticket #4's hook-based harness in spikes/agent/baseline/ of this\n"
+    say("Baseline (Ticket #4). This step points at Ticket #4's hook-based harness in spikes/agent/baseline/ of this\n"
         "checkout. Its steps are in docs/notes/phase-0-spikes.md, ## Agent SDK > Baseline. In short, in another\n"
         "terminal from the repo root:\n"
         "  ./jarvis --settings spikes/agent/baseline/settings.json   # about 10 turns, EN and IT, no repo work\n"
