@@ -151,9 +151,12 @@ def watcher_event(watcher: Watcher) -> str:
 
 
 def check_event(check: Check) -> str:
+    text = check.note
+    if check.state == "done":
+        text += " This is the last time: report what you found, or schedule another Check."
     return (
         f'<event source="timer" id="{check.id}" task="{check.task_id}" repeat="{check.repeats}" '
-        f'of="{check.max_repeats}">{escape(check.note, quote=False)}</event>'
+        f'of="{check.max_repeats}">{escape(text, quote=False)}</event>'
     )
 
 

@@ -98,7 +98,7 @@ async def test_a_check_wakes_the_orchestrator_with_a_timer_event_once_its_time_h
     await running
 
     assert events(backend, "timer") == [
-        '<event source="timer" id="C1" task="T1" repeat="1" of="1">Has Ada reviewed pumpkit#42?</event>'
+        '<event source="timer" id="C1" task="T1" repeat="1" of="1">Has Ada reviewed pumpkit#42? This is the last time: report what you found, or schedule another Check.</event>'
     ]
 
 
@@ -625,3 +625,31 @@ def _alive(pid: int) -> bool:
     except ProcessLookupError:
         return False
     return True
+
+
+async def test_a_task_whose_last_check_ends_without_a_report_is_settled_not_failed(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    backend = FakeBackend(
+        clock,
+        [[Text("I'll keep an eye on it, sir."), delegate()]],
+        orchestrator=[[check(after=60, repeats=1)], []],
+    )
+    hub = make_hub(backend, output, metrics)
+    typist = Typist(clock)
+
+    await hub.start()
+    running = asyncio.create_task(hub.run(typist.lines()))
+    typist.type(REVIEW)
+    await until(lambda: results(backend, "orchestrator", "schedule_check"))
+    await advance(clock, 59)
+    clock.advance(1)
+    await until(lambda: events(backend, "timer"))
+    await until(lambda: output.notices)
+    typist.end()
+    await running
+
+    [event] = events(backend, "timer")
+    assert "last time: report what you found, or schedule another Check" in event
+    assert output.notices == ["T1: its last Check came due and the Orchestrator had nothing to report."]
+    assert not any("failed" in m for m in output.replies + output.notices)

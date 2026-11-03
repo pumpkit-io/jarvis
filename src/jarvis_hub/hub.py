@@ -195,6 +195,8 @@ class _OrchestratorInput:
     task_id: str
     message: str
     arrived: float
+    # The message is a Check's last firing: no later event will wake the Orchestrator for it.
+    last_check: bool = False
 
 
 class _TurnGate:
@@ -691,6 +693,10 @@ class Hub:
         if not task.cancelled and task.reports == reports:
             if end.outcome != "completed":
                 self._fail(task, end.error or "the Orchestrator's turn was stopped")
+            elif quiet and item.last_check:
+                # Looking and finding nothing worth saying is a fair end for a Check, not a fault.
+                task.settle()
+                self._output.notice(f"{task.id}: its last Check came due and the Orchestrator had nothing to report.")
             elif quiet:
                 self._fail(task, "the Orchestrator ended its turn without a report")
         elif quiet:
@@ -891,13 +897,13 @@ class Hub:
     def _subagent_over_time(self, subagent: Subagent) -> None:
         self._wake(subagent.task_id, over_time_event(subagent, self._clock.now()))
 
-    def _wake(self, task_id: str, message: str) -> None:
+    def _wake(self, task_id: str, message: str, *, last_check: bool = False) -> None:
         """Queue news for the Orchestrator on a Task; a cancelled Task hears nothing more."""
         task = self._tasks.get(task_id)
         if task is None or task.cancelled:
             return
         task.queue_message()
-        self._post(self._orchestrator_inbox, _OrchestratorInput(task.id, message, self._clock.now()))
+        self._post(self._orchestrator_inbox, _OrchestratorInput(task.id, message, self._clock.now(), last_check))
 
     async def _watch(self, args: dict[str, Any]) -> str:
         task = self._tasks.get(self._orchestrating)
@@ -958,4 +964,4 @@ class Hub:
             self._handled()
 
     def _check_due(self, check: Check) -> None:
-        self._wake(check.task_id, check_event(check))
+        self._wake(check.task_id, check_event(check), last_check=check.state == "done")
