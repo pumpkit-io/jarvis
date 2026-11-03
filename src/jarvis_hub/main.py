@@ -369,6 +369,10 @@ def _open_player(rate: int, on_played: PlayedTap) -> Player:
     return SoundPlayer(rate, on_played=on_played)
 
 
+def _ignored_in_text(error: str) -> None:
+    sys.stderr.write(f"jarvis-hub: {error}; voice settings are not used with --text, so it is ignored.\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="jarvis-hub", description="Run the Jarvis Hub.")
     parser.add_argument("--text", action="store_true", help="talk by typing, with no audio")
@@ -382,7 +386,9 @@ def main() -> None:
     if cli is None:
         sys.exit("jarvis-hub: the claude CLI is not on PATH; install Claude Code and log in with your Max plan.")
     try:
-        settings = load_settings(Path(__file__).resolve().parents[2], os.environ)
+        settings = load_settings(
+            Path(__file__).resolve().parents[2], os.environ, ignore_voice=_ignored_in_text if args.text else None
+        )
     except ConfigError as e:
         sys.exit(f"jarvis-hub: {e}")
 

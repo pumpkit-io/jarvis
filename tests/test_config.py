@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from jarvis_hub.config import ConfigError, load_settings, parse_env
+from jarvis_hub.config import ConfigError, VoiceSettings, load_settings, parse_env
 
 
 @pytest.mark.parametrize(
@@ -199,6 +199,15 @@ def test_voice_settings_out_of_range_are_refused(checkout: Path, line: str) -> N
     (checkout / ".env").write_text(line + "\n")
     with pytest.raises(ConfigError, match=line.split("=")[0]):
         load_settings(checkout, environ={})
+
+
+def test_text_mode_warns_about_a_bad_voice_setting_and_starts_on_the_defaults(checkout: Path) -> None:
+    (checkout / ".env").write_text("JARVIS_AEC=maybe\nJARVIS_FOLLOWUP_SECONDS=8\nJARVIS_MAX_SUBAGENTS=2\n")
+    warnings: list[str] = []
+    settings = load_settings(checkout, environ={}, ignore_voice=warnings.append)
+    assert settings.voice == VoiceSettings()
+    assert settings.max_subagents == 2
+    assert len(warnings) == 1 and "JARVIS_AEC" in warnings[0]
 
 
 @pytest.mark.parametrize(

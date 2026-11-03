@@ -3,16 +3,17 @@
 import math
 import re
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, TypeGuard, get_args
+from typing import Literal, TypeGuard, TypeVar, get_args
 
 DEFAULT_ORG = "pumpkit-io"
 # Of the Talker's context window: a long conversation keeps its speed by restarting well before it fills.
 DEFAULT_TALKER_RESTART_AT = 0.40
 
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
+_Choice = TypeVar("_Choice", bound=str)
 # Lowest first, so a level's index orders it.
 EFFORTS: tuple[Effort, ...] = get_args(Effort)
 
@@ -112,7 +113,10 @@ def main_checkout(repo_dir: Path) -> Path:
     return Path(common).resolve().parent
 
 
-def load_settings(repo_dir: Path, environ: Mapping[str, str]) -> Settings:
+def load_settings(
+    repo_dir: Path, environ: Mapping[str, str], *, ignore_voice: Callable[[str], None] | None = None
+) -> Settings:
+    """With `ignore_voice` (text mode), voice settings stay at their defaults and a bad one is reported to it."""
     repo_dir = repo_dir.resolve()
     main = main_checkout(repo_dir)
     env_file = main / ".env"
@@ -140,30 +144,42 @@ def load_settings(repo_dir: Path, environ: Mapping[str, str]) -> Settings:
             raise ConfigError(f"{name}={raw!r} is out of range ({low:g} to {high:g})")
         return value
 
-    def choice(name: str, default: str, allowed: tuple[str, ...]) -> Any:
+    def choice(name: str, default: _Choice, allowed: tuple[_Choice, ...]) -> _Choice:
         value = get(name, default)
-        if value not in allowed:
-            raise ConfigError(f"{name}={value!r} is not one of {', '.join(allowed)}")
-        return value
+        for option in allowed:
+            if value == option:
+                return option
+        raise ConfigError(f"{name}={value!r} is not one of {', '.join(allowed)}")
 
-    voice = VoiceSettings(
-        follow_up_s=number("JARVIS_FOLLOWUP_SECONDS", 6.0, 0, 120, low_open=True),
-        announce_follow_up_s=number("JARVIS_ANNOUNCE_FOLLOWUP_SECONDS", 4.0, 0, 120, low_open=True),
-        listen_s=number("JARVIS_LISTEN_SECONDS", 6.0, 0, 120, low_open=True),
-        wake_engine=choice("JARVIS_WAKE_ENGINE", "openwakeword", ("openwakeword",)),
-        wake_threshold=number("JARVIS_WAKE_THRESHOLD", 0.5, 0, 1, low_open=True),
-        stt_engine=choice("JARVIS_STT_ENGINE", "parakeet", ("parakeet",)),
-        aec=choice("JARVIS_AEC", "webrtc", ("webrtc", "off")),
-        vad_threshold=number("JARVIS_VAD_THRESHOLD", 0.5, 0, 1, low_open=True),
-        end_silence_ms=round(number("JARVIS_END_SILENCE_MS", 500, 0, 5000, low_open=True)),
-        end_extend_ms=round(number("JARVIS_END_EXTEND_MS", 1500, 0, 10000)),
-        smart_turn_threshold=number("JARVIS_SMART_TURN_THRESHOLD", 0.5, 0, 1),
-        preroll_ms=round(number("JARVIS_PREROLL_MS", 1500, 0, 5000)),
-        max_turn_s=number("JARVIS_MAX_TURN_SECONDS", 30.0, 0, 600, low_open=True),
-        chime_guard_ms=round(number("JARVIS_CHIME_GUARD_MS", 500, 0, 5000)),
-        wake_refractory_ms=round(number("JARVIS_WAKE_REFRACTORY_MS", 2000, 0, 10000)),
-        onset_pad_ms=round(number("JARVIS_ONSET_PAD_MS", 200, 0, 1000)),
-    )
+    def voice_settings() -> VoiceSettings:
+        return VoiceSettings(
+            follow_up_s=number("JARVIS_FOLLOWUP_SECONDS", 6.0, 0, 120, low_open=True),
+            announce_follow_up_s=number("JARVIS_ANNOUNCE_FOLLOWUP_SECONDS", 4.0, 0, 120, low_open=True),
+            listen_s=number("JARVIS_LISTEN_SECONDS", 6.0, 0, 120, low_open=True),
+            wake_engine=choice("JARVIS_WAKE_ENGINE", "openwakeword", ("openwakeword",)),
+            wake_threshold=number("JARVIS_WAKE_THRESHOLD", 0.5, 0, 1, low_open=True),
+            stt_engine=choice("JARVIS_STT_ENGINE", "parakeet", ("parakeet",)),
+            aec=choice("JARVIS_AEC", "webrtc", ("webrtc", "off")),
+            vad_threshold=number("JARVIS_VAD_THRESHOLD", 0.5, 0, 1, low_open=True),
+            end_silence_ms=round(number("JARVIS_END_SILENCE_MS", 500, 0, 5000, low_open=True)),
+            end_extend_ms=round(number("JARVIS_END_EXTEND_MS", 1500, 0, 10000)),
+            smart_turn_threshold=number("JARVIS_SMART_TURN_THRESHOLD", 0.5, 0, 1),
+            preroll_ms=round(number("JARVIS_PREROLL_MS", 1500, 0, 5000)),
+            max_turn_s=number("JARVIS_MAX_TURN_SECONDS", 30.0, 0, 600, low_open=True),
+            chime_guard_ms=round(number("JARVIS_CHIME_GUARD_MS", 500, 0, 5000)),
+            wake_refractory_ms=round(number("JARVIS_WAKE_REFRACTORY_MS", 2000, 0, 10000)),
+            onset_pad_ms=round(number("JARVIS_ONSET_PAD_MS", 200, 0, 1000)),
+        )
+
+    if ignore_voice is None:
+        voice = voice_settings()
+    else:
+        try:
+            voice_settings()
+        except ConfigError as e:
+            ignore_voice(str(e))
+        voice = VoiceSettings()
+
     def fraction(name: str, default: float) -> float:
         raw = get(name, str(default))
         try:
