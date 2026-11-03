@@ -53,6 +53,8 @@ def options_for(spec: SessionSpec, cli_path: str, stderr: Callable[[str], None] 
         thinking=thinking,
         system_prompt=spec.system_prompt,
         setting_sources=[],
+        # Also keeps out the claude.ai connectors of the logged-in account, which setting_sources does not.
+        strict_mcp_config=True,
         tools=[],
         mcp_servers=mcp_servers,
         allowed_tools=[f"mcp__{TOOL_SERVER}__{t.name}" for t in spec.tools],
@@ -129,7 +131,7 @@ def _translate(event: dict[str, Any], blocks: dict[int, dict[str, Any]]) -> list
                 args: dict[str, Any] = json.loads(done["json"] or "{}")
             except json.JSONDecodeError:
                 args = {}
-            return [ToolCall(done["name"], args)]
+            return [ToolCall(done["name"].removeprefix(f"mcp__{TOOL_SERVER}__"), args)]
     return []
 
 

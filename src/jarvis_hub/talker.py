@@ -12,7 +12,7 @@ PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
 def talker_spec(settings: Settings) -> SessionSpec:
     """Rendered once per launch: the prompt must stay byte-identical across turns to stay cached."""
     template = (PROMPTS_DIR / "talker.md").read_text()
-    user = settings.user_name or "the User (name not known)"
+    user = settings.user_name or "not known"
     return SessionSpec(
         role="talker",
         model=settings.talker.model,

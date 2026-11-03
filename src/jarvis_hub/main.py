@@ -5,7 +5,6 @@ import asyncio
 import json
 import os
 import shutil
-import signal
 import sys
 import threading
 import time
@@ -95,7 +94,6 @@ async def text_mode(
     stderr: TextIO,
     metrics: Metrics,
     clock: Clock,
-    handle_ctrl_c: bool = False,
 ) -> None:
     """A terminal conversation with the Talker: typed lines in, streamed replies out, until end of input."""
     interactive = stdin.isatty()
@@ -110,19 +108,8 @@ async def text_mode(
     if interactive:
         stdout.write(PROMPT)
         stdout.flush()
-    conversation = asyncio.create_task(hub.run(_typed_lines(stdin, stdout, interactive)))
-
-    async def ctrl_c() -> None:
-        # Ctrl-C stops a reply in progress; between replies it ends the conversation.
-        if not await hub.interrupt():
-            conversation.cancel()
-
-    if handle_ctrl_c:
-        asyncio.get_running_loop().add_signal_handler(signal.SIGINT, lambda: asyncio.ensure_future(ctrl_c()))
     try:
-        await conversation
-    except asyncio.CancelledError:
-        stdout.write("\n")
+        await hub.run(_typed_lines(stdin, stdout, interactive))
     finally:
         await hub.close()
 
@@ -146,15 +133,21 @@ def main() -> None:
     except ConfigError as e:
         sys.exit(f"jarvis-hub: {e}")
 
-    asyncio.run(
-        text_mode(
-            talker=talker_spec(settings),
-            backend=SdkBackend(cli),
-            stdin=sys.stdin,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-            metrics=JsonlMetrics(settings.runtime_dir / "metrics.jsonl"),
-            clock=MonotonicClock(),
-            handle_ctrl_c=True,
+    talker = talker_spec(settings)
+    metrics = JsonlMetrics(settings.runtime_dir / "metrics.jsonl")
+    # Ctrl-C reaches the claude CLI too (same process group), so it ends the conversation rather than a reply.
+    try:
+        asyncio.run(
+            text_mode(
+                talker=talker,
+                backend=SdkBackend(cli),
+                stdin=sys.stdin,
+                stdout=sys.stdout,
+                stderr=sys.stderr,
+                metrics=metrics,
+                clock=MonotonicClock(),
+            )
         )
-    )
+    except KeyboardInterrupt:
+        sys.stdout.write("\n")
+        sys.exit(130)
