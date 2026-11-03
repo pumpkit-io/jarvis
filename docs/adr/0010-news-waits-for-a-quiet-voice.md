@@ -14,4 +14,5 @@ So in voice mode the Hub keeps Orchestrator and Subagent events in a queue of it
 - News comes a little later: after the User's exchange and its Follow-up window, and after each earlier Announcement's own window (4 s).
 - A Talker restart due at the same quiet moment runs first, and the news goes to the new session.
 - The speech no longer holds anything. It still drops, leaving it on screen, the answer to a turn heard before the latest Wake word, and `end_conversation` still acts only on the reply to the User's own spoken turn.
+- Once the input ends (Ctrl-D), voice mode stops stepping and can no longer go quiet, so the voice stops gating: remaining news goes to the Talker on screen only, and a due restart no longer waits. The Hub then settles and exits.
 - Ticket #15 builds the full Announcement queue and Quiet mode on this queue.

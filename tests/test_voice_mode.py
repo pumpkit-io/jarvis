@@ -44,6 +44,8 @@ class Rig:
     voice: VoiceMode
     hub: Hub
     tts: FakeTts
+    # `Hub.run` on the typed and spoken lines.
+    running: asyncio.Task[None]
 
     def user_messages(self) -> list[str]:
         return [m for s in self.backend.all_sessions("talker") for m in s.received if m.startswith("<user")]
@@ -94,7 +96,7 @@ async def rig_for() -> AsyncIterator[MakeRig]:
         await hub.start()
         voice.start()
         running = asyncio.create_task(hub.run(merge(typist.lines(), voice.lines(hub.interrupt))))
-        rig = Rig(clock, backend, audio, player, output, metrics, typist, voice, hub, tts)
+        rig = Rig(clock, backend, audio, player, output, metrics, typist, voice, hub, tts, running)
         rigs.append((rig, running))
         await until(lambda: player.texts == ["At your service, sir."])
         player.clips.clear()
@@ -662,3 +664,32 @@ async def test_a_turn_the_user_moved_on_from_is_answered_on_screen_only(rig_for:
 
     assert "Main is red, sir." in rig.output.replies
     assert "Main is red, sir." not in rig.player.texts
+
+
+async def test_news_after_the_input_ends_in_the_follow_up_window_is_shown_and_the_hub_stops(rig_for: MakeRig) -> None:
+    rig, [arrival] = await news_rig(rig_for, [Text("Green, sir.")], [Text(NEWS)])
+    rig.audio.wake()
+    rig.audio.say("Is the CI green?")
+    await until(lambda: rig.state == "follow_up")
+
+    rig.typist.end()
+    await rig.settle()
+    await arrive(rig, arrival)
+    await rig.advance(30)
+
+    await until(lambda: rig.running.done())
+    assert NEWS in rig.output.replies
+    assert NEWS not in rig.player.texts
+
+
+async def test_news_after_the_input_ends_while_idle_is_all_shown_and_the_hub_stops(rig_for: MakeRig) -> None:
+    rig, arrivals = await news_rig(rig_for, [Text(NEWS)], [Text(DOCS)], items=2)
+
+    rig.typist.end()
+    await rig.settle()
+    for arrival in arrivals:
+        await arrive(rig, arrival)
+    await rig.advance(30)
+
+    await until(lambda: rig.running.done())
+    assert [r for r in rig.output.replies if r in (NEWS, DOCS)] == [NEWS, DOCS]

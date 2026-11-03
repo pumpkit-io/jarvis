@@ -285,6 +285,8 @@ class Hub:
         self._pending = 0
         self._settled = asyncio.Event()
         self._settled.set()
+        # Once the input has ended voice mode stops stepping, so the voice no longer gates news or a restart.
+        self._input_ended = asyncio.Event()
         self._turn_count = 0
         self._talker_gate = _TurnGate()
         # Whether the Talker turn under way is heard: only a spoken turn's reply is interrupted.
@@ -320,6 +322,7 @@ class Hub:
             await asyncio.wait([reading])
             return
         await reading
+        self._input_ended.set()
         settling = asyncio.create_task(self._settled.wait())
         await asyncio.wait([settling, talking], return_when=asyncio.FIRST_COMPLETED)
         settling.cancel()
@@ -407,7 +410,8 @@ class Hub:
             upcoming = await self._restart_if_full(end.context)
 
     async def _next_input(self) -> _TalkerInput:
-        """The User's next line first; in voice mode, news only once Jarvis is quiet (the announcement policy).
+        """The User's next line first; in voice mode, news only once Jarvis is quiet (the announcement policy), or
+        on screen once the input has ended.
 
         From the `announce` claim to the turn's start nothing awaits, so a Wake word lands before the claim, which
         then fails, or after it, on the news turn.
@@ -420,6 +424,8 @@ class Hub:
             await self._talker_gate.before_next_turn()
             if not self._talker_inbox.empty():
                 return self._talker_inbox.get_nowait()
+            if self._news and self._input_ended.is_set():
+                return replace(self._news.popleft(), spoken=False)
             if self._news and quiet and self._floor.announce():
                 return self._news.popleft()
             quiet = await self._line_or_quiet()
@@ -444,8 +450,18 @@ class Hub:
         while not self._news:
             self._arrived.clear()
             await self._arrived.wait()
+        await self._quiet()
+
+    async def _quiet(self) -> None:
+        """Returns once voice mode is quiet, or the input has ended."""
         assert self._floor is not None
-        await self._floor.quiet()
+        quiet = asyncio.ensure_future(self._floor.quiet())
+        ended = asyncio.ensure_future(self._input_ended.wait())
+        try:
+            await asyncio.wait([quiet, ended], return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            quiet.cancel()
+            ended.cancel()
 
     async def _open_talker(self) -> AgentSession:
         """Open a Talker session. A cancel that lands meanwhile lets the open finish and closes what it opened."""
@@ -502,10 +518,11 @@ class Hub:
         return None
 
     async def _quiet_or_next(self) -> _TalkerInput | None:
-        """Waits for voice mode to go quiet, unless the inbox's next item comes first; then returns that item."""
+        """Waits for voice mode to go quiet (or the input to end), unless the inbox's next item comes first; then
+        returns that item."""
         if self._floor is None:
             return None
-        quiet = asyncio.ensure_future(self._floor.quiet())
+        quiet = asyncio.ensure_future(self._quiet())
         getting = asyncio.ensure_future(self._talker_inbox.get())
         try:
             await asyncio.wait([quiet, getting], return_when=asyncio.FIRST_COMPLETED)
