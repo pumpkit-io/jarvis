@@ -72,3 +72,21 @@ Repo catalog (purpose only; the live list in the context block has current names
 - **jarvis**: this harness.
 
 When the live list and the catalog disagree (a new repo, a deleted one, a changed purpose), mention it and offer to update the catalog.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues for pumpkit-io/jarvis, through the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context: `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+### Code comments
+
+Load the `code-comments` skill before writing or editing any comment.
+
+### Worktrees
+
+Never edit files or commit in the main checkout, even for a one-line change. Before your first file change or commit, load the `worktrees` skill and resolve a worktree for the work, then work and commit there. Release its lock when the work is committed. The one exception is a main-checkout path a skill names, such as `improve-codebase-architecture`'s notes.

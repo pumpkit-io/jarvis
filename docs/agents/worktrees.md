@@ -1,0 +1,5 @@
+# Worktrees
+
+## Copy
+
+- `.env`
