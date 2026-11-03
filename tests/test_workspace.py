@@ -1,14 +1,17 @@
 """The real Workspace against scratch git repos and the installed sdlc worktree.sh."""
 
+import asyncio
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from jarvis_hub.config import load_settings
 from jarvis_hub.subagents import Refusal
-from jarvis_hub.workspace import GitWorkspace, find_worktree_script
+from jarvis_hub.workspace import GitWorkspace, find_worktree_script, is_org_remote
 
-SCRIPT = find_worktree_script(Path.home() / "Projects" / "pumpkit-io", Path.home())
+SCRIPT = find_worktree_script(load_settings(Path(__file__).resolve().parents[1], {}).org_dir, Path.home())
+needs_script = pytest.mark.skipif(SCRIPT is None, reason="the sdlc worktrees script is not installed")
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -30,6 +33,35 @@ def clone(tmp_path: Path) -> Path:
     org.mkdir()
     git(org, "clone", "-q", str(origin), "pumpkit")
     return org / "pumpkit"
+
+
+@pytest.mark.parametrize(
+    ("url", "matches"),
+    [
+        ("https://github.com/pumpkit-io/pumpkit.git", True),
+        ("https://github.com/pumpkit-io/pumpkit", True),
+        ("git@github.com:pumpkit-io/pumpkit.git", True),
+        ("ssh://git@github.com/Pumpkit-IO/pumpkit.git", True),
+        ("https://evil/x/github.com/pumpkit-io/pumpkit", False),
+        ("https://github.com.evil.com/pumpkit-io/pumpkit", False),
+        ("https://github.com/someone/pumpkit-io/pumpkit", False),
+        ("https://github.com/pumpkit-io/pumpkit-ops", False),
+        ("https://github.com/pumpkit-io/pumpkit.git\nhttps://evil", False),
+    ],
+    ids=lambda v: str(v),
+)
+def test_is_org_remote_takes_only_githubs_own_url_for_the_repo(url: str, matches: bool) -> None:
+    assert is_org_remote(url, "pumpkit-io", "pumpkit") == matches
+
+
+async def test_repo_refuses_a_clone_that_is_a_symlink_out_of_the_org_folder(clone: Path, tmp_path: Path) -> None:
+    git(clone, "remote", "set-url", "origin", "https://github.com/pumpkit-io/pumpkit.git")
+    elsewhere = tmp_path / "elsewhere"
+    clone.rename(elsewhere)
+    clone.symlink_to(elsewhere)
+    workspace = GitWorkspace("pumpkit-io", clone.parent, SCRIPT)
+    with pytest.raises(Refusal, match="leads outside the Org folder"):
+        await workspace.repo("pumpkit")
 
 
 @pytest.mark.parametrize(
@@ -56,7 +88,7 @@ async def test_repo_accepts_an_org_clone_by_name_or_full_name(clone: Path) -> No
     assert await workspace.repo("Pumpkit-IO/pumpkit") == ("pumpkit", clone)
 
 
-@pytest.mark.skipif(SCRIPT is None, reason="the sdlc worktrees script is not installed")
+@needs_script
 async def test_worktree_makes_a_fresh_locked_branch_and_describe_says_what_is_on_it(clone: Path) -> None:
     workspace = GitWorkspace("pumpkit-io", clone.parent, SCRIPT)
     git(clone, "branch", "fix/typo")
@@ -75,3 +107,68 @@ async def test_worktree_makes_a_fresh_locked_branch_and_describe_says_what_is_on
     described = await workspace.describe(path)
     assert "Commits not on origin/main:" in described and "fix: the typo" in described
     assert "?? notes.txt" in described and "Not pushed." in described
+
+
+@needs_script
+async def test_describe_counts_commits_beyond_the_pushed_branch_without_an_upstream(clone: Path) -> None:
+    workspace = GitWorkspace("pumpkit-io", clone.parent, SCRIPT)
+    path, branch = await workspace.worktree(clone, "fix/typo", "jarvis S1 (T1): Fix typo")
+    (path / "a.txt").write_text("a\n")
+    git(path, "add", "a.txt")
+    git(path, "commit", "-qm", "fix: one")
+    git(path, "push", "-q", "origin", branch)
+    assert "Pushed to origin/fix/typo." in await workspace.describe(path)
+    (path / "b.txt").write_text("b\n")
+    git(path, "add", "b.txt")
+    git(path, "commit", "-qm", "fix: two")
+    assert "Pushed to origin/fix/typo, with 1 commit not pushed." in await workspace.describe(path)
+
+
+@needs_script
+async def test_two_worktrees_asked_at_once_get_different_branches(clone: Path) -> None:
+    workspace = GitWorkspace("pumpkit-io", clone.parent, SCRIPT)
+    (one, a), (two, b) = await asyncio.gather(
+        workspace.worktree(clone, "fix/typo", "jarvis S1 (T1): Fix typo"),
+        workspace.worktree(clone, "fix/typo", "jarvis S2 (T1): Fix typo"),
+    )
+    assert {a, b} == {"fix/typo", "fix/typo-2"} and one != two
+    holders = {(path / ".sdlc" / "lock").read_text().splitlines()[1] for path in (one, two)}
+    assert holders == {"jarvis S1 (T1): Fix typo", "jarvis S2 (T1): Fix typo"}
+
+
+@needs_script
+async def test_a_worktree_that_cannot_be_locked_is_removed_with_its_new_branch(clone: Path, tmp_path: Path) -> None:
+    assert SCRIPT is not None
+    failing = tmp_path / "worktree.sh"
+    failing.write_text(f'[ "$1" = lock ] && {{ echo "no lock today" >&2; exit 1; }}\nexec bash {SCRIPT} "$@"\n')
+    workspace = GitWorkspace("pumpkit-io", clone.parent, failing)
+    with pytest.raises(Refusal, match="no lock today.*both empty, are removed"):
+        await workspace.worktree(clone, "fix/typo", "jarvis S1 (T1): Fix typo")
+    assert git(clone, "branch", "--list", "fix/typo") == ""
+    assert not (clone / ".claude" / "worktrees" / "typo").exists()
+
+
+@needs_script
+async def test_a_read_only_worktree_is_detached_locked_and_removed_by_discard(clone: Path) -> None:
+    workspace = GitWorkspace("pumpkit-io", clone.parent, SCRIPT)
+    git(clone, "checkout", "-qb", "users-own-work")
+    (clone / "wip.txt").write_text("the User's work\n")
+
+    path = await workspace.scratch(clone, "read-what-changed", "jarvis S1 (T1): What changed")
+
+    assert path == clone / ".claude" / "worktrees" / "read-what-changed"
+    assert git(path, "branch", "--show-current") == ""
+    assert git(path, "rev-parse", "HEAD") == git(clone, "rev-parse", "origin/main")
+    assert (path / ".sdlc" / "lock").read_text().splitlines()[1] == "jarvis S1 (T1): What changed"
+    assert await workspace.discard(path) is None
+    assert not path.exists()
+    assert git(clone, "branch", "--show-current") == "users-own-work" and (clone / "wip.txt").exists()
+
+
+@needs_script
+async def test_a_read_only_worktree_with_changes_is_kept_and_discard_says_why(clone: Path) -> None:
+    workspace = GitWorkspace("pumpkit-io", clone.parent, SCRIPT)
+    path = await workspace.scratch(clone, "read-what-changed", "jarvis S1 (T1): What changed")
+    (path / ".gitignore").write_text("changed\n")
+    kept = await workspace.discard(path)
+    assert kept and path.exists()

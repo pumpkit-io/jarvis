@@ -8,7 +8,18 @@ import pytest
 from jarvis_hub.agents.backend import Refused
 from jarvis_hub.agents.sdk import options_for
 from jarvis_hub.config import Effort, RoleModel, Settings
-from jarvis_hub.subagents import VOICE_TOOLS, Subagent, branch_name, check_choice, connector_check, subagent_session
+from jarvis_hub.subagent_rules import (
+    PUMPKIT_READS,
+    PUMPKIT_SERVERS,
+    READ_CONNECTOR_TOOLS,
+    asked_effort,
+    branch_name,
+    check_choice,
+    connector_check,
+)
+from jarvis_hub.subagents import VOICE_TOOLS, Subagent, subagent_session
+
+PROMPTS = Path(__file__).parents[1] / "prompts"
 
 
 @pytest.mark.parametrize(
@@ -21,10 +32,6 @@ from jarvis_hub.subagents import VOICE_TOOLS, Subagent, branch_name, check_choic
         ("sonnet", "high", "medium", [], "above JARVIS_MAX_EFFORT=medium"),
         ("opus", "xhigh", "max", ["Fix the typo in pumpkit."], "only when the User asks"),
         ("opus", "max", "max", ["Review it carefully."], "only when the User asks"),
-        ("opus", "xhigh", "max", ["Review it at xhigh effort."], None),
-        ("opus", "xhigh", "max", ["Use extra high effort for this one."], None),
-        ("opus", "max", "max", ["Give it max effort."], None),
-        ("opus", "max", "max", ["Mettici il massimo impegno."], None),
         ("opus", "xhigh", "max", ["Fix it.", "Actually, go maximum effort."], None),
         ("opus", "max", "max", ["Review it at xhigh."], "only when the User asks"),
         ("opus", "max", "high", ["Give it max effort."], "above JARVIS_MAX_EFFORT=high"),
@@ -39,11 +46,7 @@ from jarvis_hub.subagents import VOICE_TOOLS, Subagent, branch_name, check_choic
         "above the cap",
         "xhigh unasked",
         "max unasked",
-        "xhigh asked",
-        "extra high asked",
-        "max asked",
-        "massimo asked, Italian",
-        "max asked covers xhigh, in a later request",
+        "max asked covers xhigh, in a later turn",
         "xhigh asked does not cover max",
         "asked but above the cap",
         "unknown model",
@@ -56,6 +59,32 @@ def test_check_choice(model: str, effort: str, max_effort: Effort, words: list[s
         assert verdict is None
     else:
         assert isinstance(verdict, Refused) and refusal in verdict.reason
+
+
+@pytest.mark.parametrize(
+    ("words", "asked"),
+    [
+        ("Review it at xhigh effort.", "xhigh"),
+        ("Run it at x-high.", "xhigh"),
+        ("Use extra high effort for this one.", "xhigh"),
+        ("Give it max effort.", "max"),
+        ("Go maximum effort on the review.", "max"),
+        ("Effort: max, please.", "max"),
+        ("Set the effort to maximum.", "max"),
+        ("Mettici il massimo impegno.", "max"),
+        ("Usa lo sforzo massimo.", "max"),
+        ("Fix the typo, max two files.", None),
+        ("Change at most a maximum of three files.", None),
+        ("Al massimo due file, per favore.", None),
+        ("I'm on my Max plan, so go ahead.", None),
+        ("Ask Max about the deploy.", None),
+        ("Make the effort to keep it small.", None),
+        ("Give it extra high priority.", None),
+    ],
+    ids=lambda v: str(v),
+)
+def test_asked_effort_hears_only_an_explicit_effort_request(words: str, asked: str | None) -> None:
+    assert asked_effort([words]) == asked
 
 
 @pytest.mark.parametrize(
@@ -104,8 +133,15 @@ def test_connector_check(tool: str, allowed: bool) -> None:
         assert isinstance(verdict, Refused) and "Approval" in verdict.reason
 
 
+def test_both_pumpkit_server_names_allow_the_same_reads_and_nothing_else() -> None:
+    for server in PUMPKIT_SERVERS:
+        allowed = {t.removeprefix(f"mcp__{server}__") for t in READ_CONNECTOR_TOOLS if t.startswith(f"mcp__{server}__")}
+        assert allowed == set(PUMPKIT_READS), server
+
+
 def a_subagent(branch: str | None) -> Subagent:
-    cwd = Path("/org/.claude/worktrees/fix-typo") if branch else Path("/org/pumpkit")
+    worktrees = Path("/org/pumpkit/.claude/worktrees")
+    cwd = worktrees / "fix-typo" if branch else worktrees / "read-fix-typo"
     return Subagent("S2", "T1", "pumpkit", "Fix typo", "brief", "sonnet", "medium", cwd, 0.0, branch)
 
 
@@ -122,24 +158,40 @@ def a_settings(tmp_path: Path) -> Settings:
     )
 
 
-def test_the_subagent_prompt_carries_the_boundary_verbatim_the_preferences_path_and_its_branch(tmp_path: Path) -> None:
+def test_the_subagent_prompt_carries_the_boundary_verbatim(tmp_path: Path) -> None:
+    spec = subagent_session(a_settings(tmp_path), a_subagent("fix/fix-typo"))
+    assert (PROMPTS / "boundary.md").read_text() in spec.system_prompt
+
+
+def test_the_subagent_prompt_leaves_out_the_orchestrators_working_rules(tmp_path: Path) -> None:
+    spec = subagent_session(a_settings(tmp_path), a_subagent("fix/fix-typo"))
+    assert "## Working rules" not in spec.system_prompt
+
+
+def test_the_subagent_prompt_points_to_the_preferences_and_the_repos_own_instructions(tmp_path: Path) -> None:
     settings = a_settings(tmp_path)
     spec = subagent_session(settings, a_subagent("fix/fix-typo"))
-    prompts = Path(__file__).parents[1] / "prompts"
-    assert (prompts / "boundary.md").read_text() in spec.system_prompt
-    assert (prompts / "working-rules.md").read_text() in spec.system_prompt
     assert f"`{settings.repo_dir / 'docs' / 'working-preferences.md'}`" in spec.system_prompt
-    assert "Branch: `fix/fix-typo`" in spec.system_prompt and "locked under S2" in spec.system_prompt
     assert "AGENTS.md" in spec.system_prompt and "sdlc skills" in spec.system_prompt
     assert "{" not in spec.system_prompt.replace("{org}", "")
+
+
+def test_a_writing_subagent_is_told_its_branch_and_lock(tmp_path: Path) -> None:
+    spec = subagent_session(a_settings(tmp_path), a_subagent("fix/fix-typo"))
+    assert "Branch: `fix/fix-typo`" in spec.system_prompt and "locked under S2" in spec.system_prompt
+
+
+def test_the_subagent_session_runs_in_its_worktree_skipping_permissions_with_the_guard(tmp_path: Path) -> None:
+    spec = subagent_session(a_settings(tmp_path), a_subagent("fix/fix-typo"))
     assert (spec.role, spec.model, spec.effort, spec.cwd) == ("subagent", "sonnet", "medium", a_subagent("x").cwd)
     assert spec.preset and spec.skip_permissions and spec.mcp_guard is connector_check
     assert set(VOICE_TOOLS) <= set(spec.denied_tools)
 
 
-def test_a_read_only_subagent_is_told_it_has_no_branch(tmp_path: Path) -> None:
+def test_a_read_only_subagent_is_told_its_worktree_has_no_branch(tmp_path: Path) -> None:
     spec = subagent_session(a_settings(tmp_path), a_subagent(None))
-    assert "no branch was made for you" in spec.system_prompt and spec.cwd == Path("/org/pumpkit")
+    assert "no branch, detached at the default branch" in spec.system_prompt
+    assert spec.cwd == Path("/org/pumpkit/.claude/worktrees/read-fix-typo")
 
 
 def test_a_subagent_session_loads_settings_skips_permissions_and_guards_mcp_tools(tmp_path: Path) -> None:

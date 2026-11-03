@@ -20,9 +20,7 @@ class Task:
     reports: int = 0
     # Messages for this Task still in the Orchestrator's queue.
     waiting: int = 0
-    # Subagents of this Task not yet ended; the Task keeps working while any runs.
-    subagents: int = 0
-    # The User's words for this Task: its request and every follow-up.
+    # What the User typed or said in the turns that started or continued this Task, never a model's rewording.
     words: list[str] = field(default_factory=lambda: [])
 
     @property
@@ -43,7 +41,8 @@ class Task:
         self.state = "working"
         return True
 
-    def report(self, spoken: str, *, needs_user: bool) -> None:
+    def report(self, spoken: str, *, needs_user: bool, subagents_live: bool) -> None:
+        """`subagents_live`: Subagents of this Task still run, so it keeps working after the report."""
         self.last_report = spoken
         self.reports += 1
         if self.waiting:
@@ -51,11 +50,14 @@ class Task:
         elif needs_user:
             self.state = "needs_user"
         else:
-            self.state = "working" if self.subagents else "done"
+            self.state = "working" if subagents_live else "done"
 
-    def fail(self, reason: str) -> None:
+    def fail(self, reason: str, *, subagents_live: bool) -> None:
         self.last_report = f"Failed: {reason}."
-        self.state = "queued" if self.waiting else "failed"
+        if self.waiting:
+            self.state = "queued"
+        elif not subagents_live:
+            self.state = "failed"
 
     def cancel(self) -> bool:
         """False when the Task had already finished with nothing left in the queue for it."""
@@ -70,7 +72,7 @@ class Tasks:
         self._tasks: dict[str, Task] = {}
 
     def create(self, request: str, now: float) -> Task:
-        task = Task(id=f"T{len(self._tasks) + 1}", request=request, created=now, words=[request])
+        task = Task(id=f"T{len(self._tasks) + 1}", request=request, created=now)
         self._tasks[task.id] = task
         return task
 

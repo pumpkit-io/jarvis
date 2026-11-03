@@ -61,8 +61,8 @@ def orchestrator_tools(
         HubTool(
             "spawn_subagent",
             "Start a Subagent on the Task you are on: its own session, in an Org repo, cloned first if missing. "
-            "With writes, it works in a new worktree on a branch of its own. Returns at once; its report arrives "
-            "later as an event.",
+            "With writes, it works in a new worktree on a branch of its own; without, in a worktree with no branch, "
+            "removed when it ends. Returns at once; its report arrives later as an event.",
             object_schema(
                 {
                     "repo": {**STRING, "description": "An Org repo, such as pumpkit."},

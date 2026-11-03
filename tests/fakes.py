@@ -182,6 +182,8 @@ class FakeSession:
             self._interrupted.set()
 
     async def close(self) -> None:
+        if self.spec.role == "subagent" and self.backend.subagent_close_gate is not None:
+            await self.backend.subagent_close_gate.wait()
         self.closed = True
 
 
@@ -202,6 +204,9 @@ class FakeBackend:
         interrupt_gate: asyncio.Event | None = None,
         interrupt_error: Exception | None = None,
         subagents: dict[str, Sequence[Step]] | None = None,
+        subagent_open_error: Exception | None = None,
+        subagent_open_gate: asyncio.Event | None = None,
+        subagent_close_gate: asyncio.Event | None = None,
     ) -> None:
         self.clock = clock
         self.scripts = list(scripts)
@@ -214,8 +219,17 @@ class FakeBackend:
         self.sessions: list[FakeSession] = []
         # A Subagent's script, by its brief.
         self.subagent_scripts = dict(subagents or {})
+        self.subagent_open_error = subagent_open_error
+        # Holds a Subagent's open, or its session's close, until set: a CLI that never answers.
+        self.subagent_open_gate = subagent_open_gate
+        self.subagent_close_gate = subagent_close_gate
 
     async def open(self, spec: SessionSpec) -> FakeSession:
+        if spec.role == "subagent":
+            if self.subagent_open_gate is not None:
+                await self.subagent_open_gate.wait()
+            if self.subagent_open_error is not None:
+                raise self.subagent_open_error
         error = self.orchestrator_open_error if spec.role == "orchestrator" else self.open_error
         if error is not None:
             raise error
@@ -312,8 +326,14 @@ class FakeWorkspace:
         self.released: list[Path] = []
         # What describe() says is on each worktree's branch.
         self.on_branch: dict[Path, str] = {}
+        self.scratches: list[Path] = []
+        self.discarded: list[Path] = []
+        # Why discard() keeps a scratch worktree, by path; one not listed is removed.
+        self.keep: dict[Path, str] = {}
 
     async def repo(self, name: str) -> tuple[str, Path]:
+        # A real workspace awaits git here, so another spawn may run meanwhile.
+        await asyncio.sleep(0)
         short = name.removeprefix("pumpkit-io/")
         if short not in self.org:
             raise Refusal(f"{name} is outside the Org pumpkit-io.")
@@ -328,9 +348,20 @@ class FakeWorkspace:
         self.locks[path] = holder
         return path, branch
 
+    async def scratch(self, clone: Path, name: str, holder: str) -> Path:
+        path = Path("/wt") / clone.name / name
+        self.scratches.append(path)
+        self.locks[path] = holder
+        return path
+
     async def release(self, worktree: Path) -> None:
         self.released.append(worktree)
         self.locks.pop(worktree, None)
+
+    async def discard(self, worktree: Path) -> str | None:
+        self.locks.pop(worktree, None)
+        self.discarded.append(worktree)
+        return self.keep.get(worktree)
 
     async def describe(self, worktree: Path) -> str:
         return self.on_branch.get(worktree, "No commits beyond origin/main.")

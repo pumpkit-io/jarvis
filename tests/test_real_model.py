@@ -224,10 +224,15 @@ async def test_max_turns_caps_each_message_not_the_whole_session() -> None:
     assert outcomes == ["completed", "completed", "completed"]
 
 
+@pytest.mark.parametrize("hooks_off_in", [None, "settings.json", "settings.local.json"])
 async def test_a_subagent_skips_permissions_without_voice_tools_and_its_mcp_guard_refuses_a_connector(
-    tmp_path: Path,
+    tmp_path: Path, hooks_off_in: str | None
 ) -> None:
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    if hooks_off_in:
+        # A repo that turns its hooks off must not turn off the guard: it is an SDK callback, not a settings hook.
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".claude" / hooks_off_in).write_text('{"disableAllHooks": true}')
     settings = load_settings(Path(__file__).resolve().parents[1], os.environ)
     subagent = Subagent("S1", "T1", "scratch", "Probe", "brief", "haiku", "low", tmp_path, 0.0)
     cli = shutil.which("claude")

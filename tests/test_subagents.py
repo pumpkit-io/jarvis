@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from jarvis_hub.subagents import Subagent, Subagents, SubagentSetup
 from tests.fakes import (
     AwaitInterrupt,
     FakeBackend,
@@ -23,6 +24,7 @@ from tests.fakes import (
     Typist,
     lines,
     make_hub,
+    subagent_spec,
     until,
 )
 
@@ -162,24 +164,73 @@ async def test_a_repo_outside_the_org_is_refused_and_a_missing_one_is_cloned_fir
     assert json.loads(started.result or "")["branch"] is None
     assert workspace.clones == ["motion-studio"] and workspace.worktrees == []
     [session] = backend.all_sessions("subagent")
-    assert session.received == ["b"] and session.spec.cwd == Path("/org/motion-studio")
+    assert session.received == ["b"] and session.spec.cwd == Path("/wt/motion-studio/read-fix-typo-x-in-pumpkit")
+
+
+async def test_a_read_only_subagent_works_in_a_worktree_of_its_own_removed_when_it_ends(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    workspace = FakeWorkspace()
+    scratch = Path("/wt/pumpkit/read-what-changed")
+    workspace.keep[Path("/wt/pumpkit/read-what-changed-2")] = "it has changes"
+    backend = FakeBackend(
+        clock,
+        [[Text("On it."), delegate("What changed in pumpkit?")]],
+        orchestrator=[
+            [spawn(brief="a", title="What changed", writes=False)],
+            [report("T1", "Looked.")],
+        ],
+    )
+    hub = make_hub(backend, output, metrics, workspace=workspace)
+
+    await hub.start()
+    await hub.run(lines(clock, "What changed in pumpkit?"))
+
+    assert workspace.scratches == [scratch] and workspace.discarded == [scratch]
+    assert workspace.locks == {} and workspace.released == []
+    [session] = backend.all_sessions("subagent")
+    assert session.spec.cwd == scratch
+    [event] = subagent_events(backend)
+    assert "kept" not in event
+
+
+async def test_a_read_only_worktree_that_cannot_be_removed_is_named_in_the_report(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    workspace = FakeWorkspace()
+    scratch = Path("/wt/pumpkit/read-what-changed")
+    workspace.keep[scratch] = "it has untracked files"
+    backend = FakeBackend(
+        clock,
+        [[Text("On it."), delegate("What changed in pumpkit?")]],
+        orchestrator=[[spawn(brief="a", title="What changed", writes=False)], [report("T1", "Looked.")]],
+    )
+    hub = make_hub(backend, output, metrics, workspace=workspace)
+
+    await hub.start()
+    await hub.run(lines(clock, "What changed in pumpkit?"))
+
+    [event] = subagent_events(backend)
+    assert f"Its read-only worktree {scratch} was kept: it has untracked files" in event
 
 
 @pytest.mark.parametrize(
-    ("request_words", "overrides", "max_effort", "refusal"),
+    ("typed", "delegated", "overrides", "max_effort", "refusal"),
     [
-        (TYPO, {"effort": "max", "model": "opus"}, "max", "max is used only when the User asks for it"),
-        (TYPO + ", at max effort", {"effort": "max", "model": "opus"}, "max", None),
-        (TYPO, {"effort": "high"}, "medium", "high is above JARVIS_MAX_EFFORT=medium"),
-        (TYPO, {"model": "gpt-5"}, "max", "'gpt-5' is not a model"),
+        (TYPO, TYPO, {"effort": "max", "model": "opus"}, "max", "max is used only when the User asks for it"),
+        (TYPO + ", max effort", TYPO, {"effort": "max", "model": "opus"}, "max", None),
+        (TYPO, TYPO + " at max effort", {"effort": "max", "model": "opus"}, "max", "only when the User asks"),
+        (TYPO, TYPO, {"effort": "high"}, "medium", "high is above JARVIS_MAX_EFFORT=medium"),
+        (TYPO, TYPO, {"model": "gpt-5"}, "max", "'gpt-5' is not a model"),
     ],
-    ids=["max unasked", "max asked", "above the cap", "unknown model"],
+    ids=["max unasked", "max asked", "max only in the Talker's rewording", "above the cap", "unknown model"],
 )
 async def test_the_hub_checks_model_and_effort_before_starting_anything(
     clock: FakeClock,
     output: RecordingOutput,
     metrics: RecordingMetrics,
-    request_words: str,
+    typed: str,
+    delegated: str,
     overrides: dict[str, Any],
     max_effort: Any,
     refusal: str | None,
@@ -187,13 +238,13 @@ async def test_the_hub_checks_model_and_effort_before_starting_anything(
     workspace = FakeWorkspace()
     backend = FakeBackend(
         clock,
-        [[Text("On it."), delegate(request_words)]],
+        [[Text("On it."), delegate(delegated)]],
         orchestrator=[[spawn(**overrides), report("T1", "Tried.")], [report("T1", "Done.")]],
     )
     hub = make_hub(backend, output, metrics, workspace=workspace, max_effort=max_effort)
 
     await hub.start()
-    await hub.run(lines(clock, request_words))
+    await hub.run(lines(clock, typed))
 
     [result] = results(backend, "spawn_subagent")
     if refusal is None:
@@ -462,3 +513,183 @@ async def test_closing_the_hub_stops_running_subagents_and_keeps_their_branches(
 
     [session] = backend.all_sessions("subagent")
     assert session.closed and workspace.released == [Path("/wt/pumpkit/fix-typo-x-in-pumpkit")]
+
+
+async def test_the_users_follow_up_turn_can_ask_for_max_effort_on_the_same_task(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    backend = FakeBackend(
+        clock,
+        [
+            [Text("On it."), delegate(TYPO)],
+            [Text("Max effort needs your word, sir.")],
+            [Text("Right."), delegate("Redo it harder", "T1")],
+        ],
+        orchestrator=[
+            [spawn(effort="max", model="opus"), report("T1", "Max needs your ask.", needs_user=True)],
+            [spawn(effort="max", model="opus")],
+            [report("T1", "Done.")],
+        ],
+    )
+    hub = make_hub(backend, output, metrics)
+
+    await hub.start()
+    typist = Typist(clock)
+    running = asyncio.create_task(hub.run(typist.lines()))
+    typist.type(TYPO)
+    await until(lambda: len(output.replies) == 2)
+    typist.type("Yes, use maximum effort on it.")
+    typist.end()
+    await running
+
+    refused, started = results(backend, "spawn_subagent")
+    assert "only when the User asks" in (refused.result or "")
+    assert json.loads(started.result or "")["subagent_id"] == "S1"
+
+
+@pytest.mark.parametrize("how", ["open fails", "cancelled at once"])
+async def test_a_subagent_that_ends_at_once_does_not_fail_the_task_and_its_event_still_arrives(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, how: str
+) -> None:
+    first_turn: list[Any] = [spawn()]
+    if how == "cancelled at once":
+        first_turn.append(Tool("cancel_subagent", {"subagent_id": "S1"}))
+    backend = FakeBackend(
+        clock,
+        [[Text("On it."), delegate(TYPO)], [Text("It ended, sir.")]],
+        orchestrator=[first_turn, [report("T1", "The typo fix ended early.")]],
+        subagents={BRIEF: [AwaitInterrupt()]},
+        subagent_open_error=RuntimeError("the CLI is missing") if how == "open fails" else None,
+    )
+    hub = make_hub(backend, output, metrics)
+
+    await hub.start()
+    await hub.run(lines(clock, TYPO))
+
+    [event] = subagent_events(backend)
+    status = "failed" if how == "open fails" else "cancelled"
+    assert event.startswith(f'<event source="subagent" id="S1" task="T1" status="{status}">')
+    talker = backend.session("talker").received
+    assert not [m for m in talker if "T1 failed" in m], talker
+    assert output.replies[-1] == "It ended, sir."
+    assert "Last report: The typo fix ended early." in await hub._status({})  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_an_orchestrator_failure_while_subagents_run_reaches_the_user_and_the_task_goes_on(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    release = asyncio.Event()
+    backend = FakeBackend(
+        clock,
+        [
+            [Text("On it."), delegate(TYPO)],
+            [Text("The Orchestrator stumbled, sir."), Set(release)],
+            [Text("The typo fix is up, sir.")],
+        ],
+        orchestrator=[[spawn(), Fail("overloaded")], [report("T1", "The typo fix is up.")]],
+        subagents={BRIEF: [Gate(release), Text("Done.")]},
+    )
+    hub = make_hub(backend, output, metrics)
+
+    await hub.start()
+    await hub.run(lines(clock, TYPO))
+
+    talker = backend.session("talker").received
+    assert any("The Orchestrator failed on T1: overloaded. Its Subagents keep working" in m for m in talker), talker
+    assert [e.split('status="')[1].split('"')[0] for e in subagent_events(backend)] == ["done"]
+    assert output.replies[-1] == "The typo fix is up, sir."
+
+
+async def test_two_spawns_in_flight_get_different_ids(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    subagents = Subagents(
+        setup=SubagentSetup(session=subagent_spec, workspace=FakeWorkspace()),
+        backend=FakeBackend(clock),
+        clock=clock,
+        on_end=lambda s: None,
+        on_over_time=lambda s: None,
+    )
+    args = {"repo": "pumpkit", "title": "One", "brief": "b", "model": "haiku", "effort": "low", "writes": False}
+    one, two = await asyncio.gather(
+        subagents.prepare("T1", args, []), subagents.prepare("T1", {**args, "title": "Two"}, [])
+    )
+    assert isinstance(one, Subagent) and isinstance(two, Subagent)
+    assert (one.id, two.id) == ("S1", "S2")
+
+
+async def test_a_subagent_being_stopped_is_not_reported_over_time(clock: FakeClock) -> None:
+    release = asyncio.Event()
+    over: list[Subagent] = []
+    ended: list[Subagent] = []
+    backend = FakeBackend(clock, subagents={"b": [Gate(release), Text("Done.")]})
+    subagents = Subagents(
+        setup=SubagentSetup(session=subagent_spec, workspace=FakeWorkspace(), time_limit=60),
+        backend=backend,
+        clock=clock,
+        on_end=ended.append,
+        on_over_time=over.append,
+    )
+    args = {"repo": "pumpkit", "title": "T", "brief": "b", "model": "haiku", "effort": "low", "writes": True}
+    subagent = await subagents.prepare("T1", args, [])
+    assert isinstance(subagent, Subagent)
+    subagents.start(subagent)
+    await until(lambda: backend.all_sessions("subagent"))
+    subagents.cancel(subagent.id)
+    await asyncio.sleep(0.01)
+    clock.advance(60)
+    await asyncio.sleep(0.01)
+    release.set()
+    await until(lambda: ended)
+    assert over == []
+
+
+async def test_closing_does_not_hang_on_a_subagent_whose_session_never_opens(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    workspace = FakeWorkspace()
+    backend = FakeBackend(
+        clock,
+        [[Text("On it."), delegate(TYPO)]],
+        orchestrator=[[spawn()]],
+        subagent_open_gate=asyncio.Event(),
+    )
+    hub = make_hub(backend, output, metrics, workspace=workspace)
+
+    await hub.start()
+    typist = Typist(clock)
+    running = asyncio.create_task(hub.run(typist.lines()))
+    typist.type(TYPO)
+    await until(lambda: results(backend, "spawn_subagent"))
+    async with asyncio.timeout(1):
+        await hub.close()
+    running.cancel()
+
+    assert workspace.released == [Path("/wt/pumpkit/fix-typo-x-in-pumpkit")] and not workspace.locks
+
+
+async def test_a_run_cut_off_at_close_still_releases_its_lock_and_ends(
+    clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("jarvis_hub.subagents.STOP_GRACE", 0.01)
+    workspace = FakeWorkspace()
+    ended: list[Subagent] = []
+    backend = FakeBackend(clock, subagents={"b": [AwaitInterrupt()]}, subagent_close_gate=asyncio.Event())
+    subagents = Subagents(
+        setup=SubagentSetup(session=subagent_spec, workspace=workspace),
+        backend=backend,
+        clock=clock,
+        on_end=ended.append,
+        on_over_time=lambda s: None,
+    )
+    args = {"repo": "pumpkit", "title": "T", "brief": "b", "model": "haiku", "effort": "low", "writes": True}
+    subagent = await subagents.prepare("T1", args, [])
+    assert isinstance(subagent, Subagent)
+    subagents.start(subagent)
+    await until(lambda: backend.all_sessions("subagent"))
+
+    async with asyncio.timeout(1):
+        await subagents.close()
+
+    assert [s.state for s in ended] == ["cancelled"]
+    assert workspace.released == [subagent.cwd] and not workspace.locks
