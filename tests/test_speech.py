@@ -1,6 +1,7 @@
 """Spoken replies, driven through the Hub with a fake synthesiser and a recording player."""
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator
 
 import pytest
@@ -491,3 +492,54 @@ async def test_interrupting_after_the_text_has_ended_still_stops_the_speech(
     assert player.pending() == 0
     assert "stop" in player.events
     await speech.close()
+
+
+async def test_the_holding_line_counts_from_when_the_talker_starts_on_a_line(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, speech: Speech, player: RecordingPlayer
+) -> None:
+    release = asyncio.Event()
+    backend = FakeBackend(clock, [[Text("First, sir. "), Wait(3.0), Gate(release)], [Wait(1.0), Text("Second, sir.")]])
+    hub = speaking_hub(backend, output, metrics, speech)
+
+    await hub.start()
+    running = asyncio.create_task(hub.run(lines(clock, "One", "Two")))
+    await until(lambda: player.texts == ["First, sir."])
+    await speech.idle()
+    release.set()
+    await running
+    await speech.idle()
+
+    assert player.texts == ["First, sir.", "Second, sir."]
+
+
+async def test_idle_gives_up_on_audio_that_stops_playing(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, tts: FakeTts
+) -> None:
+    player = RecordingPlayer(hold=True)
+    speech = Speech(tts, player, clock, metrics=metrics, notice=output.notice)
+    speech.start()
+    speech.say("startup", "en")
+    await until(lambda: player.texts == ["At your service, sir."])
+
+    idling = asyncio.create_task(speech.idle())
+    await asyncio.sleep(0.01)
+    assert not idling.done()
+    clock.advance(5.0)
+
+    await until(idling.done)
+    await speech.close()
+
+
+async def test_a_voice_still_loading_never_keeps_the_process_from_exiting(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, player: RecordingPlayer
+) -> None:
+    tts = FakeTts()
+    tts.hold.clear()
+    speech = Speech(tts, player, clock, metrics=metrics, notice=output.notice)
+    speech.start()
+
+    await asyncio.wait_for(speech.close(), timeout=1)
+
+    synthesis = [t for t in threading.enumerate() if t.name.startswith("tts")]
+    assert synthesis and all(t.daemon for t in synthesis)
+    tts.hold.set()

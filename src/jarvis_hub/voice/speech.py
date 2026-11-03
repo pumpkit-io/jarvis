@@ -6,10 +6,12 @@ sentence n plays and the player starts each clip the moment the one before it en
 
 import asyncio
 import contextlib
+import queue
+import threading
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Executor, Future
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, ParamSpec, Protocol, TypeVar
 
 import numpy as np
 
@@ -34,6 +36,9 @@ HOLDING_LINE_AFTER = 1.5
 # A delta ending on "sir." may wait half a second for the next one; this long without one, the sentence goes.
 SETTLE = 0.1
 
+# With queued audio this long unplayed, as from a paused player or a device that stopped pulling, `idle` gives up.
+STALLED = 2.0
+
 
 class SpeechClock(Protocol):
     def now(self) -> float: ...
@@ -43,6 +48,39 @@ class SpeechClock(Protocol):
 
 class Metrics(Protocol):
     def record(self, entry: dict[str, Any]) -> None: ...
+
+
+P = ParamSpec("P")
+T = TypeVar("T")
+
+
+class _DaemonThread(Executor):
+    """One thread for every call, a daemon so a model download still running never holds up the process's exit."""
+
+    def __init__(self, name: str) -> None:
+        self._jobs: queue.SimpleQueue[Callable[[], None] | None] = queue.SimpleQueue()
+        threading.Thread(target=self._run, name=name, daemon=True).start()
+
+    def submit(self, fn: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs) -> "Future[T]":
+        future: Future[T] = Future()
+
+        def job() -> None:
+            if not future.set_running_or_notify_cancel():
+                return
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except BaseException as e:
+                future.set_exception(e)
+
+        self._jobs.put(job)
+        return future
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        self._jobs.put(None)
+
+    def _run(self) -> None:
+        while (job := self._jobs.get()) is not None:
+            job()
 
 
 def chime(sample_rate: int) -> Samples:
@@ -109,7 +147,7 @@ class Speech:
         self._notice = notice
         self._holding_line_after = holding_line_after
         # One thread: MLX ties its streams to the thread that loaded the model.
-        self._thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts")
+        self._thread = _DaemonThread("tts")
         self._queue: asyncio.Queue[_Say | _Cached | _End] = asyncio.Queue()
         self._cache: dict[tuple[ClipName, Lang], Clip] = {}
         self._reply: _Reply | None = None
@@ -129,11 +167,14 @@ class Speech:
         self._queue.put_nowait(_Cached(name, lang))
 
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None) -> None:
-        """A new reply in `lang`. With `heard_at`, when the User's turn ended, the holding line covers a slow start."""
+        """A new reply in `lang`. With `heard_at`, when the User's turn ended, the holding line covers a slow start.
+
+        The holding line counts from now, so a line that waited behind a busy Talker is not answered with it at once.
+        """
         self._cancel_holding_line()
         self._reply = _Reply(turn, lang, self._clock.now(), heard_at)
         if heard_at is not None:
-            self._holding_line = asyncio.create_task(self._hold_the_line(self._reply, heard_at))
+            self._holding_line = asyncio.create_task(self._hold_the_line(self._reply))
 
     def feed(self, text: str) -> None:
         reply = self._reply
@@ -179,8 +220,13 @@ class Speech:
             with contextlib.suppress(Exception):
                 await self._loading
         await self._queue.join()
-        while self._player.pending() > 0:
-            await asyncio.sleep(0.05)
+        left, since = self._player.pending(), self._clock.now()
+        while left > 0:
+            await self._clock.sleep(0.05)
+            if (now_left := self._player.pending()) < left:
+                left, since = now_left, self._clock.now()
+            elif self._clock.now() - since >= STALLED:
+                return
 
     async def close(self) -> None:
         self._cancel_holding_line()
@@ -189,7 +235,7 @@ class Speech:
             self._worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._worker
-        self._thread.shutdown(wait=False, cancel_futures=True)
+        self._thread.shutdown(wait=False)
         self._player.close()
 
     def _say(self, chunks: list[str]) -> None:
@@ -263,8 +309,8 @@ class Speech:
             reply.audio_s += clip.seconds
         self._player.play(clip, starts_reply=starts_reply)
 
-    async def _hold_the_line(self, reply: _Reply, heard_at: float) -> None:
-        await self._clock.sleep(max(0.0, heard_at + self._holding_line_after - self._clock.now()))
+    async def _hold_the_line(self, reply: _Reply) -> None:
+        await self._clock.sleep(self._holding_line_after)
         quiet = self._queue.empty() and not self._synthesising and self._player.pending() == 0
         if self._reply is reply and reply.first_chunk is None and quiet:
             reply.holding_line = True
