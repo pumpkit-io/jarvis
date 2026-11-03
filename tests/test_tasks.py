@@ -236,6 +236,46 @@ async def test_cancel_of_an_unknown_or_finished_task_says_so(
     assert [r.result for r in results(backend, "talker", "cancel")] == ["T1 is already done.", "There is no Task T9."]
 
 
+async def test_a_failed_task_with_a_follow_up_waiting_can_be_cancelled_and_the_follow_up_never_runs(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    fail_now, release = asyncio.Event(), asyncio.Event()
+    backend = FakeBackend(
+        clock,
+        [
+            [Text("On it."), delegate()],
+            [Text("That too."), delegate("Is CI green on jarvis?")],
+            [Text("Adding that."), delegate("And the drafts?", task_id="T1"), Set(fail_now)],
+            [Text("The PR look-up failed, sir.")],
+            [Text("Dropping it."), Tool("cancel", {"task_id": "T1"}), Set(release)],
+            [Text("CI is green, sir.")],
+        ],
+        orchestrator=[
+            [Gate(fail_now), Raise(ConnectionError("pipe closed"))],
+            [Gate(release), report("T2", "CI is green.")],
+            [report("T1", "One draft.")],
+        ],
+    )
+    hub = make_hub(backend, output, metrics)
+    typist = Typist(clock)
+
+    await hub.start()
+    running = asyncio.create_task(hub.run(typist.lines()))
+    typist.type(ASK_PRS)
+    typist.type("Is CI green on jarvis?")
+    typist.type("And the drafts?")
+    await until(lambda: len(output.replies) == 4)
+    typist.type("Forget the PR one")
+    typist.end()
+    await asyncio.wait_for(running, 1)
+
+    assert results(backend, "talker", "cancel")[0].result == "Cancelled T1."
+    assert [m.splitlines()[0] for m in backend.session("orchestrator").received] == [
+        '<task id="T1">',
+        '<task id="T2">',
+    ]
+
+
 async def test_an_answer_to_an_orchestrator_question_continues_the_same_task(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
 ) -> None:

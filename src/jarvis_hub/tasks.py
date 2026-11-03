@@ -47,12 +47,12 @@ class Task:
             self.state = "needs_user" if needs_user else "done"
 
     def fail(self, reason: str) -> None:
-        self.state = "failed"
         self.last_report = f"Failed: {reason}."
+        self.state = "queued" if self.waiting else "failed"
 
     def cancel(self) -> bool:
-        """False when the Task had already finished."""
-        if self.state in FINISHED:
+        """False when the Task had already finished with nothing left in the queue for it."""
+        if self.cancelled or (self.state in FINISHED and not self.waiting):
             return False
         self.state = "cancelled"
         return True
