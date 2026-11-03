@@ -44,6 +44,11 @@ class SmartTurn:
         return float(self.session.run(None, {"input_features": feats})[0][0].item())
 
 
+def pause_ms(seconds: float) -> int:
+    """A pause in whole milliseconds, so whether it reaches Smart Turn and how it is scored never disagree over float error."""
+    return round(seconds * 1000)
+
+
 def end_of_turn(p_complete: dict, p_pause: dict, pause_s: dict, infer_ms: float) -> dict:
     """End-of-turn latency on complete turns and premature cuts on real pauses, from the model's verdicts.
 
@@ -51,11 +56,12 @@ def end_of_turn(p_complete: dict, p_pause: dict, pause_s: dict, infer_ms: float)
     """
     ends = [VAD_SILENCE_MS + infer_ms + (0 if p > 0.5 else EXTENSION_MS) for p in p_complete.values()]
     mean = sum(ends) / len(ends) if ends else None
-    pauses = {k: s * 1000 for k, s in pause_s.items() if s is not None}
+    pauses = {k: pause_ms(s) for k, s in pause_s.items() if s is not None}
 
     def cut_by_smart_turn(k):
         # A pause shorter than VAD_SILENCE_MS never reaches Smart Turn, so it has no verdict.
-        return pauses[k] >= VAD_SILENCE_MS and (p_pause[k] > 0.5 or pauses[k] >= VAD_SILENCE_MS + infer_ms + EXTENSION_MS)
+        judged_complete = pauses[k] >= VAD_SILENCE_MS and p_pause.get(k, 0.0) > 0.5
+        return judged_complete or pauses[k] >= VAD_SILENCE_MS + infer_ms + EXTENSION_MS
 
     premature = {"smart_turn": f"{sum(map(cut_by_smart_turn, pauses))}/{len(pauses)}"}
     premature |= {f"fixed_{t}ms": f"{sum(ms >= t for ms in pauses.values())}/{len(pauses)}" for t in FIXED_THRESHOLDS_MS}
@@ -104,8 +110,8 @@ def pause_turns(folder: Path) -> tuple[dict, dict, dict]:
         complete[take.id] = turn_audio(audio, speech_end_s(audio))
         if take.paused:
             pause = find_pause(audio)
-            pauses[take.id] = None if pause is None else round(pause[1] - pause[0], 2)
-            if pause and pause[1] - pause[0] >= VAD_SILENCE_MS / 1000:
+            pauses[take.id] = None if pause is None else pause_ms(pause[1] - pause[0]) / 1000
+            if pause and pause_ms(pauses[take.id]) >= VAD_SILENCE_MS:
                 cut[take.id] = turn_audio(audio, pause[0])
     return cut, complete, pauses
 

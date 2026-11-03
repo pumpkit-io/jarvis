@@ -256,6 +256,26 @@ def test_a_barge_in_counts_only_speech_the_same_jarvis_audio_did_not_already_tri
     assert out == {"user_barge_ins_detected": "1/2", "matching_jarvis_span_triggered": "1/2"}
 
 
+def test_a_pause_of_exactly_the_vad_silence_is_cut_and_scored_alike():
+    folder = SCRATCH / "pauses-boundary"
+    common.save_16k(folder / "p_en01.wav", tone(200, 2.0, SR))
+    saved = bench_smart_turn.find_pause
+    try:
+        # 0.57 - 0.07 is 0.49999999999999994 in floating point, yet the pause is 500 ms long.
+        bench_smart_turn.find_pause = lambda audio: (0.07, 0.57)
+        cut, _, pauses = bench_smart_turn.pause_turns(folder)
+    finally:
+        bench_smart_turn.find_pause = saved
+    assert set(cut) == {"p_en01"} and pauses == {"p_en01": 0.5}
+    out = bench_smart_turn.end_of_turn({"a": 0.9}, {"p_en01": 0.8}, pauses, infer_ms=15)
+    assert out["premature_cuts"]["smart_turn"] == "1/1"
+
+
+def test_a_pause_long_enough_but_without_a_verdict_is_not_read_as_one():
+    out = bench_smart_turn.end_of_turn({"a": 0.9}, {}, {"x": 0.6}, infer_ms=15)
+    assert out["premature_cuts"]["smart_turn"] == "0/1"
+
+
 def test_smart_turn_hears_the_turn_up_to_half_a_second_into_the_silence():
     rng = np.random.default_rng(0)
     room_tone = rng.normal(0, 0.002, int(0.8 * SR)).astype(np.float32)
