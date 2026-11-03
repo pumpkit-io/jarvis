@@ -43,14 +43,15 @@ def talker_tools(
         ),
         HubTool(
             "status",
-            "List this session's Tasks: state, age, request and last report. Answered at once.",
+            "List this session's Tasks: state, age, request and last report, with their Subagents, Watchers and "
+            "Checks. Answered at once.",
             object_schema({}),
             status,
         ),
         HubTool(
             "cancel",
-            "Cancel a Task by id.",
-            object_schema({"task_id": {**STRING, "description": "Such as T3."}}, ("task_id",)),
+            "Cancel a Task by id, or only one Watcher or Check of it; the Task then goes on.",
+            object_schema({"task_id": {**STRING, "description": "Such as T3, or W1 or C2 for one wait."}}, ("task_id",)),
             cancel,
         ),
         HubTool(

@@ -460,6 +460,9 @@ async def test_each_role_gets_only_its_own_hub_tools(
         "spawn_subagent",
         "list_subagents",
         "cancel_subagent",
+        "watch",
+        "schedule_check",
+        "cancel_wait",
     ]
 
 

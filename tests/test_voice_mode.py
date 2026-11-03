@@ -716,3 +716,34 @@ async def test_a_wake_word_queued_as_news_claims_the_voice_interrupts_the_news(r
     assert NEWS not in rig.player.texts
     assert rig.states()[-7:-4] == ["idle", "announce", "listening"]
     assert "stop" in rig.player.events
+
+
+async def test_news_from_a_check_that_comes_due_mid_exchange_waits_until_jarvis_is_quiet(rig_for: MakeRig) -> None:
+    check = {"after_seconds": 60, "note": "Has Ada reviewed pumpkit#42?", "max_repeats": 1}
+    report = {"task_id": "T1", "spoken": "Ada approved pumpkit 42.", "needs_user": False}
+    rig: Rig = await rig_for(
+        [Text("I'll keep an eye on it, sir."), Tool("delegate", {"request": "Tell me when Ada reviews", "context": ""})],
+        [Text("Green, sir.")],
+        [Text("Ada has approved it, sir.")],
+        orchestrator=[[Tool("schedule_check", check)], [Tool("report", report)]],
+    )
+
+    rig.audio.wake()
+    rig.audio.say("Tell me when Ada reviews pumpkit 42")
+    await until(lambda: rig.state == "follow_up")
+    await rig.advance(6)
+    assert rig.state == "idle"
+    await rig.advance(50)
+    rig.audio.wake()
+    rig.audio.say("Is the CI green?")
+    await until(lambda: rig.state == "follow_up")
+    await rig.advance(4)
+    await until(lambda: len(rig.backend.session("orchestrator").received) == 2)
+    await rig.settle()
+    assert rig.backend.session("orchestrator").received[1].startswith('<event source="timer" id="C1" task="T1"')
+    assert rig.state == "follow_up" and "Ada has approved it, sir." not in rig.output.replies
+
+    await rig.advance(2)
+    await until(lambda: "Ada has approved it, sir." in rig.player.texts and rig.state == "follow_up")
+    assert spoken(rig)[-2:] == ["Green, sir.", "Ada has approved it, sir."]
+    assert rig.states()[-3:] == ["idle", "announce", "follow_up"]

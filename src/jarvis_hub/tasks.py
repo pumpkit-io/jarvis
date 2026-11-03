@@ -41,8 +41,8 @@ class Task:
         self.state = "working"
         return True
 
-    def report(self, spoken: str, *, needs_user: bool, subagents_live: bool) -> None:
-        """`subagents_live`: Subagents of this Task still run, so it keeps working after the report."""
+    def report(self, spoken: str, *, needs_user: bool, live: bool) -> None:
+        """`live`: Subagents, Watchers or Checks of this Task still run, so it keeps working after the report."""
         self.last_report = spoken
         self.reports += 1
         if self.waiting:
@@ -50,13 +50,13 @@ class Task:
         elif needs_user:
             self.state = "needs_user"
         else:
-            self.state = "working" if subagents_live else "done"
+            self.state = "working" if live else "done"
 
-    def fail(self, reason: str, *, subagents_live: bool) -> None:
+    def fail(self, reason: str, *, live: bool) -> None:
         self.last_report = f"Failed: {reason}."
         if self.waiting:
             self.state = "queued"
-        elif not subagents_live:
+        elif not live:
             self.state = "failed"
 
     def cancel(self) -> bool:
@@ -94,7 +94,7 @@ class Tasks:
     def _lines(tasks: Iterable[Task], now: float, subagents: Callable[[str], list[str]]) -> list[str]:
         lines: list[str] = []
         for task in tasks:
-            line = f"{task.id} {task.state.replace('_', ' ')}, started {_ago(now - task.created)} ago: {task.request}"
+            line = f"{task.id} {task.state.replace('_', ' ')}, started {ago(now - task.created)} ago: {task.request}"
             if task.last_report:
                 line += f" | Last report: {task.last_report}"
             lines.append(line)
@@ -106,7 +106,7 @@ def no_task(task_id: object) -> str:
     return f"There is no Task {task_id}."
 
 
-def _ago(seconds: float) -> str:
+def ago(seconds: float) -> str:
     if seconds < 90:
         return f"{max(0, round(seconds))} s"
     if seconds < 90 * 60:

@@ -46,6 +46,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
     "real_model: talks to the real model on the Max subscription; runs only with JARVIS_REAL_MODEL_TESTS=1",
+    "real_github: reads the Org on GitHub through gh; runs only with JARVIS_REAL_GITHUB_TESTS=1",
 ]
 
 [tool.pyright]

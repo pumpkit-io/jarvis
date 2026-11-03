@@ -22,6 +22,7 @@ from jarvis_hub.agents.backend import (
 from jarvis_hub.hub import WARM_UP, Hub, Line
 from jarvis_hub.voice.language import Lang
 from jarvis_hub.subagents import Refusal, Subagent, SubagentSetup
+from jarvis_hub.waits import WaitSetup
 from jarvis_hub.voice.player import Clip, Samples
 from jarvis_hub.voice.state import Heard, SpeechStarted, WakeWord
 
@@ -425,6 +426,8 @@ def make_hub(
     max_effort: Any = "max",
     cap: int = 3,
     time_limit: float = 3600.0,
+    runner: "StubRunner | None" = None,
+    watch_limit: float = 6 * 3600.0,
     **options: Any,
 ) -> Hub:
     setup = SubagentSetup(
@@ -443,8 +446,30 @@ def make_hub(
         output=output,
         metrics=metrics,
         subagents=setup,
+        waits=WaitSetup(org="pumpkit-io", runner=runner or StubRunner(), watch_limit=watch_limit),
         **options,
     )
+
+
+class StubRunner:
+    """Stands in for a Watcher's gh process: each command blocks until the test ends it with `finish`."""
+
+    def __init__(self) -> None:
+        self.started: list[tuple[str, ...]] = []
+        self.killed: list[tuple[str, ...]] = []
+        self._ends: dict[tuple[str, ...], asyncio.Future[tuple[int, str]]] = {}
+
+    async def __call__(self, argv: tuple[str, ...]) -> tuple[int, str]:
+        self.started.append(argv)
+        end = self._ends[argv] = asyncio.get_running_loop().create_future()
+        try:
+            return await end
+        except asyncio.CancelledError:
+            self.killed.append(argv)
+            raise
+
+    def finish(self, index: int, code: int, output: str) -> None:
+        self._ends[self.started[index]].set_result((code, output))
 
 
 class Typist:

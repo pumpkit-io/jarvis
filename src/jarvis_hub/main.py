@@ -34,6 +34,7 @@ from jarvis_hub.voice.speech import Speech, SpeechClock
 from jarvis_hub.voice.state import Timing
 from jarvis_hub.voice.tts import KokoroSynthesizer, Synthesizer
 from jarvis_hub.voice.voice_mode import AudioInput, VoiceMode, merge
+from jarvis_hub.waits import WaitSetup
 from jarvis_hub.workspace import default_workspace
 
 PROMPT = "› "
@@ -264,6 +265,7 @@ async def text_mode(
         output=output,
         metrics=metrics,
         subagents=subagent_setup(settings),
+        waits=WaitSetup(org=settings.org),
         speech=speech,
         talker_restart_at=settings.talker_restart_at,
     )
@@ -333,6 +335,7 @@ async def voice_mode(
         output=output,
         metrics=metrics,
         subagents=subagent_setup(settings),
+        waits=WaitSetup(org=settings.org),
         speech=conversation.speech,
         speak_typed=False,
         on_end_conversation=conversation.end_conversation,

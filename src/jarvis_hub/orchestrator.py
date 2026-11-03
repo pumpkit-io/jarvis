@@ -4,6 +4,7 @@ from jarvis_hub.agents.backend import STRING, HubTool, SessionSpec, ToolHandler,
 from jarvis_hub.config import Settings
 from jarvis_hub.prompts import render
 from jarvis_hub.read_only import check, describe_reads
+from jarvis_hub.waits import MAX_REPEATS, WATCH_KINDS
 
 # Model turns per message: enough for a look-up of a few commands and a report.
 MAX_TURNS = 12
@@ -42,6 +43,9 @@ def orchestrator_tools(
     spawn_subagent: ToolHandler,
     list_subagents: ToolHandler,
     cancel_subagent: ToolHandler,
+    watch: ToolHandler,
+    schedule_check: ToolHandler,
+    cancel_wait: ToolHandler,
 ) -> tuple[HubTool, ...]:
     return (
         HubTool(
@@ -88,5 +92,40 @@ def orchestrator_tools(
             "Stop a Subagent. Its worktree and branch are kept, and its report says what is on the branch.",
             object_schema({"subagent_id": {**STRING, "description": "Such as S2."}}, ("subagent_id",)),
             cancel_subagent,
+        ),
+        HubTool(
+            "watch",
+            "Set a Watcher on the Task you are on: the Hub waits, at no cost, until a CI run or a PR's checks finish, "
+            "and its end arrives as a watcher event. ci_run takes a run id (pumpkit#12345678, from gh run list), "
+            "pr_checks a PR number (pumpkit#42).",
+            object_schema(
+                {
+                    "kind": {**STRING, "enum": list(WATCH_KINDS)},
+                    "target": {**STRING, "description": "An Org repo and a number, such as pumpkit#42."},
+                },
+                ("kind", "target"),
+            ),
+            watch,
+        ),
+        HubTool(
+            "schedule_check",
+            "Set a Check on the Task you are on: a timer event after after_seconds (60 at least), then again after "
+            "twice as long each time, max_repeats times in all. Only for a change nothing announces, such as a "
+            "human review.",
+            object_schema(
+                {
+                    "after_seconds": {"type": "integer", "minimum": 60},
+                    "note": {**STRING, "description": "What to look at when it comes due."},
+                    "max_repeats": {"type": "integer", "minimum": 1, "maximum": MAX_REPEATS},
+                },
+                ("after_seconds", "note"),
+            ),
+            schedule_check,
+        ),
+        HubTool(
+            "cancel_wait",
+            "Stop a Watcher or Check you no longer need.",
+            object_schema({"wait_id": {**STRING, "description": "Such as W1 or C2."}}, ("wait_id",)),
+            cancel_wait,
         ),
     )

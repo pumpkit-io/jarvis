@@ -86,6 +86,11 @@ def check(command: str, environ: Mapping[str, str] = os.environ) -> Argv | Refus
     words = _checked(command)
     if isinstance(words, Refused):
         return words
+    return confined(words, environ)
+
+
+def confined(words: Argv, environ: Mapping[str, str] = os.environ) -> Argv:
+    """`words` behind `env -i`, with only RUN_ENV from `environ`: what every gh or git call the Hub makes runs as."""
     kept = [f"{k}={v}" for k, v in environ.items() if k in RUN_ENV or k.startswith("LC_")]
     return (ENV, "-i", *kept, *words)
 

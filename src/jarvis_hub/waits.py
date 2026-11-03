@@ -1,0 +1,295 @@
+"""Watchers and Checks (ADR 0003): how a Task waits on the world without any model call until something happens.
+
+A Watcher runs one fixed `gh` command that blocks until what it watches ends; a Check is a timer with backoff.
+The Orchestrator names only a kind and a target, never a command.
+"""
+
+import asyncio
+import re
+from collections import deque
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from html import escape
+from typing import Any, Literal, Protocol, cast
+
+from jarvis_hub.agents.backend import Refused
+from jarvis_hub.read_only import Argv, confined
+from jarvis_hub.tasks import ago
+
+WatchKind = Literal["ci_run", "pr_checks"]
+WATCH_KINDS: dict[str, str] = {"ci_run": "CI run", "pr_checks": "checks on PR"}
+WatcherState = Literal["waiting", "succeeded", "failed", "timed_out", "error", "cancelled"]
+CheckState = Literal["waiting", "done", "cancelled"]
+
+# gh asks GitHub again every this many seconds while it watches: calls to the API, never to a model.
+GH_INTERVAL = "30"
+# A run queued behind a stuck runner can wait for days; a Watcher gives up after this and says so.
+WATCH_LIMIT = 6 * 3600.0
+MIN_AFTER = 60.0
+MAX_AFTER = 24 * 3600.0
+# Each repeat waits twice as long as the one before, up to this.
+MAX_INTERVAL = 4 * 3600.0
+MAX_REPEATS = 10
+MAX_WATCHERS = 5
+MAX_CHECKS = 5
+# The last lines a Watcher's command printed travel with its event; gh's progress screens before them do not.
+OUTPUT_LINES = 20
+
+# `pumpkit#42` or `pumpkit-io/pumpkit#42`.
+_TARGET = re.compile(r"(?:(?P<owner>[A-Za-z0-9-]+)/)?(?P<repo>[A-Za-z0-9._-]+)#(?P<number>[1-9][0-9]{0,19})")
+
+Runner = Callable[[Argv], Awaitable[tuple[int, str]]]
+
+
+class WaitClock(Protocol):
+    def now(self) -> float: ...
+
+    async def sleep(self, seconds: float) -> None: ...
+
+
+async def run_confined(words: Argv) -> tuple[int, str]:
+    """Runs gh with no shell and the read-only guard's cut-down environment (ADR 0007): exit code and output tail.
+
+    Cancelled, it kills the process. Its own session keeps a Ctrl-C meant for the Hub from ending it as a failure.
+    """
+    process = await asyncio.create_subprocess_exec(
+        *confined(words),
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
+    )
+    tail: deque[str] = deque(maxlen=OUTPUT_LINES)
+    try:
+        assert process.stdout is not None
+        async for raw in process.stdout:
+            if line := raw.decode(errors="replace").rstrip():
+                tail.append(line)
+        code = await process.wait()
+    except BaseException:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        raise
+    return code, "\n".join(tail)
+
+
+def watch_command(kind: str, target: str, org: str) -> tuple[str, Argv] | Refused:
+    """The target as `repo#number` and the fixed command watching it, or why the request is refused."""
+    if kind not in WATCH_KINDS:
+        return Refused(f"kind is one of {', '.join(WATCH_KINDS)}.")
+    match = _TARGET.fullmatch(target.strip())
+    if match is None or match["repo"] in (".", ".."):
+        return Refused("target is an Org repo and a number, such as pumpkit#42.")
+    if match["owner"] and match["owner"].lower() != org.lower():
+        return Refused(f"{target} is outside the Org {org}.")
+    repo, number = match["repo"], match["number"]
+    where = ("-R", f"{org}/{repo}")
+    if kind == "ci_run":
+        argv = ("gh", "run", "watch", number, *where, "--exit-status", "--compact", "--interval", GH_INTERVAL)
+    else:
+        argv = ("gh", "pr", "checks", number, *where, "--watch", "--fail-fast", "--interval", GH_INTERVAL)
+    return f"{repo}#{number}", argv
+
+
+@dataclass
+class Watcher:
+    id: str
+    task_id: str
+    kind: WatchKind
+    target: str
+    argv: Argv
+    created: float
+    state: WatcherState = "waiting"
+    ended: float | None = None
+    output: str = ""
+
+    def line(self, now: float) -> str:
+        what = f"{WATCH_KINDS[self.kind]} {self.target}"
+        age = ago((self.ended or now) - self.created)
+        if self.state == "waiting":
+            return f"{self.id} watching the {what}, {age} so far"
+        return f"{self.id} {self.state.replace('_', ' ')} after {age}: the {what}"
+
+
+@dataclass
+class Check:
+    id: str
+    task_id: str
+    note: str
+    created: float
+    due: float
+    interval: float
+    max_repeats: int
+    repeats: int = 0
+    state: CheckState = "waiting"
+
+    def line(self, now: float) -> str:
+        if self.state == "waiting":
+            return f"{self.id} check in {ago(self.due - now)} ({self.repeats + 1} of {self.max_repeats}): {self.note}"
+        return f"{self.id} check {self.state} after {self.repeats} of {self.max_repeats}: {self.note}"
+
+
+Wait = Watcher | Check
+
+
+def watcher_event(watcher: Watcher) -> str:
+    """The Orchestrator's news that a Watcher ended, with the last of what its command printed."""
+    text = watcher.output or "No output."
+    return (
+        f'<event source="watcher" id="{watcher.id}" task="{watcher.task_id}" kind="{watcher.kind}" '
+        f'target="{watcher.target}" status="{watcher.state}">{escape(text, quote=False)}</event>'
+    )
+
+
+def check_event(check: Check) -> str:
+    return (
+        f'<event source="timer" id="{check.id}" task="{check.task_id}" repeat="{check.repeats}" '
+        f'of="{check.max_repeats}">{escape(check.note, quote=False)}</event>'
+    )
+
+
+@dataclass(frozen=True)
+class WaitSetup:
+    org: str
+    runner: Runner = run_confined
+    max_watchers: int = MAX_WATCHERS
+    max_checks: int = MAX_CHECKS
+    watch_limit: float = WATCH_LIMIT
+
+
+class Waits:
+    """Every Watcher and Check this launch. `on_watcher_end` hears once of every Watcher that stops, whatever
+    stopped it; `on_check` of every time a Check comes due.
+
+    The records are plain data, so a store can keep them across a restart (ticket #14).
+    """
+
+    def __init__(
+        self,
+        *,
+        setup: WaitSetup,
+        clock: WaitClock,
+        on_watcher_end: Callable[[Watcher], None],
+        on_check: Callable[[Check], None],
+    ) -> None:
+        self._setup = setup
+        self._clock = clock
+        self._on_watcher_end = on_watcher_end
+        self._on_check = on_check
+        self._all: dict[str, Wait] = {}
+        self._runs: dict[str, asyncio.Task[None]] = {}
+        self._watchers = 0
+        self._checks = 0
+
+    def watch(self, task_id: str, kind: str, target: str) -> Watcher | Refused:
+        command = watch_command(kind, target, self._setup.org)
+        if isinstance(command, Refused):
+            return command
+        if len(self._waiting(Watcher)) >= self._setup.max_watchers:
+            return Refused(f"{self._setup.max_watchers} Watchers already wait; cancel one with cancel_wait first.")
+        self._watchers += 1
+        target, argv = command
+        watcher = Watcher(f"W{self._watchers}", task_id, cast(WatchKind, kind), target, argv, self._clock.now())
+        self._start(watcher, self._run_watcher(watcher))
+        # A done callback, so a Watcher cancelled before its run began is still reported once.
+        self._runs[watcher.id].add_done_callback(lambda _: self._watcher_stopped(watcher))
+        return watcher
+
+    def schedule(self, task_id: str, after: Any, note: str, max_repeats: Any) -> Check | Refused:
+        """Sets a Check, its first wait clamped to MIN_AFTER..MAX_AFTER and its repeats to 1..MAX_REPEATS."""
+        note = note.strip()
+        if not note:
+            return Refused("note is required: what to look at when the Check comes due.")
+        try:
+            seconds = min(max(float(after), MIN_AFTER), MAX_AFTER)
+            repeats = min(max(int(max_repeats or 1), 1), MAX_REPEATS)
+        except (TypeError, ValueError):
+            return Refused("after_seconds and max_repeats are numbers.")
+        if len(self._waiting(Check)) >= self._setup.max_checks:
+            return Refused(f"{self._setup.max_checks} Checks already wait; cancel one with cancel_wait first.")
+        self._checks += 1
+        now = self._clock.now()
+        check = Check(f"C{self._checks}", task_id, note, now, now + seconds, seconds, repeats)
+        self._start(check, self._run_check(check))
+        return check
+
+    def get(self, wait_id: object) -> Wait | None:
+        return self._all.get(str(wait_id).strip().upper()) if wait_id else None
+
+    def cancel(self, wait_id: object) -> Wait | str:
+        """The Watcher or Check now cancelled, or why nothing was."""
+        wait = self.get(wait_id)
+        if wait is None:
+            return f"There is no Watcher or Check {wait_id}."
+        if wait.state != "waiting":
+            return f"{wait.id} is already {wait.state.replace('_', ' ')}."
+        wait.state = "cancelled"
+        self._runs[wait.id].cancel()
+        return wait
+
+    def cancel_task(self, task_id: str) -> None:
+        for wait in self.live(task_id):
+            self.cancel(wait.id)
+
+    def live(self, task_id: str) -> list[Wait]:
+        return [w for w in self._all.values() if w.task_id == task_id and w.state == "waiting"]
+
+    def lines(self, task_id: str) -> list[str]:
+        now = self._clock.now()
+        return [w.line(now) for w in self._all.values() if w.task_id == task_id]
+
+    def records(self) -> list[Wait]:
+        return list(self._all.values())
+
+    async def close(self) -> None:
+        runs = [run for run in self._runs.values() if not run.done()]
+        for run in runs:
+            run.cancel()
+        if runs:
+            await asyncio.wait(runs)
+
+    def _waiting(self, kind: type[Watcher] | type[Check]) -> list[Wait]:
+        return [w for w in self._all.values() if isinstance(w, kind) and w.state == "waiting"]
+
+    def _start(self, wait: Wait, run: Awaitable[None]) -> None:
+        self._all[wait.id] = wait
+        self._runs[wait.id] = asyncio.ensure_future(run)
+
+    async def _run_watcher(self, watcher: Watcher) -> None:
+        try:
+            running = asyncio.ensure_future(self._setup.runner(watcher.argv))
+            limit = asyncio.ensure_future(self._clock.sleep(self._setup.watch_limit))
+            try:
+                await asyncio.wait([running, limit], return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                limit.cancel()
+                if not running.done():
+                    running.cancel()
+                    await asyncio.wait([running])
+            if running.cancelled():
+                watcher.state, watcher.output = "timed_out", f"Still not over after {ago(self._setup.watch_limit)}."
+            elif (error := running.exception()) is not None:
+                watcher.state, watcher.output = "error", f"{type(error).__name__}: {error}"
+            else:
+                code, watcher.output = running.result()
+                watcher.state = "succeeded" if code == 0 else "failed"
+        except asyncio.CancelledError:
+            watcher.state = "cancelled"
+            raise
+
+    def _watcher_stopped(self, watcher: Watcher) -> None:
+        watcher.ended = self._clock.now()
+        self._on_watcher_end(watcher)
+
+    async def _run_check(self, check: Check) -> None:
+        while check.state == "waiting":
+            await self._clock.sleep(check.due - self._clock.now())
+            check.repeats += 1
+            if check.repeats >= check.max_repeats:
+                check.state = "done"
+            else:
+                check.interval = min(check.interval * 2, MAX_INTERVAL)
+                check.due = self._clock.now() + check.interval
+            self._on_check(check)
+

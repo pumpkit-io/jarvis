@@ -32,6 +32,7 @@ from jarvis_hub.subagents import Subagent, SubagentSetup, Subagents, ended_event
 from jarvis_hub.talker import talker_tools
 from jarvis_hub.tasks import Task, Tasks, no_task
 from jarvis_hub.voice.language import Lang, detect_language
+from jarvis_hub.waits import Check, Watcher, Waits, WaitSetup, check_event, watcher_event
 
 
 class Clock(Protocol):
@@ -227,6 +228,7 @@ class Hub:
         output: Output,
         metrics: Metrics,
         subagents: SubagentSetup,
+        waits: WaitSetup,
         orchestrator_timeout: float = ORCHESTRATOR_TIMEOUT,
         speech: Speech | None = None,
         speak_typed: bool = True,
@@ -249,6 +251,9 @@ class Hub:
                 spawn_subagent=self._spawn_subagent,
                 list_subagents=self._list_subagents,
                 cancel_subagent=self._cancel_subagent,
+                watch=self._watch,
+                schedule_check=self._schedule_check,
+                cancel_wait=self._cancel_wait,
             ),
         )
         self._backend = backend
@@ -307,6 +312,7 @@ class Hub:
             on_end=self._subagent_ended,
             on_over_time=self._subagent_over_time,
         )
+        self._waits = Waits(setup=waits, clock=clock, on_watcher_end=self._watcher_ended, on_check=self._check_due)
 
     async def start(self) -> None:
         """Open the Talker and warm it in the background (ADR 0006); a line typed meanwhile waits for it."""
@@ -338,6 +344,7 @@ class Hub:
         return await self._talker_gate.interrupt(self._talker, turn)
 
     async def close(self) -> None:
+        await self._waits.close()
         await self._subagents.close()
         for loop in self._loops:
             loop.cancel()
@@ -500,7 +507,7 @@ class Hub:
             self._restart_failed(str(e))
             return None
         try:
-            seed = restart_message(self._tasks.open_status(self._clock.now(), self._subagents.lines), self._exchanges)
+            seed = restart_message(self._tasks.open_status(self._clock.now(), self._task_lines), self._exchanges)
             end = await self._turn(seed, kind="restart", arrived=self._clock.now(), session=session)
         except BaseException:
             with contextlib.suppress(Exception):
@@ -681,8 +688,9 @@ class Hub:
         if not task.cancelled and task.reports == reports:
             if end.outcome != "completed":
                 self._fail(task, end.error or "the Orchestrator's turn was stopped")
-            elif not (self._spawned or task.waiting or self._subagents.live(task.id)):
-                # Without a report, only news still to come (a Subagent's end, a queued message) carries the Task on.
+            elif not (self._spawned or task.waiting or self._live(task.id)):
+                # Without a report, only news still to come (a Subagent's or Watcher's end, a Check, a queued
+                # message) carries the Task on.
                 self._fail(task, "the Orchestrator ended its turn without a report")
         self._record(
             self._orchestrator_spec,
@@ -730,10 +738,9 @@ class Hub:
             yield TurnEnd("failed", error=f"{type(e).__name__}: {e}")
 
     def _fail(self, task: Task, reason: str) -> None:
-        live = bool(self._subagents.live(task.id))
-        task.fail(reason, subagents_live=live)
+        task.fail(reason, live=self._live(task.id))
         text = f"{task.id} failed: {reason}."
-        if live:
+        if self._subagents.live(task.id):
             text = f"The Orchestrator failed on {task.id}: {reason}. Its Subagents keep working and still report."
         message = event_message("hub", text, task.id)
         self._post_news(_TalkerInput(message, "event", self._clock.now()))
@@ -776,9 +783,17 @@ class Hub:
         return json.dumps({"task_id": task.id, "queued": True})
 
     async def _status(self, args: dict[str, Any]) -> str:
-        return self._tasks.status(self._clock.now(), self._subagents.lines)
+        return self._tasks.status(self._clock.now(), self._task_lines)
+
+    def _task_lines(self, task_id: str) -> list[str]:
+        return self._subagents.lines(task_id) + self._waits.lines(task_id)
+
+    def _live(self, task_id: str) -> bool:
+        return bool(self._subagents.live(task_id) or self._waits.live(task_id))
 
     async def _cancel(self, args: dict[str, Any]) -> str:
+        if self._waits.get(args.get("task_id")) is not None:
+            return self._cancel_wait_for_user(args["task_id"])
         task = self._tasks.get(args.get("task_id"))
         if task is None:
             return no_task(args.get("task_id"))
@@ -786,6 +801,7 @@ class Hub:
             return f"{task.id} is already {task.state}."
         for subagent in self._subagents.live(task.id):
             self._subagents.cancel(subagent.id)
+        self._waits.cancel_task(task.id)
         turn = self._orchestrator_gate.turn
         if self._orchestrating == task.id and turn is not None and self._orchestrator is not None:
             await self._orchestrator_gate.interrupt(self._orchestrator, turn)
@@ -817,7 +833,7 @@ class Hub:
             return "spoken is required."
         details = str(args.get("details_markdown") or "").strip() or None
         needs_user = args.get("needs_user") in (True, "true")
-        task.report(spoken, needs_user=needs_user, subagents_live=bool(self._subagents.live(task.id)))
+        task.report(spoken, needs_user=needs_user, live=self._live(task.id))
         message = event_message("orchestrator", spoken, task.id, needs_user=needs_user, details=details is not None)
         self._post_news(_TalkerInput(message, "event", self._clock.now(), details))
         return "Reported to the User."
@@ -877,3 +893,74 @@ class Hub:
         task.queue_message()
         message = over_time_event(subagent, self._clock.now())
         self._post(self._orchestrator_inbox, _OrchestratorInput(task.id, message, self._clock.now()))
+
+    async def _watch(self, args: dict[str, Any]) -> str:
+        task = self._tasks.get(self._orchestrating)
+        if task is None or task.cancelled:
+            return "watch works only while you are on a Task."
+        watcher = self._waits.watch(task.id, str(args.get("kind") or ""), str(args.get("target") or ""))
+        if isinstance(watcher, Refused):
+            return watcher.reason
+        # A Watcher ends on its own, so text mode waits for it like a Subagent.
+        self._pending += 1
+        self._settled.clear()
+        return json.dumps(
+            {
+                "watcher_id": watcher.id,
+                "watching": " ".join(watcher.argv),
+                "note": "Its end reaches you as a watcher event. End this turn without a report unless the User "
+                "should hear something now.",
+            }
+        )
+
+    async def _schedule_check(self, args: dict[str, Any]) -> str:
+        task = self._tasks.get(self._orchestrating)
+        if task is None or task.cancelled:
+            return "schedule_check works only while you are on a Task."
+        note = str(args.get("note") or "")
+        check = self._waits.schedule(task.id, args.get("after_seconds"), note, args.get("max_repeats"))
+        if isinstance(check, Refused):
+            return check.reason
+        return json.dumps(
+            {
+                "check_id": check.id,
+                "first_in_seconds": round(check.interval),
+                "max_repeats": check.max_repeats,
+                "note": "Each time it comes due you get a timer event; each wait is twice the one before. "
+                "cancel_wait stops it once you no longer need it.",
+            }
+        )
+
+    async def _cancel_wait(self, args: dict[str, Any]) -> str:
+        cancelled = self._waits.cancel(args.get("wait_id"))
+        return cancelled if isinstance(cancelled, str) else f"Cancelled {cancelled.id}."
+
+    def _cancel_wait_for_user(self, wait_id: str) -> str:
+        """The User stops one wait: its Task goes on, and the Orchestrator hears of it to decide what is next."""
+        cancelled = self._waits.cancel(wait_id)
+        if isinstance(cancelled, str):
+            return cancelled
+        task = self._tasks.get(cancelled.task_id)
+        if task is not None and not task.cancelled:
+            task.queue_message()
+            text = f"The User cancelled {cancelled.id}; nothing more comes from it."
+            message = f'<event source="hub" id="{cancelled.id}" task="{task.id}" status="cancelled">{text}</event>'
+            self._post(self._orchestrator_inbox, _OrchestratorInput(task.id, message, self._clock.now()))
+        return f"Cancelled {cancelled.id}."
+
+    def _watcher_ended(self, watcher: Watcher) -> None:
+        try:
+            task = self._tasks.get(watcher.task_id)
+            if watcher.state == "cancelled" or task is None or task.cancelled:
+                return
+            task.queue_message()
+            self._post(self._orchestrator_inbox, _OrchestratorInput(task.id, watcher_event(watcher), self._clock.now()))
+        finally:
+            self._handled()
+
+    def _check_due(self, check: Check) -> None:
+        task = self._tasks.get(check.task_id)
+        if task is None or task.cancelled:
+            return
+        task.queue_message()
+        self._post(self._orchestrator_inbox, _OrchestratorInput(task.id, check_event(check), self._clock.now()))
