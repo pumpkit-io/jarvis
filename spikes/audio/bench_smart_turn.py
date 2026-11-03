@@ -1,13 +1,6 @@
-"""Smart Turn v3: inference time on the M3, its verdicts on complete and cut-off turns, and what they cost.
+"""Smart Turn v3: inference time, its verdicts on complete turns and on pauses, and the end-of-turn latency they give.
 
-    uv run bench_smart_turn.py --source synthetic
-
-A complete turn ends at the clip's end. A cut-off turn is a long clip cut at the
-quietest word gap near its middle, which is what a mid-sentence pause looks like to VAD.
-The pause takes (`PAUSE_TAKES`) add real pauses: each is cut 200 ms into its pause.
-
-The end-of-turn saving follows the Spec's input pipeline: after VAD_SILENCE_MS of silence
-Smart Turn runs; "complete" ends the turn, "incomplete" keeps listening up to EXTENSION_MS more.
+Every verdict is on what the pipeline sends: the turn up to VAD_SILENCE_MS into the silence that triggered it.
 """
 
 import argparse
@@ -58,9 +51,10 @@ def end_of_turn(p_complete: dict, p_pause: dict, pause_s: dict, infer_ms: float)
     """
     ends = [VAD_SILENCE_MS + infer_ms + (0 if p > 0.5 else EXTENSION_MS) for p in p_complete.values()]
     mean = sum(ends) / len(ends) if ends else None
-    pauses = {k: pause_s[k] * 1000 for k in p_pause if pause_s.get(k) is not None}
+    pauses = {k: s * 1000 for k, s in pause_s.items() if s is not None}
 
     def cut_by_smart_turn(k):
+        # A pause shorter than VAD_SILENCE_MS never reaches Smart Turn, so it has no verdict.
         return pauses[k] >= VAD_SILENCE_MS and (p_pause[k] > 0.5 or pauses[k] >= VAD_SILENCE_MS + infer_ms + EXTENSION_MS)
 
     premature = {"smart_turn": f"{sum(map(cut_by_smart_turn, pauses))}/{len(pauses)}"}
@@ -73,35 +67,46 @@ def end_of_turn(p_complete: dict, p_pause: dict, pause_s: dict, infer_ms: float)
     }
 
 
-def trim_tail(audio: np.ndarray) -> np.ndarray:
+def speech_end_s(audio: np.ndarray) -> float:
     frames = audio[: len(audio) // 160 * 160].reshape(-1, 160)
     loud = np.nonzero(np.sqrt((frames**2).mean(axis=1)) > 0.01)[0]
-    return audio[: (loud[-1] + 1) * 160] if len(loud) else audio
+    return (loud[-1] + 1) * 160 / SR if len(loud) else len(audio) / SR
 
 
-def cut_mid_sentence(audio: np.ndarray) -> np.ndarray:
+def turn_audio(audio: np.ndarray, speech_end: float) -> np.ndarray:
+    """The take up to VAD_SILENCE_MS after `speech_end` seconds, zero-padded only where the take ends sooner."""
+    n = int((speech_end + VAD_SILENCE_MS / 1000) * SR)
+    return np.pad(audio[:n], (0, max(0, n - len(audio))))
+
+
+def mid_sentence_gap_s(audio: np.ndarray) -> float:
     frames = audio[: len(audio) // 160 * 160].reshape(-1, 160)
     energy = np.sqrt((frames**2).mean(axis=1))
     n = len(energy)
     window = range(int(n * 0.35), int(n * 0.65))
-    gap = min(window, key=lambda i: energy[max(0, i - 3) : i + 3].mean())
-    return audio[: gap * 160]
+    return min(window, key=lambda i: energy[max(0, i - 3) : i + 3].mean()) * 160 / SR
+
+
+def cut_turn(audio: np.ndarray) -> np.ndarray:
+    """A long clip stopped at its quietest word gap, followed by the silence VAD would wait for."""
+    gap = mid_sentence_gap_s(audio[: int(speech_end_s(audio) * SR)])
+    return turn_audio(audio[: int(gap * SR)], gap)
 
 
 def pause_turns(folder: Path) -> tuple[dict, dict, dict]:
-    """Cuts at each real pause, the whole pause takes as complete turns, and every pause's length."""
+    """Each real pause as Smart Turn would hear it, the whole pause takes as complete turns, and every pause's length."""
     cut, complete, pauses = {}, {}, {}
     for take in PAUSE_TAKES:
         path = folder / f"{take.id}.wav"
         if not path.exists():
             continue
         audio = load_16k(path)
-        complete[take.id] = np.concatenate([trim_tail(audio), np.zeros(int(0.2 * SR), np.float32)])
+        complete[take.id] = turn_audio(audio, speech_end_s(audio))
         if take.paused:
             pause = find_pause(audio)
             pauses[take.id] = None if pause is None else round(pause[1] - pause[0], 2)
-            if pause:
-                cut[take.id] = audio[: int((pause[0] + 0.2) * SR)]
+            if pause and pause[1] - pause[0] >= VAD_SILENCE_MS / 1000:
+                cut[take.id] = turn_audio(audio, pause[0])
     return cut, complete, pauses
 
 
@@ -111,10 +116,9 @@ def main() -> None:
     args = ap.parse_args()
     folder = clips_dir(args.source) / "clips"
     clips = [c for c in CLIPS if (folder / f"{c.id}.wav").exists()]
-    silence = np.zeros(int(0.2 * SR), np.float32)
-    complete = {c.id: np.concatenate([trim_tail(load_16k(folder / f"{c.id}.wav")), silence]) for c in clips}
-    cut = {c.id: np.concatenate([cut_mid_sentence(trim_tail(load_16k(folder / f"{c.id}.wav"))), silence])
-           for c in clips if c.kind == "long"}
+    audio = {c.id: load_16k(folder / f"{c.id}.wav") for c in clips}
+    complete = {c.id: turn_audio(audio[c.id], speech_end_s(audio[c.id])) for c in clips}
+    cut = {c.id: cut_turn(audio[c.id]) for c in clips if c.kind == "long"}
 
     pause_cut, pause_complete, pauses = pause_turns(clips_dir(args.source) / "pauses")
     result = {"source": args.source, "models": {}, "pause_s": pauses}

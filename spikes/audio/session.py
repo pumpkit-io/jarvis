@@ -1,18 +1,13 @@
-"""The User's recording session for Ticket #5, then every measurement on what it recorded.
+"""Ticket #5's recording session with the User, then every measurement on what it recorded (`uv run session.py`).
 
-    cd spikes/audio && uv run session.py   # about 41 minutes with the User, then about 77 unattended
-    uv run session.py --only clips          # one step: preflight, baseline, clips, pauses, wake, speakers, room, analyse
-    uv run session.py --redo                # re-record takes that already exist
-
-Recordings go to data/recordings/ (gitignored). Each step skips takes already on disk,
-so a session can stop and resume. The room step records an hour with a video playing
-while the User is away; analyse then runs on its own, writes numbers without transcripts
-to results/ (tracked) and replaces its block in the notes.
+Steps and usage are in docs/notes/phase-0-spikes.md, ## Audio > The recording session.
 """
 
 import argparse
 import json
 import os
+import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -37,7 +32,8 @@ TURBO_MODEL = Path.home() / ".cache/jarvis-spikes/whisper/ggml-large-v3-turbo.bi
 WHISPER_SERVER = Path.home() / ".voicemode/services/whisper/build/bin/whisper-server"
 TURBO_PORT = 2023
 SERVER_READY_TIMEOUT_S = 120
-STEPS = ["preflight", "baseline", "clips", "pauses", "wake", "speakers", "room", "analyse"]
+PLAYING_AT_TIMEOUT_S = 30
+STEPS = ["preflight", "baseline", "clips", "pauses", "wake", "speakers", "headphones", "room", "analyse"]
 
 # What the User says over Jarvis in the second half of the speaker run.
 BARGE_IN_WORDS = ["okay", "mhm", "wait, stop", "aspetta", "actually, open an issue instead"]
@@ -102,6 +98,9 @@ def preflight() -> None:
     print(f"  level {level_db(audio):.0f} dBFS (speech should be above -40; silence near -60 or below)")
     if np.abs(audio).max() < 1e-4:
         sys.exit("  the mic recorded silence: grant this terminal microphone access in System Settings > Privacy.")
+    holder = port_holder(TURBO_PORT)
+    if holder:
+        loud(f"{holder} already listens on :{TURBO_PORT}. Stop it before the analysis, or the turbo row is left out.")
 
 
 def baseline() -> None:
@@ -251,25 +250,39 @@ def vpio_pass(helper: Path, run: Path, ref_s: float, cues: list[float]) -> dict:
     wav = run / "vpio.wav"
     wav.unlink(missing_ok=True)
     proc = subprocess.Popen([str(helper), str(run / "reference_48k.wav"), str(wav)], stdout=subprocess.PIPE, text=True)
-    seen, timed_out = "", False
-    try:
+    lines: list[str] = []
+    playing = threading.Event()
+
+    def read() -> None:
         for line in proc.stdout:
-            seen += line
+            lines.append(line)
             if line.startswith("playing_at="):
-                playing = float(line.split("=", 1)[1])
-                show_cues(lambda: time.time() - playing, cues)
-                break
-        seen += proc.communicate(timeout=ref_s + 30)[0] or ""
+                playing.set()
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    reason = None
+    try:
+        deadline = time.monotonic() + PLAYING_AT_TIMEOUT_S
+        while not playing.wait(0.2) and proc.poll() is None and time.monotonic() < deadline:
+            pass
+        if playing.is_set():
+            started = parse_helper_output("".join(lines))["playing_at"]
+            show_cues(lambda: time.time() - started, cues)
+            proc.wait(timeout=ref_s + 30)
+        elif proc.poll() is None:
+            reason = f"helper did not start playing within {PLAYING_AT_TIMEOUT_S} s"
     except subprocess.TimeoutExpired:
-        timed_out = True
+        reason = "helper timed out"
     except BaseException:
         stop(proc)
         wav.unlink(missing_ok=True)
         raise
     finally:
         stop(proc)
-    times = parse_helper_output(seen)
-    reason = "helper timed out" if timed_out else vpio_failure(proc.returncode, times, wav)
+        reader.join(5)
+    times = parse_helper_output("".join(lines))
+    reason = reason or vpio_failure(proc.returncode, times, wav)
     if reason:
         wav.unlink(missing_ok=True)
         return {"failed": reason}
@@ -288,12 +301,15 @@ def compile_helper() -> Path | None:
         return helper
     print("  compiling the Voice Processing I/O helper...")
     helper.parent.mkdir(parents=True, exist_ok=True)
-    if subprocess.run(["swiftc", "-O", str(source), "-o", str(helper)], capture_output=True).returncode:
+    try:
+        if subprocess.run(["swiftc", "-O", str(source), "-o", str(helper)], capture_output=True).returncode:
+            return None
+    except FileNotFoundError:
         return None
     return helper
 
 
-def play_and_record(ref: np.ndarray, cues: list[float]) -> np.ndarray:
+def play_and_record(ref: np.ndarray, cues: list[float], mic: int | None = None) -> np.ndarray:
     """Play `ref` and record the mic on one duplex stream, showing each cue on the clock of the speaker output."""
     rec = np.zeros(len(ref), np.float32)
     pos, clock = 0, {}
@@ -315,7 +331,8 @@ def play_and_record(ref: np.ndarray, cues: list[float]) -> np.ndarray:
         if pos >= len(ref):
             raise sd.CallbackStop
 
-    with sd.Stream(samplerate=PLAY_SR, channels=1, dtype="float32", callback=callback, finished_callback=done.set):
+    with sd.Stream(samplerate=PLAY_SR, channels=1, dtype="float32", device=(mic, None), callback=callback,
+                   finished_callback=done.set):
         if not started.wait(5):
             sys.exit("  the audio stream never started: check the built-in speakers and microphone access.")
         show_cues(lambda: time.monotonic() - clock["t0"], cues)
@@ -334,11 +351,7 @@ def speakers(redo: bool) -> None:
     segments = json.loads(segments_path.read_text()) if segments_path.exists() else {}
     if redo or not (run / "mic.wav").exists():
         wait_enter("Enter to start (WebRTC pass: raw mic).")
-        rec = play_and_record(ref, cues)
-        save_16k(run / "mic.wav", resample(rec, PLAY_SR, SR))
-        save_16k(run / "reference.wav", resample(ref, PLAY_SR, SR))
-        segments = {**marks(cues, 0.0, jarvis_half_s(ref_s)), "cues": dict(zip(BARGE_IN_WORDS, cues)),
-                    "vpio": segments.get("vpio", {})}
+        segments = save_run(run, ref, play_and_record(ref, cues), cues) | {"vpio": segments.get("vpio", {})}
         segments_path.write_text(json.dumps(segments))
     if redo or not vpio_done(run, segments):
         helper = compile_helper()
@@ -364,6 +377,47 @@ def speakers(redo: bool) -> None:
         print("  done.")
 
 
+def save_run(run: Path, ref: np.ndarray, rec: np.ndarray, cues: list[float]) -> dict:
+    """Save a duplex run's mic and reference at 16 kHz; returns its marks for segments.json."""
+    save_16k(run / "mic.wav", resample(rec, PLAY_SR, SR))
+    save_16k(run / "reference.wav", resample(ref, PLAY_SR, SR))
+    return {**marks(cues, 0.0, jarvis_half_s(len(ref) / PLAY_SR)), "cues": dict(zip(BARGE_IN_WORDS, cues))}
+
+
+def builtin_mic() -> int | None:
+    """The MacBook's own microphone, so a headset's mic doesn't take over the input."""
+    for i, device in enumerate(sd.query_devices()):
+        if device["max_input_channels"] and "MacBook" in device["name"]:
+            return i
+    return None
+
+
+def headphones(redo: bool) -> None:
+    run = RECORDINGS / "headphones-run"
+    if (run / "mic.wav").exists() and not redo:
+        return
+    say("Headphones, optional, under 3 minutes. Jarvis plays the same lines through headphones, with no echo cancellation,\n"
+        "and the built-in mic records. As before: silent for the first half, then say the words shown, over Jarvis.")
+    while True:
+        if wait_enter("Put them on, then Enter. No headphones to hand: type s and Enter.") == "s":
+            return
+        output = sd.query_devices(kind="output")["name"]
+        print(f"  output: {output}")
+        if "MacBook" not in output:
+            break
+        loud("Sound still goes to the built-in speakers. Connect the headphones, or pick them in the menu bar's sound menu.")
+    ref = jarvis_reference()
+    cues = cue_times(len(ref) / PLAY_SR)
+    try:
+        rec = play_and_record(ref, cues, mic=builtin_mic())
+    except sd.PortAudioError as err:
+        loud(f"The headphones run FAILED ({err}); the speaker numbers still stand.")
+        return
+    (run / "segments.json").write_text(json.dumps(save_run(run, ref, rec, cues)))
+    say("Done. Take the headphones off and disconnect them: the room step plays its video on the built-in speakers.")
+    wait_enter()
+
+
 def room_chunks_todo(folder: Path, redo: bool) -> list[int]:
     """Numbers of the ROOM_CHUNK_MINUTES chunks still to record; a chunk is saved only once complete."""
     n = ROOM_MINUTES // ROOM_CHUNK_MINUTES
@@ -380,8 +434,6 @@ def room(redo: bool) -> None:
         "Start a long video or podcast with people talking (an hour or more, or a playlist), at normal volume on the\n"
         "built-in speakers. Keep the lid open and the Mac on power. Then leave: nobody should speak near it.")
     wait_enter("Enter once the video is playing, then walk away.")
-    # Keeps the Mac awake while this process lives; a sleeping Mac records nothing.
-    awake = subprocess.Popen(["caffeinate", "-ims", "-w", str(os.getpid())])
     try:
         for i in todo:
             audio = record_after_cue(f"  ● room {i}/{ROOM_MINUTES // ROOM_CHUNK_MINUTES} ({ROOM_CHUNK_MINUTES} min)",
@@ -393,8 +445,6 @@ def room(redo: bool) -> None:
         loud(f"Room run stopped with {left} minutes to go; finished chunks are kept.\n"
              "To resume: uv run session.py --only room   then: uv run session.py --only analyse")
         sys.exit(1)
-    finally:
-        stop(awake)
     print("  Room run done; the video can stop whenever you are back.")
 
 
@@ -404,6 +454,19 @@ def server_ready(port: int) -> bool:
         return httpx.get(f"http://127.0.0.1:{port}/", timeout=1).is_success
     except httpx.TransportError:
         return False
+
+
+def port_holder(port: int) -> str | None:
+    """What listens on `port` here, as "name (pid N)", or None when nothing does."""
+    try:
+        out = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fpc"], capture_output=True, text=True).stdout
+    except OSError:
+        out = ""
+    fields = {line[0]: line[1:] for line in out.splitlines() if line[:1] in ("p", "c")}
+    if "p" in fields:
+        return f"{fields.get('c', 'a process')} (pid {fields['p']})"
+    with socket.socket() as sock:
+        return "an unknown process" if sock.connect_ex(("127.0.0.1", port)) == 0 else None
 
 
 def stop(proc: subprocess.Popen | None) -> None:
@@ -422,8 +485,10 @@ def start_turbo_server() -> subprocess.Popen | None:
     if missing:
         loud(f"No whisper.cpp large-v3-turbo row: missing {', '.join(missing)}.")
         return None
-    if server_ready(TURBO_PORT):
-        loud(f"Something already listens on :{TURBO_PORT}; the turbo row measures whatever that is.")
+    holder = port_holder(TURBO_PORT)
+    if holder:
+        loud(f"{holder} already listens on :{TURBO_PORT}, perhaps a turbo server left by an earlier run. It is not\n"
+             f"measured, so there is no turbo row. Stop it, then rerun: uv run session.py --only analyse")
         return None
     log = DATA / "whisper-server-2023.log"
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -447,28 +512,32 @@ def start_turbo_server() -> subprocess.Popen | None:
         raise
 
 
-BENCHES = [
-    ["bench_stt.py", "--source", "recordings"],
-    ["bench_lang.py", "--source", "recordings"],
-    ["bench_wake.py", "recall", "--source", "recordings"],
-    ["bench_wake.py", "false-accepts", "{run}/video.wav", "--name", "false-accepts-video"],
-    ["bench_wake.py", "false-accepts", "{recordings}/room", "--name", "false-accepts-room"],
-    ["bench_aec.py", "analyse", "{run}"],
-    ["bench_smart_turn.py", "--source", "recordings"],
-]
+def benches(recordings: Path) -> list[list[str]]:
+    """The analysis commands, with the headphones run only when the User recorded it."""
+    run, phones = recordings / "speaker-run", recordings / "headphones-run"
+    cmds = [
+        ["bench_stt.py", "--source", "recordings"],
+        ["bench_lang.py", "--source", "recordings"],
+        ["bench_wake.py", "recall", "--source", "recordings"],
+        ["bench_wake.py", "false-accepts", f"{run}/video.wav", "--name", "false-accepts-video"],
+        ["bench_wake.py", "false-accepts", f"{recordings}/room", "--name", "false-accepts-room"],
+        ["bench_aec.py", "analyse", str(run)],
+        ["bench_smart_turn.py", "--source", "recordings"],
+    ]
+    if (phones / "mic.wav").exists():
+        cmds.insert(6, ["bench_aec.py", "analyse", str(phones)])
+    return cmds
 
 
 def analyse() -> None:
-    say("Analysis. This runs on its own for about 17 minutes; you can leave.")
-    run = RECORDINGS / "speaker-run"
+    say("Analysis. This runs on its own for about 18 minutes; you can leave.")
     log = DATA / "analysis.log"
     failed = []
     turbo = None
     try:
         turbo = start_turbo_server()
         with log.open("w") as out:
-            for cmd in BENCHES:
-                cmd = [part.format(run=run, recordings=RECORDINGS) for part in cmd]
+            for cmd in benches(RECORDINGS):
                 print(f"  $ {' '.join(cmd)}", flush=True)
                 code = subprocess.run([sys.executable, str(HERE / cmd[0])] + cmd[1:], cwd=HERE, check=False,
                                       stdout=out, stderr=subprocess.STDOUT).returncode
@@ -479,8 +548,17 @@ def analyse() -> None:
     if failed:
         loud("These steps FAILED; their rows are missing. Details in " + str(log) + ":\n  " + "\n  ".join(failed))
     subprocess.run([sys.executable, str(HERE / "report.py")], cwd=HERE, check=False)
-    print(f"  numbers: {RESULTS}/*-recordings.json, aec-speaker-run.json, wake-false-accepts-video.json, "
-          "wake-false-accepts-room.json")
+    print(f"  numbers: {RESULTS}/*-recordings.json, aec-speaker-run.json, aec-headphones-run.json, "
+          "wake-false-accepts-video.json, wake-false-accepts-room.json")
+
+
+def install_signal_handlers() -> None:
+    """Turn a closed terminal or a kill into an exit that runs every cleanup, so no server or helper outlives the session."""
+    def leave(signum, _frame):
+        raise SystemExit(128 + signum)
+
+    for sig in (signal.SIGHUP, signal.SIGTERM):
+        signal.signal(sig, leave)
 
 
 def main() -> None:
@@ -491,9 +569,16 @@ def main() -> None:
     steps = [args.only] if args.only else STEPS
     actions = {"preflight": preflight, "baseline": baseline, "clips": lambda: clips(args.redo),
                "pauses": lambda: pauses(args.redo), "wake": lambda: wake(args.redo),
-               "speakers": lambda: speakers(args.redo), "room": lambda: room(args.redo), "analyse": analyse}
-    for step in steps:
-        actions[step]()
+               "speakers": lambda: speakers(args.redo), "headphones": lambda: headphones(args.redo),
+               "room": lambda: room(args.redo), "analyse": analyse}
+    install_signal_handlers()
+    # A sleeping Mac records nothing and stalls the unattended analysis, so it stays awake while the session runs.
+    awake = subprocess.Popen(["caffeinate", "-ims", "-w", str(os.getpid())])
+    try:
+        for step in steps:
+            actions[step]()
+    finally:
+        stop(awake)
     say("Session complete. The results block is in docs/notes/phase-0-spikes.md under ## Audio.")
 
 

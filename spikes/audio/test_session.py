@@ -1,9 +1,8 @@
-"""Checks for the recording-session kit that need no mic, no speakers and no models.
+"""Checks for the recording-session kit that need no mic, no speakers and no models (`uv run test_session.py`)."""
 
-    uv run test_session.py
-"""
-
+import contextlib
 import http.server
+import io
 import json
 import os
 import socket
@@ -23,11 +22,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import bench_aec  # noqa: E402
 import bench_smart_turn  # noqa: E402
+import bench_wake  # noqa: E402
 import common  # noqa: E402
 import report  # noqa: E402
 import session  # noqa: E402
 
-SR = common.SR
+SR = 16_000
+TRANSCRIPT_FIELDS = {"hyp", "samples", "wrong"}
 
 
 def tone(freq: float, seconds: float, sr: int) -> np.ndarray:
@@ -68,6 +69,23 @@ def test_tracked_results_name_no_home_folder():
         assert "/Users/" not in text and str(Path.home()) not in text, name
 
 
+def keys(data) -> set:
+    if isinstance(data, dict):
+        return set(data) | set().union(*map(keys, data.values()))
+    if isinstance(data, list):
+        return set().union(*map(keys, data))
+    return set()
+
+
+def test_tracked_results_from_recordings_hold_no_transcript_fields():
+    root = common.HERE.parent.parent
+    tracked = subprocess.run(["git", "ls-files", "spikes/audio/results/*.json"], cwd=root,
+                             capture_output=True, text=True, check=True).stdout.split()
+    # Only results on synthetic speech may carry transcripts; everything else may come from the User's recordings.
+    for name in (n for n in tracked if not n.endswith("-synthetic.json")):
+        assert not keys(json.loads((root / name).read_text())) & TRANSCRIPT_FIELDS, name
+
+
 def test_written_results_give_paths_relative_to_the_data_folder():
     run = common.DATA / "recordings" / "speaker-run"
     data = {"run": str(run), "log": str(Path.home() / "elsewhere" / "x.log"), "files": [str(run / "mic.wav")]}
@@ -98,18 +116,18 @@ def test_find_pause_locates_a_one_second_gap_and_ignores_word_gaps():
 
 
 def test_barge_in_cues_and_their_windows_fall_inside_the_recording():
-    # Jarvis's lines in the synthetic speaker run last 29 s per half.
-    ref_s = 2 * 29.0 + session.SPEAKER_TAIL_S
+    # Jarvis's lines last 29 s per play, followed by a 4 s silent tail; each cue's window is 3 s.
+    ref_s = 2 * 29.0 + 4.0
     cues = session.cue_times(ref_s)
-    assert len(cues) == len(session.BARGE_IN_WORDS)
+    assert len(cues) == 5
     assert cues[0] > 29.0
-    assert cues[-1] + session.USER_SPAN_S <= ref_s - 0.5
-    assert all(b - a >= session.USER_SPAN_S for a, b in zip(cues, cues[1:]))
+    assert cues[-1] + 3.0 <= ref_s - 0.5
+    assert all(b - a >= 3.0 for a, b in zip(cues, cues[1:]))
 
 
 def test_cue_times_refuse_a_reference_too_short_for_five_cues():
     try:
-        session.cue_times(2 * 10.0 + session.SPEAKER_TAIL_S)
+        session.cue_times(2 * 10.0 + 4.0)
     except ValueError:
         return
     raise AssertionError("expected ValueError")
@@ -120,7 +138,7 @@ def test_vpio_marks_are_shifted_by_when_playback_began_in_the_recording():
     m = session.marks([30.0, 36.0], out["playing_at"] - out["recording_started_at"], half_s=29.0)
     assert m["jarvis_only"] == [0.5, 30.5]
     assert m["echo_shift_s"] == 29.0
-    assert m["user_speech"] == [[30.5, 30.5 + session.USER_SPAN_S], [36.5, 36.5 + session.USER_SPAN_S]]
+    assert m["user_speech"] == [[30.5, 33.5], [36.5, 39.5]]
 
 
 def test_a_failed_or_empty_vpio_run_is_not_scored():
@@ -148,12 +166,12 @@ def test_a_vpio_pass_without_its_marks_is_not_done():
 
 def test_the_room_run_resumes_with_the_chunks_still_missing():
     folder = SCRATCH / "room"
-    n = session.ROOM_MINUTES // session.ROOM_CHUNK_MINUTES
-    assert session.room_chunks_todo(folder, redo=False) == list(range(1, n + 1))
+    # An hour in 5-minute chunks is twelve chunks.
+    assert session.room_chunks_todo(folder, redo=False) == list(range(1, 13))
     for i in (1, 2, 4):
         common.save_16k(folder / f"room_{i:02d}.wav", tone(300, 1, SR))
-    assert session.room_chunks_todo(folder, redo=False) == [3] + list(range(5, n + 1))
-    assert session.room_chunks_todo(folder, redo=True) == list(range(1, n + 1))
+    assert session.room_chunks_todo(folder, redo=False) == [3] + list(range(5, 13))
+    assert session.room_chunks_todo(folder, redo=True) == list(range(1, 13))
 
 
 def free_port() -> int:
@@ -211,12 +229,13 @@ def test_turbo_server_that_crashes_or_never_answers_gives_no_row_and_is_stopped(
 
 
 def test_enter_click_is_trimmed_from_the_end_of_a_take():
-    assert len(session.drop_enter_click(np.ones(SR, np.float32))) == SR - int(0.15 * SR)
+    assert len(session.drop_enter_click(np.ones(SR, np.float32))) == SR - 2400
 
 
 def test_end_of_turn_saving_comes_from_the_verdicts_and_counts_premature_cuts_apart():
     complete = {"a": 0.9, "b": 0.9, "c": 0.2, "d": 0.8}
-    at_pause = {"x": 0.3, "y": 0.7, "z": 0.9, "w": 0.2}
+    # "z" pauses for less than the 500 ms VAD silence, so Smart Turn never ran on it and has no verdict.
+    at_pause = {"x": 0.3, "y": 0.7, "w": 0.2}
     pause_s = {"x": 1.0, "y": 1.2, "z": 0.4, "w": 2.5}
     out = bench_smart_turn.end_of_turn(complete, at_pause, pause_s, infer_ms=15)
     # Three turns end at 500 + 15 ms; "c" was judged incomplete and waits the 1.5 s extension too.
@@ -228,13 +247,119 @@ def test_end_of_turn_saving_comes_from_the_verdicts_and_counts_premature_cuts_ap
 
 
 def test_a_barge_in_counts_only_speech_the_same_jarvis_audio_did_not_already_trigger():
-    frame_s = bench_aec.VAD_FRAME / SR
+    frame_s = 512 / SR  # Silero VAD's frame
     probs = np.zeros(200)
     probs[0:16] = probs[100:116] = 0.9  # echo: the same Jarvis audio fires VAD in both halves
     probs[150:166] = 0.9  # the User, over a stretch where Jarvis's first half was quiet
     spans = [[100 * frame_s, 125 * frame_s], [150 * frame_s, 175 * frame_s]]
     out = bench_aec.barge_ins(probs, spans, shift_s=100 * frame_s)
     assert out == {"user_barge_ins_detected": "1/2", "matching_jarvis_span_triggered": "1/2"}
+
+
+def test_smart_turn_hears_the_turn_up_to_half_a_second_into_the_silence():
+    rng = np.random.default_rng(0)
+    room_tone = rng.normal(0, 0.002, int(0.8 * SR)).astype(np.float32)
+    long_tail = np.concatenate([tone(200, 1.0, SR), room_tone])
+    heard = bench_smart_turn.turn_audio(long_tail, 1.0)
+    assert len(heard) == int(1.5 * SR)
+    assert np.array_equal(heard, long_tail[: int(1.5 * SR)])
+    short_tail = np.concatenate([tone(200, 1.0, SR), room_tone[: int(0.1 * SR)]])
+    heard = bench_smart_turn.turn_audio(short_tail, 1.0)
+    assert len(heard) == int(1.5 * SR)
+    assert np.array_equal(heard[: int(1.1 * SR)], short_tail) and not heard[int(1.1 * SR) :].any()
+
+
+def test_a_complete_turn_ends_where_its_speech_ends():
+    take = np.concatenate([tone(200, 1.0, SR), np.zeros(int(0.3 * SR), np.float32)])
+    assert abs(bench_smart_turn.speech_end_s(take) - 1.0) < 0.011
+
+
+def test_minutes_where_the_video_had_stopped_are_counted_as_quiet():
+    rng = np.random.default_rng(0)
+    video = (rng.normal(0, 0.05, 60 * SR) * 32767).astype(np.int16)
+    stopped = (rng.normal(0, 0.0005, 60 * SR) * 32767).astype(np.int16)
+    assert bench_wake.quiet_seconds(np.concatenate([video, stopped, video, stopped[: 30 * SR]])) == 90.0
+
+
+def test_false_accepts_per_hour_leave_quiet_minutes_out_of_the_hours():
+    # Two hours recorded, half an hour of it with the video stopped: 3 false accepts over 1.5 h.
+    assert bench_wake.per_hour({0.5: 3}, seconds=7200, quiet_s=1800) == {"@0.5": 2.0}
+
+
+def test_a_missing_swift_compiler_means_no_helper_instead_of_a_crash():
+    saved = os.environ["PATH"]
+    try:
+        os.environ["PATH"] = str(SCRATCH / "empty-bin")
+        assert session.compile_helper() is None
+    finally:
+        os.environ["PATH"] = saved
+
+
+def helper_stub(body: str) -> Path:
+    stub = SCRATCH / "vpio-helper-stub"
+    stub.write_text(f"#!/bin/sh\necho $$ > {SCRATCH / 'helper.pid'}\n{body}\n")
+    stub.chmod(0o755)
+    return stub
+
+
+def test_a_helper_that_never_starts_playing_fails_the_pass_and_is_stopped():
+    run = SCRATCH / "vpio-silent"
+    run.mkdir()
+    saved = session.PLAYING_AT_TIMEOUT_S
+    try:
+        session.PLAYING_AT_TIMEOUT_S = 1
+        t = time.monotonic()
+        with contextlib.redirect_stdout(io.StringIO()):
+            out = session.vpio_pass(helper_stub("echo recording_started_at=1.0\nexec sleep 60"), run, 62.0, [33.0])
+        assert time.monotonic() - t < 15
+    finally:
+        session.PLAYING_AT_TIMEOUT_S = saved
+    assert "failed" in out and "playing" in out["failed"]
+    pid = int((SCRATCH / "helper.pid").read_text())
+    assert subprocess.run(["kill", "-0", str(pid)], capture_output=True).returncode != 0, "helper still running"
+
+
+def test_closing_the_terminal_still_stops_what_the_session_started():
+    child = SCRATCH / "child.pid"
+    script = (f"import sys, subprocess, time; sys.path.insert(0, {str(common.HERE)!r}); import session\n"
+              "session.install_signal_handlers()\n"
+              "proc = subprocess.Popen(['sleep', '60'], start_new_session=True)\n"
+              f"open({str(child)!r}, 'w').write(str(proc.pid))\n"
+              "try:\n    time.sleep(60)\nfinally:\n    session.stop(proc)\n")
+    for sig in ("SIGHUP", "SIGTERM"):
+        child.unlink(missing_ok=True)
+        proc = subprocess.Popen([sys.executable, "-c", script])
+        deadline = time.monotonic() + 30
+        while not child.exists() or not child.read_text():
+            assert time.monotonic() < deadline, "the session never started its child"
+            time.sleep(0.1)
+        proc.send_signal(getattr(__import__("signal"), sig))
+        proc.wait(15)
+        pid = int(child.read_text())
+        assert subprocess.run(["kill", "-0", str(pid)], capture_output=True).returncode != 0, f"child survived {sig}"
+
+
+def test_an_orphan_on_the_turbo_port_is_named_and_not_measured():
+    server, port = serve(200)
+    saved = session.TURBO_PORT, session.TURBO_MODEL, session.WHISPER_SERVER
+    model = SCRATCH / "model-orphan.bin"
+    model.write_bytes(b"")
+    try:
+        session.TURBO_PORT, session.TURBO_MODEL, session.WHISPER_SERVER = port, model, stub_server("exit 0")
+        said = io.StringIO()
+        with contextlib.redirect_stdout(said):
+            assert session.start_turbo_server() is None
+    finally:
+        session.TURBO_PORT, session.TURBO_MODEL, session.WHISPER_SERVER = saved
+        server.shutdown()
+    assert f"pid {os.getpid()}" in said.getvalue()
+
+
+def test_the_headphones_run_is_analysed_only_when_it_was_recorded():
+    recordings = SCRATCH / "benches"
+    assert not any("headphones-run" in " ".join(cmd) for cmd in session.benches(recordings))
+    common.save_16k(recordings / "headphones-run" / "mic.wav", tone(300, 1, SR))
+    assert any(cmd[:2] == ["bench_aec.py", "analyse"] and cmd[2].endswith("headphones-run") for cmd in session.benches(recordings))
 
 
 def test_report_replaces_its_block_instead_of_adding_another():

@@ -1,0 +1,22 @@
+{
+  "claude_version": "2.1.317 (Claude Code)",
+  "sessions": 3,
+  "settle_s": 60,
+  "cwd": "sdlc",
+  "processes": [
+    {
+      "footprint": 198.0,
+      "rss": 238
+    },
+    {
+      "footprint": 198.0,
+      "rss": 236
+    },
+    {
+      "footprint": 199.0,
+      "rss": 233
+    }
+  ],
+  "median_footprint_mb": 198.0,
+  "three_idle_mb": 595
+}

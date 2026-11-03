@@ -1,10 +1,4 @@
-"""Wake word: openWakeWord `hey_jarvis` recall per phrasing and false accepts per hour.
-
-    uv run bench_wake.py recall --source synthetic
-    uv run bench_wake.py false-accepts <audio files or folders> [--hours 6]
-
-Porcupine is not run: it needs a Picovoice AccessKey, which means an account.
-"""
+"""Wake word: openWakeWord `hey_jarvis` recall per phrasing and false accepts per hour of audio with sound in it."""
 
 import argparse
 import json
@@ -69,6 +63,22 @@ def decode(path: Path) -> np.ndarray:
     return np.frombuffer(raw, np.int16)
 
 
+def quiet_seconds(pcm: np.ndarray) -> float:
+    """Seconds in minutes near silence, where the video had stopped and nothing was tested."""
+    quiet = 0.0
+    for i in range(0, len(pcm), 60 * SR):
+        minute = pcm[i : i + 60 * SR] / 32768.0
+        if 20 * np.log10(np.sqrt(np.mean(minute**2)) + 1e-9) < QUIET_DBFS:
+            quiet += len(minute) / SR
+    return quiet
+
+
+def per_hour(hits: dict, seconds: float, quiet_s: float) -> dict:
+    """False accepts per hour with sound; hits in quiet minutes still count, so this can only overstate."""
+    hours = (seconds - quiet_s) / 3600
+    return {f"@{t}": round(n / hours, 2) if hours > 0 else None for t, n in hits.items()}
+
+
 def false_accepts(paths: list[Path], max_hours: float) -> dict:
     files = []
     for p in paths:
@@ -82,9 +92,7 @@ def false_accepts(paths: list[Path], max_hours: float) -> dict:
             break
         pcm = decode(f)
         seconds += len(pcm) / SR
-        # A file near silence means the video had stopped, so those minutes tested nothing.
-        if 20 * np.log10(np.sqrt(np.mean((pcm / 32768.0) ** 2)) + 1e-9) < QUIET_DBFS:
-            quiet += len(pcm) / SR
+        quiet += quiet_seconds(pcm)
         for vad, m in models.items():
             t0 = time.perf_counter()
             s = scores(m, pcm)
@@ -98,11 +106,11 @@ def false_accepts(paths: list[Path], max_hours: float) -> dict:
                         if t == 0.5 and len(examples[vad]) < 10:
                             examples[vad].append(f"{f.name}@{at:.1f}s ({s[i]:.2f})")
                     last = at
-    hours = seconds / 3600
     return {
-        "files": len(files), "hours": round(hours, 2), "quiet_minutes": round(quiet / 60, 1),
+        "files": len(files), "hours": round(seconds / 3600, 2), "quiet_minutes": round(quiet / 60, 1),
+        "hours_with_sound": round((seconds - quiet) / 3600, 2),
         "realtime_factor_no_vad": round(compute / seconds, 4) if seconds else None,
-        "false_accepts_per_hour": {f"vad_threshold={v}": {f"@{t}": round(n / hours, 2) for t, n in h.items()} for v, h in hits.items()},
+        "false_accepts_per_hour": {f"vad_threshold={v}": per_hour(h, seconds, quiet) for v, h in hits.items()},
         "false_accepts_total": {f"vad_threshold={v}": h for v, h in hits.items()},
         "examples_at_0.5": {f"vad_threshold={v}": e for v, e in examples.items()},
     }
