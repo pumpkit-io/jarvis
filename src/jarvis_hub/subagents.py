@@ -94,6 +94,8 @@ class Subagent:
     created: float
     branch: str | None = None
     log: Path | None = None
+    # The lock description saved with the Subagent, so a restart releases by what was written, not by a recomputed one.
+    holder: str = ""
     state: SubagentState = "queued"
     started: float | None = None
     ended: float | None = None
@@ -104,9 +106,8 @@ class Subagent:
     def writes(self) -> bool:
         return self.branch is not None
 
-    @property
-    def holder(self) -> str:
-        return lock_holder(self.id, self.task_id, self.title)
+    def __post_init__(self) -> None:
+        self.holder = self.holder or lock_holder(self.id, self.task_id, self.title)
 
     def line(self, now: float) -> str:
         since = self.started if self.started is not None else self.created
@@ -179,6 +180,8 @@ class Subagents:
     async def prepare(self, task_id: str, args: dict[str, Any], user_words: Sequence[str]) -> Subagent | Refused:
         """Check the request and set up its worktree, with a branch when it writes. Not started yet."""
         repo, title, brief = (str(args.get(k) or "").strip() for k in ("repo", "title", "brief"))
+        # worktree.sh keeps only a lock description's first line, so a title is one line of plain spaces.
+        title = " ".join(title.split())
         if not (repo and title and brief):
             return Refused("repo, title and brief are required.")
         model, effort = str(args.get("model") or "").strip(), str(args.get("effort") or "").strip()
@@ -205,7 +208,7 @@ class Subagents:
         except Refusal as e:
             return Refused(str(e))
         log = self._setup.log_dir / f"{sid}.jsonl" if self._setup.log_dir else None
-        subagent = Subagent(sid, task_id, name, title, brief, model, effort, cwd, self._clock.now(), branch, log)
+        subagent = Subagent(sid, task_id, name, title, brief, model, effort, cwd, self._clock.now(), branch, log, holder)
         self._all[sid] = subagent
         return subagent
 

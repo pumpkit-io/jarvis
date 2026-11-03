@@ -140,9 +140,9 @@ class GitWorkspace:
             return path
 
     async def release(self, worktree: Path, holder: str) -> str | None:
-        # worktree.sh writes the lock as the time it was taken, then the holder's description.
+        # worktree.sh writes the time taken, then the holder, one per "\n"; splitlines() would also cut at \x85 or U+2028.
         try:
-            lines = (worktree / ".sdlc" / "lock").read_text().splitlines()
+            lines = (worktree / ".sdlc" / "lock").read_text().split("\n")
         except FileNotFoundError:
             return None
         if lines[1:2] != [holder]:

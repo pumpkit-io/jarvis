@@ -8,8 +8,9 @@ import pytest
 
 from jarvis_hub import workspace as workspace_module
 from jarvis_hub.config import load_settings
-from jarvis_hub.subagents import Refusal
+from jarvis_hub.subagents import Refusal, Subagent, Subagents, SubagentSetup
 from jarvis_hub.workspace import GitWorkspace, find_worktree_script, is_org_remote, lock_key
+from tests.fakes import FakeBackend, FakeClock, subagent_spec
 
 SCRIPT = find_worktree_script(load_settings(Path(__file__).resolve().parents[1], {}).org_dir, Path.home())
 needs_script = pytest.mark.skipif(SCRIPT is None, reason="the sdlc worktrees script is not installed")
@@ -239,3 +240,33 @@ async def test_discard_keeps_a_read_only_worktree_someone_else_locked(clone: Pat
 
     assert kept is not None and "the User's session" in kept and path.exists()
     assert (path / ".sdlc" / "lock").read_text().splitlines()[1] == "the User's session"
+
+
+class LocalOrgWorkspace(GitWorkspace):
+    """Skips the GitHub remote check: the scratch clone's origin is a local path."""
+
+    async def _check_clone(self, clone: Path, short: str) -> None:
+        pass
+
+
+@needs_script
+@pytest.mark.parametrize("writes", [True, False])
+async def test_a_title_with_line_breaks_still_locks_and_releases_the_worktree(clone: Path, writes: bool) -> None:
+    ended: list[Subagent] = []
+    subagents = Subagents(
+        setup=SubagentSetup(session=subagent_spec, workspace=LocalOrgWorkspace("pumpkit-io", clone.parent, SCRIPT)),
+        backend=FakeBackend(FakeClock()),
+        clock=FakeClock(),
+        on_end=ended.append,
+        on_over_time=lambda s: None,
+    )
+    title = "Fix\ntypo\x85in the\x0cREADME"
+    args = {"repo": "pumpkit", "title": title, "brief": "b", "model": "haiku", "effort": "low", "writes": writes}
+    subagent = await subagents.prepare("T1", args, [])
+    assert isinstance(subagent, Subagent)
+    assert subagent.title == "Fix typo in the README"
+
+    await subagents.free_interrupted(subagent)
+
+    assert "held by" not in subagent.report and "not unlocked" not in subagent.report
+    assert not (subagent.cwd / ".sdlc" / "lock").exists() if writes else not subagent.cwd.exists()
