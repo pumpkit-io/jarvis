@@ -9,7 +9,7 @@ import pytest
 
 from jarvis_hub.config import RoleModel, Settings
 from jarvis_hub.main import text_mode
-from tests.fakes import FakeBackend, FakeClock, Gate, Text, Wait
+from tests.fakes import FakeBackend, FakeClock, Gate, Text, Tool, Wait
 
 
 def settings(tmp_path: Path, user_name: str | None = "Ada", talker_model: str = "sonnet") -> Settings:
@@ -20,7 +20,7 @@ def settings(tmp_path: Path, user_name: str | None = "Ada", talker_model: str = 
         repo_dir=tmp_path / "jarvis",
         runtime_dir=tmp_path / "jarvis" / ".jarvis",
         talker=RoleModel(talker_model, "low", False),
-        orchestrator=RoleModel("sonnet", "medium"),
+        orchestrator=RoleModel("sonnet", "medium", True),
     )
 
 
@@ -69,12 +69,13 @@ async def test_one_talker_session_with_one_prompt_carries_the_whole_launch(tmp_p
     [session] = backend.sessions
     assert len(session.received) == 3
     spec = session.spec
-    assert (spec.role, spec.model, spec.effort, spec.thinking, list(spec.tools)) == (
+    assert (spec.role, spec.model, spec.effort, spec.thinking, spec.preset, spec.bash_guard) == (
         "talker",
         "haiku",
         "low",
         False,
-        [],
+        False,
+        None,
     )
     assert "J.A.R.V.I.S." in spec.system_prompt
     assert '"sir"' in spec.system_prompt and '"signore"' in spec.system_prompt
@@ -93,7 +94,14 @@ async def test_the_prompt_says_when_the_user_name_is_not_known(tmp_path: Path) -
 
 @pytest.mark.parametrize(
     "variable",
-    ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"],
+    [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+    ],
 )
 async def test_billing_outside_the_subscription_is_warned_about_and_switched_off(
     tmp_path: Path, variable: str
@@ -169,3 +177,70 @@ async def test_input_ending_during_the_warm_up_closes_the_session(tmp_path: Path
 
     assert stdout == ""
     assert [s.closed for s in backend.sessions] == [True]
+
+
+async def test_the_orchestrator_works_read_only_in_the_org_folder_with_the_boundary(tmp_path: Path) -> None:
+    backend = FakeBackend(
+        FakeClock(),
+        [[Text("On it, sir."), Tool("delegate", {"request": "What PRs are open in pumpkit?"})]],
+        orchestrator=[[Tool("report", {"task_id": "T1", "spoken": "Two are open.", "needs_user": False})]],
+    )
+    config = settings(tmp_path)
+
+    await converse(backend, io.StringIO("What PRs are open in pumpkit?\n"), config=config)
+
+    spec = backend.session("orchestrator").spec
+    assert (spec.model, spec.effort, spec.thinking, spec.preset, spec.cwd, spec.max_turns) == (
+        "sonnet",
+        "medium",
+        True,
+        True,
+        tmp_path,
+        12,
+    )
+    assert list(spec.read_tools) == ["Read", "Grep", "Glob"]
+    assert spec.bash_guard is not None
+    assert spec.bash_guard("gh pr list -R acme/pumpkit") is None
+    assert spec.bash_guard("gh pr merge 42 -R acme/pumpkit")
+    boundary = (Path(__file__).parents[1] / "prompts" / "boundary.md").read_text()
+    assert boundary in spec.system_prompt
+    assert "**pumpkit-ops**" in spec.system_prompt
+    assert str(config.repo_dir / "docs" / "working-preferences.md") in spec.system_prompt
+    assert "acme" in spec.system_prompt and "{" not in spec.system_prompt.replace(boundary, "")
+
+
+async def test_details_are_rendered_on_screen_and_kept_in_the_show_log(tmp_path: Path) -> None:
+    details = "## Open PRs\n\n- **#41** Fix the scheduler\n- **#42** Add threads"
+    backend = FakeBackend(
+        FakeClock(),
+        [
+            [Text("On it, sir."), Tool("delegate", {"request": "What PRs are open in pumpkit?"})],
+            [Text("Two are open, sir. Here is my plan."), Tool("show", {"markdown": "# Plan\n\n1. Merge #41"})],
+        ],
+        orchestrator=[
+            [Tool("report", {"task_id": "T1", "spoken": "Two are open.", "details_markdown": details, "needs_user": False})]
+        ],
+    )
+    config = settings(tmp_path)
+
+    stdout, stderr = await converse(backend, io.StringIO("What PRs are open in pumpkit?\n"), config=config)
+
+    assert "Open PRs" in stdout and "#41 Fix the scheduler" in stdout and "**" not in stdout
+    assert stdout.index("Open PRs") < stdout.index("Two are open, sir") < stdout.index("Plan")
+    assert "Here is my plan.\n" in stdout
+    log = (config.runtime_dir / "show.log").read_text()
+    assert details in log and "# Plan\n\n1. Merge #41" in log
+    assert log.index(details) < log.index("# Plan")
+    assert stderr == ""
+
+
+async def test_a_show_log_that_cannot_be_written_does_not_stop_the_screen(tmp_path: Path) -> None:
+    backend = FakeBackend(FakeClock(), [[Text("Here, sir."), Tool("show", {"markdown": "# Plan"})], [Text("Indeed.")]])
+    config = settings(tmp_path)
+    config.runtime_dir.mkdir(parents=True)
+    (config.runtime_dir / "show.log").mkdir()
+
+    stdout, stderr = await converse(backend, io.StringIO("Show me the plan\nThanks\n"), config=config)
+
+    assert "Plan" in stdout and stdout.endswith("Indeed.\n")
+    assert stderr.startswith("[hub] Could not write the show log:")

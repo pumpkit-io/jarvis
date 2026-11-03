@@ -8,16 +8,27 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ClaudeSDKError,
+    HookContext,
+    HookMatcher,
     ResultMessage,
     SdkMcpTool,
     StreamEvent,
     create_sdk_mcp_server,
     tool,
 )
-from claude_agent_sdk.types import McpServerConfig, ThinkingConfig
+from claude_agent_sdk.types import (
+    HookCallback,
+    HookEvent,
+    HookInput,
+    HookJSONOutput,
+    McpServerConfig,
+    SystemPromptPreset,
+    ThinkingConfig,
+)
 
 from jarvis_hub.agents.backend import (
     AgentEvent,
+    BashGuard,
     HubTool,
     SessionSpec,
     TextDelta,
@@ -39,11 +50,35 @@ def _sdk_tool(hub_tool: HubTool) -> SdkMcpTool[Any]:
     return tool(hub_tool.name, hub_tool.description, hub_tool.input_schema)(handler)
 
 
+def _bash_hook(guard: BashGuard) -> HookCallback:
+    async def hook(hook_input: HookInput, tool_use_id: str | None, context: HookContext) -> HookJSONOutput:
+        command = str(hook_input.get("tool_input", {}).get("command", ""))
+        refusal = guard(command)
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny" if refusal else "allow",
+                "permissionDecisionReason": refusal or "read-only",
+            }
+        }
+
+    return hook
+
+
 def options_for(spec: SessionSpec, cli_path: str, stderr: Callable[[str], None] | None = None) -> ClaudeAgentOptions:
     mcp_servers: dict[str, McpServerConfig] = {}
     if spec.tools:
         mcp_servers[TOOL_SERVER] = create_sdk_mcp_server(TOOL_SERVER, tools=[_sdk_tool(t) for t in spec.tools])
     thinking: ThinkingConfig | None = None if spec.thinking else {"type": "disabled"}
+    system_prompt: str | SystemPromptPreset = (
+        {"type": "preset", "preset": "claude_code", "append": spec.system_prompt} if spec.preset else spec.system_prompt
+    )
+    builtins = [*spec.read_tools, *(["Bash"] if spec.bash_guard else [])]
+    hooks: dict[HookEvent, list[HookMatcher]] = {}
+    if spec.bash_guard:
+        # Bash is left off allowed_tools, so under dontAsk only this hook's allow lets a command run;
+        # a hook that fails blocks the call.
+        hooks["PreToolUse"] = [HookMatcher(matcher="Bash", hooks=[_bash_hook(spec.bash_guard)], on_failure="block")]
     return ClaudeAgentOptions(
         # Without cli_path the SDK runs its own bundled CLI, not the one logged in to Max.
         cli_path=cli_path,
@@ -51,13 +86,19 @@ def options_for(spec: SessionSpec, cli_path: str, stderr: Callable[[str], None] 
         model=spec.model,
         effort=spec.effort,
         thinking=thinking,
-        system_prompt=spec.system_prompt,
+        system_prompt=system_prompt,
         setting_sources=[],
+        # Keeps the bundled skill listing out of the preset prompt.
+        skills=[] if spec.preset else None,
         # Also keeps out the claude.ai connectors of the logged-in account, which setting_sources does not.
         strict_mcp_config=True,
-        tools=[],
+        tools=builtins,
         mcp_servers=mcp_servers,
-        allowed_tools=[f"mcp__{TOOL_SERVER}__{t.name}" for t in spec.tools],
+        allowed_tools=[*spec.read_tools, *(f"mcp__{TOOL_SERVER}__{t.name}" for t in spec.tools)],
+        # Denies every tool call the allowlist or the Bash hook has not approved, without prompting.
+        permission_mode="dontAsk",
+        max_turns=spec.max_turns,
+        hooks=hooks or None,
         include_partial_messages=True,
         stderr=stderr,
     )

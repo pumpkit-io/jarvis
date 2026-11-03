@@ -14,10 +14,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TextIO
 
+from rich.console import Console
+from rich.markdown import Markdown
+
 from jarvis_hub.agents.backend import AgentBackend
 from jarvis_hub.agents.sdk import SdkBackend
 from jarvis_hub.config import ConfigError, Settings, load_settings
-from jarvis_hub.hub import Clock, Hub
+from jarvis_hub.hub import Clock, Hub, Line
+from jarvis_hub.orchestrator import orchestrator_spec
 from jarvis_hub.talker import talker_spec
 
 PROMPT = "› "
@@ -26,8 +30,10 @@ PROMPT = "› "
 BILLING_SWITCHES = {
     "ANTHROPIC_API_KEY": "every model call would be billed to the API",
     "ANTHROPIC_AUTH_TOKEN": "every model call would authenticate with that token",
+    "ANTHROPIC_BASE_URL": "every model call would go to that endpoint",
     "CLAUDE_CODE_USE_BEDROCK": "every model call would go to Amazon Bedrock",
     "CLAUDE_CODE_USE_VERTEX": "every model call would go to Google Vertex AI",
+    "CLAUDE_CODE_USE_FOUNDRY": "every model call would go to Microsoft Foundry",
 }
 
 
@@ -48,22 +54,47 @@ class JsonlMetrics:
 
 
 class TerminalOutput:
-    def __init__(self, stdout: TextIO, stderr: TextIO, prompt: bool) -> None:
+    """Replies and notices as plain text; shown details rendered as markdown and appended to the show log."""
+
+    def __init__(self, stdout: TextIO, stderr: TextIO, prompt: bool, show_log: Path) -> None:
         self._stdout = stdout
         self._stderr = stderr
         self._prompt = prompt
+        self._show_log = show_log
+        self._console = Console(file=stdout, highlight=False)
+        self._mid_reply = False
+
+    def heard(self, text: str) -> None:
+        # A terminal already shows what was typed; piped input is echoed so the transcript reads in order.
+        if not self._prompt:
+            self._stdout.write(f"{PROMPT}{text}\n")
 
     def reply(self, text: str) -> None:
         self._stdout.write(text)
         self._stdout.flush()
+        self._mid_reply = True
 
     def reply_end(self) -> None:
         self._stdout.write("\n" + (PROMPT if self._prompt else ""))
         self._stdout.flush()
+        self._mid_reply = False
 
     def notice(self, text: str) -> None:
         self._stderr.write(f"[hub] {text}\n")
         self._stderr.flush()
+
+    def show(self, markdown: str) -> None:
+        if self._mid_reply:
+            self._stdout.write("\n")
+        self._console.print(Markdown(markdown))
+        self._stdout.flush()
+        try:
+            self._show_log.parent.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            with self._show_log.open("a") as f:
+                f.write(f"<!-- shown {stamp} -->\n{markdown.rstrip()}\n\n")
+        except OSError as e:
+            self.notice(f"Could not write the show log: {e}")
 
 
 def _guard_billing(environ: MutableMapping[str, str], stderr: TextIO) -> None:
@@ -79,17 +110,17 @@ def _guard_billing(environ: MutableMapping[str, str], stderr: TextIO) -> None:
     stderr.flush()
 
 
-async def _typed_lines(stdin: TextIO, stdout: TextIO, interactive: bool) -> AsyncIterator[str]:
+async def _typed_lines(stdin: TextIO, clock: Clock) -> AsyncIterator[Line]:
     # A daemon thread, so a blocked read never keeps the process alive at exit.
     loop = asyncio.get_running_loop()
-    queue: asyncio.Queue[str | None] = asyncio.Queue()
+    queue: asyncio.Queue[Line | None] = asyncio.Queue()
     if isinstance(stdin, io.TextIOWrapper):
         stdin.reconfigure(errors="replace")
 
     def read() -> None:
         try:
             for line in stdin:
-                loop.call_soon_threadsafe(queue.put_nowait, line.rstrip("\n"))
+                loop.call_soon_threadsafe(queue.put_nowait, Line(line.rstrip("\n"), clock.now()))
         except OSError:
             pass  # A terminal that went away ends the conversation like the end of input.
         finally:
@@ -97,8 +128,6 @@ async def _typed_lines(stdin: TextIO, stdout: TextIO, interactive: bool) -> Asyn
 
     threading.Thread(target=read, daemon=True).start()
     while (line := await queue.get()) is not None:
-        if not interactive and line.strip():
-            stdout.write(f"{PROMPT}{line.strip()}\n")
         yield line
 
 
@@ -112,14 +141,15 @@ async def text_mode(
     stdout: TextIO,
     stderr: TextIO,
 ) -> None:
-    """A terminal conversation with the Talker: typed lines in, streamed replies out, until end of input."""
+    """A terminal conversation: typed lines in, streamed replies out, until end of input and every Task is quiet."""
     _guard_billing(environ, stderr)
     interactive = stdin.isatty()
     hub = Hub(
         talker=talker_spec(settings),
+        orchestrator=orchestrator_spec(settings),
         backend=backend,
         clock=clock,
-        output=TerminalOutput(stdout, stderr, prompt=interactive),
+        output=TerminalOutput(stdout, stderr, prompt=interactive, show_log=settings.runtime_dir / "show.log"),
         metrics=JsonlMetrics(settings.runtime_dir / "metrics.jsonl"),
     )
     try:
@@ -127,7 +157,7 @@ async def text_mode(
         if interactive:
             stdout.write(PROMPT)
             stdout.flush()
-        await hub.run(_typed_lines(stdin, stdout, interactive))
+        await hub.run(_typed_lines(stdin, clock))
     finally:
         await hub.close()
 

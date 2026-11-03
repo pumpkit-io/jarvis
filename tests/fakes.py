@@ -3,9 +3,10 @@
 import asyncio
 from collections.abc import AsyncIterator, Iterable, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
-from jarvis_hub.hub import WARM_UP
+from jarvis_hub.hub import WARM_UP, Hub, Line
 from jarvis_hub.agents.backend import (
     AgentEvent,
     SessionSpec,
@@ -64,25 +65,57 @@ class Gate:
 
 
 @dataclass(frozen=True)
+class Set:
+    """Sets the event, releasing whatever a Gate holds elsewhere."""
+
+    event: asyncio.Event
+
+
+@dataclass(frozen=True)
+class Raise:
+    """The session itself raises, as a broken transport would."""
+
+    error: Exception
+
+
+@dataclass(frozen=True)
 class Abort:
     """Ends the turn as interrupted although nobody called interrupt(), as when the CLI aborts on its own."""
 
 
-Step = Wait | Text | Tool | AwaitInterrupt | Gate | Fail | Abort | Usage
+Step = Wait | Text | Tool | AwaitInterrupt | Gate | Set | Fail | Raise | Abort | Usage
+
+
+@dataclass(frozen=True)
+class ToolResult:
+    name: str
+    input: dict[str, Any]
+    result: str | None
 
 
 class FakeSession:
+    """Calls the Hub's tool handlers as the CLI would, after reporting the call."""
+
     def __init__(self, backend: "FakeBackend", spec: SessionSpec) -> None:
         self.backend = backend
         self.spec = spec
         self.received: list[str] = []
+        self.tool_results: list[ToolResult] = []
         self.closed = False
+        self._sending = False
         self._interrupted = asyncio.Event()
 
     async def send(self, message: str) -> AsyncIterator[AgentEvent]:
         self.received.append(message)
         self._interrupted.clear()
-        script = self.backend.next_script(message)
+        self._sending = True
+        try:
+            async for event in self._play(self.backend.next_script(self.spec.role, message)):
+                yield event
+        finally:
+            self._sending = False
+
+    async def _play(self, script: Sequence[Step]) -> AsyncIterator[AgentEvent]:
         usage, in_text = Usage(), False
         for step in script:
             await asyncio.sleep(0)
@@ -98,10 +131,17 @@ class FakeSession:
                     self.backend.clock.advance(seconds)
                 case Tool(name, args):
                     yield ToolCall(name, args)
+                    handler = next((t.handler for t in self.spec.tools if t.name == name), None)
+                    result = await handler(args) if handler else None
+                    self.tool_results.append(ToolResult(name, args, result))
                 case AwaitInterrupt():
                     await self._interrupted.wait()
                 case Gate(event):
                     await event.wait()
+                case Set(event):
+                    event.set()
+                case Raise(error):
+                    raise error
                 case Fail(error):
                     yield TurnEnd("failed", usage, error)
                     return
@@ -115,14 +155,21 @@ class FakeSession:
         yield TurnEnd("interrupted" if self._interrupted.is_set() else "completed", usage)
 
     async def interrupt(self) -> None:
-        self._interrupted.set()
+        # Like the CLI: the interrupt lands on whatever turn runs when it arrives, or on none.
+        if self.backend.interrupt_gate is not None:
+            await self.backend.interrupt_gate.wait()
+        if self._sending:
+            self._interrupted.set()
 
     async def close(self) -> None:
         self.closed = True
 
 
 class FakeBackend:
-    """Plays one script per message sent, in order; `warm_up` answers the Hub's warm-up message."""
+    """Plays one script per message, in order, per role; `warm_up` answers the Talker's warm-up message.
+
+    An Orchestrator with no script left ends its turn without a report.
+    """
 
     def __init__(
         self,
@@ -130,21 +177,33 @@ class FakeBackend:
         scripts: Iterable[Sequence[Step]] = (),
         warm_up: Sequence[Step] = (Text("Ready."),),
         open_error: Exception | None = None,
+        orchestrator: Iterable[Sequence[Step]] = (),
+        orchestrator_open_error: Exception | None = None,
+        interrupt_gate: asyncio.Event | None = None,
     ) -> None:
         self.clock = clock
         self.scripts = list(scripts)
+        self.orchestrator_scripts = list(orchestrator)
         self.warm_up = warm_up
         self.open_error = open_error
+        self.orchestrator_open_error = orchestrator_open_error
+        self.interrupt_gate = interrupt_gate
         self.sessions: list[FakeSession] = []
 
     async def open(self, spec: SessionSpec) -> FakeSession:
-        if self.open_error is not None:
-            raise self.open_error
+        error = self.orchestrator_open_error if spec.role == "orchestrator" else self.open_error
+        if error is not None:
+            raise error
         session = FakeSession(self, spec)
         self.sessions.append(session)
         return session
 
-    def next_script(self, message: str) -> Sequence[Step]:
+    def session(self, role: str) -> FakeSession:
+        return next(s for s in self.sessions if s.spec.role == role)
+
+    def next_script(self, role: str, message: str) -> Sequence[Step]:
+        if role == "orchestrator":
+            return self.orchestrator_scripts.pop(0) if self.orchestrator_scripts else ()
         if message == WARM_UP:
             return self.warm_up
         return self.scripts.pop(0) if self.scripts else (Text("Very good, sir."),)
@@ -155,6 +214,9 @@ class RecordingOutput:
         self.log: list[tuple[str, str]] = []
         self.on_text: asyncio.Event = asyncio.Event()
 
+    def heard(self, text: str) -> None:
+        self.log.append(("heard", text))
+
     def reply(self, text: str) -> None:
         self.log.append(("reply", text))
         self.on_text.set()
@@ -164,6 +226,9 @@ class RecordingOutput:
 
     def notice(self, text: str) -> None:
         self.log.append(("notice", text))
+
+    def show(self, markdown: str) -> None:
+        self.log.append(("show", markdown))
 
     @property
     def replies(self) -> list[str]:
@@ -181,6 +246,10 @@ class RecordingOutput:
     def notices(self) -> list[str]:
         return [text for kind, text in self.log if kind == "notice"]
 
+    @property
+    def shown(self) -> list[str]:
+        return [text for kind, text in self.log if kind == "show"]
+
 
 class RecordingMetrics:
     def __init__(self) -> None:
@@ -190,6 +259,40 @@ class RecordingMetrics:
         self.records.append(entry)
 
 
-async def lines(*texts: str) -> AsyncIterator[str]:
+async def lines(clock: FakeClock, *texts: str) -> AsyncIterator[Line]:
     for text in texts:
-        yield text
+        yield Line(text, clock.now())
+
+
+TALKER = SessionSpec(role="talker", model="sonnet", effort="low", thinking=False, system_prompt="You are Jarvis.", cwd=Path("/tmp"))
+ORCHESTRATOR = SessionSpec(
+    role="orchestrator", model="sonnet", effort="medium", thinking=True, system_prompt="You orchestrate.", cwd=Path("/tmp")
+)
+
+
+def make_hub(backend: FakeBackend, output: RecordingOutput, metrics: Any) -> Hub:
+    return Hub(talker=TALKER, orchestrator=ORCHESTRATOR, backend=backend, clock=backend.clock, output=output, metrics=metrics)
+
+
+class Typist:
+    """Lines typed one at a time while the Hub runs; `end()` closes the input."""
+
+    def __init__(self, clock: FakeClock) -> None:
+        self._clock = clock
+        self._queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+    def type(self, text: str) -> None:
+        self._queue.put_nowait(text)
+
+    def end(self) -> None:
+        self._queue.put_nowait(None)
+
+    async def lines(self) -> AsyncIterator[Line]:
+        while (text := await self._queue.get()) is not None:
+            yield Line(text, self._clock.now())
+
+
+async def until(condition: Any, timeout: float = 1.0) -> None:
+    async with asyncio.timeout(timeout):
+        while not condition():
+            await asyncio.sleep(0.001)

@@ -107,5 +107,7 @@ def load_settings(repo_dir: Path, environ: Mapping[str, str]) -> Settings:
         orchestrator=RoleModel(
             model=get("JARVIS_ORCHESTRATOR_MODEL", "sonnet"),
             effort=effort("JARVIS_ORCHESTRATOR_EFFORT", "medium"),
+            # Left to the model: the Orchestrator judges results, and its latency is not heard.
+            thinking=True,
         ),
     )

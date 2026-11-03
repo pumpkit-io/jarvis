@@ -7,10 +7,15 @@ from typing import Any
 
 import pytest
 
-from jarvis_hub.agents.backend import AgentEvent, HubTool, SessionSpec, TextDelta, ToolCall, TurnEnd
-from claude_agent_sdk import ClaudeSDKClient, SystemMessage
+from dataclasses import replace
 
+from claude_agent_sdk import AssistantMessage, ClaudeSDKClient, SystemMessage, UserMessage
+from claude_agent_sdk.types import ToolResultBlock, ToolUseBlock
+
+from jarvis_hub.agents.backend import AgentEvent, HubTool, SessionSpec, TextDelta, ToolCall, TurnEnd
 from jarvis_hub.agents.sdk import SdkBackend, SdkSession, options_for
+from jarvis_hub.config import load_settings
+from jarvis_hub.orchestrator import orchestrator_spec
 
 pytestmark = pytest.mark.real_model
 
@@ -102,3 +107,62 @@ async def test_a_session_sees_only_the_hub_tools() -> None:
                 if isinstance(m, SystemMessage) and m.subtype == "init":
                     tool_lists.append(m.data.get("tools", []))
     assert tool_lists == [["mcp__jarvis__status"], ["mcp__jarvis__status"]]
+
+
+async def _noop(args: dict[str, Any]) -> str:
+    return ""
+
+
+def real_orchestrator_spec() -> SessionSpec:
+    settings = load_settings(Path(__file__).resolve().parents[1], os.environ)
+    report = HubTool("report", "Tell the User about a Task.", {"type": "object", "properties": {}}, _noop)
+    return replace(orchestrator_spec(settings), tools=(report,), model="haiku", effort="low")
+
+
+async def test_the_orchestrator_sees_only_its_read_tools_and_hub_tools() -> None:
+    cli = shutil.which("claude")
+    assert cli is not None and "ANTHROPIC_API_KEY" not in os.environ
+    inits: list[tuple[list[str], str]] = []
+    async with ClaudeSDKClient(options_for(real_orchestrator_spec(), cli)) as client:
+        for message in ("Reply with one word.", "Reply with one word again."):
+            await client.query(message)
+            async for m in client.receive_response():
+                if isinstance(m, SystemMessage) and m.subtype == "init":
+                    inits.append((sorted(m.data.get("tools", [])), m.data.get("permissionMode", "")))
+    expected = (["Bash", "Glob", "Grep", "Read", "mcp__jarvis__report"], "dontAsk")
+    assert inits == [expected, expected]
+
+
+async def test_the_orchestrator_bash_runs_a_read_and_the_hook_refuses_a_write() -> None:
+    # A neutral prompt and one command per message, so the model runs each as given and the guard alone decides.
+    # Which commands are refused is table-tested; models decline to try a bare `gh api -X POST` and split chains.
+    spec = replace(
+        real_orchestrator_spec(),
+        system_prompt="You are a test harness. Run the command the user gives with one Bash call, exactly as given, "
+        "then reply DONE.",
+    )
+    commands = [
+        "gh repo view pumpkit-io/jarvis --json name --jq .name",
+        "gh label create jarvis-probe --repo pumpkit-io/does-not-exist-xyz",
+    ]
+    cli = shutil.which("claude")
+    assert cli is not None and "ANTHROPIC_API_KEY" not in os.environ
+    outcomes: dict[str, list[tuple[bool, str]]] = {}
+    async with ClaudeSDKClient(options_for(spec, cli)) as client:
+        for command in commands:
+            ran: dict[str, str] = {}
+            await client.query(command)
+            async for m in client.receive_response():
+                if isinstance(m, AssistantMessage):
+                    for block in m.content:
+                        if isinstance(block, ToolUseBlock) and block.name == "Bash":
+                            ran[block.id] = str(block.input.get("command", ""))
+                elif isinstance(m, UserMessage) and isinstance(m.content, list):
+                    for block in m.content:
+                        if isinstance(block, ToolResultBlock) and block.tool_use_id in ran:
+                            outcome = (bool(block.is_error), str(block.content))
+                            outcomes.setdefault(ran[block.tool_use_id], []).append(outcome)
+    assert outcomes.get(commands[0], [])[:1] == [(False, "jarvis")], outcomes
+    for command in commands[1:]:
+        assert outcomes.get(command), (command, outcomes)
+        assert all(is_error and "hook" in content for is_error, content in outcomes[command]), (command, outcomes)

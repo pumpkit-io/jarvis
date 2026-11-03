@@ -8,6 +8,8 @@ from typing import Any, Literal, Protocol
 from jarvis_hub.config import Effort
 
 ToolHandler = Callable[[dict[str, Any]], Awaitable[str]]
+# Returns why a Bash command is refused, or None to let it run.
+BashGuard = Callable[[str], str | None]
 
 
 @dataclass(frozen=True)
@@ -22,6 +24,8 @@ class HubTool:
 
 @dataclass(frozen=True)
 class SessionSpec:
+    """One session's setup. Nothing outside it is allowed: no settings, no connectors, no unlisted tool."""
+
     role: str
     model: str
     effort: Effort
@@ -29,6 +33,14 @@ class SessionSpec:
     system_prompt: str
     cwd: Path
     tools: Sequence[HubTool] = ()
+    # Appends system_prompt to Claude Code's own prompt instead of replacing it.
+    preset: bool = False
+    # Built-in tools the session may use without asking, such as Read.
+    read_tools: Sequence[str] = ()
+    # Gives the session Bash, running only the commands this guard lets through.
+    bash_guard: BashGuard | None = None
+    # Model turns allowed per message.
+    max_turns: int | None = None
 
 
 @dataclass(frozen=True)
