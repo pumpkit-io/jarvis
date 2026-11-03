@@ -353,3 +353,19 @@ def test_resume_keeps_one_finished_clip_even_when_it_is_over_the_history_budget(
     out = stream.pull(40)
 
     np.testing.assert_array_equal(out[20:], ramp(20, 20))
+
+
+def test_every_block_played_goes_to_echo_cancellation_silence_included() -> None:
+    streams: list[FakeStream] = []
+    played: list[tuple[np.ndarray, int]] = []
+
+    def open_stream(rate: int, fill: Callable[[np.ndarray], None]) -> FakeStream:
+        streams.append(FakeStream(fill))
+        return streams[-1]
+
+    player = SoundPlayer(RATE, open_stream=open_stream, on_played=lambda s, r: played.append((s.copy(), r)))
+    player.play(clip("One.", ramp(0, 100)))
+    out = np.concatenate([streams[0].pull(64) for _ in range(3)])
+
+    np.testing.assert_array_equal(np.concatenate([s for s, _ in played]), out)
+    assert {r for _, r in played} == {RATE}

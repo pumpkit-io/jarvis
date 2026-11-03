@@ -157,3 +157,41 @@ def test_unknown_effort_is_refused(checkout: Path) -> None:
     (checkout / ".env").write_text("JARVIS_ORCHESTRATOR_EFFORT=extreme\n")
     with pytest.raises(ConfigError, match="JARVIS_ORCHESTRATOR_EFFORT"):
         load_settings(checkout, environ={})
+
+
+def test_voice_settings_default_to_the_ticket_and_phase_0(checkout: Path) -> None:
+    voice = load_settings(checkout, environ={}).voice
+    assert (voice.follow_up_s, voice.announce_follow_up_s, voice.listen_s) == (6.0, 4.0, 6.0)
+    assert (voice.wake_engine, voice.wake_threshold, voice.stt_engine, voice.aec) == ("openwakeword", 0.5, "parakeet", "webrtc")
+    assert (voice.vad_threshold, voice.end_silence_ms, voice.end_extend_ms) == (0.5, 500, 1500)
+    assert (voice.smart_turn_threshold, voice.preroll_ms) == (0.5, 1500)
+
+
+def test_voice_settings_come_from_dotenv(checkout: Path) -> None:
+    (checkout / ".env").write_text(
+        "JARVIS_FOLLOWUP_SECONDS=8\nJARVIS_WAKE_THRESHOLD=0.3\nJARVIS_AEC=off\nJARVIS_END_SILENCE_MS=400\n"
+        "JARVIS_END_EXTEND_MS=1000\nJARVIS_SMART_TURN_THRESHOLD=0.6\nJARVIS_VAD_THRESHOLD=0.4\n"
+        "JARVIS_PREROLL_MS=1200\nJARVIS_LISTEN_SECONDS=5\nJARVIS_ANNOUNCE_FOLLOWUP_SECONDS=3\n"
+    )
+    voice = load_settings(checkout, environ={}).voice
+    assert (voice.follow_up_s, voice.announce_follow_up_s, voice.listen_s) == (8.0, 3.0, 5.0)
+    assert (voice.wake_threshold, voice.aec, voice.vad_threshold) == (0.3, "off", 0.4)
+    assert (voice.end_silence_ms, voice.end_extend_ms, voice.smart_turn_threshold, voice.preroll_ms) == (400, 1000, 0.6, 1200)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "JARVIS_FOLLOWUP_SECONDS=soon",
+        "JARVIS_FOLLOWUP_SECONDS=-1",
+        "JARVIS_WAKE_THRESHOLD=1.5",
+        "JARVIS_END_SILENCE_MS=0",
+        "JARVIS_AEC=maybe",
+        "JARVIS_STT_ENGINE=whisper",
+        "JARVIS_WAKE_ENGINE=porcupine",
+    ],
+)
+def test_voice_settings_out_of_range_are_refused(checkout: Path, line: str) -> None:
+    (checkout / ".env").write_text(line + "\n")
+    with pytest.raises(ConfigError, match=line.split("=")[0]):
+        load_settings(checkout, environ={})

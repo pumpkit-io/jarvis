@@ -14,21 +14,25 @@ from collections.abc import AsyncIterator, Callable, MutableMapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, Protocol, TextIO
 
 from rich.console import Console
 from rich.markdown import Markdown
 
 from jarvis_hub.agents.backend import AgentBackend
 from jarvis_hub.agents.sdk import SdkBackend
-from jarvis_hub.config import ConfigError, Settings, load_settings
+from jarvis_hub.config import ConfigError, Settings, VoiceSettings, load_settings
 from jarvis_hub.hub import Clock, Hub, Line
 from jarvis_hub.orchestrator import orchestrator_spec
 from jarvis_hub.talker import talker_spec
 from jarvis_hub.voice import language
-from jarvis_hub.voice.player import Player, SoundPlayer
+from jarvis_hub.voice.engines import EngineChoice
+from jarvis_hub.voice.input import Listening
+from jarvis_hub.voice.player import Player, Samples, SoundPlayer
 from jarvis_hub.voice.speech import Speech, SpeechClock
+from jarvis_hub.voice.state import Timing
 from jarvis_hub.voice.tts import KokoroSynthesizer, Synthesizer
+from jarvis_hub.voice.voice_mode import AudioInput, VoiceMode, merge
 
 PROMPT = "› "
 # Marks what the User said aloud, as transcribed, apart from what they typed.
@@ -59,6 +63,51 @@ class Voice:
 
     tts: Synthesizer
     open_player: Callable[[int], Player]
+
+
+# The Hub's chime is 180 ms; the margin covers the output's latency.
+CHIME_GUARD_S = 0.5
+
+PlayedTap = Callable[[Samples, int], None]
+
+
+class Listener(AudioInput, Protocol):
+    def start(self) -> None: ...
+
+    def close(self) -> None: ...
+
+    def reference(self, samples: Samples, rate: int) -> None:
+        """What the speakers played, for echo cancellation."""
+        ...
+
+
+@dataclass(frozen=True)
+class Ears:
+    """What voice mode adds to `--speak`: the listener, and a player that reports what it plays to it."""
+
+    tts: Synthesizer
+    open_player: Callable[[int, PlayedTap], Player]
+    open_listener: Callable[[EngineChoice, Listening, Callable[[dict[str, Any]], None], Callable[[str], None]], Listener]
+
+
+def timing(voice: VoiceSettings) -> Timing:
+    return Timing(
+        follow_up_s=voice.follow_up_s,
+        announce_follow_up_s=voice.announce_follow_up_s,
+        listen_s=voice.listen_s,
+        chime_s=CHIME_GUARD_S,
+    )
+
+
+def listening(voice: VoiceSettings) -> Listening:
+    return Listening(
+        wake_threshold=voice.wake_threshold,
+        vad_threshold=voice.vad_threshold,
+        end_silence_s=voice.end_silence_ms / 1000,
+        end_extend_s=voice.end_extend_ms / 1000,
+        smart_turn_threshold=voice.smart_turn_threshold,
+        preroll_s=voice.preroll_ms / 1000,
+    )
 
 
 class JsonlMetrics:
@@ -221,14 +270,93 @@ async def text_mode(
                 await speech.close()
 
 
+async def voice_mode(
+    *,
+    settings: Settings,
+    environ: MutableMapping[str, str],
+    backend: AgentBackend,
+    clock: SpeechClock,
+    stdin: TextIO,
+    stdout: TextIO,
+    stderr: TextIO,
+    ears: Ears,
+    headphones: bool = False,
+    debug: bool = False,
+) -> None:
+    """Idle until the Wake word, then a spoken conversation; lines typed meanwhile get text-only replies.
+
+    Ends with the typed input (Ctrl-D) or Ctrl-C.
+    """
+    _guard_billing(environ, stderr)
+    output = TerminalOutput(stdout, stderr, prompt=stdin.isatty(), show_log=settings.runtime_dir / "show.log")
+    metrics = JsonlMetrics(settings.runtime_dir / "metrics.jsonl")
+    voice = settings.voice
+    choice = EngineChoice(aec="off" if headphones else voice.aec, wake=voice.wake_engine, stt=voice.stt_engine)
+    listener = ears.open_listener(choice, listening(voice), metrics.record, output.notice)
+    try:
+        player = ears.open_player(ears.tts.sample_rate, listener.reference)
+    except Exception as e:
+        output.notice(f"Voice mode needs an audio output: {type(e).__name__}: {e}. Run `jarvis-hub --text` instead.")
+        return
+    conversation = VoiceMode(
+        audio=listener,
+        tts=ears.tts,
+        player=player,
+        clock=clock,
+        timing=timing(voice),
+        metrics=metrics,
+        notice=output.notice,
+        debug=debug,
+    )
+    hub = Hub(
+        talker=talker_spec(settings),
+        orchestrator=orchestrator_spec(settings),
+        backend=backend,
+        clock=clock,
+        output=output,
+        metrics=metrics,
+        speech=conversation.speech,
+        speak_typed=False,
+        on_end_conversation=conversation.end_conversation,
+    )
+    try:
+        await hub.start()
+        await asyncio.to_thread(language.warm_up)
+        conversation.start()
+        listener.start()
+        if stdin.isatty():
+            stdout.write(PROMPT)
+            stdout.flush()
+        await hub.run(merge(_typed_lines(stdin, clock), conversation.lines(hub.interrupt)))
+    finally:
+        try:
+            await hub.close()
+        finally:
+            listener.close()
+            await conversation.close()
+
+
+def _open_listener(
+    choice: EngineChoice, settings: Listening, record: Callable[[dict[str, Any]], None], notice: Callable[[str], None]
+) -> Listener:
+    from jarvis_hub.voice.engines import load_engines
+    from jarvis_hub.voice.input import Capture
+
+    return Capture(lambda: load_engines(choice), settings, record, notice)
+
+
+def _open_player(rate: int, on_played: PlayedTap) -> Player:
+    return SoundPlayer(rate, on_played=on_played)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="jarvis-hub", description="Run the Jarvis Hub.")
     parser.add_argument("--text", action="store_true", help="talk by typing, with no audio")
     parser.add_argument("--speak", action="store_true", help="with --text, also speak the replies aloud")
+    parser.add_argument("--headphones", action="store_true", help="voice mode with echo cancellation off")
+    parser.add_argument("--debug", action="store_true", help="show the voice state machine's transitions")
     args = parser.parse_args()
 
-    if not args.text:
-        sys.exit("jarvis-hub: only text mode exists so far; run `jarvis-hub --text`.")
     voice = Voice(KokoroSynthesizer(), SoundPlayer) if args.speak else None
     cli = shutil.which("claude")
     if cli is None:
@@ -240,18 +368,34 @@ def main() -> None:
 
     # Ctrl-C reaches the claude CLI too (same process group), so it ends the conversation rather than a reply.
     try:
-        asyncio.run(
-            text_mode(
-                settings=settings,
-                environ=os.environ,
-                backend=SdkBackend(cli),
-                clock=MonotonicClock(),
-                stdin=sys.stdin,
-                stdout=sys.stdout,
-                stderr=sys.stderr,
-                voice=voice,
+        if args.text:
+            asyncio.run(
+                text_mode(
+                    settings=settings,
+                    environ=os.environ,
+                    backend=SdkBackend(cli),
+                    clock=MonotonicClock(),
+                    stdin=sys.stdin,
+                    stdout=sys.stdout,
+                    stderr=sys.stderr,
+                    voice=voice,
+                )
             )
-        )
+        else:
+            asyncio.run(
+                voice_mode(
+                    settings=settings,
+                    environ=os.environ,
+                    backend=SdkBackend(cli),
+                    clock=MonotonicClock(),
+                    stdin=sys.stdin,
+                    stdout=sys.stdout,
+                    stderr=sys.stderr,
+                    ears=Ears(KokoroSynthesizer(), _open_player, _open_listener),
+                    headphones=args.headphones,
+                    debug=args.debug,
+                )
+            )
     except KeyboardInterrupt:
         sys.stdout.write("\n")
         sys.exit(130)

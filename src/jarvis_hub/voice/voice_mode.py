@@ -39,7 +39,7 @@ InputEvent = WakeWord | SpeechStarted | Heard
 
 
 class AudioInput(Protocol):
-    """What the microphone pipeline reports (`jarvis_hub.voice.input.Microphone`), or a test's script."""
+    """What the input pipeline reports (`jarvis_hub.voice.input.Capture`), or a test's script."""
 
     def events(self) -> AsyncIterator[InputEvent]: ...
 

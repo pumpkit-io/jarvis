@@ -5,7 +5,7 @@ import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypeGuard, get_args
+from typing import Any, Literal, TypeGuard, get_args
 
 DEFAULT_ORG = "pumpkit-io"
 
@@ -27,6 +27,24 @@ class RoleModel:
 
 
 @dataclass(frozen=True)
+class VoiceSettings:
+    """Voice mode's windows, engines and thresholds; defaults from Ticket #12 and Phase 0 (docs/notes/phase-0-spikes.md)."""
+
+    follow_up_s: float = 6.0
+    announce_follow_up_s: float = 4.0
+    listen_s: float = 6.0
+    wake_engine: Literal["openwakeword"] = "openwakeword"
+    wake_threshold: float = 0.5
+    stt_engine: Literal["parakeet"] = "parakeet"
+    aec: Literal["webrtc", "off"] = "webrtc"
+    vad_threshold: float = 0.5
+    end_silence_ms: int = 500
+    end_extend_ms: int = 1500
+    smart_turn_threshold: float = 0.5
+    preroll_ms: int = 1500
+
+
+@dataclass(frozen=True)
 class Settings:
     user_name: str | None
     org: str
@@ -35,6 +53,7 @@ class Settings:
     runtime_dir: Path
     talker: RoleModel
     orchestrator: RoleModel
+    voice: VoiceSettings = VoiceSettings()
 
 
 def parse_env(data: bytes) -> dict[str, str]:
@@ -96,6 +115,39 @@ def load_settings(repo_dir: Path, environ: Mapping[str, str]) -> Settings:
             raise ConfigError(f"{name}={value!r} is not one of {', '.join(get_args(Effort))}")
         return value
 
+    def number(name: str, default: float, low: float, high: float, *, low_open: bool = False) -> float:
+        raw = get(name, "")
+        if not raw:
+            return default
+        try:
+            value = float(raw)
+        except ValueError:
+            raise ConfigError(f"{name}={raw!r} is not a number") from None
+        if value < low or value > high or (low_open and value == low):
+            raise ConfigError(f"{name}={raw!r} is out of range ({low:g} to {high:g})")
+        return value
+
+    def choice(name: str, default: str, allowed: tuple[str, ...]) -> Any:
+        value = get(name, default)
+        if value not in allowed:
+            raise ConfigError(f"{name}={value!r} is not one of {', '.join(allowed)}")
+        return value
+
+    voice = VoiceSettings(
+        follow_up_s=number("JARVIS_FOLLOWUP_SECONDS", 6.0, 0, 120, low_open=True),
+        announce_follow_up_s=number("JARVIS_ANNOUNCE_FOLLOWUP_SECONDS", 4.0, 0, 120, low_open=True),
+        listen_s=number("JARVIS_LISTEN_SECONDS", 6.0, 0, 120, low_open=True),
+        wake_engine=choice("JARVIS_WAKE_ENGINE", "openwakeword", ("openwakeword",)),
+        wake_threshold=number("JARVIS_WAKE_THRESHOLD", 0.5, 0, 1, low_open=True),
+        stt_engine=choice("JARVIS_STT_ENGINE", "parakeet", ("parakeet",)),
+        aec=choice("JARVIS_AEC", "webrtc", ("webrtc", "off")),
+        vad_threshold=number("JARVIS_VAD_THRESHOLD", 0.5, 0, 1, low_open=True),
+        end_silence_ms=round(number("JARVIS_END_SILENCE_MS", 500, 0, 5000, low_open=True)),
+        end_extend_ms=round(number("JARVIS_END_EXTEND_MS", 1500, 0, 10000)),
+        smart_turn_threshold=number("JARVIS_SMART_TURN_THRESHOLD", 0.5, 0, 1),
+        preroll_ms=round(number("JARVIS_PREROLL_MS", 1500, 0, 5000)),
+    )
+
     return Settings(
         user_name=values.get("JARVIS_USER_NAME") or None,
         org=get("JARVIS_GITHUB_ORG", DEFAULT_ORG),
@@ -110,4 +162,5 @@ def load_settings(repo_dir: Path, environ: Mapping[str, str]) -> Settings:
             # Left to the model: the Orchestrator judges results, and its latency is not heard.
             thinking=True,
         ),
+        voice=voice,
     )

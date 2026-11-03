@@ -93,7 +93,14 @@ class _Queued:
 class SoundPlayer:
     """A player on the default output device. The device's audio thread pulls samples through `_fill`."""
 
-    def __init__(self, sample_rate: int, *, open_stream: OpenStream = _DeviceStream, fade_ms: int = 20) -> None:
+    def __init__(
+        self,
+        sample_rate: int,
+        *,
+        open_stream: OpenStream = _DeviceStream,
+        fade_ms: int = 20,
+        on_played: Callable[[Samples, int], None] | None = None,
+    ) -> None:
         self._rate = sample_rate
         self._fade = max(1, sample_rate * fade_ms // 1000)
         self._lock = threading.Lock()
@@ -107,6 +114,8 @@ class SoundPlayer:
         # A stop drops this many clips at the head of the queue once its fade reaches silence.
         self._stopping = False
         self._to_flush = 0
+        # Echo cancellation's reference: every block sent to the device, silence too, on the device's thread.
+        self._on_played = on_played
         self._stream = open_stream(sample_rate, self._fill)
 
     def play(self, clip: Clip, *, starts_reply: bool = False) -> None:
@@ -187,6 +196,11 @@ class SoundPlayer:
             self._start_current()
 
     def _fill(self, out: Samples) -> None:
+        self._fill_locked(out)
+        if self._on_played is not None:
+            self._on_played(out, self._rate)
+
+    def _fill_locked(self, out: Samples) -> None:
         out[:] = 0
         with self._lock:
             if self._gain == 0.0 and self._target == 0.0:
