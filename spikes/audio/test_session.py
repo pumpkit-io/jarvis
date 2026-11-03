@@ -388,6 +388,43 @@ def test_the_turbo_port_is_measured_only_when_it_is_the_server_the_session_start
     assert "--turbo-pid" not in session.benches(SCRATCH / "benches")[0]
 
 
+def run_stt_session(turbo_pid: int, port: int) -> tuple[int, str]:
+    """Run bench_stt's parent with one stub engine; the parent starts this stub as its child process, which sees a real listener on `port`."""
+    stub = SCRATCH / "stt-stub"
+    stub.mkdir(exist_ok=True)
+    here = Path(__file__).resolve().parent
+    (stub / "bench_stt.py").write_text(
+        f"import sys\nsys.path.insert(0, {str(here)!r})\nimport bench_stt\n"
+        f"import pathlib\nbench_stt.HERE = pathlib.Path(__file__).resolve().parent\n"
+        f"bench_stt.ENGINES = ['server-2023']\nbench_stt.SERVER_PORTS = {{'server-2023': {port}}}\n"
+        "bench_stt.run_engine = lambda engine, source: {'engine': engine, 'source': source, 'clips': {}}\n"
+        "bench_stt.main()\n")
+    (SCRATCH / "results" / "stt-server-2023-synthetic.json").unlink(missing_ok=True)
+    done = subprocess.run([sys.executable, str(stub / "bench_stt.py"), "--turbo-pid", str(turbo_pid)],
+                          capture_output=True, text=True, env={**os.environ, "JARVIS_AUDIO_RESULTS": str(SCRATCH / "results")})
+    return done.returncode, done.stdout + done.stderr
+
+
+def test_a_full_stt_run_hands_the_turbo_pid_to_the_child_that_measures_it():
+    server, port = serve(200)
+    try:
+        code, said = run_stt_session(turbo_pid=os.getpid(), port=port)
+    finally:
+        server.shutdown()
+    assert code == 0, said
+    assert (SCRATCH / "results" / "stt-server-2023-synthetic.json").exists(), said
+
+
+def test_a_turbo_row_the_session_expected_but_skipped_fails_the_run():
+    server, port = serve(200)
+    try:
+        code, said = run_stt_session(turbo_pid=os.getpid() + 1, port=port)
+    finally:
+        server.shutdown()
+    assert code != 0 and "server-2023" in said
+    assert not (SCRATCH / "results" / "stt-server-2023-synthetic.json").exists()
+
+
 def test_a_bench_that_hangs_is_stopped_with_everything_it_started():
     child = SCRATCH / "bench-child.pid"
     script = f"import subprocess, time; p = subprocess.Popen(['sleep', '60']); open({str(child)!r}, 'w').write(str(p.pid)); time.sleep(60)"

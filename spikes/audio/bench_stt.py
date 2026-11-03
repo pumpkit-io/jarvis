@@ -27,6 +27,7 @@ ENGINES = ["parakeet", "mlx-whisper", "server-2022", "server-2023"]
 SERVER_PORTS = {"server-2022": 2022, "server-2023": 2023}
 SNIPPETS_S = [0.4, 0.6, 0.8]
 RUNS = 3
+SKIPPED_EXIT = 3  # a child exits with this when the engine the session expected was skipped
 
 
 class Parakeet:
@@ -203,6 +204,11 @@ def server_skip(engine: str, listener_pid: int | None, turbo_pid: int | None) ->
     return None
 
 
+def expected_but_skipped(engine: str, skipped: dict, turbo_pid: int | None) -> bool:
+    """The session started a turbo server for this run, so leaving its row out is a failure, not a quiet skip."""
+    return engine == "server-2023" and turbo_pid is not None and bool(skipped.get(engine))
+
+
 def loud(text: str) -> None:
     bar = "!" * 72
     print(f"\n{bar}\n{text}\n{bar}\n", flush=True)
@@ -221,21 +227,28 @@ def main() -> None:
             loud(f"skip {engine}: {reason}")
     if args.engine:
         if skipped.get(args.engine):
+            if expected_but_skipped(args.engine, skipped, args.turbo_pid):
+                sys.exit(SKIPPED_EXIT)
             return
         result = run_engine(args.engine, args.source)
         path = write_result(f"stt-{args.engine}-{args.source}", result)
         print(json.dumps({k: v for k, v in result.items() if k != "clips"}, indent=2, ensure_ascii=False))
         print(f"-> {path}")
         return
-    crashed = []
+    missing = []
     for engine in ENGINES:
         if skipped.get(engine):
+            if expected_but_skipped(engine, skipped, args.turbo_pid):
+                missing.append(f"{engine} (skipped)")
             continue
-        code = subprocess.run([sys.executable, str(HERE / "bench_stt.py"), "--source", args.source, "--engine", engine]).returncode
+        cmd = [sys.executable, str(HERE / "bench_stt.py"), "--source", args.source, "--engine", engine]
+        if engine == "server-2023" and args.turbo_pid is not None:
+            cmd += ["--turbo-pid", str(args.turbo_pid)]
+        code = subprocess.run(cmd).returncode
         if code:
-            crashed.append(f"{engine} (exit {code})")
-    if crashed:
-        sys.exit(f"STT engines that crashed, so their rows are missing: {', '.join(crashed)}")
+            missing.append(f"{engine} ({'skipped' if code == SKIPPED_EXIT else f'exit {code}'})")
+    if missing:
+        sys.exit(f"STT engines that crashed or were skipped, so their rows are missing: {', '.join(missing)}")
 
 
 if __name__ == "__main__":
