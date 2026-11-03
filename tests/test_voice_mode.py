@@ -890,7 +890,9 @@ async def test_news_held_in_quiet_mode_is_shown_when_the_input_ends_and_the_hub_
 RED = "CI is red on pumpkit 42."
 
 
-async def blocker_rig(rig_for: MakeRig, reports_: list[tuple[str, bool]], *scripts: list[Step]) -> tuple[Rig, list[asyncio.Event]]:
+async def blocker_rig(
+    rig_for: MakeRig, reports_: list[tuple[str, bool]], *scripts: list[Step]
+) -> tuple[Rig, list[asyncio.Event]]:
     """One Task whose Orchestrator turn sends `reports_` (spoken, needs_user) one per arrival, in Quiet mode."""
     arrivals = [asyncio.Event() for _ in reports_]
     turn: list[Step] = []
@@ -925,12 +927,15 @@ async def test_news_that_needs_the_user_gets_through_quiet_mode_once_per_change(
 
     await arrive(rig, arrivals[2])
     await until(lambda: "A new failure, sir." in rig.player.texts and rig.state == "follow_up")
-    assert talker_received(rig)[-1].startswith('<event source="orchestrator" task="T1" needs_user="true">CI is red on pumpkit 42 with')
+    assert talker_received(rig)[-1].startswith(f'<event source="orchestrator" task="T1" needs_user="true">{worse}')
 
 
 async def test_needs_user_news_counts_as_changed_after_the_task_reported_something_else(rig_for: MakeRig) -> None:
     rig, arrivals = await blocker_rig(
-        rig_for, [(RED, True), ("CI is green.", False), (RED, True)], [Text("CI is red, sir.")], [Text("Red again, sir.")]
+        rig_for,
+        [(RED, True), ("CI is green.", False), (RED, True)],
+        [Text("CI is red, sir.")],
+        [Text("Red again, sir.")],
     )
 
     await arrive(rig, arrivals[0])
@@ -946,7 +951,9 @@ async def test_needs_user_news_counts_as_changed_after_the_task_reported_somethi
 
 
 async def test_a_repeat_held_in_quiet_mode_still_counts_among_the_updates(rig_for: MakeRig) -> None:
-    rig, arrivals = await blocker_rig(rig_for, [(RED, True), (RED, True)], [Text("CI is red, sir.")], [Text("One more.")])
+    rig, arrivals = await blocker_rig(
+        rig_for, [(RED, True), (RED, True)], [Text("CI is red, sir.")], [Text("One more.")]
+    )
     await arrive(rig, arrivals[0])
     await until(lambda: "CI is red, sir." in rig.player.texts and rig.state == "follow_up")
     await rig.advance(4)

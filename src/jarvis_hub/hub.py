@@ -172,7 +172,8 @@ def restart_message(open_tasks: str, exchanges: "deque[tuple[str, str]]") -> str
 
 def away_message(count: int) -> str:
     updates = "update" if count == 1 else "updates"
-    return f'<event source="hub" away="{count}">{count} {updates} while you were away; their details are on screen.</event>'
+    text = f"{count} {updates} while you were away; their details are on screen."
+    return f'<event source="hub" away="{count}">{text}</event>'
 
 
 def _needs_user_key(spoken: str) -> str:
@@ -412,7 +413,9 @@ class Hub:
         inbox.put_nowait(item)
         self._arrived.set()
 
-    def _post_news(self, source: str, text: str, task: str, *, needs_user: bool = False, details: str | None = None) -> None:
+    def _post_news(
+        self, source: str, text: str, task: str, *, needs_user: bool = False, details: str | None = None
+    ) -> None:
         message = event_message(source, text, task, needs_user=needs_user, details=details is not None)
         item = _TalkerInput(message, "event", self._clock.now(), details, news=f"{task}: {text}")
         if self._floor is None:
@@ -443,7 +446,9 @@ class Hub:
             return
         held, self._held = self._held, []
         listed = "\n".join(f"- {item.news}" for item in held)
-        details = "\n\n".join([f"**While you were away**\n\n{listed}", *(item.details for item in held if item.details)])
+        details = "\n\n".join(
+            [f"**While you were away**\n\n{listed}", *(item.details for item in held if item.details)]
+        )
         message = "\n".join([away_message(len(held)), *(item.message for item in held)])
         away = _TalkerInput(message, "event", self._clock.now(), details, count=len(held), away=True, parts=tuple(held))
         self._news.appendleft(away)
