@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 from collections.abc import AsyncIterator, MutableMapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TextIO
@@ -24,6 +25,10 @@ from jarvis_hub.config import ConfigError, Settings, load_settings
 from jarvis_hub.hub import Clock, Hub, Line
 from jarvis_hub.orchestrator import orchestrator_spec
 from jarvis_hub.talker import talker_spec
+from jarvis_hub.voice import language
+from jarvis_hub.voice.player import Player, SoundPlayer
+from jarvis_hub.voice.speech import Speech, SpeechClock
+from jarvis_hub.voice.tts import KokoroSynthesizer, Synthesizer
 
 PROMPT = "› "
 
@@ -41,6 +46,17 @@ BILLING_SWITCHES = {
 class MonotonicClock:
     def now(self) -> float:
         return time.perf_counter()
+
+    async def sleep(self, seconds: float) -> None:
+        await asyncio.sleep(seconds)
+
+
+@dataclass(frozen=True)
+class Voice:
+    """What `--speak` adds: a synthesiser and the player for the default output."""
+
+    tts: Synthesizer
+    player: Player
 
 
 class JsonlMetrics:
@@ -148,39 +164,62 @@ async def text_mode(
     settings: Settings,
     environ: MutableMapping[str, str],
     backend: AgentBackend,
-    clock: Clock,
+    clock: SpeechClock,
     stdin: TextIO,
     stdout: TextIO,
     stderr: TextIO,
+    voice: Voice | None = None,
 ) -> None:
-    """A terminal conversation: typed lines in, streamed replies out, until end of input and every Task is quiet."""
+    """A terminal conversation: typed lines in, streamed replies out, until end of input and every Task is quiet.
+
+    With a voice, replies are also spoken, and the conversation ends once the last one has finished playing.
+    """
     _guard_billing(environ, stderr)
     interactive = stdin.isatty()
+    output = TerminalOutput(stdout, stderr, prompt=interactive, show_log=settings.runtime_dir / "show.log")
+    metrics = JsonlMetrics(settings.runtime_dir / "metrics.jsonl")
+    speech = None
+    if voice is not None:
+        speech = Speech(voice.tts, voice.player, clock, metrics=metrics, notice=output.notice)
     hub = Hub(
         talker=talker_spec(settings),
         orchestrator=orchestrator_spec(settings),
         backend=backend,
         clock=clock,
-        output=TerminalOutput(stdout, stderr, prompt=interactive, show_log=settings.runtime_dir / "show.log"),
-        metrics=JsonlMetrics(settings.runtime_dir / "metrics.jsonl"),
+        output=output,
+        metrics=metrics,
+        speech=speech,
     )
     try:
         await hub.start()
+        await asyncio.to_thread(language.warm_up)
+        if speech is not None:
+            speech.start()
+            speech.say("startup")
         if interactive:
             stdout.write(PROMPT)
             stdout.flush()
         await hub.run(_typed_lines(stdin, clock))
+        if speech is not None:
+            await speech.idle()
     finally:
         await hub.close()
+        if speech is not None:
+            await speech.close()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="jarvis-hub", description="Run the Jarvis Hub.")
     parser.add_argument("--text", action="store_true", help="talk by typing, with no audio")
+    parser.add_argument("--speak", action="store_true", help="with --text, also speak the replies aloud")
     args = parser.parse_args()
 
     if not args.text:
         sys.exit("jarvis-hub: only text mode exists so far; run `jarvis-hub --text`.")
+    voice = None
+    if args.speak:
+        tts = KokoroSynthesizer()
+        voice = Voice(tts, SoundPlayer(tts.sample_rate))
     cli = shutil.which("claude")
     if cli is None:
         sys.exit("jarvis-hub: the claude CLI is not on PATH; install Claude Code and log in with your Max plan.")
@@ -200,6 +239,7 @@ def main() -> None:
                 stdin=sys.stdin,
                 stdout=sys.stdout,
                 stderr=sys.stderr,
+                voice=voice,
             )
         )
     except KeyboardInterrupt:

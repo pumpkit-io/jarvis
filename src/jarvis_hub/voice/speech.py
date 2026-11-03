@@ -1,0 +1,289 @@
+"""Speech output: the Talker's streamed text becomes audio sentence by sentence, plus the Hub's cached lines.
+
+Synthesis runs on one thread of its own and never waits for playback, so sentence n+1 is synthesised while
+sentence n plays and the player starts each clip the moment the one before it ends.
+"""
+
+import asyncio
+import contextlib
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from typing import Any, Literal, Protocol
+
+import numpy as np
+
+from jarvis_hub.voice.language import Lang, voice_for
+from jarvis_hub.voice.player import Clip, Player, Samples
+from jarvis_hub.voice.splitter import SentenceSplitter
+from jarvis_hub.voice.tts import Synthesizer
+
+ClipName = Literal["chime", "filler", "startup", "very_good", "usage_limit"]
+
+LINES: dict[ClipName, dict[Lang, str]] = {
+    "startup": {"en": "At your service, sir.", "it": "Ai suoi ordini, signore."},
+    "filler": {"en": "One moment, sir.", "it": "Un momento, signore."},
+    "very_good": {"en": "Very good, sir.", "it": "Molto bene, signore."},
+    # The reset time is not known at startup; the usage-limit ticket says it after this line.
+    "usage_limit": {"en": "I've reached the usage limit, sir.", "it": "Ho raggiunto il limite di utilizzo, signore."},
+}
+
+# The Talker's first sentence takes 1.1-1.2 s at p50 (docs/notes/phase-0-spikes.md), so a filler at
+# 1.2 s, the plan's figure, would cut in on about half the turns; 1.5 s catches the slow tail.
+FILLER_AFTER = 1.5
+
+
+class SpeechClock(Protocol):
+    def now(self) -> float: ...
+
+    async def sleep(self, seconds: float) -> None: ...
+
+
+class Metrics(Protocol):
+    def record(self, entry: dict[str, Any]) -> None: ...
+
+
+def chime(sample_rate: int) -> Samples:
+    """Two short rising notes."""
+    note = int(sample_rate * 0.09)
+    t = np.arange(note) / sample_rate
+    envelope = np.sin(np.pi * np.arange(note) / note) ** 2
+    tones = [0.25 * envelope * np.sin(2 * np.pi * hz * t) for hz in (880.0, 1318.5)]
+    return np.concatenate(tones).astype(np.float32)
+
+
+@dataclass
+class _Reply:
+    turn: int
+    lang: Lang
+    began: float
+    heard_at: float | None
+    splitter: SentenceSplitter = field(default_factory=SentenceSplitter)
+    chunks: int = 0
+    first_chunk: float | None = None
+    first_chunk_audio: float | None = None
+    first_audio: float | None = None
+    filler: bool = False
+    gaps: int = 0
+
+
+@dataclass(frozen=True)
+class _Say:
+    reply: _Reply
+    text: str
+
+
+@dataclass(frozen=True)
+class _Cached:
+    name: ClipName
+    lang: Lang
+    reply: _Reply | None = None
+
+
+@dataclass(frozen=True)
+class _End:
+    reply: _Reply
+
+
+class Speech:
+    """`begin` a reply, `feed` it the Talker's text as it streams and `block_end` at each text block's end,
+    then `end` it. `stop` drops whatever is unsaid. A sentence that fails to synthesise is skipped with a notice;
+    if the voice cannot load at all, speech stays off and the replies go on as text."""
+
+    def __init__(
+        self,
+        tts: Synthesizer,
+        player: Player,
+        clock: SpeechClock,
+        *,
+        metrics: Metrics,
+        notice: Callable[[str], None],
+        filler_after: float = FILLER_AFTER,
+    ) -> None:
+        self._tts = tts
+        self._player = player
+        self._clock = clock
+        self._metrics = metrics
+        self._notice = notice
+        self._filler_after = filler_after
+        # One thread: MLX ties its streams to the thread that loaded the model.
+        self._thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts")
+        self._queue: asyncio.Queue[_Say | _Cached | _End] = asyncio.Queue()
+        self._cache: dict[tuple[ClipName, Lang], Clip] = {}
+        self._lang: Lang = "en"
+        self._reply: _Reply | None = None
+        self._generation = 0
+        self._synthesising = False
+        self._filler: asyncio.Task[None] | None = None
+        self._worker: asyncio.Task[None] | None = None
+        self._loading: asyncio.Future[None] | None = None
+
+    def start(self) -> None:
+        """Load the voice and synthesise the cached lines in the background; what is said meanwhile waits."""
+        self._loading = asyncio.get_running_loop().run_in_executor(self._thread, self._load)
+        self._worker = asyncio.create_task(self._work(self._loading))
+
+    def say(self, name: ClipName) -> None:
+        """A cached line, in the language of the latest reply."""
+        self._queue.put_nowait(_Cached(name, self._lang))
+
+    def begin(self, lang: Lang, *, turn: int, heard_at: float | None) -> None:
+        """A new reply in `lang`. `heard_at` is when the User's turn ended; with it, a filler covers a slow start."""
+        self._cancel_filler()
+        self._lang = lang
+        self._reply = _Reply(turn, lang, self._clock.now(), heard_at)
+        if heard_at is not None:
+            self._filler = asyncio.create_task(self._fill_silence(self._reply, heard_at))
+
+    def feed(self, text: str) -> None:
+        if self._reply is not None:
+            self._say(self._reply.splitter.feed(text))
+
+    def block_end(self) -> None:
+        if self._reply is not None:
+            self._say(self._reply.splitter.end_block())
+
+    def end(self) -> None:
+        reply = self._reply
+        if reply is None:
+            return
+        self._say(reply.splitter.flush())
+        self._cancel_filler()
+        self._queue.put_nowait(_End(reply))
+        self._reply = None
+
+    def stop(self) -> None:
+        """Drop the reply and everything queued or playing."""
+        self._generation += 1
+        self._cancel_filler()
+        self._reply = None
+        while not self._queue.empty():
+            self._queue.get_nowait()
+            self._queue.task_done()
+        self._player.stop()
+
+    def played(self) -> str:
+        return self._player.played()
+
+    async def idle(self) -> None:
+        """Returns once the voice has loaded, or failed to, and everything said so far has finished playing."""
+        if self._loading is not None:
+            with contextlib.suppress(Exception):
+                await self._loading
+        await self._queue.join()
+        while self._player.pending() > 0:
+            await asyncio.sleep(0.05)
+
+    async def close(self) -> None:
+        self._cancel_filler()
+        if self._worker is not None:
+            self._worker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._worker
+        self._thread.shutdown(wait=False, cancel_futures=True)
+        self._player.close()
+
+    def _say(self, chunks: list[str]) -> None:
+        reply = self._reply
+        assert reply is not None
+        for chunk in chunks:
+            if reply.first_chunk is None:
+                reply.first_chunk = self._clock.now()
+                self._cancel_filler()
+            reply.chunks += 1
+            self._queue.put_nowait(_Say(reply, chunk))
+
+    def _load(self) -> None:
+        self._tts.load()
+        for name, lines in LINES.items():
+            for lang, text in lines.items():
+                voice = voice_for(lang)
+                self._cache[name, lang] = Clip(text, voice, self._tts.synthesize(text, voice), self._tts.sample_rate)
+        tone = chime(self._tts.sample_rate)
+        for lang in ("en", "it"):
+            self._cache["chime", lang] = Clip("", "chime", tone, self._tts.sample_rate)
+
+    async def _work(self, loading: "asyncio.Future[None]") -> None:
+        try:
+            await loading
+            ready = True
+        except Exception as e:
+            self._notice(f"Speech is off: the voice could not load: {type(e).__name__}: {e}")
+            ready = False
+        while True:
+            item = await self._queue.get()
+            try:
+                if ready:
+                    await self._handle(item)
+            except Exception as e:
+                self._notice(f"Could not speak a sentence: {type(e).__name__}: {e}")
+            finally:
+                self._queue.task_done()
+
+    async def _handle(self, item: _Say | _Cached | _End) -> None:
+        match item:
+            case _Say(reply, text):
+                generation = self._generation
+                voice = voice_for(reply.lang)
+                self._synthesising = True
+                try:
+                    samples = await asyncio.get_running_loop().run_in_executor(
+                        self._thread, self._tts.synthesize, text, voice
+                    )
+                finally:
+                    self._synthesising = False
+                if generation == self._generation:
+                    self._play(Clip(text, voice, samples, self._tts.sample_rate), reply, sentence=True)
+            case _Cached(name, lang, reply):
+                self._play(self._cache[name, lang], reply, sentence=False)
+            case _End(reply):
+                self._record(reply)
+
+    def _play(self, clip: Clip, reply: _Reply | None, *, sentence: bool) -> None:
+        starts = self._clock.now() + self._player.pending()
+        if reply is not None:
+            if reply.first_audio is None:
+                reply.first_audio = starts
+            if sentence and reply.first_chunk_audio is None:
+                reply.first_chunk_audio = starts
+            elif sentence and self._player.pending() == 0:
+                reply.gaps += 1
+        self._player.play(clip)
+
+    async def _fill_silence(self, reply: _Reply, heard_at: float) -> None:
+        await self._clock.sleep(max(0.0, heard_at + self._filler_after - self._clock.now()))
+        quiet = self._queue.empty() and not self._synthesising and self._player.pending() == 0
+        if self._reply is reply and reply.first_chunk is None and quiet:
+            reply.filler = True
+            self._queue.put_nowait(_Cached("filler", reply.lang, reply))
+
+    def _cancel_filler(self) -> None:
+        if self._filler is not None:
+            self._filler.cancel()
+            self._filler = None
+
+    def _record(self, reply: _Reply) -> None:
+        start = reply.heard_at if reply.heard_at is not None else reply.began
+
+        def ms(t: float | None) -> int | None:
+            return None if t is None else round((t - start) * 1000)
+
+        chunk_to_audio = None
+        if reply.first_chunk is not None and reply.first_chunk_audio is not None:
+            chunk_to_audio = round((reply.first_chunk_audio - reply.first_chunk) * 1000)
+        entry = {
+            "kind": "speech",
+            "turn": reply.turn,
+            "lang": reply.lang,
+            "voice": voice_for(reply.lang),
+            "chunks": reply.chunks,
+            "filler": reply.filler,
+            "first_chunk_ms": ms(reply.first_chunk),
+            "first_audio_ms": ms(reply.first_audio),
+            "chunk_to_audio_ms": chunk_to_audio,
+            "gaps": reply.gaps,
+        }
+        try:
+            self._metrics.record(entry)
+        except Exception as e:
+            self._notice(f"Could not write metrics: {e}")

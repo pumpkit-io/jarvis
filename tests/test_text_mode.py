@@ -8,9 +8,9 @@ from typing import TextIO
 import pytest
 
 from jarvis_hub.config import RoleModel, Settings
-from jarvis_hub.main import TerminalOutput, text_mode
+from jarvis_hub.main import TerminalOutput, Voice, text_mode
 from jarvis_hub.read_only import check
-from tests.fakes import FakeBackend, FakeClock, Gate, Text, Tool, Wait
+from tests.fakes import FakeBackend, FakeClock, FakeTts, Gate, RecordingPlayer, Text, Tool, Wait
 
 
 def settings(tmp_path: Path, user_name: str | None = "Ada", talker_model: str = "sonnet") -> Settings:
@@ -31,6 +31,7 @@ async def converse(
     *,
     config: Settings,
     environ: MutableMapping[str, str] | None = None,
+    voice: Voice | None = None,
 ) -> tuple[str, str]:
     stdout, stderr = io.StringIO(), io.StringIO()
     await asyncio.wait_for(
@@ -42,6 +43,7 @@ async def converse(
             stdin=stdin,
             stdout=stdout,
             stderr=stderr,
+            voice=voice,
         ),
         timeout=5,
     )
@@ -56,8 +58,8 @@ async def test_typed_lines_get_streamed_replies_on_the_terminal(tmp_path: Path) 
     assert stdout == "› Good evening\nGood evening, sir.\n› All well?\nIndeed, sir.\n"
     assert stderr == ""
     assert backend.sessions[0].received[1:] == [
-        '<user typed="true">Good evening</user>',
-        '<user typed="true">All well?</user>',
+        '<user lang="en" typed="true">Good evening</user>',
+        '<user lang="en" typed="true">All well?</user>',
     ]
     assert backend.sessions[0].closed
 
@@ -149,9 +151,9 @@ async def test_bytes_that_are_not_utf8_do_not_stop_the_conversation(tmp_path: Pa
     await converse(backend, stdin, config=settings(tmp_path))
 
     assert backend.sessions[0].received[1:] == [
-        '<user typed="true">Hello</user>',
-        '<user typed="true">Caf�?</user>',
-        '<user typed="true">Still there?</user>',
+        '<user lang="en" typed="true">Hello</user>',
+        '<user lang="en" typed="true">Caf�?</user>',
+        '<user lang="en" typed="true">Still there?</user>',
     ]
 
 
@@ -167,7 +169,7 @@ async def test_input_that_fails_ends_the_conversation(tmp_path: Path) -> None:
 
     await converse(backend, BrokenStdin("Hello\nNever read\n"), config=settings(tmp_path))
 
-    assert backend.sessions[0].received[1:] == ['<user typed="true">Hello</user>']
+    assert backend.sessions[0].received[1:] == ['<user lang="en" typed="true">Hello</user>']
     assert backend.sessions[0].closed
 
 
@@ -269,3 +271,26 @@ def test_a_notice_for_a_terminal_that_is_gone_does_not_stop_the_hub(tmp_path: Pa
     output.show("# Plan")
 
     assert "# Plan" in (tmp_path / "show.log").read_text()
+
+
+async def test_speak_says_the_startup_line_then_every_reply_and_ends_once_they_have_played(tmp_path: Path) -> None:
+    backend = FakeBackend(FakeClock(), [[Text("Good evening, sir. All quiet.")], [Text("Bene, signore.")]])
+    player = RecordingPlayer()
+    config = settings(tmp_path)
+
+    stdout, stderr = await converse(
+        backend, io.StringIO("Good evening\nTutto bene?\n"), config=config, voice=Voice(FakeTts(), player)
+    )
+
+    assert stdout == "› Good evening\nGood evening, sir. All quiet.\n› Tutto bene?\nBene, signore.\n"
+    assert stderr == ""
+    assert list(zip(player.texts, player.voices)) == [
+        ("At your service, sir.", "am_liam"),
+        ("Good evening, sir.", "am_liam"),
+        ("All quiet.", "am_liam"),
+        ("Bene, signore.", "im_nicola"),
+    ]
+    assert player.closed
+    rows = [json.loads(line) for line in (config.runtime_dir / "metrics.jsonl").read_text().splitlines()]
+    assert [(r["kind"], r.get("lang")) for r in rows if r["kind"] == "speech"] == [("speech", "en"), ("speech", "it")]
+

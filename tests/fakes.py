@@ -1,12 +1,16 @@
 """Adapters the tests inject into the Hub core: a scripted agent backend, a manual clock, recorders."""
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from jarvis_hub.hub import WARM_UP, Hub, Line
+from jarvis_hub.voice.player import Clip, Samples
 from jarvis_hub.agents.backend import (
     AgentEvent,
     SessionSpec,
@@ -19,14 +23,27 @@ from jarvis_hub.agents.backend import (
 
 
 class FakeClock:
+    """Time moves only when a test or a script's Wait advances it; sleepers wake when it passes their deadline."""
+
     def __init__(self) -> None:
         self.t = 1000.0
+        self._sleepers: list[asyncio.Event] = []
 
     def now(self) -> float:
         return self.t
 
     def advance(self, seconds: float) -> None:
         self.t += seconds
+        for sleeper in self._sleepers:
+            sleeper.set()
+        self._sleepers.clear()
+
+    async def sleep(self, seconds: float) -> None:
+        deadline = self.t + seconds
+        while self.t < deadline:
+            woken = asyncio.Event()
+            self._sleepers.append(woken)
+            await woken.wait()
 
 
 @dataclass(frozen=True)
@@ -311,3 +328,79 @@ async def until(condition: Any, timeout: float = 1.0) -> None:
     async with asyncio.timeout(timeout):
         while not condition():
             await asyncio.sleep(0.001)
+
+
+class FakeTts:
+    """Instant synthesis: a twentieth of a second per character, every sample 0.1."""
+
+    sample_rate = 24_000
+
+    def __init__(self, load_error: Exception | None = None, fail_on: str | None = None) -> None:
+        self.load_error = load_error
+        self.fail_on = fail_on
+        self.calls: list[tuple[str, str]] = []
+        # Set by a test to hold synthesis until it is cleared; the Hub runs synthesis off the event loop.
+        self.hold = threading.Event()
+        self.hold.set()
+
+    def load(self) -> None:
+        if self.load_error is not None:
+            raise self.load_error
+
+    def synthesize(self, text: str, voice: str) -> Samples:
+        self.hold.wait(timeout=5)
+        self.calls.append((text, voice))
+        if text == self.fail_on:
+            raise RuntimeError("synthesis failed")
+        return np.full(len(text) * self.sample_rate // 20, 0.1, dtype=np.float32)
+
+
+class RecordingPlayer:
+    """Reports what was played. Clips play at once, or with `hold` stay queued until `finish()`."""
+
+    def __init__(self, hold: bool = False) -> None:
+        self.hold = hold
+        self.clips: list[Clip] = []
+        self.events: list[str] = []
+        self._queued: list[Clip] = []
+        self._heard: list[str] = []
+        self.closed = False
+
+    def play(self, clip: Clip) -> None:
+        self.clips.append(clip)
+        self.events.append(f"play {clip.text}")
+        if self.hold:
+            self._queued.append(clip)
+        else:
+            self._heard.append(clip.text)
+
+    def finish(self) -> None:
+        self._heard += [c.text for c in self._queued]
+        self._queued.clear()
+
+    def pause(self) -> None:
+        self.events.append("pause")
+
+    def resume(self, rewind_ms: int = 300) -> None:
+        self.events.append(f"resume {rewind_ms}")
+
+    def stop(self) -> None:
+        self.events.append("stop")
+        self._queued.clear()
+
+    def played(self) -> str:
+        return " ".join(self._heard)
+
+    def pending(self) -> float:
+        return sum(c.seconds for c in self._queued)
+
+    def close(self) -> None:
+        self.closed = True
+
+    @property
+    def texts(self) -> list[str]:
+        return [c.text for c in self.clips]
+
+    @property
+    def voices(self) -> list[str]:
+        return [c.voice for c in self.clips]

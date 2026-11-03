@@ -1,7 +1,7 @@
 """The Hub core: turns User input into Talker turns, hands Tasks to the Orchestrator, and relays its reports.
 
-Every outside dependency is injected (agent backend, clock, output, metrics) so tests and text mode share
-this one code path; voice mode will add audio adapters around it.
+Every outside dependency is injected (agent backend, clock, output, metrics, speech) so tests and text mode
+share this one code path; voice mode will add audio adapters around it.
 """
 
 import asyncio
@@ -26,6 +26,8 @@ from jarvis_hub.agents.backend import (
 from jarvis_hub.orchestrator import orchestrator_tools
 from jarvis_hub.talker import talker_tools
 from jarvis_hub.tasks import Task, Tasks, no_task
+from jarvis_hub.voice.language import Lang, detect_language
+from jarvis_hub.voice.speech import Speech
 
 
 class Clock(Protocol):
@@ -64,6 +66,8 @@ class Line:
 
     text: str
     arrived: float
+    # Left out, the Hub detects it from the text.
+    lang: Lang | None = None
 
 
 # Sent once at launch, in the background, so the first real turn finds the prompt cached (ADR 0006); never shown.
@@ -80,9 +84,9 @@ ORCHESTRATOR_TIMEOUT = 600.0
 INTERRUPT_GRACE = 10.0
 
 
-def user_message(text: str) -> str:
+def user_message(text: str, lang: Lang) -> str:
     # Escaped so typed text can never close the tag or forge another one.
-    return f'<user typed="true">{escape(text, quote=False)}</user>'
+    return f'<user lang="{lang}" typed="true">{escape(text, quote=False)}</user>'
 
 
 def event_message(source: str, text: str, task: str, *, needs_user: bool = False, details: bool = False) -> str:
@@ -106,6 +110,7 @@ class _TalkerInput:
     arrived: float
     details: str | None = None
     heard: str | None = None
+    lang: Lang | None = None
 
 
 @dataclass(frozen=True)
@@ -146,6 +151,7 @@ class Hub:
         output: Output,
         metrics: Metrics,
         orchestrator_timeout: float = ORCHESTRATOR_TIMEOUT,
+        speech: Speech | None = None,
     ) -> None:
         tools = talker_tools(
             delegate=self._delegate,
@@ -161,6 +167,10 @@ class Hub:
         self._output = output
         self._metrics = metrics
         self._orchestrator_timeout = orchestrator_timeout
+        self._speech = speech
+        # The language of the latest line read, and of the latest User turn the Talker took: replies follow it.
+        self._read_lang: Lang = "en"
+        self._lang: Lang = "en"
         self._tasks = Tasks()
         self._talker: AgentSession | None = None
         self._orchestrator: AgentSession | None = None
@@ -201,6 +211,8 @@ class Hub:
         if turn is None or self._talker is None:
             return False
         self._interrupted_turn = turn
+        if self._speech is not None:
+            self._speech.stop()
         return await self._talker_gate.interrupt(self._talker, turn)
 
     async def close(self) -> None:
@@ -219,7 +231,9 @@ class Hub:
     async def _read(self, inputs: AsyncIterator[Line]) -> None:
         async for line in inputs:
             if text := line.text.strip():
-                self._post(self._talker_inbox, _TalkerInput(user_message(text), "user", line.arrived, heard=text))
+                self._read_lang = lang = line.lang or detect_language(text, self._read_lang)
+                message = user_message(text, lang)
+                self._post(self._talker_inbox, _TalkerInput(message, "user", line.arrived, heard=text, lang=lang))
 
     def _post(self, inbox: "asyncio.Queue[Any]", item: _TalkerInput | _OrchestratorInput) -> None:
         """Queue an item; the Hub counts as settled again once every posted item is handled."""
@@ -243,6 +257,8 @@ class Hub:
             item = await self._talker_inbox.get()
             try:
                 await self._talker_gate.before_next_turn()
+                if item.lang:
+                    self._lang = item.lang
                 if item.heard:
                     self._output.heard(item.heard)
                 if item.details:
@@ -265,6 +281,9 @@ class Hub:
         after_block = False
         end = TurnEnd("failed", error="the session ended without a result")
         self._talker_gate.turn = turn if show else None
+        speech = self._speech if show else None
+        if speech is not None:
+            speech.begin(self._lang, turn=turn, heard_at=arrived if kind == "user" else None)
         try:
             async for event in self._guarded(self._talker.send(message)):
                 match event:
@@ -282,7 +301,11 @@ class Hub:
                             first_sentence = self._clock.now()
                         if show:
                             self._output.reply(text)
+                        if speech is not None:
+                            speech.feed(text)
                     case TextEnd():
+                        if speech is not None:
+                            speech.block_end()
                         if first_sentence is None and block.strip():
                             first_sentence = self._clock.now()
                         block, after_block = "", True
@@ -294,6 +317,8 @@ class Hub:
                         end = event
         finally:
             self._talker_gate.turn = None
+            if speech is not None and self._interrupted_turn != turn:
+                speech.end()
         if end.outcome == "interrupted" and self._interrupted_turn != turn:
             end = TurnEnd("failed", end.usage, "the turn stopped without the Hub interrupting it")
         if show:

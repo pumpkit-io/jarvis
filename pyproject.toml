@@ -6,6 +6,13 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "claude-agent-sdk>=0.2.177,<0.3",
     "rich>=13",
+    "kokoro-mlx>=0.1.4,<0.2",
+    "mlx>=0.32.4",
+    "numpy>=2",
+    "sounddevice>=0.5",
+    "lingua-language-detector>=2.2",
+    # misaki needs this spaCy model and otherwise pip-installs it into whatever virtualenv is active.
+    "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
 ]
 
 [project.scripts]
@@ -14,6 +21,10 @@ jarvis-hub = "jarvis_hub.main:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+# For the spaCy model wheel, which is not on PyPI.
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/jarvis_hub"]
