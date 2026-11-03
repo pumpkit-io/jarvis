@@ -70,6 +70,7 @@
   },
   "stop_phrases": "2/2 idled at once with no turn sent",
   "requests_while_idle_sent": 0,
+  "requests_while_idle_played": 6,
   "memory": {
     "footprint_mb_at_start": 35.0,
     "footprint_mb_after": 2140.0,

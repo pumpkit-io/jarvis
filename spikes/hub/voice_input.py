@@ -33,9 +33,9 @@ import soundfile as sf
 import soxr
 
 from jarvis_hub.voice.engines import EngineChoice, load_engines
-from jarvis_hub.voice.input import FRAME, SAMPLE_RATE, Capture, InputEvent, Listening, Push
+from jarvis_hub.voice.input import FRAME, SAMPLE_RATE, Capture, Listening, Push
 from jarvis_hub.voice.player import Clip
-from jarvis_hub.voice.state import Timing, WakeWord
+from jarvis_hub.voice.state import InputEvent, Timing, WakeWord
 from jarvis_hub.voice.tts import KokoroSynthesizer
 from jarvis_hub.voice.voice_mode import VoiceMode
 
@@ -306,7 +306,7 @@ async def main() -> None:
     # 2. "Hey Jarvis, <request>" in one breath (150 ms gap), and 3. with a 1 s pause for the chime.
     hey = [load(t) for t in wake_takes if t.stem.startswith("hey_")]
     for name, gap in [("one_breath", 0.15), ("pause_for_chime", 1.0)]:
-        eot, right, exact, missed, stt, smart = [], 0, 0, 0, [], []
+        eot, right, exact, missed, stt, smart, incomplete = [], 0, 0, 0, [], [], 0
         for i, (cid, clip) in enumerate(clips.items()):
             wake_audio = hey[i % len(hey)]
             head = wake_audio[: int(speech_end_s(wake_audio) * SAMPLE_RATE) + FRAME]
@@ -328,6 +328,7 @@ async def main() -> None:
                 if turn_rows:
                     stt.append(turn_rows[-1]["stt_ms"])
                     smart.append(turn_rows[-1]["smart_turn_ms"])
+                    incomplete += any(v < Listening().smart_turn_threshold for v in turn_rows[-1]["smart_turn"])
             await run.until_idle()
         results[name] = {
             "turns": len(clips),
@@ -337,6 +338,7 @@ async def main() -> None:
             "speech_end_to_turn_ms": summary(eot),
             "stt_ms": summary(stt),
             "smart_turn_ms": summary(smart),
+            "turns_judged_incomplete": incomplete,
         }
 
     # 4. The Follow-up window: a turn without the Wake word inside it, then silence to idle.
@@ -364,13 +366,14 @@ async def main() -> None:
         idled = await run.until_idle(timeout=1.5)
         stop_ok += idled and len(run.turns) - n_turns == 1
         await run.until_idle()
-    idle_turns = 0
-    for cid in list(clips)[:6]:
+    idle_turns, idle_requests = 0, list(clips)[:6]
+    for cid in idle_requests:
         n_turns = len(run.turns)
         await run.play(np.concatenate([clip_audio[cid], silence(1.5)]))
         idle_turns += len(run.turns) - n_turns
     results["stop_phrases"] = f"{stop_ok}/{len(stops)} idled at once with no turn sent"
     results["requests_while_idle_sent"] = idle_turns
+    results["requests_while_idle_played"] = len(idle_requests)
 
     mx.clear_cache()
     results["memory"] = {
