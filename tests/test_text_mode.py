@@ -260,3 +260,12 @@ def test_details_for_a_screen_that_is_gone_still_reach_the_show_log(tmp_path: Pa
 
     assert "# Plan" in (tmp_path / "show.log").read_text()
     assert stderr.getvalue().startswith("[hub] Could not show the details on screen:")
+
+
+def test_a_notice_for_a_terminal_that_is_gone_does_not_stop_the_hub(tmp_path: Path) -> None:
+    output = TerminalOutput(ClosedPipe(), ClosedPipe(), prompt=False, show_log=tmp_path / "show.log")
+
+    output.notice("The Talker failed.")
+    output.show("# Plan")
+
+    assert "# Plan" in (tmp_path / "show.log").read_text()

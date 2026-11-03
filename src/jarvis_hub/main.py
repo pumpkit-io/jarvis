@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import contextlib
 import io
 import json
 import os
@@ -86,8 +87,10 @@ class TerminalOutput:
         self._mid_reply = False
 
     def notice(self, text: str) -> None:
-        self._stderr.write(f"[hub] {text}\n")
-        self._stderr.flush()
+        # With stderr gone there is nowhere left to say it, and the conversation goes on without it.
+        with contextlib.suppress(OSError):
+            self._stderr.write(f"[hub] {text}\n")
+            self._stderr.flush()
 
     def show(self, markdown: str) -> None:
         try:
