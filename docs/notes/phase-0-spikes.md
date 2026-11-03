@@ -369,3 +369,25 @@ The Orchestrator runs under `permission_mode="dontAsk"` with Read, Grep and Glob
 ### The turn cap counts per message
 
 The Orchestrator is one persistent session with `max_turns=12`. An opt-in test (`test_max_turns_caps_each_message_not_the_whole_session`, run 2026-11-03 on Haiku) sent three messages to one session capped at 2 turns, each needing two (a tool call, then the reply): all three completed. With a cap of 1, each message failed on its own with "Reached maximum number of turns (1)". So the CLI's cap applies to each message, which is the per-message cap the ticket asks for, and the Hub adds none of its own.
+
+## Spoken replies
+
+Ticket #9, run on 2026-11-03 on the M3: `jarvis-hub --text --speak` with `kokoro-mlx` 0.1.4 in the Hub's process (`mlx` 0.32.4, `Kokoro-82M-bf16`, speed 1.0, MLX cache capped at 256 MB), the Talker on Sonnet at `effort="low"` with thinking disabled, through the MacBook Pro speakers. Every number below is in `docs/notes/spoken-replies.json`, per turn, with no message text. Eight small-talk lines from `docs/notes/talker-small-talk.txt`, English and Italian in turn, each typed once the reply before it had finished playing, so every turn started from silence.
+
+| From the typed line | p50 | p90 | max |
+|---|---|---|---|
+| First text delta | 691 ms | 730 ms | 731 ms |
+| First piece out of the splitter | 909 ms | 1,118 ms | 1,157 ms |
+| First audio | 1,050 ms | 1,256 ms | 1,290 ms |
+| First piece to its audio | 140 ms | 149 ms | 162 ms |
+
+- **First audio within about 300 ms of the first sentence: met.** Synthesis of the first piece took 119-162 ms; the speakers add 78 ms of output latency (PortAudio's figure for a `low` latency stream), so sound leaves the speakers about 220 ms after the sentence is ready. No gaps: every later sentence was synthesised and queued before the one ahead of it ended.
+- **Typed turn to first audio: 1.05 s at p50, 1.26 s at p90.** That is the number Spec story 12 cares about; with voice input, end-of-turn detection adds to it.
+- **A sentence at the end of a delta goes after 100 ms of quiet.** A first run waited for the space after "sir.", as the Spec words the rule, and on 2 of 8 turns the next delta came 217 and 487 ms later. The splitter now also reports a sentence end at the end of its text, never after a digit (Phase 0's "3." then "5"), an abbreviation or inside backticks, and Speech cuts it if no delta follows within 100 ms. Those two turns of the second run paid 100 ms each.
+- **The filler waits 1.5 s.** The Talker's first sentence takes 1.1-1.2 s at p50 and 1.32 s at p90 (sections above), so the plan's 1.2 s would cut in on about half the turns, and "One moment, sir." plus the real sentence behind it would then start later than the sentence alone. At 1.5 s it fired on none of these eight turns, whose first piece came by 1.16 s at most. It plays only after a User turn, never before relayed news, and only when nothing else is playing or queued.
+- **The first clause goes early** on `,;:` once it has six words, which on these turns never fired: the Talker opens with a short sentence ("Good evening, sir.") as its prompt asks.
+- **Startup:** loading the voice and synthesising the cached lines (chime, filler, startup line, "Very good, sir." and the usage-limit line, in both languages) took 3.49 s, in the background; the warm-up's first delta came in 1.12 s meanwhile. The startup line plays when they are ready. The usage-limit line stops before the reset time, which #16 says after it.
+- **Memory:** the Hub process, voice loaded, is 976 MB after startup and 1,061 MB after the eight turns (`footprint`), against the 313 MB of MLX memory Phase 0 measured for the model alone; most of the rest is the libraries `kokoro-mlx` pulls in through misaki (spaCy, and torch through spacy-curated-transformers). The `claude` processes are separate and not counted.
+- **Synthesis is GPU-bound and sensitive to load.** Earlier in the day, with the machine at a load average of 11 and a virtual machine running, the same model took 450-870 ms per sentence (12 words: about 750 ms) against 120-160 ms here. On a busy machine the 300 ms target would be missed, though the pipeline still keeps sentences gap-free.
+- **The voice follows the User's language.** `<user lang=…>` now carries it. Typed lines are detected by counting function words of each language first, then `lingua` (EN and IT, preloaded at launch), keeping the previous language when lingua is under 0.8, or 0.9 for one word. Function words come first because lingua alone read "Apri una issue su pumpkit per il bug del login" as English (0.76) from its English nouns. On the 40 lines of the two text-mode files, this got every line right; "Stop." keeps the previous language.
+- `misaki` pulls in `en-core-web-sm`; the Hub now declares it, so nothing is pip-installed into another environment.

@@ -1,0 +1,168 @@
+{
+ "about": "Numbers behind docs/notes/phase-0-spikes.md, section Spoken replies. Times in ms from when the typed line arrived, except chunk_to_audio_ms, from when the splitter let the first piece go to when its audio was due to start (queued audio ahead of it included). p50 and p90 interpolate linearly between ranks. A turn's line is its position in the run's eight lines, English and Italian in turn, from docs/notes/talker-small-talk.txt.",
+ "setup": {
+  "date": "2026-11-03",
+  "tts": "kokoro-mlx 0.1.4 in-process, mlx 0.32.4, mlx-community/Kokoro-82M-bf16, speed 1.0, MLX cache limit 256 MB",
+  "claude_agent_sdk": "0.2.177",
+  "talker_model": "sonnet",
+  "effort": "low",
+  "thinking": "disabled",
+  "output_device": "MacBook Pro Speakers",
+  "output_latency_ms": 78,
+  "filler_after_ms": 1500,
+  "settle_ms": 100,
+  "machine": "Apple M3 Pro, 18 GB"
+ },
+ "startup": {
+  "warm_up_first_delta_ms": 1122,
+  "voice_load_and_cache_ms": 3490,
+  "launch_to_voice_loaded_ms": 4340
+ },
+ "memory_mb": {
+  "hub_footprint_after_startup": 976,
+  "hub_footprint_after_eight_turns": 1061
+ },
+ "summary": {
+  "first_delta_ms": {
+   "p50": 691,
+   "p90": 730,
+   "max": 731
+  },
+  "first_sentence_ms": {
+   "p50": 909,
+   "p90": 1118,
+   "max": 1157
+  },
+  "first_chunk_ms": {
+   "p50": 909,
+   "p90": 1118,
+   "max": 1157
+  },
+  "first_audio_ms": {
+   "p50": 1050,
+   "p90": 1256,
+   "max": 1290
+  },
+  "chunk_to_audio_ms": {
+   "p50": 140,
+   "p90": 149,
+   "max": 162
+  },
+  "fillers": 0,
+  "gaps": 0
+ },
+ "turns": [
+  {
+   "line": 1,
+   "lang": "en",
+   "first_delta_ms": 634,
+   "first_sentence_ms": 634,
+   "first_chunk_ms": 735,
+   "first_audio_ms": 866,
+   "chunk_to_audio_ms": 131,
+   "filler": false,
+   "chunks": 3,
+   "gaps": 0,
+   "audio_s": 8.05,
+   "total_ms": 1105
+  },
+  {
+   "line": 2,
+   "lang": "it",
+   "first_delta_ms": 731,
+   "first_sentence_ms": 1102,
+   "first_chunk_ms": 1102,
+   "first_audio_ms": 1242,
+   "chunk_to_audio_ms": 140,
+   "filler": false,
+   "chunks": 3,
+   "gaps": 0,
+   "audio_s": 10.53,
+   "total_ms": 1120
+  },
+  {
+   "line": 3,
+   "lang": "en",
+   "first_delta_ms": 640,
+   "first_sentence_ms": 912,
+   "first_chunk_ms": 912,
+   "first_audio_ms": 1031,
+   "chunk_to_audio_ms": 119,
+   "filler": false,
+   "chunks": 3,
+   "gaps": 0,
+   "audio_s": 12.47,
+   "total_ms": 1449
+  },
+  {
+   "line": 4,
+   "lang": "it",
+   "first_delta_ms": 724,
+   "first_sentence_ms": 724,
+   "first_chunk_ms": 825,
+   "first_audio_ms": 967,
+   "chunk_to_audio_ms": 142,
+   "filler": false,
+   "chunks": 3,
+   "gaps": 0,
+   "audio_s": 16.6,
+   "total_ms": 1694
+  },
+  {
+   "line": 5,
+   "lang": "en",
+   "first_delta_ms": 719,
+   "first_sentence_ms": 1028,
+   "first_chunk_ms": 1028,
+   "first_audio_ms": 1168,
+   "chunk_to_audio_ms": 140,
+   "filler": false,
+   "chunks": 4,
+   "gaps": 0,
+   "audio_s": 11.4,
+   "total_ms": 1430
+  },
+  {
+   "line": 6,
+   "lang": "it",
+   "first_delta_ms": 663,
+   "first_sentence_ms": 906,
+   "first_chunk_ms": 906,
+   "first_audio_ms": 1068,
+   "chunk_to_audio_ms": 162,
+   "filler": false,
+   "chunks": 3,
+   "gaps": 0,
+   "audio_s": 13.03,
+   "total_ms": 1477
+  },
+  {
+   "line": 7,
+   "lang": "en",
+   "first_delta_ms": 730,
+   "first_sentence_ms": 1157,
+   "first_chunk_ms": 1157,
+   "first_audio_ms": 1290,
+   "chunk_to_audio_ms": 133,
+   "filler": false,
+   "chunks": 3,
+   "gaps": 0,
+   "audio_s": 12.1,
+   "total_ms": 1680
+  },
+  {
+   "line": 8,
+   "lang": "it",
+   "first_delta_ms": 600,
+   "first_sentence_ms": 856,
+   "first_chunk_ms": 856,
+   "first_audio_ms": 999,
+   "chunk_to_audio_ms": 143,
+   "filler": false,
+   "chunks": 3,
+   "gaps": 0,
+   "audio_s": 12.9,
+   "total_ms": 1237
+  }
+ ]
+}
