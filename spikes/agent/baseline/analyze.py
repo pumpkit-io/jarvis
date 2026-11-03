@@ -1,21 +1,6 @@
 """Phase 0 baseline: end of the User's speech to Jarvis's first audio with today's launcher. Throwaway.
 
-Joins VoiceMode's event log with the hook log from hook.py. For each spoken turn:
-  end of speech  = RECORDING_END - VoiceMode's silence threshold (recording stops after that much silence)
-  first audio    = TTS_FIRST_AUDIO of the next converse call
-and the gap is split into silence tail, STT, tool return, model, and TTS time to first audio.
-
-Run: python3 analyze.py [--session ID | --session all] [--list-sessions] [--hooks hooks.jsonl]
-                        [--events ~/.voicemode/logs/events] [--silence-ms N]
-The hook log holds every recorded session; by default the analysis covers only the most recent one.
-Turns whose split comes out negative (a hook entry missing or misordered) are skipped and counted.
-A turn with a missing hook entry that still comes out consistent falls back to VoiceMode's own timestamp
-for that boundary; such turns are counted, not skipped, and the count is printed. A TOOL_REQUEST_START
-with no matching end is dropped and counted, as are unparseable JSON lines in any log.
-Other VoiceMode clients running in the same window mix their events in: record with no other converse
-session open.
-It exits with an error when the hook log is missing or has no entries, because without it the analysis
-would cover every VoiceMode event ever logged.
+Run steps and the meaning of each count are in docs/notes/phase-0-spikes.md.
 """
 
 import argparse
@@ -34,21 +19,27 @@ def ts(s: str) -> float:
     return datetime.fromisoformat(s).timestamp()
 
 
-def read_jsonl(path, bad):
-    """Yield each parsed line of a JSONL file; append a marker to `bad` for every line that is not JSON."""
-    for line in open(path):
-        if not line.strip():
-            continue
-        try:
-            yield json.loads(line)
-        except json.JSONDecodeError:
-            bad.append(path)
+def read_jsonl(path, bad, required=()):
+    """Yield each JSON object in a JSONL file; append `path` to `bad` for every line that is unusable."""
+    with open(path, errors="replace") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                bad.append(path)
+                continue
+            if isinstance(row, dict) and all(k in row for k in required):
+                yield row
+            else:
+                bad.append(path)
 
 
 def load_events(events_dir, since, until, bad):
     rows = []
     for path in sorted(glob.glob(os.path.join(events_dir, "voicemode_events_*.jsonl"))):
-        for e in read_jsonl(path, bad):
+        for e in read_jsonl(path, bad, ("timestamp", "event_type")):
             t = ts(e["timestamp"])
             if since <= t <= until:
                 rows.append((t, e["event_type"], e.get("data") or {}))
@@ -58,7 +49,7 @@ def load_events(events_dir, since, until, bad):
 def silence_threshold_ms(conv_dir, since, until, bad):
     found = []
     for path in glob.glob(os.path.join(conv_dir, "exchanges_*.jsonl")):
-        for x in read_jsonl(path, bad):
+        for x in read_jsonl(path, bad, ("timestamp",)):
             if x.get("type") == "stt" and since <= ts(x["timestamp"]) <= until:
                 ms = ((x.get("metadata") or {}).get("silence_detection") or {}).get("silence_threshold_ms")
                 if ms:
@@ -67,13 +58,14 @@ def silence_threshold_ms(conv_dir, since, until, bad):
 
 
 def converse_calls(events):
-    """Group events into calls; returns (calls, dropped).
+    """Group converse events into calls; returns (calls, dropped).
 
-    A start with no end (a crashed or interrupted call) is dropped and counted. It leaves a None in its
-    place so that the calls on either side are not paired as if they were consecutive.
+    A start with no end is dropped and leaves a None, so its neighbours are not paired.
     """
     calls, cur, dropped = [], None, 0
     for t, kind, data in events:
+        if kind.startswith("TOOL_REQUEST_") and data.get("tool_name") != "converse":
+            continue
         if kind == "TOOL_REQUEST_START":
             if cur is not None:
                 calls.append(None)
@@ -95,12 +87,9 @@ def first_after(times, t, limit=float("inf")):
 
 
 def compute_turns(calls, pre, post, other_pre, silence):
-    """Split each spoken turn between consecutive converse calls; returns (turns, skipped, fallbacks).
+    """Split each spoken turn between consecutive calls; returns (turns, skipped, fallbacks).
 
-    A hook entry can be missing (a timeout, a failed call), so both hook lookups stop at the next call's
-    start: otherwise they could land on a later call's hook and shift the split. The boundary then falls
-    back to VoiceMode's own timestamp, and the turn is counted in `fallbacks` (it is kept, not skipped).
-    A turn whose pieces come out negative is skipped and counted. A None call (dropped) pairs with nothing.
+    Hook lookups stop at the next call's start so a missing entry cannot borrow a later call's hook.
     """
     turns, skipped, fallbacks = [], 0, 0
     for a, b in zip(calls, calls[1:]):
@@ -110,6 +99,9 @@ def compute_turns(calls, pre, post, other_pre, silence):
             continue  # no speech heard, or the next call did not speak
         if b["start"] - a["TOOL_REQUEST_END"] > MAX_GAP_S:
             continue  # the two calls belong to different sessions
+        if "RECORDING_END" not in a:
+            skipped += 1
+            continue
         end_speech = a["RECORDING_END"] - silence
         hook_returned = first_after(post, a["STT_COMPLETE"], b["start"])
         returned = hook_returned or a["TOOL_REQUEST_END"]
@@ -150,7 +142,7 @@ def main():
     args = ap.parse_args()
 
     bad_lines = []
-    all_hooks = list(read_jsonl(args.hooks, bad_lines)) if os.path.exists(args.hooks) else []
+    all_hooks = list(read_jsonl(args.hooks, bad_lines, ("session", "t", "event"))) if os.path.exists(args.hooks) else []
     if not all_hooks:
         sys.exit(f"no hook entries in {args.hooks}: record a session with the hook settings first "
                  "(see docs/notes/phase-0-spikes.md), or the analysis would cover every VoiceMode event ever logged")
