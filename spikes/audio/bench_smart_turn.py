@@ -1,10 +1,13 @@
-"""Smart Turn v3: inference time on the M3 and its verdicts on complete and cut-off turns.
+"""Smart Turn v3: inference time on the M3, its verdicts on complete and cut-off turns, and what they cost.
 
     uv run bench_smart_turn.py --source synthetic
 
 A complete turn ends at the clip's end. A cut-off turn is a long clip cut at the
 quietest word gap near its middle, which is what a mid-sentence pause looks like to VAD.
 The pause takes (`PAUSE_TAKES`) add real pauses: each is cut 200 ms into its pause.
+
+The end-of-turn saving follows the Spec's input pipeline: after VAD_SILENCE_MS of silence
+Smart Turn runs; "complete" ends the turn, "incomplete" keeps listening up to EXTENSION_MS more.
 """
 
 import argparse
@@ -13,20 +16,22 @@ import time
 from pathlib import Path
 
 import numpy as np
-import onnxruntime as ort
-from huggingface_hub import snapshot_download
-from transformers import WhisperFeatureExtractor
 
 from common import SR, clips_dir, find_pause, load_16k, p50, rss_mb, write_result
 from corpus import CLIPS, PAUSE_TAKES
 
 MODELS = ["smart-turn-v3.2-cpu.onnx", "smart-turn-v3.0.onnx"]
 VAD_SILENCE_MS = 500
+EXTENSION_MS = 1500
 FIXED_THRESHOLDS_MS = [800, 1000, 1500]
 
 
 class SmartTurn:
     def __init__(self, filename: str):
+        import onnxruntime as ort
+        from huggingface_hub import snapshot_download
+        from transformers import WhisperFeatureExtractor
+
         path = Path(snapshot_download("pipecat-ai/smart-turn-v3")) / filename
         so = ort.SessionOptions()
         so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
@@ -44,6 +49,28 @@ class SmartTurn:
                                max_length=8 * SR, truncation=True, do_normalize=True)
         feats = inputs.input_features.astype(np.float32)
         return float(self.session.run(None, {"input_features": feats})[0][0].item())
+
+
+def end_of_turn(p_complete: dict, p_pause: dict, pause_s: dict, infer_ms: float) -> dict:
+    """End-of-turn latency on complete turns and premature cuts on real pauses, from the model's verdicts.
+
+    A complete turn judged incomplete waits the whole extension, so the saving is a lower bound.
+    """
+    ends = [VAD_SILENCE_MS + infer_ms + (0 if p > 0.5 else EXTENSION_MS) for p in p_complete.values()]
+    mean = sum(ends) / len(ends) if ends else None
+    pauses = {k: pause_s[k] * 1000 for k in p_pause if pause_s.get(k) is not None}
+
+    def cut_by_smart_turn(k):
+        return pauses[k] >= VAD_SILENCE_MS and (p_pause[k] > 0.5 or pauses[k] >= VAD_SILENCE_MS + infer_ms + EXTENSION_MS)
+
+    premature = {"smart_turn": f"{sum(map(cut_by_smart_turn, pauses))}/{len(pauses)}"}
+    premature |= {f"fixed_{t}ms": f"{sum(ms >= t for ms in pauses.values())}/{len(pauses)}" for t in FIXED_THRESHOLDS_MS}
+    return {
+        "complete_judged_incomplete": f"{sum(p <= 0.5 for p in p_complete.values())}/{len(p_complete)}",
+        "end_ms_mean": None if mean is None else round(mean),
+        "saved_ms_vs_fixed_silence": {t: None if mean is None else round(t - mean) for t in FIXED_THRESHOLDS_MS},
+        "premature_cuts": premature,
+    }
 
 
 def trim_tail(audio: np.ndarray) -> np.ndarray:
@@ -109,18 +136,18 @@ def main() -> None:
             "inference_ms_p50": round(infer, 1), "inference_ms_max": round(max(times), 1),
             "complete_judged_complete": f"{tp}/{len(p_complete)}",
             "cut_judged_incomplete": f"{tn}/{len(p_cut)}",
-            "end_of_turn_ms_with_smart_turn": round(VAD_SILENCE_MS + infer),
-            "saved_ms_vs_fixed_silence": {t: round(t - VAD_SILENCE_MS - infer) for t in FIXED_THRESHOLDS_MS},
             "p_complete": p_complete, "p_cut": p_cut,
         }
+        p_pause = {k: round(model(a), 3) for k, a in pause_cut.items()}
+        p_whole = {k: round(model(a), 3) for k, a in pause_complete.items()}
         if pause_cut or pause_complete:
-            p_pause = {k: round(model(a), 3) for k, a in pause_cut.items()}
-            p_whole = {k: round(model(a), 3) for k, a in pause_complete.items()}
             result["models"][filename] |= {
                 "real_pause_judged_incomplete": f"{sum(p <= 0.5 for p in p_pause.values())}/{len(p_pause)}",
                 "pause_takes_judged_complete": f"{sum(p > 0.5 for p in p_whole.values())}/{len(p_whole)}",
                 "p_real_pause": p_pause, "p_pause_take_complete": p_whole,
             }
+        # Complete turns are the clips and the whole pause takes; premature cuts come from the real pauses only.
+        result["models"][filename]["end_of_turn"] = end_of_turn(p_complete | p_whole, p_pause, pauses, infer)
     result["rss_mb_with_both_models"] = round(rss_mb())
     print(json.dumps({k: ({m: {kk: vv for kk, vv in v.items() if not kk.startswith("p_")} for m, v in r.items()}
                           if k == "models" else r) for k, r in result.items()}, indent=2))
