@@ -12,44 +12,71 @@ BRANCH_KINDS = ("feat", "fix", "chore")
 MODELS = ("haiku", "sonnet", "opus")
 # The levels that spend the User's limits fastest, granted only on a request in one of these forms; anything else
 # denies, since a false deny costs the User one plain sentence (docs/notes/phase-0-spikes.md, "Asking for xhigh or max").
-_EN_ASK = (
-    r"(?:(?:^|,)\s*(?:with|at)|\buse|\bgo(?:\s+(?:with|at|to))?|\bgive\s+it"
-    r"|\b(?:run|rerun|do|redo|review|fix|build|try|handle|check|write|implement|investigate|debug|plan|design|start)"
+_LEVEL: dict[Effort, str] = {"xhigh": r"(?:x[- ]?high|extra[- ]high)", "max": r"max(?:imum)?"}
+# The ask opens its sentence or a comma clause, after these words only, and closes the sentence, so reported speech,
+# descriptions and sarcasm ("Tony said to use max effort", "use max effort and burn my credits") don't grant.
+_OPENING = r"^(?:.*,)?\s*(?:(?:ok(?:ay)?|please|sure|yes|sì|va\s+bene|per\s+favore)\b\s*,?\s*)*"
+_CLOSING = r"(?:\s+(?:on|for|per|su)(?:\s+\w+){1,3})?(?:\s*,?\s*(?:please|grazie|per\s+favore))?\W*$"
+_EN_VERB = (
+    r"(?:with|at|use|go(?:\s+(?:with|at|to))?|give\s+it"
+    r"|(?:run|rerun|do|redo|review|fix|build|try|handle|check|write|implement|investigate|debug|plan|design|start)"
     r"\s+(?:it|this|that|them)\s+(?:with|at))\s+(?:the\s+)?"
 )
-_EN_SET = r"effort\s*(?::|=|\s+to|\s+at)\s*(?:the\s+)?"
-_IT_ASK = r"(?:(?:^|,)\s*con|\busa|\busate|\bmetti(?:ci)?|\bimposta)\s+"
-ON_REQUEST: dict[Effort, re.Pattern[str]] = {
-    "xhigh": re.compile(
-        rf"{_EN_ASK}(?:x[- ]?high|extra[- ]high\s+effort)\b|\b{_EN_SET}(?:x[- ]?high|extra[- ]high)\b"
-        r"|(?:^|,)\s*(?:x[- ]?high|extra[- ]high)\s+effort(?:,?\s+please)?\W*$",
-        re.IGNORECASE,
-    ),
-    "max": re.compile(
-        rf"{_EN_ASK}max(?:imum)?\s+effort\b|\b{_EN_SET}max(?:imum)?\b"
-        r"|(?:^|,)\s*max(?:imum)?\s+effort(?:,?\s+please)?\W*$"
-        rf"|{_IT_ASK}(?:lo\s+|l['\u2019]\s*|il\s+)?(?:sforzo|impegno)\s+(?:al\s+)?massimo\b"
-        rf"|{_IT_ASK}il\s+massimo\s+(?:dello\s+sforzo|sforzo|impegno)\b|\b(?:sforzo|impegno)\s*:\s*massimo\b",
-        re.IGNORECASE,
-    ),
-}
-EFFORT_WORD = re.compile(r"\b(effort|x[- ]?high|extra[- ]high|max|maximum|sforzo|impegno|massimo)\b", re.IGNORECASE)
-# Any of these in a sentence that names an effort denies the whole turn: a refusal, a limit, a hedge or a question.
+_IT_VERB = r"(?:con|usa|usate|metti(?:ci)?|imposta)\s+"
+_IT_MAX = r"(?:(?:lo\s+|l['’]\s*|il\s+)?(?:sforzo|impegno)\s+(?:al\s+)?massimo|il\s+massimo\s+(?:dello\s+sforzo|sforzo|impegno))"
+
+
+def _ask_form(level: Effort) -> re.Pattern[str]:
+    asks = [
+        rf"(?:{_EN_VERB})?{_LEVEL[level]}\s+effort",
+        rf"set\s+(?:the\s+)?effort\s+(?:to|at)\s+(?:the\s+)?{_LEVEL[level]}",
+    ]
+    # "effort: max" grants only as the whole sentence, never inside a description of an old config.
+    whole = [rf"^\s*(?:please\s*,?\s*)?effort\s*[:=]\s*{_LEVEL[level]}"]
+    if level == "max":
+        asks.append(rf"{_IT_VERB}{_IT_MAX}")
+        whole.append(r"^\s*(?:sforzo|impegno)\s*:\s*massimo")
+    return re.compile(rf"(?:{_OPENING}(?:{'|'.join(asks)})|{'|'.join(whole)}){_CLOSING}", re.IGNORECASE)
+
+
+ON_REQUEST: dict[Effort, re.Pattern[str]] = {level: _ask_form(level) for level in _LEVEL}
+# The lower levels count too, so a downgrade such as "make it high" decides the latest turn.
+EFFORT_WORD = re.compile(
+    r"\b(effort|x[- ]?high|extra[- ]high|max|maximum|high|medium|low|sforzo|impegno|massimo|alto|medio|basso)\b",
+    re.IGNORECASE,
+)
+# Any of these in a sentence that names an effort denies the whole turn.
+_QUESTION = r"\?|^\s*(?:is|are|was|were|do|does|did|shall|can|may|why|what|how|when)\b"
+_EN_REFUSAL = (
+    r"don['’]?t|do\s+not|\w+n['’]t|\w+['’](?:d|ll)|will|never|no|not|nope|nah|none|nothing"
+    r"|without|avoid|skip|instead|rather|except|unless|forget|ignore|stop|quit|cancel|drop"
+)
+_EN_LIMIT = (
+    r"unnecessary|needless|overkill|excessive|too|neither|nor|below|under|lower|less|fewer|than|cap|limit|reduce"
+)
+_EN_HEDGE = r"if|maybe|perhaps|might|could|should|would|whether"
+_IT_REFUSAL = (
+    r"non|senza|mai|niente|nessun[oa]?|evit\w*|invece|piuttosto|tranne|lascia(?:mo)?\s+(?:perdere|stare)"
+    r"|dimentic\w*|basta|anzi"
+)
+_IT_LIMIT = r"meno|sotto|inferiore|troppo|inutile|esagerat[oa]|eccessiv[oa]|né|neanche|nemmeno|neppure"
+_IT_HEDGE = r"se|forse|serve|necessari[oa]|dovremmo"
 DOUBT = re.compile(
-    r"\?|^\s*(is|are|was|were|do|does|did|shall|can|may|why|what|how|when)\b"
-    r"|\b(don['\u2019]?t|do\s+not|\w+n['\u2019]t|\w+['\u2019](?:d|ll)|will|never|no|not|nope|nah|none|nothing"
-    r"|without|avoid|skip|instead|rather|except|unless|forget|ignore|stop|quit|cancel|drop|unnecessary|needless"
-    r"|overkill|excessive|too|neither|nor|below|under|lower|less|fewer|than|cap|limit|reduce"
-    r"|if|maybe|perhaps|might|could|should|would|whether"
-    r"|non|senza|mai|niente|nessun[oa]?|evit\w*|invece|piuttosto|tranne|lascia(?:mo)?\s+(?:perdere|stare)"
-    r"|dimentic\w*|basta|meno|sotto|inferiore|troppo|inutile|esagerat[oa]|eccessiv[oa]|n\u00e9|neanche|nemmeno"
-    r"|neppure|se|forse|serve|necessari[oa]|dovremmo|anzi)\b",
+    rf"{_QUESTION}|\b(?:{_EN_REFUSAL}|{_EN_LIMIT}|{_EN_HEDGE}|{_IT_REFUSAL}|{_IT_LIMIT}|{_IT_HEDGE})\b",
     re.IGNORECASE,
 )
 # Any of these after the request takes it back, in a later sentence or a later turn.
 RETRACT = re.compile(
     r"\b(actually|never\s*mind|forget|scratch\s+that|on\s+second\s+thought|wait|hold\s+on|cancel|undo"
-    r"|anzi|lascia(?:mo)?\s+(?:stare|perdere)|ripensandoci|aspetta|scherzavo)\b",
+    r"|back\s+to\s+normal|(?:just\s+)?kidding|psych"
+    r"|anzi|lascia(?:mo)?\s+(?:stare|perdere)|ripensandoci|aspetta|scherzavo|scherzo)\b",
+    re.IGNORECASE,
+)
+# A turn that is, or opens with, one of these takes back whatever came before; a bare word must stand alone, so
+# "No rush." does not.
+TAKE_BACK = re.compile(
+    r"^\W*(?:(?:ignore\s+that|never\s*mind|just\s+kidding|no\s+grazie)\b"
+    r"|(?:no|nah|nope|kidding|psych|scherzo)\b(?!\s+\w))",
     re.IGNORECASE,
 )
 SENTENCE = re.compile(r"[^.!?;\n]+[.!?;\n]*")
@@ -70,7 +97,9 @@ def asked_effort(user_words: Sequence[str]) -> Effort | None:
     """The on-request effort the User asked for in the latest turn that speaks of effort or takes a request back."""
     asked: Effort | None = None
     for turn in user_words:
-        if EFFORT_WORD.search(turn) or RETRACT.search(turn):
+        if TAKE_BACK.search(turn):
+            asked = None
+        elif EFFORT_WORD.search(turn) or RETRACT.search(turn):
             asked = _turn_asks(turn)
     return asked
 
