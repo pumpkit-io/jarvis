@@ -36,11 +36,11 @@ class Player(Protocol):
         ...
 
     def resume(self, rewind_ms: int = 300) -> None:
-        """Go on from a little before where the pause left off, fading back in."""
+        """Go on from `rewind_ms` before where the pause left off, back across earlier clips if need be, fading in."""
         ...
 
     def stop(self) -> None:
-        """Fade out and drop everything queued so far."""
+        """Fade out and drop everything queued so far. Paused or not, the player is then unpaused and empty."""
         ...
 
     def played(self) -> str:
@@ -80,6 +80,10 @@ class _DeviceStream:
         self._stream.close()
 
 
+# How far back a resume can rewind across finished clips.
+_HISTORY_SECONDS = 2
+
+
 @dataclass
 class _Queued:
     clip: Clip
@@ -95,8 +99,8 @@ class SoundPlayer:
         self._lock = threading.Lock()
         self._clips: deque[_Queued] = deque()
         self._pos = 0
-        # The clip that finished last, so a resume can rewind into it.
-        self._previous: _Queued | None = None
+        # The clips of this reply that finished last, oldest first, so a resume can rewind into them.
+        self._history: deque[_Queued] = deque()
         self._heard: list[str] = []
         self._gain = 1.0
         self._target = 1.0
@@ -120,11 +124,12 @@ class SoundPlayer:
             if self._target == 1.0 or self._stopping:
                 return
             self._pos -= self._rate * rewind_ms // 1000
-            if self._pos < 0 and self._previous is not None and self._clips:
-                self._clips.appendleft(self._previous)
-                self._heard.pop()
-                self._pos += len(self._previous.clip.samples)
-                self._previous = None
+            if self._clips:
+                while self._pos < 0 and self._history:
+                    previous = self._history.pop()
+                    self._clips.appendleft(previous)
+                    self._heard.pop()
+                    self._pos += len(previous.clip.samples)
             self._pos = max(0, self._pos)
             self._target = 1.0
 
@@ -158,7 +163,15 @@ class SoundPlayer:
     def _start_current(self) -> None:
         if self._clips[0].starts_reply:
             self._heard = []
-            self._previous = None
+            self._history.clear()
+
+    def _remember(self, finished: _Queued) -> None:
+        """Keeps the clip for a resume to rewind into, and no more than `_HISTORY_SECONDS` of them."""
+        self._history.append(finished)
+        budget = _HISTORY_SECONDS * self._rate
+        # A dropped clip's text stays in the heard record, which a rewind then never reaches.
+        while len(self._history) > 1 and sum(len(q.clip.samples) for q in self._history) > budget:
+            self._history.popleft()
 
     def _flush(self) -> None:
         if self._to_flush:
@@ -166,7 +179,7 @@ class SoundPlayer:
             self._pos = 0
         for _ in range(self._to_flush):
             self._clips.popleft()
-        self._previous = None
+        self._history.clear()
         self._gain = self._target = 1.0
         self._stopping = False
         self._to_flush = 0
@@ -186,7 +199,8 @@ class SoundPlayer:
                     # Past the fade nothing is heard, so those samples stay queued.
                     limit = int(np.count_nonzero(gains > 0.0))
             n = 0
-            while n < limit and self._clips:
+            # A stop fades only the clips queued before it; whatever is queued after starts at full gain.
+            while n < limit and self._clips and not (self._stopping and self._to_flush == 0):
                 clip = self._clips[0].clip
                 take = min(limit - n, len(clip.samples) - self._pos)
                 out[n : n + take] = clip.samples[self._pos : self._pos + take]
@@ -194,7 +208,7 @@ class SoundPlayer:
                 n += take
                 if self._pos == len(clip.samples):
                     self._heard.append(clip.text)
-                    self._previous = self._clips.popleft()
+                    self._remember(self._clips.popleft())
                     self._to_flush = max(0, self._to_flush - 1)
                     self._pos = 0
                     if self._clips:
@@ -202,7 +216,7 @@ class SoundPlayer:
             if gains is not None:
                 out *= gains.astype(np.float32)
                 self._gain = float(gains[-1])
-                if self._gain == 0.0 and self._stopping:
+                if self._stopping and (self._gain == 0.0 or self._to_flush == 0):
                     self._flush()
 
     def _gains(self, frames: int) -> NDArray[np.float64]:

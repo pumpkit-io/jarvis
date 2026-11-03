@@ -267,3 +267,56 @@ def test_a_stop_whose_clips_end_during_the_fade_leaves_the_player_ready(
     player.play(clip("Next reply.", np.full(50, 0.25, dtype=np.float32)), starts_reply=True)
 
     np.testing.assert_array_equal(stream.pull(50), 0.25)
+
+
+def test_a_clip_queued_after_a_stop_is_not_faded_when_the_stop_fade_outlasts_the_stopped_clip(
+    stream_and_player: tuple[FakeStream, SoundPlayer],
+) -> None:
+    stream, player = stream_and_player
+    player.play(clip("One.", ramp(0, 15)))
+    stream.pull(10)
+
+    player.stop()  # Five samples are left in the clip, fewer than the ten of the fade.
+    player.play(clip("Next reply.", ramp(100, 50)), starts_reply=True)
+    fade = stream.pull(10)
+    out = stream.pull(50)
+
+    assert np.all(np.diff(fade[:5]) < 0)
+    np.testing.assert_array_equal(out, ramp(100, 50))
+    assert player.played() == "Next reply."
+
+
+def test_a_stop_after_a_pause_leaves_the_player_clean_unpaused_and_empty(
+    stream_and_player: tuple[FakeStream, SoundPlayer],
+) -> None:
+    stream, player = stream_and_player
+    player.play(clip("One.", np.full(500, 0.5, dtype=np.float32)))
+    player.play(clip("Two.", np.full(500, 0.5, dtype=np.float32)))
+    stream.pull(100)
+    player.pause()
+    stream.pull(30)
+
+    player.stop()
+
+    assert player.pending() == 0
+    player.resume()
+    player.play(clip("Next reply.", np.full(50, 0.25, dtype=np.float32)), starts_reply=True)
+    np.testing.assert_array_equal(stream.pull(50), 0.25)
+    assert player.played() == "Next reply."
+
+
+def test_resume_rewinds_across_as_many_short_clips_as_it_takes(
+    stream_and_player: tuple[FakeStream, SoundPlayer],
+) -> None:
+    stream, player = stream_and_player
+    for i in range(4):
+        player.play(clip(f"Clip {i}.", ramp(i * 20, 20)))
+    stream.pull(70)
+
+    player.pause()
+    stream.pull(20)  # The fade plays up to sample 78, in the fourth clip.
+    player.resume(rewind_ms=70)
+    out = stream.pull(40)
+
+    # Back at sample 9, three clips before the one where the fade ended.
+    np.testing.assert_array_equal(out[10:], ramp(19, 30))
