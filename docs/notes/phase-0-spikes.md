@@ -441,33 +441,35 @@ Run `./jarvis` (or `uv run jarvis-hub --debug` to see each transition), in a qui
 
 ## Barge-in
 
-Ticket #17. While Jarvis speaks (`speaking` or `announce`), the input pipeline watches the echo-cancelled microphone. Unbroken speech held for `JARVIS_BARGEIN_MIN_SPEECH_MS` (200) pauses the player, unless Jarvis started or resumed less than `JARVIS_BARGEIN_GUARD_MS` (250) ago, while the APM settles. Parakeet transcribes from 300 ms before the onset at about 400 and 700 ms, and once more each time the speech goes quiet for 200 ms. `jarvis_hub.voice.bargein.decide`, pure, reads the latest partial:
+Ticket #17. While Jarvis speaks (`speaking` or `announce`), the input pipeline watches the echo-cancelled microphone. Unbroken speech held for `JARVIS_BARGEIN_MIN_SPEECH_MS` (200) pauses the player. Speech counts only from `JARVIS_BARGEIN_GUARD_MS` (250) after Jarvis's voice starts or resumes, while the APM settles: the state machine gives that time (`barge_in_from`) and the pipeline measures held speech from it, so echo inside the guard is ignored and the User already talking as a reply starts pauses it 200 ms after the guard ends. (The first build rejected a Barge-in inside the guard in the state machine, which left the pipeline holding it, so no other fired until half a second of silence.) Parakeet transcribes from 300 ms before the onset at about 400 and 700 ms, and once more each time the speech goes quiet for 200 ms. `jarvis_hub.voice.bargein.decide`, pure, reads the latest partial:
 
-1. The Wake word, or any phrase of `lexicons/interrupt.txt` (wait, stop, hold on, no, actually, Jarvis, aspetta, un attimo, fermo, anzi…): stop.
-2. Words that are not all Backchannel (`lexicons/backchannel.txt`: okay, mhm, yeah, right, sì, certo, va bene, esatto…): stop once there are three, once the speech has run 700 ms, or once it has gone quiet; otherwise wait.
-3. Only Backchannels, or no words at all (noise): resume once the speech has gone quiet.
-4. At `JARVIS_BARGEIN_DECIDE_MS` (800) after the pause nothing waits: still talking with words stops, anything else resumes.
+1. Any phrase of `lexicons/interrupt.txt` (wait, stop, hold on, no, actually, Jarvis, aspetta, un attimo, fermo, anzi…): stop, unless it lies inside a longer Backchannel phrase ("no" in "no problem"). The Wake word stops Jarvis in the state machine, before any partial.
+2. Words that are not all Backchannel (`lexicons/backchannel.txt`: okay, mhm, yeah, right, no problem, all right, sì, certo, va bene, vabbè, ho capito…): stop once there are three, once the speech has run 700 ms (compared at 650 ms, since VAD reads speech held throughout a chunk short at the 700 ms partial), or once it has gone quiet; otherwise wait.
+3. Only Backchannels, or no words at all (noise, or only STT marks such as `[BLANK_AUDIO]`, `[Music]`, `(coughs)`): resume once the speech has gone quiet.
+4. At `JARVIS_BARGEIN_DECIDE_MS` (800) after the pause nothing waits: still talking with words other than Backchannels stops, anything else resumes, so a slow "sì, certo" resumes.
 
 Resume rewinds 300 ms and the Backchannel never becomes a turn. Stop flushes the player, interrupts and drains the Talker, and listens with no chime; the turn keeps the User's audio from the onset and reaches the Talker as `<interrupted spoken="…"/>` (the player's record of what was heard) then `<user>`. A Wake word that cuts Jarvis off does the same, plus its chime. With `--headphones` (or `JARVIS_AEC=off`) the same logic runs on the raw microphone, so it assumes headphones.
 
 ### File-driven check
 
-`spikes/hub/bargein.py`, run on 2026-11-04 on the M3: Jarvis's reply (Kokoro `am_liam` / `im_nicola`) goes to the WebRTC APM as the reference and into the "microphone" 40 ms late at 40 % level, with the User's phrase (Kokoro `af_heart` / `if_sara`) mixed in 2.5 s later. Frames run through the real `InputPipeline` (APM, openWakeWord, Silero, parakeet) and the pure state machine in audio time; the reply pauses, rewinds and stops as the player would. Numbers only in `docs/notes/bargein.json`.
+`spikes/hub/bargein.py`, last run on 2026-11-04 on the M3 after fix round 1: Jarvis's reply (Kokoro `am_liam` / `im_nicola`) goes to the WebRTC APM as the reference and into the "microphone" 40 ms late at 40 % level, with the User's phrase (Kokoro `af_heart` / `if_sara`) mixed in 2.5 s later. Frames run through the real `InputPipeline` (APM, openWakeWord, Silero, parakeet) and the pure state machine in audio time; the reply pauses, rewinds and stops as the player would. Numbers only in `docs/notes/bargein.json`.
 
 | Case | Outcome | Onset to decision (audio) |
 |---|---|---|
-| "Okay.", "Mhm.", "Yeah, right." | resume | 656-936 ms |
-| "Va bene." | resume | 1,046 ms |
-| "Wait, stop.", "Actually, open an issue instead." | stop | 440-443 ms |
+| "Okay.", "Yeah, right.", "No problem." | resume | 785-1,043 ms |
+| "Sì, certo.", "Va bene." | resume | 1,046-1,165 ms |
+| "Mhm." | **stop**, expected resume: parakeet heard Kokoro's "Mhm." as "Yeah no." | 657 ms |
+| "Wait, stop.", "Actually, open an issue instead." | stop | 440 ms |
 | "Hey Jarvis." | stop (STT heard "Jarvis"; openWakeWord missed the synthetic voice) | 754 ms |
-| "Aspetta, un attimo.", "Anzi, apri una issue." | stop | 614-820 ms |
-| "Sì, certo." | **stop**, expected resume: the slow synthetic voice was still talking at the deadline | 1,125 ms |
+| "Aspetta, un attimo.", "Anzi, apri una issue." | stop | 491-915 ms |
+| "Actually, open an issue instead." begun 0.3 s before the reply | paused at 0.48 s into the reply, then stop | 640 ms |
 | Noise, 150 ms and 400 ms | never paused: below the minimum, and Silero does not take noise for speech | |
 | Jarvis's echo alone, EN and IT, about 8 s each | never paused | |
 
-- 13 of 14 as expected. Each partial costs parakeet about 78 ms (median; the first of the run 176 ms), which comes on top of the times above, since frames queue behind it and catch up: resume at 0.74-1.12 s from the User's first sound, stop at 0.5-1.2 s.
+- 15 of 16 as expected. Each partial costs parakeet about 77 ms (median; the first of the run about 200 ms), which comes on top of the times above, since frames queue behind it and catch up: resume at up to 1.24 s from the User's first sound, stop at up to 1.0 s.
+- **The talking-at-start case needs a converged APM.** With a fresh WebRTC APM and the User talking from the reply's first frame, the APM suppresses both voices and nothing pauses; started 0.1 s in, it pauses only at 1.4 s. The session keeps one canceller, converged on the replies before, so the case first runs 4 s of the other reply's echo through it.
 - **The quiet partial came from this run.** Silero's speech probability lingers about 100-150 ms past the end of a word, so a finished "okay" still looked like speech at the 700 ms partial (0.12 s quiet) and the deadline stopped Jarvis. Transcribing again as the speech goes quiet resumes it right then.
-- **Kokoro's "Mhm." is a weak stand-in**: another run heard it as "Ham milk" then "Hammer." and stopped. A real "mhm" may also come out of parakeet as a word; the Barge-in decision log (#19) will show which, and its spelling goes in `backchannel.txt`.
+- **Kokoro's "Mhm." is a weak stand-in**: runs have heard it as "Ham milk", "Hammer.", "Yeah no." and "Handle." and stopped; one run heard "Mhm." and resumed. A real "mhm" may also come out of parakeet as a word; the Barge-in decision log (#19) will show which, and its spelling goes in `backchannel.txt`.
 - **The echo here is linear and clean**, so "never paused" on echo alone checks the guard and the logic, not the APM on real speakers. That needs the manual script.
 
 ### Manual script, for the User
@@ -481,7 +483,7 @@ Ask "Tell me a long story about a lighthouse" (or anything with a reply of 20 s 
 - [ ] "Actually, open an issue instead": it stops; the turn on screen starts at "Actually"; the next reply takes up the issue and does not repeat the story.
 - [ ] "Jarvis": it stops, chimes and listens.
 - [ ] "Sì, certo" and "aspetta, un attimo" over an Italian reply: the first resumes, the second stops.
-- [ ] On speakers only: let Jarvis speak for 10 minutes in all (long answers, news) with nobody talking. No pause, no stop, and no turn from its own voice. Count any `paused for a Barge-in`.
+- [ ] On speakers only: let Jarvis speak for 10 minutes in all (long answers, news) with nobody talking. No pause, no stop, and no turn from its own voice. Count any `paused for a Barge-in`. This is the check for the known speaker-echo risk: Barge-in partials are not passed through the speaker gate, so echo the APM leaves in, held 200 ms, pauses Jarvis, and a word STT makes of it ("no", "wait", "Jarvis") stops it.
 
 ## Subagents
 

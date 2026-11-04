@@ -45,11 +45,12 @@ REPLIES = {
 }
 USER_VOICES = {"en": "af_heart", "it": "if_sara"}
 
-# (id, language, what the User says or a special source, the outcome expected)
+# (id, language, what the User says or a special source, the outcome expected); the User starts at `USER_AT_S`.
 CASES: list[tuple[str, str, str, str]] = [
     ("okay", "en", "Okay.", "resume"),
     ("mhm", "en", "Mhm.", "resume"),
     ("yeah-right", "en", "Yeah, right.", "resume"),
+    ("no-problem", "en", "No problem.", "resume"),
     ("wait-stop", "en", "Wait, stop.", "stop"),
     ("actually", "en", "Actually, open an issue instead.", "stop"),
     ("hey-jarvis", "en", "Hey Jarvis.", "stop"),
@@ -64,6 +65,10 @@ CASES: list[tuple[str, str, str, str]] = [
     ("echo-only", "en", "<none>", "none"),
     ("echo-only-it", "it", "<none>", "none"),
 ]
+# The User already talking 0.3 s before the reply starts, so their speech counts from the guard's end. The APM has
+# first converged on the other reply, as the session's one canceller would have; a fresh one hears nothing here.
+AT_START = {"talking-at-start": -0.3}
+CASES.append(("talking-at-start", "en", "Actually, open an issue instead.", "stop"))
 
 
 class TimedStt:
@@ -94,7 +99,20 @@ def user_audio(tts: KokoroSynthesizer, lang: str, said: str) -> Samples:
     return soxr.resample(audio, TTS_RATE, SAMPLE_RATE).astype(np.float32)
 
 
-def run_case(engines: Engines, stt: TimedStt, reply24: Samples, user: Samples) -> dict[str, Any]:
+def converge(echo: Any, reply24: Samples, seconds: float = 4.0) -> None:
+    """Runs `seconds` of `reply24`'s echo and half a second of silence through the canceller."""
+    reply16 = soxr.resample(reply24, TTS_RATE, SAMPLE_RATE).astype(np.float32)
+    rng = np.random.default_rng(2)
+    played: list[Samples] = [np.zeros(FRAME, np.float32)] * ECHO_DELAY_FRAMES
+    for k in range(round((seconds + 0.5) * 100)):
+        talking = k < seconds * 100
+        echo.reference(reply24[k * REF : (k + 1) * REF] if talking else np.zeros(REF, np.float32), TTS_RATE)
+        played.append(reply16[k * FRAME : (k + 1) * FRAME] if talking else np.zeros(FRAME, np.float32))
+        mic = ECHO_GAIN * played.pop(0) + rng.normal(0, 0.002, FRAME).astype(np.float32)
+        echo.process((np.clip(mic, -1, 1) * 32767).astype(np.int16))
+
+
+def run_case(engines: Engines, stt: TimedStt, reply24: Samples, user: Samples, user_at: float) -> dict[str, Any]:
     reply16 = soxr.resample(reply24, TTS_RATE, SAMPLE_RATE).astype(np.float32)
     frames = len(reply16) // FRAME
     pipeline = InputPipeline(engines, Listening(), record=lambda row: None)
@@ -103,7 +121,9 @@ def run_case(engines: Engines, stt: TimedStt, reply24: Samples, user: Samples) -
     pipeline.barge_in(since)
     rng = np.random.default_rng(0)
     played: list[Samples] = [np.zeros(FRAME, np.float32)] * ECHO_DELAY_FRAMES
-    user_start = round(USER_AT_S * 100) * FRAME
+    if user_at < 0:
+        user, user_at = user[round(-user_at * SAMPLE_RATE) :], 0.0
+    user_start = round(user_at * 100) * FRAME
     loud = np.flatnonzero(np.abs(user) > 0.02)
     onset = (user_start + loud[0]) / SAMPLE_RATE if len(loud) else None
     k, paused, n = 0, False, 0
@@ -164,7 +184,9 @@ def main() -> None:
     for case, lang, said, expected in CASES:
         # A fresh echo canceller and Wake word model per case, so nothing one case leaves behind reaches the next.
         engines = replace(loaded, echo=WebRtcEchoCancellation(), wake=OpenWakeWord(), stt=stt)
-        result = run_case(engines, stt, replies[lang], user_audio(tts, lang, said))
+        if case in AT_START:
+            converge(engines.echo, replies["it" if lang == "en" else "en"])
+        result = run_case(engines, stt, replies[lang], user_audio(tts, lang, said), AT_START.get(case, USER_AT_S))
         outcome = result["decisions"][0][0] if result["decisions"] else "none"
         decided_ms = None
         if result["decisions"] and result["onset_s"] is not None:

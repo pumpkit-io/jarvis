@@ -1,11 +1,11 @@
 {
   "date": "2026-11-04",
   "machine": "arm64",
-  "cases": 14,
-  "as_expected": 13,
-  "resume_ms_max": 1116.7,
-  "stop_ms_max": 1201.2,
-  "partial_stt_ms_median": 77.7,
+  "cases": 16,
+  "as_expected": 15,
+  "resume_ms_max": 1239.9,
+  "stop_ms_max": 996.4,
+  "partial_stt_ms_median": 76.75,
   "rows": [
     {
       "case": "okay",
@@ -15,9 +15,9 @@
       "ok": true,
       "decided_ms": 785,
       "partial_stt_ms": [
-        176.4,
-        72.4,
-        73.3
+        200.7,
+        71.8,
+        69.4
       ],
       "barge_ins": 1,
       "wake_words": 0,
@@ -32,12 +32,33 @@
       "case": "mhm",
       "lang": "en",
       "expected": "resume",
+      "outcome": "stop",
+      "ok": false,
+      "decided_ms": 657,
+      "partial_stt_ms": [
+        81.6,
+        79.6
+      ],
+      "barge_ins": 1,
+      "wake_words": 0,
+      "pauses_s": [
+        3.17
+      ],
+      "decisions": [
+        "stop"
+      ]
+    },
+    {
+      "case": "yeah-right",
+      "lang": "en",
+      "expected": "resume",
       "outcome": "resume",
       "ok": true,
-      "decided_ms": 656,
+      "decided_ms": 936,
       "partial_stt_ms": [
-        80.6,
-        80.1
+        82.0,
+        77.1,
+        77.6
       ],
       "barge_ins": 1,
       "wake_words": 0,
@@ -49,21 +70,21 @@
       ]
     },
     {
-      "case": "yeah-right",
+      "case": "no-problem",
       "lang": "en",
       "expected": "resume",
       "outcome": "resume",
       "ok": true,
-      "decided_ms": 936,
+      "decided_ms": 1043,
       "partial_stt_ms": [
-        81.5,
-        77.7,
-        79.3
+        78.9,
+        71.8,
+        73.2
       ],
       "barge_ins": 1,
       "wake_words": 0,
       "pauses_s": [
-        3.17
+        3.14
       ],
       "decisions": [
         "resume"
@@ -77,7 +98,7 @@
       "ok": true,
       "decided_ms": 440,
       "partial_stt_ms": [
-        84.8
+        83.4
       ],
       "barge_ins": 1,
       "wake_words": 0,
@@ -94,9 +115,9 @@
       "expected": "stop",
       "outcome": "stop",
       "ok": true,
-      "decided_ms": 443,
+      "decided_ms": 440,
       "partial_stt_ms": [
-        81.2
+        80.3
       ],
       "barge_ins": 1,
       "wake_words": 0,
@@ -115,8 +136,8 @@
       "ok": true,
       "decided_ms": 754,
       "partial_stt_ms": [
-        83.8,
-        75.7
+        83.4,
+        76.4
       ],
       "barge_ins": 1,
       "wake_words": 0,
@@ -131,20 +152,20 @@
       "case": "si-certo",
       "lang": "it",
       "expected": "resume",
-      "outcome": "stop",
-      "ok": false,
-      "decided_ms": 1125,
+      "outcome": "resume",
+      "ok": true,
+      "decided_ms": 1165,
       "partial_stt_ms": [
-        84.3,
-        76.2
+        83.3,
+        74.9
       ],
       "barge_ins": 1,
       "wake_words": 0,
       "pauses_s": [
-        3.04
+        3.08
       ],
       "decisions": [
-        "stop"
+        "resume"
       ]
     },
     {
@@ -155,9 +176,9 @@
       "ok": true,
       "decided_ms": 1046,
       "partial_stt_ms": [
-        75.6,
-        76.0,
-        70.7
+        78.3,
+        71.9,
+        71.7
       ],
       "barge_ins": 1,
       "wake_words": 0,
@@ -174,9 +195,10 @@
       "expected": "stop",
       "outcome": "stop",
       "ok": true,
-      "decided_ms": 614,
+      "decided_ms": 915,
       "partial_stt_ms": [
-        86.4
+        80.4,
+        81.4
       ],
       "barge_ins": 1,
       "wake_words": 0,
@@ -193,15 +215,14 @@
       "expected": "stop",
       "outcome": "stop",
       "ok": true,
-      "decided_ms": 820,
+      "decided_ms": 491,
       "partial_stt_ms": [
-        80.3,
-        80.4
+        84.2
       ],
       "barge_ins": 1,
       "wake_words": 0,
       "pauses_s": [
-        3.08
+        3.04
       ],
       "decisions": [
         "stop"
@@ -258,6 +279,25 @@
       "wake_words": 0,
       "pauses_s": [],
       "decisions": []
+    },
+    {
+      "case": "talking-at-start",
+      "lang": "en",
+      "expected": "stop",
+      "outcome": "stop",
+      "ok": true,
+      "decided_ms": 640,
+      "partial_stt_ms": [
+        84.9
+      ],
+      "barge_ins": 1,
+      "wake_words": 0,
+      "pauses_s": [
+        0.48
+      ],
+      "decisions": [
+        "stop"
+      ]
     }
   ]
 }
