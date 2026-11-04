@@ -18,7 +18,7 @@ from typing import Any, Literal, Protocol
 import numpy as np
 from numpy.typing import NDArray
 
-from jarvis_hub.voice.bargein import Partial
+from jarvis_hub.voice.bargein import TALKING_GAP_S, Partial
 from jarvis_hub.voice.player import Samples
 from jarvis_hub.voice.state import BargeIn, Heard, InputEvent, SpeechStarted, WakeWord
 
@@ -152,9 +152,10 @@ class InputPipeline:
         self._run: float | None = None
         self._run_spent = False
         self._watching = False
-        # The onset of the Barge-in under way, and when its partials are due.
+        # The onset of the Barge-in under way, when its partials are due, and whether its going quiet was transcribed.
         self._barge: float | None = None
         self._partials_due: list[float] = []
+        self._quiet_told = False
 
     def capture(self, on: bool) -> None:
         self._capturing = on
@@ -195,6 +196,7 @@ class InputPipeline:
         events += self._barge_events(at)
         if self._onset is not None and self._turn is None and at - self._last_speech >= self._s.end_silence_s:
             self._onset = None
+            self._barge = None
         if self._capturing and self._turn is None and self._onset is not None:
             self._turn = self._begin_turn(self._onset)
             events.append(SpeechStarted(at))
@@ -207,10 +209,17 @@ class InputPipeline:
         run = self._run
         held = run is not None and self._last_speech - run >= self._s.bargein_min_speech_s
         if self._watching and self._barge is None and run is not None and held and not self._run_spent:
-            self._barge, self._run_spent = run, True
+            self._barge, self._run_spent, self._quiet_told = run, True, False
             self._partials_due = [run + offset for offset in self._s.bargein_partials_s]
             events.append(BargeIn(run, at))
-        if self._barge is not None and self._partials_due and at >= self._partials_due[0] - 0.005:
+        if self._barge is None:
+            return events
+        quiet = at - self._last_speech >= TALKING_GAP_S
+        due = bool(self._partials_due) and at >= self._partials_due[0] - 0.005
+        # Silero lingers past the end of a word, so a short Backchannel is often still "speech" at 700 ms.
+        went_quiet = quiet and not self._quiet_told
+        self._quiet_told = quiet
+        if due or went_quiet:
             while self._partials_due and at >= self._partials_due[0] - 0.005:
                 self._partials_due.pop(0)
             events.append(self._partial(self._barge, at))

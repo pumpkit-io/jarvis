@@ -356,15 +356,17 @@ def test_a_barge_in_is_transcribed_at_about_400_and_700_ms_from_a_little_before_
     r.feed("speech", 0.35)
     r.feed("silence", 1.0)
 
-    early, late = partials(r)
+    early, quiet, late = partials(r)
     onset = barge_ins(r)[0].onset
     assert (early.text, late.text) == ("okay", "okay")
     assert early.at - onset == pytest.approx(0.4, abs=0.02)  # pyright: ignore[reportUnknownMemberType]
+    # Also as the speech goes quiet, so a Backchannel said and done resumes without waiting for the next one.
+    assert quiet.silent_s == pytest.approx(0.2, abs=0.04)  # pyright: ignore[reportUnknownMemberType]
     assert late.at - onset == pytest.approx(0.7, abs=0.02)  # pyright: ignore[reportUnknownMemberType]
     assert late.speech_s == pytest.approx(0.35, abs=0.04)  # pyright: ignore[reportUnknownMemberType]
     assert late.silent_s == pytest.approx(0.35, abs=0.04)  # pyright: ignore[reportUnknownMemberType]
     # From 300 ms before the onset to the moment of each partial.
-    assert len(r.stt.heard[1]) / RATE == pytest.approx(0.3 + 0.7, abs=0.04)  # pyright: ignore[reportUnknownMemberType]
+    assert len(r.stt.heard[2]) / RATE == pytest.approx(0.3 + 0.7, abs=0.04)  # pyright: ignore[reportUnknownMemberType]
 
 
 def test_a_cough_shorter_than_the_minimum_is_no_barge_in() -> None:
@@ -438,3 +440,26 @@ def test_a_turn_after_a_barge_in_keeps_the_users_audio_from_its_onset() -> None:
     assert [type(e) for e in r.events] == [BargeIn, Partial, SpeechStarted, Heard]
     # From the pad before the onset, through 1.5 s of speech, to half a second of silence.
     assert len(r.stt.heard[-1]) / RATE == pytest.approx(0.2 + 1.5 + 0.5, abs=0.06)  # pyright: ignore[reportUnknownMemberType]
+
+
+def test_each_time_the_barge_in_goes_quiet_it_is_transcribed_once() -> None:
+    r = rig()
+    r.pipeline.barge_in(True)
+    r.feed("speech", 0.8)
+    r.feed("silence", 0.3)
+    r.feed("speech", 0.2)
+    r.feed("silence", 0.3)
+
+    quiet = [p for p in partials(r) if p.silent_s >= 0.2]
+    assert len(quiet) == 2
+    assert len(partials(r)) == 4
+
+
+def test_a_barge_in_ends_with_its_speech() -> None:
+    r = rig()
+    r.pipeline.barge_in(True)
+    r.feed("speech", 0.3)
+    r.feed("silence", 2.0)
+    r.feed("speech", 0.3)
+
+    assert len(barge_ins(r)) == 2
