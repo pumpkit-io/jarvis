@@ -12,12 +12,15 @@ from jarvis_hub.voice.bargein import Partial
 from jarvis_hub.voice.input import Engines, InputPipeline, Listening
 from jarvis_hub.voice.player import Samples
 from jarvis_hub.voice.state import (
+    CAPTURING,
     BargeIn,
     Event,
     Heard,
+    Interrupt,
     Pause,
     ReplyAudio,
     Resume,
+    SendTurn,
     SpeechStarted,
     Tick,
     Timing,
@@ -73,14 +76,20 @@ class ScriptedTurn:
 
 @dataclass
 class ScriptedStt:
+    """Says `text`, or, once `words` has any, the words whose marker samples the audio holds, in the order said."""
+
     text: str = "Open a PR"
     heard: list[Samples] = field(default_factory=lambda: [])
     after: list[float] = field(default_factory=lambda: [])
+    words: dict[int, str] = field(default_factory=lambda: {})
 
     def transcribe(self, audio: Samples, *, after: float = 0.0) -> str:
         self.heard.append(audio)
         self.after.append(after)
-        return self.text
+        if not self.words:
+            return self.text
+        markers = dict.fromkeys(int(v) for v in np.round(audio * 32768))
+        return " ".join(self.words[m] for m in markers if m in self.words)
 
 
 class Everyone:
@@ -98,8 +107,8 @@ class Rig:
     events: list[object] = field(default_factory=lambda: [])
     records: list[dict[str, object]] = field(default_factory=lambda: [])
 
-    def feed(self, kind: str, seconds: float) -> None:
-        value = {"speech": SPEECH, "silence": 0, "wake": WAKE}[kind]
+    def feed(self, kind: str, seconds: float, value: int | None = None) -> None:
+        value = value if value is not None else {"speech": SPEECH, "silence": 0, "wake": WAKE}[kind]
         for _ in range(round(seconds * 100)):
             self.t = round(self.t + 0.01, 6)
             frame = np.full(FRAME, value, dtype=np.int16)
@@ -431,6 +440,7 @@ def test_watching_again_forgets_the_barge_in_and_needs_speech_held_anew() -> Non
     r = rig()
     r.pipeline.barge_in(T0)
     r.feed("speech", 0.5)
+    r.pipeline.barge_in(None)
     r.pipeline.barge_in(T0)
     r.feed("speech", 1.0)
     assert len(barge_ins(r)) == 1
@@ -439,6 +449,36 @@ def test_watching_again_forgets_the_barge_in_and_needs_speech_held_anew() -> Non
     r.feed("silence", 0.2)
     r.feed("speech", 0.25)
     assert len(barge_ins(r)) == 2
+
+
+def test_speech_going_on_past_a_resume_is_a_barge_in_again_once_per_run() -> None:
+    r = rig()
+    r.pipeline.barge_in(T0)
+    r.feed("speech", 0.8)
+    r.pipeline.barge_in(T0 + 1.0)
+    r.feed("speech", 0.38)
+    assert len(barge_ins(r)) == 1
+    r.feed("speech", 0.1)
+    [_, again] = barge_ins(r)
+    assert again.onset == pytest.approx(T0 + 1.0)  # pyright: ignore[reportUnknownMemberType]
+
+    r.pipeline.barge_in(T0 + 2.0)
+    r.feed("speech", 2.0)
+    assert len(barge_ins(r)) == 2
+
+    r.feed("silence", 0.2)
+    r.feed("speech", 0.25)
+    assert len(barge_ins(r)) == 3
+
+
+def test_a_barge_in_still_talking_is_transcribed_every_300_ms_after_700() -> None:
+    r = rig()
+    r.pipeline.barge_in(T0)
+    r.feed("speech", 1.5)
+
+    onset = barge_ins(r)[0].onset
+    offsets = [p.at - onset for p in partials(r)]
+    assert offsets == pytest.approx([0.4, 0.7, 1.0, 1.3], abs=0.02)  # pyright: ignore[reportUnknownMemberType]
 
 
 def test_a_turn_after_a_barge_in_keeps_the_users_audio_from_its_onset() -> None:
@@ -466,7 +506,8 @@ def test_each_time_the_barge_in_goes_quiet_it_is_transcribed_once() -> None:
 
     quiet = [p for p in partials(r) if p.silent_s >= 0.2]
     assert len(quiet) == 2
-    assert len(partials(r)) == 4
+    # At 400 and 700 ms, quiet, at 1.3 s with the User talking again, and quiet again.
+    assert len(partials(r)) == 5
 
 
 def test_a_barge_in_ends_with_its_speech() -> None:
@@ -483,20 +524,25 @@ TIMING = Timing(follow_up_s=6.0, announce_follow_up_s=4.0, listen_s=6.0, chime_s
 
 
 class Duet:
-    """The pipeline's events through the voice state machine, which tells the pipeline from when Barge-ins count as
-    voice mode does, with Jarvis speaking a reply from `speak`."""
+    """The pipeline's events through the voice state machine, which turns capture on and off and tells the pipeline
+    from when Barge-ins count as voice mode does, with Jarvis speaking a reply from `speak`."""
 
     def __init__(self) -> None:
         self.r = rig()
         self.voice = Voice()
         self.actions: list[object] = []
         self.since: float | None = None
+        self.capturing = False
         self.step(WakeWord(T0))
         self.step(Heard("Tell me a story", "en", T0))
+        self.actions.clear()
 
     def step(self, event: Event) -> None:
         self.voice, actions = step(self.voice, event, TIMING)
         self.actions += actions
+        if (capturing := self.voice.state in CAPTURING) != self.capturing:
+            self.capturing = capturing
+            self.r.pipeline.capture(capturing)
         if (since := barge_in_from(self.voice, TIMING)) != self.since:
             self.since = since
             self.r.pipeline.barge_in(since)
@@ -504,14 +550,26 @@ class Duet:
     def speak(self) -> None:
         self.step(ReplyAudio(self.r.t, T0))
 
-    def feed(self, kind: str, seconds: float) -> None:
+    def feed(self, kind: str, seconds: float, value: int | None = None) -> None:
         for _ in range(round(seconds * 100)):
             seen = len(self.r.events)
-            self.r.feed(kind, 0.01)
+            self.r.feed(kind, 0.01, value)
             for event in self.r.events[seen:]:
                 assert isinstance(event, (WakeWord, SpeechStarted, Heard, BargeIn, Partial))
                 self.step(event)
             self.step(Tick(self.r.t))
+
+    def say(self, words: str, seconds: float) -> None:
+        """The User speaking `words` for `seconds`, run on from any speech before it."""
+        marker = SPEECH + 1 + len(self.r.stt.words)
+        self.r.stt.words[marker] = words
+        self.feed("speech", seconds, marker)
+
+    def pauses(self) -> list[object]:
+        return [a for a in self.actions if a in (Pause(), Resume())]
+
+    def sent(self) -> list[SendTurn]:
+        return [a for a in self.actions if isinstance(a, SendTurn)]
 
 
 def test_echo_inside_the_guard_does_not_stop_a_later_barge_in() -> None:
@@ -545,3 +603,53 @@ def test_a_second_barge_in_just_after_a_resume_still_pauses() -> None:
     d.feed("speech", 1.0)
 
     assert [a for a in d.actions if a in (Pause(), Resume())] == [Pause(), Resume(), Pause()]
+
+
+def test_an_interrupt_said_on_from_a_backchannel_in_one_breath_stops_jarvis_and_is_the_next_turn() -> None:
+    d = Duet()
+    d.speak()
+    d.feed("silence", 0.5)
+    d.say("Okay,", 0.75)
+    d.say("actually open an issue instead.", 1.5)
+    d.feed("silence", 1.0)
+
+    assert Interrupt() in d.actions
+    assert d.sent()[-1] == SendTurn("Okay, actually open an issue instead.", None, d.sent()[-1].at, interrupted=True)
+
+
+def test_an_italian_interrupt_after_backchannels_past_the_deadline_still_stops_jarvis() -> None:
+    d = Duet()
+    d.speak()
+    d.feed("silence", 0.5)
+    d.say("sì sì,", 1.1)
+    d.say("aspetta", 0.5)
+    d.feed("silence", 1.0)
+
+    assert Interrupt() in d.actions
+    assert d.sent()[-1].text == "sì sì, aspetta"
+
+
+def test_an_interrupt_after_jarvis_resumed_over_the_same_breath_still_stops_it() -> None:
+    d = Duet()
+    d.speak()
+    d.feed("silence", 0.5)
+    d.say("okay okay okay,", 1.6)
+    assert d.pauses() == [Pause(), Resume()]
+    d.say("actually open an issue instead.", 1.5)
+    d.feed("silence", 1.0)
+
+    assert d.pauses()[-1] == Pause() and Interrupt() in d.actions
+    assert d.sent()[-1].text == "okay okay okay, actually open an issue instead."
+
+
+@pytest.mark.parametrize("seconds", [2.5, 8.0])
+def test_a_long_run_of_pure_backchannels_pauses_and_resumes_jarvis_at_most_twice(seconds: float) -> None:
+    d = Duet()
+    d.speak()
+    d.feed("silence", 0.5)
+    d.say("okay okay okay okay", seconds)
+    d.feed("silence", 1.0)
+
+    assert Interrupt() not in d.actions and d.sent() == []
+    assert d.pauses() == [Pause(), Resume(), Pause(), Resume()]
+    assert d.voice.state == "speaking" and d.voice.barge is None

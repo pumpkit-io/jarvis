@@ -405,7 +405,7 @@ def test_undecided_at_the_deadline_still_talking_stops_and_quiet_resumes() -> No
     assert (voice.state, actions) == ("listening", [Interrupt()])
 
     noise, _ = run(*SPEAKING, BargeIn(20.0, 20.2), said("", 20.4, 0.38, 0.02))
-    voice, actions = run(Tick(21.0), start=noise)
+    voice, actions = run(Tick(21.0), Tick(21.5), start=noise)
     assert (voice.state, actions) == ("speaking", [Resume()])
 
 
@@ -468,3 +468,22 @@ def test_a_reply_that_ends_while_paused_unpauses_the_player() -> None:
     assert voice.state == "follow_up"
     assert actions[-1] == Resume()
     assert voice.deadline == pytest.approx(26.3)  # pyright: ignore[reportUnknownMemberType]
+
+
+def test_backchannels_still_going_at_the_deadline_wait_for_one_more_partial() -> None:
+    paused, _ = run(*SPEAKING, BargeIn(20.0, 20.2), said("okay", 20.7, 0.68, 0.02))
+    voice, actions = run(Tick(21.0), start=paused)
+    assert (voice.state, actions) == ("speaking", [])
+    assert voice.deadline == pytest.approx(21.5)  # pyright: ignore[reportUnknownMemberType]
+
+    stopped, actions = run(said("okay so the", 21.0, 0.98, 0.02), start=voice)
+    assert (stopped.state, actions) == ("listening", [Interrupt()])
+    resumed, actions = run(said("okay okay", 21.0, 0.98, 0.02), start=voice)
+    assert (resumed.state, actions) == ("speaking", [Resume()])
+    resumed, actions = run(Tick(21.5), start=voice)
+    assert (resumed.state, actions) == ("speaking", [Resume()])
+
+
+def test_backchannels_said_and_done_by_the_deadline_resume_at_once() -> None:
+    voice, actions = run(*SPEAKING, BargeIn(20.0, 20.2), said("okay", 20.7, 0.4, 0.3))
+    assert (voice.state, actions[-1]) == ("speaking", Resume())

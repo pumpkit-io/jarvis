@@ -92,6 +92,10 @@ def _phrases(path: Path) -> frozenset[str]:
 LEXICONS = Lexicons.load(LEXICON_DIR)
 
 
+def still_talking(partial: Partial) -> bool:
+    return partial.silent_s < TALKING_GAP_S
+
+
 def decide(partials: Sequence[Partial], *, final: bool, lexicons: Lexicons = LEXICONS) -> Decision:
     """Stop, resume, or wait for the next partial; with `final`, at the deadline, never wait.
 
@@ -103,7 +107,7 @@ def decide(partials: Sequence[Partial], *, final: bool, lexicons: Lexicons = LEX
     said = words(latest.text)
     if lexicons.interrupts(said):
         return "stop"
-    talking = latest.silent_s < TALKING_GAP_S
+    talking = still_talking(latest)
     if said and not lexicons.only_backchannel(said):
         floor = len(said) >= FLOOR_WORDS or latest.speech_s >= LONG_SPEECH_S
         return "stop" if floor or not talking or final else "wait"

@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from typing import Literal
 
-from jarvis_hub.voice.bargein import Partial, decide
+from jarvis_hub.voice.bargein import Partial, decide, still_talking
 from jarvis_hub.voice.language import Lang
 
 VoiceState = Literal["idle", "listening", "thinking", "speaking", "follow_up", "announce"]
@@ -31,6 +31,8 @@ class Timing:
     chime_s: float
     # From the pause, how long a Barge-in has to be told apart as a Backchannel or an Interruption.
     decide_s: float = 0.8
+    # Past that deadline, how long to wait for one more partial when the User is still talking over Backchannels.
+    last_partial_s: float = 0.5
     # From when Jarvis's voice starts or resumes, how long echo cancellation gets to settle before speech counts.
     guard_s: float = 0.25
 
@@ -170,6 +172,8 @@ class Barge:
 
     onset: float
     partials: tuple[Partial, ...] = ()
+    # The deadline has passed with the User still talking: the next partial is the last.
+    last_call: bool = False
 
 
 @dataclass(frozen=True)
@@ -309,7 +313,7 @@ def _step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Actio
             if voice.barge is None:
                 return voice, []
             barge = replace(voice.barge, partials=(*voice.barge.partials, event))
-            return _decide(replace(voice, barge=barge), at, timing, final=False)
+            return _decide(replace(voice, barge=barge), at, timing, final=barge.last_call)
         case EndConversation():
             if voice.state in ("thinking", "speaking", "announce"):
                 return replace(voice, ending=True), []
@@ -319,10 +323,15 @@ def _step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Actio
                 return replace(voice, state="announce", deadline=None), [Chime()]
             return voice, []
         case Tick(at):
-            if voice.barge is not None:
-                if voice.deadline is not None and at >= voice.deadline:
-                    return _decide(voice, at, timing, final=True)
-                return voice, []
+            if (barge := voice.barge) is not None:
+                if voice.deadline is None or at < voice.deadline:
+                    return voice, []
+                # Backchannels so far may lead into more ("okay, actually…"): hear what follows before resuming.
+                talking = bool(barge.partials) and still_talking(barge.partials[-1])
+                if not barge.last_call and talking and decide(barge.partials, final=True) == "resume":
+                    last_call = replace(barge, last_call=True)
+                    return replace(voice, barge=last_call, deadline=at + timing.last_partial_s), []
+                return _decide(voice, at, timing, final=True)
             if voice.deadline is not None and at >= voice.deadline:
                 return replace(voice, state="idle", deadline=None), []
             return voice, []

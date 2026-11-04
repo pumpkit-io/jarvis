@@ -27,6 +27,9 @@ FRAME = SAMPLE_RATE // 100
 
 Pcm = NDArray[np.int16]
 
+# Frame stamps are sums of 10 ms steps, so a time due on a frame can come out a hair after the frame's stamp.
+STAMP_SLACK_S = 0.005
+
 
 class EchoCanceller(Protocol):
     def process(self, frame: Pcm) -> Pcm:
@@ -105,6 +108,8 @@ class Listening:
     bargein_min_speech_s: float = 0.2
     # From a Barge-in's onset, when its speech is transcribed for the decision.
     bargein_partials_s: tuple[float, ...] = (0.4, 0.7)
+    # Past the last of those, while the User is still talking, it is transcribed again this often.
+    bargein_partial_every_s: float = 0.3
     # Partials start this long before the onset, which VAD finds late, so the first word is whole.
     bargein_lead_s: float = 0.3
 
@@ -148,14 +153,18 @@ class InputPipeline:
         self._last_speech = 0.0
         self._capturing = False
         self._turn: _Turn | None = None
-        # The start of the current unbroken speech, and whether it has already made a Barge-in.
+        # The start of the current unbroken speech, whether it has already made a Barge-in, and whether a resume while
+        # it went on has let it make one more, which it may only once, so Backchannels cannot pause and resume forever.
         self._run: float | None = None
         self._run_spent = False
+        self._run_rearmed = False
         # From when speech counts toward a Barge-in; None while not watching.
         self._barge_from: float | None = None
         # The onset of the Barge-in under way, when its partials are due, and whether its going quiet was transcribed.
         self._barge: float | None = None
         self._partials_due: list[float] = []
+        # When the next partial is due after those, while the User is still talking.
+        self._again_at = float("inf")
         self._quiet_told = False
 
     def capture(self, on: bool) -> None:
@@ -164,8 +173,13 @@ class InputPipeline:
             self._turn = None
 
     def barge_in(self, since: float | None) -> None:
-        """Watch for Barge-ins in speech from `since` on, or stop with None. Either way the one under way is forgotten,
-        and its speech raises no other."""
+        """Watch for Barge-ins in speech from `since` on, or stop with None. Either way the one under way is forgotten.
+
+        Its speech raises no other, except once: when watching goes on with the User still talking, as when Jarvis
+        resumes over "okay, actually…", the speech held from `since` is a Barge-in of its own.
+        """
+        if since is not None and self._barge is not None and self._run is not None and not self._run_rearmed:
+            self._run_spent, self._run_rearmed = False, True
         self._barge_from = since
         self._barge = None
         self._partials_due = []
@@ -194,7 +208,7 @@ class InputPipeline:
                     self._run = ends - len(chunk) / SAMPLE_RATE
                 self._last_speech = ends
             else:
-                self._run, self._run_spent = None, False
+                self._run, self._run_spent, self._run_rearmed = None, False, False
         events += self._barge_events(at)
         if self._onset is not None and self._turn is None and at - self._last_speech >= self._s.end_silence_s:
             self._onset = None
@@ -214,23 +228,27 @@ class InputPipeline:
         if self._barge is None and start is not None and held and not self._run_spent:
             self._barge, self._run_spent, self._quiet_told = start, True, False
             self._partials_due = [start + offset for offset in self._s.bargein_partials_s]
+            self._again_at = start + max(self._s.bargein_partials_s, default=0.0) + self._s.bargein_partial_every_s
             events.append(BargeIn(start, at))
         if self._barge is None:
             return events
         quiet = at - self._last_speech >= TALKING_GAP_S
-        due = bool(self._partials_due) and at >= self._partials_due[0] - 0.005
+        due = bool(self._partials_due) and at >= self._partials_due[0] - STAMP_SLACK_S
+        while self._partials_due and at >= self._partials_due[0] - STAMP_SLACK_S:
+            self._partials_due.pop(0)
+        again = not self._partials_due and at >= self._again_at - STAMP_SLACK_S
+        if again:
+            self._again_at += self._s.bargein_partial_every_s
         # Silero lingers past the end of a word, so a short Backchannel is often still "speech" at 700 ms.
         went_quiet = quiet and not self._quiet_told
         self._quiet_told = quiet
-        if due or went_quiet:
-            while self._partials_due and at >= self._partials_due[0] - 0.005:
-                self._partials_due.pop(0)
+        if due or (again and not quiet) or went_quiet:
             events.append(self._partial(self._barge, at))
         return events
 
     def _partial(self, onset: float, at: float) -> Partial:
         start = onset - self._s.bargein_lead_s
-        frames = [f for f, t in self._ring if t - 0.01 >= start - 0.005]
+        frames = [f for f, t in self._ring if t - 0.01 >= start - STAMP_SLACK_S]
         audio = np.concatenate(frames).astype(np.float32) / 32768.0
         text = self._e.stt.transcribe(audio).strip()
         return Partial(text, at, max(0.0, self._last_speech - onset), at - self._last_speech)
@@ -238,7 +256,7 @@ class InputPipeline:
     def _begin_turn(self, onset: float) -> _Turn:
         start = onset - self._s.onset_pad_s
         # A frame's stamp is the time of its last sample, so it starts 10 ms earlier.
-        frames = [f for f, t in self._ring if t - 0.01 >= start - 0.005]
+        frames = [f for f, t in self._ring if t - 0.01 >= start - STAMP_SLACK_S]
         first = self._ring[-len(frames)][1] - 0.01 if frames else self._ring[-1][1]
         return _Turn(first, frames, [], wake=self._last_wake if self._last_wake > first else None)
 
