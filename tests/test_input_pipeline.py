@@ -1,6 +1,9 @@
 """The microphone pipeline on 10 ms frames, with stand-in engines: what it reports and what each engine is given."""
 
+import json
 import time
+import wave
+from pathlib import Path
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -9,6 +12,7 @@ import numpy as np
 import pytest
 
 from jarvis_hub.voice.bargein import Partial
+from jarvis_hub.voice.clips import ClipSettings, ClipStore
 from jarvis_hub.voice.input import Engines, InputPipeline, Listening
 from jarvis_hub.voice.player import Samples
 from jarvis_hub.voice.state import (
@@ -123,12 +127,13 @@ def rig(
     verdicts: list[float] | None = None,
     clock: Callable[[], float] = time.perf_counter,
     echo: PassThrough | None = None,
+    clips: ClipStore | None = None,
     **settings: Any,
 ) -> Rig:
     turn, stt, echo = ScriptedTurn(list(verdicts or [])), ScriptedStt(), echo or PassThrough()
     engines = Engines(echo=echo, wake=MarkerWake(), vad=LoudVad(), turn=turn, stt=stt, gate=Everyone())
     records: list[dict[str, object]] = []
-    pipeline = InputPipeline(engines, Listening(**settings), record=records.append, clock=clock)
+    pipeline = InputPipeline(engines, Listening(**settings), record=records.append, clock=clock, clips=clips)
     return Rig(pipeline, turn, stt, echo, records=records)
 
 
@@ -667,3 +672,70 @@ def test_an_interrupt_after_the_second_barge_in_of_a_run_still_stops_jarvis() ->
 
     assert Interrupt() in d.actions and d.pauses() == [Pause(), Resume(), Pause(), Resume()]
     assert d.sent()[-1].interrupted and d.sent()[-1].text.endswith("wait, stop")
+
+
+def wavs(folder: Path, kind: str) -> list[Path]:
+    return sorted(folder.glob(f"{kind}-*.wav"))
+
+
+def clip_store(tmp_path: Path, enabled: bool = True) -> ClipStore:
+    return ClipStore(tmp_path / "clips", ClipSettings(enabled=enabled))
+
+
+def test_with_clips_off_a_turn_and_a_barge_in_write_no_audio(tmp_path: Path) -> None:
+    r = rig(clips=clip_store(tmp_path, enabled=False))
+    r.pipeline.capture(True)
+    r.feed("speech", 1.0)
+    r.feed("silence", 0.6)
+    r.pipeline.barge_in(r.t)
+    r.feed("speech", 0.5)
+    r.pipeline.barge_in(None)
+
+    assert len(r.heard()) == 1 and barge_ins(r)
+    assert not (tmp_path / "clips").exists()
+
+
+def test_a_turn_clip_holds_the_turn_audio_and_a_sidecar_of_its_timing(tmp_path: Path) -> None:
+    r = rig(clips=clip_store(tmp_path))
+    r.pipeline.capture(True)
+    r.feed("speech", 1.0)
+    r.feed("silence", 0.6)
+
+    [wav] = wavs(tmp_path / "clips", "turn")
+    with wave.open(str(wav)) as f:
+        assert (f.getframerate(), f.getnchannels()) == (16_000, 1)
+        # A second of speech, then half a second of silence: Smart Turn's view of the turn.
+        assert f.getnframes() / RATE == pytest.approx(1.0 + 0.5, abs=0.06)  # pyright: ignore[reportUnknownMemberType]
+    sidecar = json.loads(wav.with_suffix(".json").read_text())
+    assert sidecar["kind"] == "turn" and sidecar["admitted"] is True and sidecar["lang"] == "en"
+    assert sidecar["speech_s"] == pytest.approx(1.0, abs=0.1)  # pyright: ignore[reportUnknownMemberType]
+
+
+def test_a_barge_in_clip_runs_from_its_onset_to_the_decision(tmp_path: Path) -> None:
+    r = rig(clips=clip_store(tmp_path))
+    r.pipeline.barge_in(T0)
+    r.feed("silence", 0.5)
+    r.feed("speech", 0.8)
+    assert wavs(tmp_path / "clips", "bargein") == []
+
+    # The decision: the state machine changes what the pipeline watches.
+    r.pipeline.barge_in(r.t)
+
+    [wav] = wavs(tmp_path / "clips", "bargein")
+    [barge] = barge_ins(r)
+    with wave.open(str(wav)) as f:
+        # A little before the onset, which VAD finds late, through the 0.8 s of speech.
+        assert f.getnframes() / RATE == pytest.approx(r.t - barge.onset + 0.3, abs=0.06)  # pyright: ignore[reportUnknownMemberType]
+    assert json.loads(wav.with_suffix(".json").read_text())["onset"] == pytest.approx(barge.onset, abs=1e-3)  # pyright: ignore[reportUnknownMemberType]
+
+
+def test_a_failed_clip_write_is_reported_and_costs_the_turn_nothing(tmp_path: Path) -> None:
+    blocked = tmp_path / "clips"
+    blocked.write_text("a file where the folder should be")
+    r = rig(clips=ClipStore(blocked, ClipSettings(enabled=True)))
+    r.pipeline.capture(True)
+    r.feed("speech", 1.0)
+    r.feed("silence", 0.6)
+
+    assert len(r.heard()) == 1
+    assert [row["kind"] for row in r.records if row["kind"] == "clip_error"] == ["clip_error"]

@@ -1468,3 +1468,177 @@ async def test_barge_in_is_watched_only_while_jarvis_speaks(rig_for: MakeRig) ->
     await until(lambda: rig.state == "follow_up")
 
     assert [since is not None for since in rig.audio.watching] == [True, False]
+
+
+def barge_rows(rig: Rig) -> list[dict[str, Any]]:
+    return [r for r in rig.metrics.records if r["kind"] == "bargein"]
+
+
+async def test_a_backchannel_resume_is_logged_with_its_partials_timing_and_what_had_been_said(rig_for: MakeRig) -> None:
+    rig = await rig_for(STORY)
+    await speaking(rig)
+    since = rig.audio.watching[-1]
+    assert since is not None
+
+    rig.audio.barge()
+    await until(lambda: rig.player.events[-1] == "pause")
+    await rig.advance(0.2)
+    rig.audio.partial("Okay.", silent=0.35)
+    await until(lambda: rig.player.events[-1] == "resume 300")
+    # A resume waits to learn whether the User repeats themselves.
+    assert barge_rows(rig) == []
+    await rig.voice.close()
+
+    [row] = barge_rows(rig)
+    assert row["since"] == pytest.approx(since, abs=1e-3)  # pyright: ignore[reportUnknownMemberType]
+    assert row["onset"] >= row["since"]
+    assert row["decision"] == "resume" and row["extended"] is False and row["wake_hits"] == []
+    assert row["detected_ms"] == 200
+    assert [p["text"] for p in row["partials"]] == ["Okay."]
+    assert row["partials"][0]["ms"] == row["decided_ms"] == 400
+    assert row["played"] == rig.player.played()
+    assert (row["repeated"], row["next"]) == (False, None)
+
+
+async def test_wait_stop_is_logged_as_a_stop_with_no_repeat_to_judge(rig_for: MakeRig) -> None:
+    rig = await rig_for([*STORY, AwaitInterrupt()], [Text("Of course, sir.")])
+    await speaking(rig)
+
+    rig.audio.barge()
+    await rig.advance(0.2)
+    rig.audio.partial("Wait, stop")
+    await until(lambda: rig.state == "listening")
+
+    [row] = barge_rows(rig)
+    assert (row["decision"], row["decided_ms"], row["repeated"], row["next"]) == ("stop", 400, None, None)
+
+
+async def test_the_wake_word_over_a_barge_in_is_logged_with_its_hit(rig_for: MakeRig) -> None:
+    rig = await rig_for([*STORY, AwaitInterrupt()], [Text("Two Subagents, sir.")])
+    await speaking(rig)
+
+    rig.audio.barge()
+    await rig.advance(0.1)
+    rig.audio.wake()
+    await until(lambda: rig.state == "listening")
+
+    [row] = barge_rows(rig)
+    assert (row["decision"], row["wake_hits"], row["partials"]) == ("wake", [300], [])
+
+
+async def test_a_decision_that_waited_past_its_deadline_for_one_more_partial_is_logged_as_extended(
+    rig_for: MakeRig,
+) -> None:
+    rig = await rig_for(STORY)
+    await speaking(rig)
+    rig.player.finish(1)
+
+    rig.audio.barge()
+    await rig.advance(0.2)
+    rig.audio.partial("Okay")
+    await rig.advance(0.7)
+    assert rig.player.events[-1] == "pause"
+    await rig.advance(0.6)
+    await rig.voice.close()
+
+    [row] = barge_rows(rig)
+    assert (row["decision"], row["extended"]) == ("resume", True)
+
+
+async def test_a_stop_by_an_interrupt_said_after_the_runs_last_barge_in_is_logged_as_overheard(
+    rig_for: MakeRig,
+) -> None:
+    rig = await rig_for([*STORY, AwaitInterrupt()], [Text("Of course, sir.")])
+    await speaking(rig)
+
+    rig.audio.overheard("okay okay okay")
+    await rig.advance(0.3)
+    assert barge_rows(rig) == []
+    rig.audio.overheard("okay okay okay wait stop")
+    await until(lambda: rig.state == "listening")
+
+    [row] = barge_rows(rig)
+    assert row["decision"] == "overheard-stop" and row["onset"] is None
+    assert [p["text"] for p in row["partials"]] == ["okay okay okay wait stop"]
+
+
+async def resumed_over(rig: Rig, text: str = "Okay.") -> None:
+    rig.audio.barge()
+    await rig.advance(0.2)
+    rig.audio.partial(text, silent=0.35)
+    await until(lambda: rig.player.events[-1] == "resume 300")
+
+
+async def test_a_new_barge_in_after_a_quiet_resume_marks_it_a_likely_wrong_resume(rig_for: MakeRig) -> None:
+    rig = await rig_for([*STORY, AwaitInterrupt()])
+    await speaking(rig)
+    await resumed_over(rig, "")
+    await rig.advance(1.0)
+
+    rig.audio.barge()
+    await until(lambda: len(barge_rows(rig)) == 1)
+
+    [row] = barge_rows(rig)
+    assert (row["decision"], row["repeated"], row["next"]) == ("resume", True, "bargein")
+
+
+async def test_speech_that_ran_on_through_the_resume_is_one_run_and_not_a_repeat(rig_for: MakeRig) -> None:
+    rig = await rig_for([*STORY, AwaitInterrupt()])
+    await speaking(rig)
+    rig.audio.barge()
+    await rig.advance(0.2)
+    rig.audio.partial("Okay okay")
+    await rig.advance(0.7)
+    await rig.advance(0.6)
+    await until(lambda: rig.player.events[-1] == "resume 300")
+
+    rig.audio.barge()
+    await rig.advance(0.1)
+    await rig.voice.close()
+
+    assert [(r["decision"], r["repeated"]) for r in barge_rows(rig)] == [("resume", False)]
+
+
+async def test_a_turn_that_cuts_jarvis_off_soon_after_a_resume_marks_it_a_likely_wrong_resume(
+    rig_for: MakeRig,
+) -> None:
+    rig = await rig_for([*STORY, AwaitInterrupt()], [Text("Sure, sir.")])
+    await speaking(rig)
+    await resumed_over(rig, "")
+
+    rig.audio.wake()
+    await until(lambda: rig.state == "listening")
+    rig.audio.say("Which is the second one?")
+    await until(lambda: len(barge_rows(rig)) == 1)
+
+    [row] = barge_rows(rig)
+    assert (row["decision"], row["repeated"], row["next"]) == ("resume", True, "turn")
+
+
+async def test_a_plain_follow_up_after_a_resume_is_no_repeat(
+    rig_for: MakeRig,
+) -> None:
+    rig = await rig_for(STORY, [Text("Sure, sir.")], [Text("Fine, sir.")])
+    await speaking(rig)
+    await resumed_over(rig, "Okay.")
+    rig.player.finish()
+    await rig.advance(0.1)
+    rig.audio.say("Thanks, and what is the weather?")
+    await until(lambda: len(barge_rows(rig)) == 1)
+    assert [(r["repeated"], r["next"]) for r in barge_rows(rig)] == [(False, "turn")]
+
+
+async def test_a_turn_long_after_the_resume_is_no_repeat(rig_for: MakeRig) -> None:
+    rig = await rig_for(STORY, [Text("Sure, sir.")])
+    await speaking(rig)
+    await resumed_over(rig, "")
+    rig.player.finish()
+    await rig.advance(0.1)
+    await rig.advance(9.0)
+
+    rig.audio.wake()
+    rig.audio.say("Wait, which is the second one?")
+    await until(lambda: len(barge_rows(rig)) == 1)
+
+    [row] = barge_rows(rig)
+    assert (row["repeated"], row["next"]) == (False, None)

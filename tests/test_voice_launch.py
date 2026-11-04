@@ -63,7 +63,9 @@ async def test_voice_mode_wakes_hears_answers_aloud_and_idles(tmp_path: Path) ->
     player = RecordingPlayer()
     chosen: list[tuple[EngineChoice, Listening]] = []
 
-    def open_listener(choice: EngineChoice, listening: Listening, record: Any, notice: Any) -> ScriptedMicrophone:
+    def open_listener(
+        choice: EngineChoice, listening: Listening, record: Any, notice: Any, clips: Any
+    ) -> ScriptedMicrophone:
         chosen.append((choice, listening))
         return microphone
 

@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, TypeGuard, cast
 
 ROLES = ("talker", "orchestrator", "subagent")
+# What `voice/bargein_log.py` writes as a Barge-in's decision.
+DECISIONS = ("resume", "stop", "wake", "overheard-stop", "ended")
 _USAGE = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens")
 _AGO = re.compile(r"(\d+)([mhdw])")
 _UNITS = {"m": "minutes", "h": "hours", "d": "days", "w": "weeks"}
@@ -204,3 +206,86 @@ def _align(rows: list[tuple[str, ...]], left: int) -> list[str]:
         "  ".join(c.ljust(w) if i < left else c.rjust(w) for i, (c, w) in enumerate(zip(row, widths))).rstrip()
         for row in rows
     ]
+
+
+@dataclass
+class BargeStats:
+    decisions: dict[str, int] = field(default_factory=lambda: {})
+    # Milliseconds from the onset to the decision, per decision; the overheard stops have no onset.
+    decided: dict[str, list[int]] = field(default_factory=lambda: {})
+    # Milliseconds from the onset to the first partial transcript.
+    first_partial: list[int] = field(default_factory=lambda: [])
+    extended: int = 0
+    # Resumes the log could judge, and those that the User likely repeated themselves after.
+    judged_resumes: int = 0
+    wrong_resumes: int = 0
+    # Rows that are no JSON object, have no readable time, or are a Barge-in with a field missing or of the wrong type.
+    skipped: int = 0
+
+
+def summarise_bargein(rows: Iterable[object], since: datetime | None = None, until: datetime | None = None) -> BargeStats:
+    stats = BargeStats()
+    for row in rows:
+        at = _at(row)
+        if not isinstance(row, dict) or at is None:
+            stats.skipped += 1
+            continue
+        row = cast(dict[str, Any], row)
+        if row.get("kind") != "bargein" or (since and at < since) or (until and at >= until):
+            continue
+        decision, decided, partials = row.get("decision"), row.get("decided_ms"), row.get("partials")
+        repeated = row.get("repeated")
+        if (
+            decision not in DECISIONS
+            or not (decided is None or _is_int(decided))
+            or not isinstance(partials, list)
+            or not (repeated is None or isinstance(repeated, bool))
+        ):
+            stats.skipped += 1
+            continue
+        stats.decisions[decision] = stats.decisions.get(decision, 0) + 1
+        if decided is not None:
+            stats.decided.setdefault(decision, []).append(decided)
+        first = cast(list[object], partials)[:1]
+        if first and isinstance(first[0], dict) and _is_int(ms := cast(dict[str, Any], first[0]).get("ms")):
+            stats.first_partial.append(ms)
+        stats.extended += row.get("extended") is True
+        if decision == "resume" and repeated is not None:
+            stats.judged_resumes += 1
+            stats.wrong_resumes += repeated
+    return stats
+
+
+def render_bargein(stats: BargeStats, since: datetime | None, until: datetime | None) -> str:
+    def stamp(when: datetime | None, none: str) -> str:
+        return none if when is None else when.astimezone().strftime("%Y-%m-%d %H:%M")
+
+    out = [f"Jarvis Barge-ins from {stamp(since, 'the start')} to {stamp(until, 'now')}", ""]
+    footer = [f"Skipped {stats.skipped} malformed rows."] if stats.skipped else []
+    total = sum(stats.decisions.values())
+    if not total:
+        return "\n".join([*out, "No Barge-ins logged in this range.", *([""] + footer if footer else [])])
+    table: list[tuple[str, ...]] = [("decision", "n", "share")]
+    for decision in DECISIONS:
+        if n := stats.decisions.get(decision):
+            table.append((decision, str(n), f"{n / total:.0%}"))
+    table.append(("total", str(total), ""))
+    out += _align(table, left=1)
+    latency: list[tuple[str, ...]] = [("metric", "n", "p50", "p90")]
+    latency.append(_barge_latency("first partial", stats.first_partial))
+    for decision in DECISIONS:
+        if decision in stats.decided:
+            latency.append(_barge_latency(f"onset to {decision}", stats.decided[decision]))
+    out += ["", "Timing (ms)", *_align(latency, left=1), ""]
+    out.append(f"Decisions that waited past the deadline for one more partial: {stats.extended}")
+    if stats.judged_resumes:
+        share = stats.wrong_resumes / stats.judged_resumes
+        out.append(f"Likely wrong resumes: {stats.wrong_resumes} of {stats.judged_resumes} resumes ({share:.0%})")
+    else:
+        out.append("Likely wrong resumes: none judged yet")
+    return "\n".join([*out, *([""] + footer if footer else [])])
+
+
+def _barge_latency(metric: str, values: list[int]) -> tuple[str, ...]:
+    p50, p90 = percentile(values, 50), percentile(values, 90)
+    return (metric, str(len(values)), "-" if p50 is None else f"{p50:,}", "-" if p90 is None else f"{p90:,}")

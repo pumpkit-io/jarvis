@@ -255,3 +255,17 @@ def test_bad_subagent_limits_are_refused(checkout: Path, line: str, name: str) -
     (checkout / ".env").write_text(line + "\n")
     with pytest.raises(ConfigError, match=name):
         load_settings(checkout, environ={})
+
+
+def test_audio_clips_are_off_by_default_and_opt_in_with_retention_limits(checkout: Path) -> None:
+    off = load_settings(checkout, environ={}).voice
+    assert (off.audio_clips, off.clips_max_count, off.clips_max_days, off.clips_max_mb) == (False, 500, 14.0, 500.0)
+
+    (checkout / ".env").write_text("JARVIS_AUDIO_CLIPS=on\nJARVIS_CLIPS_MAX_COUNT=50\nJARVIS_CLIPS_MAX_DAYS=3\nJARVIS_CLIPS_MAX_MB=20\n")
+    on = load_settings(checkout, environ={}).voice
+    assert (on.audio_clips, on.clips_max_count, on.clips_max_days, on.clips_max_mb) == (True, 50, 3.0, 20.0)
+
+
+def test_audio_clips_must_be_on_or_off(checkout: Path) -> None:
+    with pytest.raises(ConfigError, match="JARVIS_AUDIO_CLIPS"):
+        load_settings(checkout, environ={"JARVIS_AUDIO_CLIPS": "yes"})

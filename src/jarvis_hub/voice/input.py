@@ -19,6 +19,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from jarvis_hub.voice.bargein import TALKING_GAP_S, Partial
+from jarvis_hub.voice.clips import ClipKind, ClipStore
+from jarvis_hub.voice.language import detect_language
 from jarvis_hub.voice.player import Samples
 from jarvis_hub.voice.state import BargeIn, Heard, InputEvent, Overheard, SpeechStarted, WakeWord
 
@@ -29,6 +31,8 @@ Pcm = NDArray[np.int16]
 
 # Frame stamps are sums of 10 ms steps, so a time due on a frame can come out a hair after the frame's stamp.
 STAMP_SLACK_S = 0.005
+# A Barge-in is decided within 1.3 s; a clip stops growing at 5 s, in case the decision never comes.
+MAX_BARGE_CLIP_FRAMES = 500
 
 
 class EchoCanceller(Protocol):
@@ -138,12 +142,14 @@ class InputPipeline:
         settings: Listening,
         record: Callable[[dict[str, Any]], None],
         clock: Callable[[], float] = time.perf_counter,
+        clips: ClipStore | None = None,
     ) -> None:
         self._e = engines
         self._s = settings
         self._record = record
         # Times Smart Turn and STT for the metrics.
         self._clock = clock
+        self._clips = clips
         self._ring: deque[tuple[Pcm, float]] = deque(maxlen=max(1, round(settings.preroll_s * 100)))
         self._wake_buf = np.zeros(0, np.int16)
         self._vad_buf = np.zeros(0, np.int16)
@@ -168,6 +174,10 @@ class InputPipeline:
         # When the next partial is due after those, while the User is still talking.
         self._again_at = float("inf")
         self._quiet_told = False
+        # The audio of the Barge-in since its onset, for its clip, saved when the state machine next changes what
+        # it watches (the decision); None when clips are off or no Barge-in is open. Capped, so a lost call costs little.
+        self._clip: tuple[float, list[Pcm]] | None = None
+        self._at = 0.0
 
     def capture(self, on: bool) -> None:
         self._capturing = on
@@ -188,6 +198,7 @@ class InputPipeline:
                 self._overheard = self._barge
             else:
                 self._run_spent, self._run_rearmed = False, True
+        self._save_barge_clip()
         self._barge_from = since
         self._barge = None
         self._partials_due = []
@@ -195,6 +206,9 @@ class InputPipeline:
     def push(self, frame: Pcm, at: float) -> list[InputEvent]:
         frame = self._e.echo.process(frame)
         self._ring.append((frame, at))
+        self._at = at
+        if self._clip is not None and len(self._clip[1]) < MAX_BARGE_CLIP_FRAMES:
+            self._clip[1].append(frame)
         if self._turn is not None:
             self._turn.frames.append(frame)
         events: list[InputEvent] = []
@@ -238,6 +252,9 @@ class InputPipeline:
             self._partials_due = [start + offset for offset in self._s.bargein_partials_s]
             self._again_at = start + max(self._s.bargein_partials_s, default=0.0) + self._s.bargein_partial_every_s
             events.append(BargeIn(start, at))
+            if self._clips is not None and self._clips.enabled:
+                begin = start - self._s.bargein_lead_s - STAMP_SLACK_S
+                self._clip = (start, [f for f, t in self._ring if t - 0.01 >= begin])
         if self._barge is None:
             if self._overheard is not None and at >= self._again_at - STAMP_SLACK_S:
                 self._again_at += self._s.bargein_partial_every_s
@@ -256,6 +273,22 @@ class InputPipeline:
         if due or (again and not quiet) or went_quiet:
             events.append(self._partial(self._barge, at))
         return events
+
+    def _save_barge_clip(self) -> None:
+        if self._clip is None or self._clips is None:
+            return
+        onset, frames = self._clip
+        self._clip = None
+        self._save(
+            "bargein", np.concatenate(frames), {"onset": round(onset, 3), "ended": round(self._at, 3)}
+        )
+
+    def _save(self, kind: ClipKind, pcm: Pcm, meta: dict[str, Any]) -> None:
+        assert self._clips is not None
+        try:
+            self._clips.save(kind, pcm, meta)
+        except Exception as e:
+            self._record({"kind": "clip_error", "error": f"{type(e).__name__}: {e}"})
 
     def _partial(self, onset: float, at: float) -> Partial:
         start = onset - self._s.bargein_lead_s
@@ -289,20 +322,23 @@ class InputPipeline:
             return None
         return self._finish(turn, at)
 
+    def _pcm(self, turn: _Turn) -> Pcm:
+        n = round((self._last_speech + self._s.end_silence_s - turn.start) * SAMPLE_RATE)
+        return np.concatenate(turn.frames)[:n] if turn.frames else np.zeros(0, np.int16)
+
     def _audio(self, turn: _Turn) -> Samples:
         """The turn from its start to `end_silence_s` past its latest speech: what Smart Turn was trained to judge."""
-        n = round((self._last_speech + self._s.end_silence_s - turn.start) * SAMPLE_RATE)
-        pcm = np.concatenate(turn.frames)[:n] if turn.frames else np.zeros(0, np.int16)
-        return pcm.astype(np.float32) / 32768.0
+        return self._pcm(turn).astype(np.float32) / 32768.0
 
     def _finish(self, turn: _Turn, at: float) -> Heard:
         self._turn = None
         self._onset = None
         audio = self._audio(turn)
         text, stt_ms = "", 0.0
+        admitted = self._e.gate.admits(audio)
         # STT mishears the wake phrase ("A Jarvis", "Hey George"), so it is cut by time: it ended before the hit.
         after = turn.wake - turn.start if turn.wake is not None else 0.0
-        if self._e.gate.admits(audio):
+        if admitted:
             began = self._clock()
             text = self._e.stt.transcribe(audio, after=after).strip()
             stt_ms = (self._clock() - began) * 1000
@@ -317,6 +353,11 @@ class InputPipeline:
                 "words": len(text.split()),
             }
         )
+        if self._clips is not None and self._clips.enabled:
+            # The language is a guess from the words, so a turn that was not transcribed has none.
+            lang = detect_language(text, "en") if text else None
+            meta = {"start": round(turn.start, 3), "speech_s": round(self._last_speech - turn.start, 3)}
+            self._save("turn", self._pcm(turn), {**meta, "lang": lang, "admitted": admitted})
         return Heard(text, None, self._last_speech)
 
 
@@ -384,7 +425,9 @@ class Capture:
         notice: Callable[[str], None],
         source: FrameSource | None = None,
         backlog_s: float = 2.0,
+        clips: ClipStore | None = None,
     ) -> None:
+        self._clips = clips
         self._load = load
         self._settings = settings
         self._record = record
@@ -457,7 +500,11 @@ class Capture:
         except Exception as e:
             self._on_loop(self._notice, f"Listening is off: {type(e).__name__}: {e}")
             return
-        pipeline = InputPipeline(engines, self._settings, lambda row: self._on_loop(self._record, row))
+        if self._clips is not None:
+            self._clips.prune()
+        pipeline = InputPipeline(
+            engines, self._settings, lambda row: self._on_loop(self._record, row), clips=self._clips
+        )
         self.ready.set()
         self._on_loop(self._record, {"kind": "ears_loaded", "load_ms": round((time.perf_counter() - began) * 1000)})
         self._on_loop(self._notice, 'Listening for "Hey Jarvis".')

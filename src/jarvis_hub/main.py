@@ -25,9 +25,10 @@ from jarvis_hub.config import ConfigError, Settings, VoiceSettings, load_setting
 from jarvis_hub.hub import Clock, Hub, Line, Metrics, Output
 from jarvis_hub.orchestrator import orchestrator_spec
 from jarvis_hub.subagents import Subagent, SubagentSetup, subagent_session
-from jarvis_hub.stats import parse_when, read_rows, render, summarise
+from jarvis_hub.stats import parse_when, read_rows, render, render_bargein, summarise, summarise_bargein
 from jarvis_hub.talker import talker_spec
 from jarvis_hub.voice import language
+from jarvis_hub.voice.clips import ClipSettings, ClipStore
 from jarvis_hub.voice.engines import EngineChoice
 from jarvis_hub.voice.input import Listening
 from jarvis_hub.voice.player import Player, Samples, SoundPlayer
@@ -88,7 +89,9 @@ class Ears:
 
     tts: Synthesizer
     open_player: Callable[[int, PlayedTap], Player]
-    open_listener: Callable[[EngineChoice, Listening, Callable[[dict[str, Any]], None], Callable[[str], None]], Listener]
+    open_listener: Callable[
+        [EngineChoice, Listening, Callable[[dict[str, Any]], None], Callable[[str], None], ClipStore], Listener
+    ]
 
 
 def timing(voice: VoiceSettings) -> Timing:
@@ -100,6 +103,10 @@ def timing(voice: VoiceSettings) -> Timing:
         decide_s=voice.bargein_decide_ms / 1000,
         guard_s=voice.bargein_guard_ms / 1000,
     )
+
+
+def clip_settings(voice: VoiceSettings) -> ClipSettings:
+    return ClipSettings(voice.audio_clips, voice.clips_max_count, voice.clips_max_days, voice.clips_max_mb)
 
 
 def listening(voice: VoiceSettings) -> Listening:
@@ -322,7 +329,8 @@ async def voice_mode(
     metrics = JsonlMetrics(settings.runtime_dir / "metrics.jsonl")
     voice = settings.voice
     choice = EngineChoice(aec="off" if headphones else voice.aec, wake=voice.wake_engine, stt=voice.stt_engine)
-    listener = ears.open_listener(choice, listening(voice), metrics.record, output.notice)
+    clips = ClipStore(settings.runtime_dir / "clips", clip_settings(voice))
+    listener = ears.open_listener(choice, listening(voice), metrics.record, output.notice, clips)
     try:
         player = ears.open_player(ears.tts.sample_rate, listener.reference)
     except Exception as e:
@@ -367,12 +375,16 @@ async def voice_mode(
 
 
 def _open_listener(
-    choice: EngineChoice, settings: Listening, record: Callable[[dict[str, Any]], None], notice: Callable[[str], None]
+    choice: EngineChoice,
+    settings: Listening,
+    record: Callable[[dict[str, Any]], None],
+    notice: Callable[[str], None],
+    clips: ClipStore,
 ) -> Listener:
     from jarvis_hub.voice.engines import load_engines
     from jarvis_hub.voice.input import Capture
 
-    return Capture(lambda: load_engines(choice), settings, record, notice)
+    return Capture(lambda: load_engines(choice), settings, record, notice, clips=clips)
 
 
 def _open_player(rate: int, on_played: PlayedTap) -> Player:
@@ -383,12 +395,17 @@ def _ignored_in_text(error: str) -> None:
     sys.stderr.write(f"jarvis-hub: {error}; voice settings are not used with --text, so it is ignored.\n")
 
 
-def print_stats(settings: Settings, since: str | None, until: str | None, stdout: TextIO) -> None:
+def print_stats(
+    settings: Settings, since: str | None, until: str | None, stdout: TextIO, *, bargein: bool = False
+) -> None:
     now = datetime.now(timezone.utc)
     start = parse_when(since, now) if since else None
     end = parse_when(until, now, end=True) if until else None
-    stats = summarise(read_rows(settings.runtime_dir / "metrics.jsonl"), start, end)
-    stdout.write(render(stats, start, end) + "\n")
+    rows = read_rows(settings.runtime_dir / "metrics.jsonl")
+    if bargein:
+        stdout.write(render_bargein(summarise_bargein(rows, start, end), start, end) + "\n")
+        return
+    stdout.write(render(summarise(rows, start, end), start, end) + "\n")
 
 
 def main() -> None:
@@ -403,12 +420,13 @@ def main() -> None:
     stats.add_argument(
         "--until", help="end of the range, written like --since (a bare date takes in that whole day); default now"
     )
+    stats.add_argument("--bargein", action="store_true", help="report the Barge-in decision log instead")
     args = parser.parse_args()
 
     if args.command == "stats":
         try:
             settings = load_settings(Path(__file__).resolve().parents[2], os.environ, ignore_voice=lambda error: None)
-            print_stats(settings, args.since, args.until, sys.stdout)
+            print_stats(settings, args.since, args.until, sys.stdout, bargein=args.bargein)
         except (ConfigError, ValueError) as e:
             sys.exit(f"jarvis-hub: {e}")
         return

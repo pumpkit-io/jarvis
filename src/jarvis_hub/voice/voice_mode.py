@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, Protocol
 
 from jarvis_hub.hub import Line
+from jarvis_hub.voice.bargein_log import BargeInLog
 from jarvis_hub.voice.language import Lang
 from jarvis_hub.voice.player import Player
 from jarvis_hub.voice.speech import ClipName, Metrics, Speech, SpeechClock
@@ -138,6 +139,7 @@ class VoiceMode:
         self._notice = notice
         self._debug = debug
         self._voice = Voice()
+        self._bargein_log = BargeInLog(metrics.record, notice, timing)
         self._barge_in_from: float | None = None
         # What the User heard of the voice they last cut off, for their next turn.
         self._heard_before_cut = ""
@@ -203,6 +205,7 @@ class VoiceMode:
         return True
 
     async def close(self) -> None:
+        self._bargein_log.close()
         await self._speech.close()
 
     def _reply_audio(self, heard_at: float | None) -> None:
@@ -228,8 +231,10 @@ class VoiceMode:
                 await self._act(action, interrupt)
 
     def _step(self, event: Event) -> list[Action]:
-        before, woke_at = self._voice.state, self._voice.woke_at
-        self._voice, actions = step(self._voice, event, self._timing)
+        before_voice = self._voice
+        before, woke_at = before_voice.state, before_voice.woke_at
+        self._voice, actions = step(before_voice, event, self._timing)
+        self._bargein_log.observe(before_voice, event, self._voice, actions, self._speech.played)
         after = self._voice.state
         if after != before:
             self._transition(before, after, event)

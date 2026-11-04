@@ -27,7 +27,7 @@ from jarvis_hub.subagents import Refusal, Subagent, SubagentSetup
 from jarvis_hub.waits import WaitSetup
 from jarvis_hub.voice.player import REWIND_MS, Clip, Samples
 from jarvis_hub.voice.bargein import Partial
-from jarvis_hub.voice.state import BargeIn, Heard, InputEvent, SpeechStarted, WakeWord
+from jarvis_hub.voice.state import BargeIn, Heard, InputEvent, Overheard, SpeechStarted, WakeWord
 
 
 class FakeClock:
@@ -661,6 +661,10 @@ class ScriptedAudio:
         """What STT makes of the Barge-in's speech so far, which went quiet `silent` seconds ago."""
         now = self._clock.now()
         self._queue.put_nowait(Partial(text, now, now - silent - self._onset, silent))
+
+    def overheard(self, text: str) -> None:
+        """What STT made of the rest of a run that has made all the Barge-ins it may."""
+        self._queue.put_nowait(Overheard(text, self._clock.now()))
 
     def capture(self, on: bool) -> None:
         self.capturing.append(on)

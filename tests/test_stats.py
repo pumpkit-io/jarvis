@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from jarvis_hub.stats import parse_when, percentile, read_rows, render, summarise
+from jarvis_hub.stats import parse_when, percentile, read_rows, render, render_bargein, summarise, summarise_bargein
 
 NOW = datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc)
 
@@ -167,3 +167,128 @@ def test_the_report_has_a_row_per_role_a_total_and_latency_percentiles() -> None
     assert any(l.split() == ["talker", "turn", "duration", "2", "1,000", "3,000"] for l in lines)
     assert any(l.split() == ["subagent", "turn", "duration", "1", "3,725,000", "3,725,000"] for l in lines)
     assert "$" not in text and "cost" not in text.lower()
+
+
+def barge(
+    decision: str,
+    minutes_ago: float = 5,
+    *,
+    decided_ms: int | None = 700,
+    first_ms: int | None = 400,
+    repeated: bool | None = None,
+    extended: bool = False,
+) -> dict[str, Any]:
+    partials = [] if first_ms is None else [{"text": "okay", "ms": first_ms, "speech_s": 0.4, "silent_s": 0.0}]
+    return {
+        "at": (NOW - timedelta(minutes=minutes_ago)).isoformat(timespec="milliseconds"),
+        "kind": "bargein",
+        "decision": decision,
+        "decided_ms": decided_ms,
+        "partials": partials,
+        "extended": extended,
+        "repeated": repeated,
+    }
+
+
+def test_barge_ins_are_counted_by_decision_with_timing_and_likely_wrong_resumes() -> None:
+    rows = [
+        barge("resume", decided_ms=600, first_ms=400, repeated=False),
+        barge("resume", decided_ms=1000, first_ms=400, repeated=True),
+        barge("resume", decided_ms=800, first_ms=700, repeated=False, extended=True),
+        barge("stop", decided_ms=450, first_ms=400),
+        barge("wake", decided_ms=300, first_ms=None),
+        barge("overheard-stop", decided_ms=None, first_ms=None),
+        row("talker", 1, usage=(1, 1, 1, 1)),
+    ]
+
+    stats = summarise_bargein(rows)
+
+    assert stats.decisions == {"resume": 3, "stop": 1, "wake": 1, "overheard-stop": 1}
+    assert stats.decided["resume"] == [600, 1000, 800] and "overheard-stop" not in stats.decided
+    assert stats.first_partial == [400, 400, 700, 400]
+    assert (stats.judged_resumes, stats.wrong_resumes, stats.extended, stats.skipped) == (3, 1, 1, 0)
+
+
+def test_resumes_the_log_could_not_judge_are_left_out_of_the_wrong_resume_share() -> None:
+    stats = summarise_bargein([barge("resume", repeated=None), barge("resume", repeated=True)])
+
+    assert (stats.judged_resumes, stats.wrong_resumes) == (1, 1)
+
+
+def test_malformed_barge_in_rows_are_skipped_and_counted_and_other_rows_ignored() -> None:
+    good = barge("stop")
+    rows: list[object] = [
+        good,
+        None,
+        "x",
+        {"kind": "bargein"},
+        {**good, "decision": "shrug"},
+        {**good, "decided_ms": "fast"},
+        {**good, "partials": "okay"},
+        {**good, "repeated": "yes"},
+        {**good, "at": "yesterday"},
+        {**good, "decided_ms": True},
+        {"at": good["at"], "kind": "voice"},
+    ]
+
+    stats = summarise_bargein(rows)
+
+    assert stats.decisions == {"stop": 1}
+    assert stats.skipped == 9
+
+
+def test_barge_in_rows_with_odd_partials_still_count() -> None:
+    odd = {**barge("stop"), "partials": ["okay", {"ms": "soon"}]}
+    stats = summarise_bargein([odd, {**odd, "partials": [{"text": "x", "ms": "soon"}]}, {**odd, "partials": []}])
+
+    assert stats.decisions == {"stop": 3} and stats.first_partial == []
+
+
+def test_the_barge_in_range_keeps_rows_from_since_up_to_but_not_including_until() -> None:
+    rows = [barge("stop", 90), barge("stop", 60), barge("resume", 30), barge("stop", 0)]
+
+    stats = summarise_bargein(rows, NOW - timedelta(minutes=60), NOW)
+
+    assert stats.decisions == {"stop": 1, "resume": 1}
+
+
+def test_the_barge_in_report_has_counts_percentiles_and_the_wrong_resume_share() -> None:
+    rows = [
+        barge("resume", decided_ms=600, first_ms=400, repeated=False),
+        barge("resume", decided_ms=1000, first_ms=400, repeated=True),
+        barge("stop", decided_ms=450, first_ms=400),
+        barge("overheard-stop", decided_ms=None, first_ms=None),
+    ]
+
+    text = render_bargein(summarise_bargein(rows), None, NOW)
+
+    assert text.splitlines()[0].startswith("Jarvis Barge-ins from the start to ")
+    lines = [line.split() for line in text.splitlines()]
+    assert ["resume", "2", "50%"] in lines and ["overheard-stop", "1", "25%"] in lines and ["total", "4"] in lines
+    assert "onset to resume" in text and "1,000" in text
+    assert "first partial" in text
+    assert "Likely wrong resumes: 1 of 2 resumes (50%)" in text
+
+
+def test_an_empty_barge_in_range_says_so_and_reports_skipped_rows() -> None:
+    assert "No Barge-ins logged in this range." in render_bargein(summarise_bargein([]), None, None)
+    assert "Skipped 1 malformed rows." in render_bargein(summarise_bargein([None]), None, None)
+
+
+def test_the_stats_command_reads_the_barge_in_log_only_with_the_flag(tmp_path: Path) -> None:
+    import io
+
+    from jarvis_hub.config import load_settings
+    from jarvis_hub.main import print_stats
+
+    settings = load_settings(tmp_path, {})
+    log = settings.runtime_dir / "metrics.jsonl"
+    log.parent.mkdir(parents=True)
+    log.write_text(json.dumps(barge("stop", 1)) + "\n")
+    plain, flagged = io.StringIO(), io.StringIO()
+
+    print_stats(settings, None, None, plain)
+    print_stats(settings, None, None, flagged, bargein=True)
+
+    assert "Barge-ins" not in plain.getvalue() and "No turns logged" in plain.getvalue()
+    assert "stop" in flagged.getvalue() and "Barge-ins" in flagged.getvalue()
