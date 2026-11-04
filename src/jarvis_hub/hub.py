@@ -328,6 +328,7 @@ class Hub:
         floor: Floor | None = None,
         state_path: Path | None = None,
         wall: Callable[[], float] = time.time,
+        preconnect_orchestrator: bool = False,
     ) -> None:
         tools = talker_tools(
             delegate=self._delegate,
@@ -431,6 +432,7 @@ class Hub:
         self._approvals = Approvals(
             org=waits.org, runner=waits.runner, clock=clock, on_change=self._persist, log=self._write
         )
+        self._preconnect_orchestrator = preconnect_orchestrator
         # What the Talker turn under way has shown so far, for the Approvals it names.
         self._shown = ""
         self._carrying_out: set[asyncio.Task[None]] = set()
@@ -1077,6 +1079,11 @@ class Hub:
         return end
 
     async def _orchestrate(self) -> None:
+        if self._preconnect_orchestrator:
+            try:
+                self._orchestrator = await self._backend.open(self._orchestrator_spec)
+            except Exception as e:
+                self._output.notice(f"The Orchestrator could not connect at startup: {type(e).__name__}: {e}")
         while True:
             item = await self._orchestrator_inbox.get()
             try:

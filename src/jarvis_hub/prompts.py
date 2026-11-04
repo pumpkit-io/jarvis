@@ -1,4 +1,4 @@
-"""The runtime prompts, kept as prose files so people edit them as text and AGENTS.md can import the shared ones."""
+"""Runtime instructions for the Hub sessions, separate from developer instructions."""
 
 from pathlib import Path
 

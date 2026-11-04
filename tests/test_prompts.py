@@ -1,4 +1,4 @@
-"""The prompts the Hub sessions and today's `./jarvis` session share, kept in one file each."""
+"""Runtime prompts stay separate from the instructions for developer agents."""
 
 import re
 from pathlib import Path
@@ -11,9 +11,9 @@ def imports(memory_file: Path) -> list[str]:
     return re.findall(r"^@(\S+)$", memory_file.read_text(), flags=re.MULTILINE)
 
 
-def test_claude_md_loads_agents_md_which_imports_every_shared_prompt() -> None:
+def test_developer_instructions_do_not_import_runtime_prompts() -> None:
     assert imports(ROOT / "CLAUDE.md") == ["AGENTS.md"]
-    assert sorted(imports(ROOT / "AGENTS.md")) == sorted(f"prompts/{name}" for name in SHARED)
+    assert imports(ROOT / "AGENTS.md") == []
     for name in SHARED:
         assert (ROOT / "prompts" / name).is_file()
 
@@ -26,6 +26,6 @@ def test_agents_md_keeps_no_copy_of_a_shared_prompt() -> None:
                 assert line not in agents, (name, line)
 
 
-def test_shared_prompts_have_no_placeholders_since_agents_md_imports_them_raw() -> None:
+def test_shared_prompts_have_no_runtime_placeholders() -> None:
     for name in SHARED:
         assert "{" not in (ROOT / "prompts" / name).read_text(), name

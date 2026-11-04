@@ -1,10 +1,10 @@
 # jarvis
 
-A voice-first orchestrator agent for the repos of one GitHub organization. You talk to Jarvis, it keeps an eye on your repos, helps you decide, and hands practical work to subagents that open PRs. It runs in [Claude Code](https://claude.com/claude-code) with [VoiceMode](https://github.com/mbailey/voicemode).
+A voice-first orchestrator agent for the repos of one GitHub organization. You talk to Jarvis, it keeps an eye on your repos, helps you decide, and hands practical work to subagents that open PRs. The Python Hub owns audio and runs its agents through the Claude Agent SDK and the installed Claude Code CLI. The VoiceMode plugin is no longer needed.
 
 ## Requirements
 
-- Claude Code, with the VoiceMode plugin and its local speech services running (Kokoro voices `am_liam` and `im_nicola`).
+- Apple Silicon, `uv`, and the Claude Code CLI signed in with a Max subscription. Voice mode uses local audio engines and Kokoro voices `am_liam` and `im_nicola`.
 - The `gh` CLI, signed in to an account that can read your organization.
 - The [sdlc](https://github.com/pumpkit-io/sdlc) skills, which Jarvis's subagents use.
 - Your organization's repos cloned next to this one, in the same parent folder. Jarvis clones missing ones there.
@@ -24,14 +24,24 @@ Then rewrite the Repo catalog in `prompts/repo-catalog.md` for your organization
 ./jarvis
 ```
 
-It starts Claude Code with Opus in voice mode, so you can talk right away. Extra arguments go to `claude`, for example `./jarvis --continue`.
+Voice mode listens for the Wake word and returns to idle after the Follow-up window. Type into the same terminal for a text-only reply. Ctrl-D or Ctrl-C stops the Hub.
 
-Jarvis runs with `--dangerously-skip-permissions`. The only guardrail is the Boundary in `prompts/boundary.md`, which `AGENTS.md` imports: work goes as far as opening a PR, and merging, deploying, publishing or deleting waits for your yes. Read [ADR 0001](docs/adr/0001-skip-permissions-with-written-boundaries.md) before you change that section.
+```bash
+./jarvis --text                   # no audio
+./jarvis --headphones             # echo cancellation off
+./jarvis --debug                  # voice state transitions
+./jarvis stats
+./jarvis stats --bargein
+```
+
+Arguments go to `jarvis-hub`. The launcher resolves symlinks before entering its checkout. The Talker warms in the background at startup; this uses one hidden subscription turn (ADR 0006). Audio engines warm locally. Measurements and pending manual voice checks are recorded in [the spike notes](docs/notes/phase-0-spikes.md).
+
+The Hub checks Approvals and carries out merges and branch deletions. Other Boundary actions go to Subagents with a recorded Approval. Read [the Boundary](prompts/boundary.md) and [ADR 0013](docs/adr/0013-approvals-checked-by-the-hub.md) before changing those checks.
 
 ## Files
 
 | File | What it is |
 | --- | --- |
-| `AGENTS.md` | Jarvis's instructions, loaded every session (`CLAUDE.md` imports it) |
+| `AGENTS.md` | Developer instructions (`CLAUDE.md` imports it); runtime prompts live in `prompts/` |
 | `docs/working-preferences.md` | How you want work done; Jarvis hands it to every subagent |
 | `GLOSSARY.md` | The terms the instructions use |

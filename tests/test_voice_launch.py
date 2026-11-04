@@ -8,12 +8,15 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from jarvis_hub.agents.backend import SessionSpec
 from jarvis_hub.config import RoleModel, Settings, VoiceSettings
 from jarvis_hub.main import Ears, timing, voice_mode
 from jarvis_hub.voice.engines import EngineChoice
 from jarvis_hub.voice.input import Listening
 from jarvis_hub.voice.player import Samples
-from tests.fakes import FakeBackend, FakeClock, FakeTts, RecordingPlayer, ScriptedAudio, Text, until
+from tests.fakes import FakeBackend, FakeClock, FakeSession, FakeTts, RecordingPlayer, ScriptedAudio, Text, until
 
 
 class HeldStdin(io.StringIO):
@@ -56,9 +59,26 @@ def settings(tmp_path: Path, voice: VoiceSettings = VoiceSettings()) -> Settings
     )
 
 
-async def test_voice_mode_wakes_hears_answers_aloud_and_idles(tmp_path: Path) -> None:
+@pytest.mark.parametrize("connection", ["success", "failure", "held"])
+async def test_voice_mode_wakes_hears_answers_aloud_and_idles(tmp_path: Path, connection: str) -> None:
     clock = FakeClock()
-    backend = FakeBackend(clock, [[Text("Half past nine, sir.")]])
+    opening = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class StartupBackend(FakeBackend):
+        async def open(self, spec: SessionSpec) -> FakeSession:
+            if spec.role == "orchestrator":
+                opening.set()
+                if connection == "failure":
+                    raise RuntimeError("offline")
+                if connection == "held":
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        cancelled.set()
+            return await super().open(spec)
+
+    backend = StartupBackend(clock, [[Text("Half past nine, sir.")]])
     microphone = ScriptedMicrophone(clock)
     player = RecordingPlayer()
     chosen: list[tuple[EngineChoice, Listening]] = []
@@ -88,6 +108,11 @@ async def test_voice_mode_wakes_hears_answers_aloud_and_idles(tmp_path: Path) ->
         )
     )
     await until(lambda: microphone.started and player.texts == ["At your service, sir."])
+    await until(opening.is_set)
+    if connection == "success":
+        assert backend.all_sessions("orchestrator")[0].received == []
+    elif connection == "failure":
+        assert "The Orchestrator could not connect at startup: RuntimeError: offline" in stderr.getvalue()
     microphone.wake()
     await until(lambda: microphone.capturing == [True])
     microphone.say("What time is it?")
@@ -104,6 +129,9 @@ async def test_voice_mode_wakes_hears_answers_aloud_and_idles(tmp_path: Path) ->
     assert (listening.end_silence_s, listening.max_turn_s, listening.onset_pad_s) == (0.4, 20.0, 0.3)
     assert listening.bargein_min_speech_s == 0.15
     assert microphone.closed and player.closed
+    assert all(session.closed for session in backend.sessions)
+    if connection == "held":
+        assert cancelled.is_set()
     rows = [json.loads(line) for line in (config.runtime_dir / "metrics.jsonl").read_text().splitlines()]
     assert [r["to"] for r in rows if r["kind"] == "voice"] == ["listening", "thinking", "speaking", "follow_up", "idle"]
 

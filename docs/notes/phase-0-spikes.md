@@ -520,3 +520,18 @@ A Subagent runs with the preset prompt plus `prompts/subagent.md`, `prompts/work
 - `worktree.sh finish` refused the worktree as neither merged nor pushed (exit 5), so the worktree and the branch stay in animate-pixel-art until the User removes them.
 
 Opening a PR, the cap, the time limit, cancelling and two Tasks side by side are covered by the fake-backend tests in `tests/test_subagents.py` only.
+
+## Hub launcher (#20)
+
+`./jarvis` now starts `uv run jarvis-hub`; arguments and chained relative symlinks are covered with a stub `uv`, without starting an agent. Voice launch preconnects the Orchestrator in the background without a prompt. A connection failure is shown and the next Task retries; shutdown cancels and awaits an unfinished connection. The Talker keeps ADR 0006's hidden background warm-up, which uses one subscription call. This supersedes the ticket's literal “no prompt” for the Talker; it does not change the accepted startup decision.
+
+The existing Hub tests cover whole-utterance stop phrases, typed turns staying silent in voice mode, the Talker's `end_conversation`, and the cached filler after 1.2 seconds. These are fake-adapter checks, not microphone measurements.
+
+Manual launch check, pending the recording session:
+
+1. With models already downloaded, time `./jarvis` until the startup line has played and the terminal says it is listening. Record elapsed time and `ears_loaded.load_ms` from `.jarvis/metrics.jsonl`; the target is at most 10 seconds. First-time downloads are setup, not this measurement.
+2. Wait for the one `warm_up` record. Say “Hey Jarvis”, then “that's all”. Expect “Very good, sir.” followed by silence. Compare model-turn records before and after: the stop phrase adds none.
+3. Repeat with “thanks Jarvis”, “stand by”, “go to sleep”, “grazie Jarvis” and “basta così”. The Italian phrases use the Italian cached response. In a new turn, say “that's all I need to know about the failing CI”; this longer request must reach the Talker.
+4. While voice mode is idle, type a question. Expect a terminal reply, no spoken reply and no Wake word chime. Check `--headphones`, `--debug` and launch from the optional symlink.
+
+No physical readiness time or microphone result was collected for this ticket. The recording session and the Listening and Barge-in checklists remain required before calling voice verification complete.
