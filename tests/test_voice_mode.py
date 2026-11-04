@@ -1124,3 +1124,28 @@ async def test_a_new_limit_drops_the_reset_news_held_in_quiet_mode_so_it_is_neve
     lines = talker_received(rig)[-1].splitlines()
     assert lines[0].startswith('<event source="hub" away="1">1 update while you were away')
     assert not any('reason="usage_reset"' in m for m in talker_received(rig))
+
+
+async def test_news_told_in_one_announcement_with_the_reset_is_still_told_when_the_talker_hits_the_limit_mid_way(
+    rig_for: MakeRig,
+) -> None:
+    limit_line = "I've reached the usage limit, sir."
+    rig: Rig = await rig_for([Text("Hello, sir.")], [Limited(600)], [Text("The CI is green, sir.")])
+    rig.audio.wake()
+    rig.audio.say("Hello")
+    await until(lambda: rig.state == "follow_up")
+    await rig.advance(6)
+    assert rig.state == "idle"
+
+    # The reset first, then a real report: one Announcement, which the Talker cannot finish.
+    rig.hub._limit_reset()  # pyright: ignore[reportPrivateUsage]
+    rig.hub._post_news("orchestrator", "The CI is green.", "T1")  # pyright: ignore[reportPrivateUsage]
+    await until(lambda: len(talker_received(rig)) == 2)
+    await until(lambda: limit_line in rig.player.texts)
+    await rig.advance(600)
+    await until(lambda: "The CI is green, sir." in rig.player.texts)
+
+    told = [m for m in talker_received(rig) if 'source="orchestrator"' in m]
+    assert len(told) == 2
+    assert 'reason="usage_reset"' in told[0]
+    assert 'reason="usage_reset"' not in told[1]

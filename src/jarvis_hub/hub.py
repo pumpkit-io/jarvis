@@ -222,14 +222,32 @@ class _TalkerInput:
     members: tuple["_TalkerInput", ...] = ()
 
 
+def _leaves(item: _TalkerInput) -> tuple[_TalkerInput, ...]:
+    """The posted news items `item` is made of: the members of a merged turn, the parts of an away item, or itself."""
+    if item.members:
+        return tuple(leaf for member in item.members for leaf in _leaves(member))
+    return item.parts if item.away else (item,)
+
+
 def _merged(items: "list[_TalkerInput]") -> _TalkerInput:
-    """Items as one turn, in order: the first item's kind and arrival, every message, every detail."""
+    """Items as one turn, in order: the first item's kind and arrival, every message, every detail.
+
+    A turn of several items is none of them, so it carries neither `reset` nor `away`: what it was made of is in
+    `members`, and the code that tells those flags apart reads them there.
+    """
+    if len(items) == 1:
+        return items[0]
     details = "\n\n".join(item.details for item in items if item.details)
+    news = "\n- ".join(leaf.news for leaf in (leaf for item in items for leaf in _leaves(item)) if leaf.news)
     return replace(
         items[0],
         message="\n".join(item.message for item in items),
         details=details or None,
         count=sum(item.count for item in items),
+        news=news or None,
+        urgent=any(item.urgent for item in items),
+        away=False,
+        reset=False,
         parts=tuple(part for item in items for part in item.parts),
         members=tuple(member for item in items for member in (item.members or (item,))),
     )
@@ -565,15 +583,10 @@ class Hub:
         dropped -= len(self._held)
         news: deque[_TalkerInput] = deque()
         for item in self._news:
-            parts = [part for part in item.parts if not part.reset]
-            if item.reset:
-                dropped += 1
-            elif item.away and len(parts) < len(item.parts):
-                dropped += len(item.parts) - len(parts)
-                if parts:
-                    news.append(self._away_item(parts, item.arrived))
-            else:
-                news.append(item)
+            kept = self._without_reset(item)
+            dropped += item.count - (kept.count if kept else 0)
+            if kept:
+                news.append(kept)
         self._news = news
         parked: list[_TalkerInput] = []
         for item in self._parked_news:
@@ -1309,6 +1322,11 @@ class Hub:
     @staticmethod
     def _without_reset(item: _TalkerInput) -> _TalkerInput | None:
         """`item` less the news that the limit reset, which is told once or never; None when nothing else is left."""
+        if item.members:
+            kept = [kept for member in item.members if (kept := Hub._without_reset(member))]
+            if all(k is m for k, m in zip(kept, item.members)) and len(kept) == len(item.members):
+                return item
+            return _merged(kept) if kept else None
         if item.reset:
             return None
         if item.away:
@@ -1316,11 +1334,6 @@ class Hub:
             if len(kept) == len(item.parts):
                 return item
             return Hub._away_item(kept, item.arrived) if kept else None
-        if item.members:
-            kept = [kept for member in item.members if (kept := Hub._without_reset(member))]
-            if len(kept) == len(item.members):
-                return item
-            return _merged(kept) if kept else None
         return item
 
     def _park(self, item: _TalkerInput) -> int:
@@ -1343,8 +1356,13 @@ class Hub:
         for item in parked:
             if self._floor is None:
                 self._talker_inbox.put_nowait(item)
-            elif self._quiet_mode and not item.urgent:
-                self._held.append(item)
+            elif self._quiet_mode:
+                # Quiet mode holds news item by item, so a merged turn comes apart and only what is urgent gets out.
+                for leaf in _leaves(item):
+                    if leaf.urgent:
+                        self._news.append(leaf)
+                    else:
+                        self._held.append(leaf)
             else:
                 self._news.append(item)
         self._arrived.set()
@@ -1429,7 +1447,7 @@ class Hub:
         # News already waiting for this reply to end waits for the Wake word instead.
         waiting = [item for item in self._news if not item.urgent]
         self._news = deque(item for item in self._news if item.urgent)
-        self._held += [part for item in waiting for part in (item.parts or (item,))]
+        self._held += [leaf for item in waiting for leaf in _leaves(item)]
         self._persist()
         return "Quiet mode is on until the User's next Wake word. News that needs the User still comes through."
 
