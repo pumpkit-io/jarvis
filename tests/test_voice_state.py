@@ -13,6 +13,7 @@ from jarvis_hub.voice.state import (
     Event,
     Heard,
     Interrupt,
+    Overheard,
     Pause,
     ReplyAudio,
     ReplyDone,
@@ -487,3 +488,18 @@ def test_backchannels_still_going_at_the_deadline_wait_for_one_more_partial() ->
 def test_backchannels_said_and_done_by_the_deadline_resume_at_once() -> None:
     voice, actions = run(*SPEAKING, BargeIn(20.0, 20.2), said("okay", 20.7, 0.4, 0.3))
     assert (voice.state, actions[-1]) == ("speaking", Resume())
+
+
+def test_overheard_speech_stops_jarvis_only_on_a_hard_interrupt_or_the_wake_word() -> None:
+    speaking, _ = run(*SPEAKING)
+    voice, actions = run(Overheard("okay okay okay", 25.0), start=speaking)
+    assert (voice.state, actions) == ("speaking", [])
+    for text in ("okay okay wait", "okay Jarvis"):
+        voice, actions = run(Overheard(text, 25.0), start=speaking)
+        assert (voice.state, actions, voice.cut_off) == ("listening", [Interrupt()], True)
+
+
+def test_overheard_speech_changes_nothing_while_jarvis_is_not_heard() -> None:
+    done, _ = run(*SPEAKING, ReplyDone(20.0, 11.0))
+    voice, actions = run(Overheard("wait", 20.5), start=done)
+    assert (voice.state, actions) == ("follow_up", [])

@@ -20,7 +20,7 @@ from numpy.typing import NDArray
 
 from jarvis_hub.voice.bargein import TALKING_GAP_S, Partial
 from jarvis_hub.voice.player import Samples
-from jarvis_hub.voice.state import BargeIn, Heard, InputEvent, SpeechStarted, WakeWord
+from jarvis_hub.voice.state import BargeIn, Heard, InputEvent, Overheard, SpeechStarted, WakeWord
 
 SAMPLE_RATE = 16_000
 FRAME = SAMPLE_RATE // 100
@@ -158,6 +158,8 @@ class InputPipeline:
         self._run: float | None = None
         self._run_spent = False
         self._run_rearmed = False
+        # Once the run has made its last Barge-in, still transcribed from that onset, without pausing, for interrupts.
+        self._overheard: float | None = None
         # From when speech counts toward a Barge-in; None while not watching.
         self._barge_from: float | None = None
         # The onset of the Barge-in under way, when its partials are due, and whether its going quiet was transcribed.
@@ -176,10 +178,16 @@ class InputPipeline:
         """Watch for Barge-ins in speech from `since` on, or stop with None. Either way the one under way is forgotten.
 
         Its speech raises no other, except once: when watching goes on with the User still talking, as when Jarvis
-        resumes over "okay, actually…", the speech held from `since` is a Barge-in of its own.
+        resumes over "okay, actually…", the speech held from `since` is a Barge-in of its own. After that second one,
+        the rest of the run is only `Overheard`.
         """
-        if since is not None and self._barge is not None and self._run is not None and not self._run_rearmed:
-            self._run_spent, self._run_rearmed = False, True
+        if since is None:
+            self._overheard = None
+        elif self._barge is not None and self._run is not None:
+            if self._run_rearmed:
+                self._overheard = self._barge
+            else:
+                self._run_spent, self._run_rearmed = False, True
         self._barge_from = since
         self._barge = None
         self._partials_due = []
@@ -208,7 +216,7 @@ class InputPipeline:
                     self._run = ends - len(chunk) / SAMPLE_RATE
                 self._last_speech = ends
             else:
-                self._run, self._run_spent, self._run_rearmed = None, False, False
+                self._run, self._run_spent, self._run_rearmed, self._overheard = None, False, False, None
         events += self._barge_events(at)
         if self._onset is not None and self._turn is None and at - self._last_speech >= self._s.end_silence_s:
             self._onset = None
@@ -231,6 +239,9 @@ class InputPipeline:
             self._again_at = start + max(self._s.bargein_partials_s, default=0.0) + self._s.bargein_partial_every_s
             events.append(BargeIn(start, at))
         if self._barge is None:
+            if self._overheard is not None and at >= self._again_at - STAMP_SLACK_S:
+                self._again_at += self._s.bargein_partial_every_s
+                events.append(Overheard(self._partial(self._overheard, at).text, at))
             return events
         quiet = at - self._last_speech >= TALKING_GAP_S
         due = bool(self._partials_due) and at >= self._partials_due[0] - STAMP_SLACK_S

@@ -92,6 +92,11 @@ def _phrases(path: Path) -> frozenset[str]:
 LEXICONS = Lexicons.load(LEXICON_DIR)
 
 
+def interrupts(text: str, lexicons: Lexicons = LEXICONS) -> bool:
+    """Whether `text` holds a hard interrupt, the Wake word among them."""
+    return lexicons.interrupts(words(text))
+
+
 def still_talking(partial: Partial) -> bool:
     return partial.silent_s < TALKING_GAP_S
 

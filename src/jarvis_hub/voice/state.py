@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from typing import Literal
 
-from jarvis_hub.voice.bargein import Partial, decide, still_talking
+from jarvis_hub.voice.bargein import Partial, decide, interrupts, still_talking
 from jarvis_hub.voice.language import Lang
 
 VoiceState = Literal["idle", "listening", "thinking", "speaking", "follow_up", "announce"]
@@ -63,6 +63,14 @@ class BargeIn:
 
 
 @dataclass(frozen=True)
+class Overheard:
+    """What the User said over Jarvis in a run that has made all the Barge-ins it may: only a hard interrupt counts."""
+
+    text: str
+    at: float
+
+
+@dataclass(frozen=True)
 class Heard:
     """The User's turn, transcribed once its end was detected. `lang` is None when the STT does not report it."""
 
@@ -108,7 +116,7 @@ class Tick:
 
 
 # What the audio input reports.
-InputEvent = WakeWord | SpeechStarted | Heard | BargeIn | Partial
+InputEvent = WakeWord | SpeechStarted | Heard | BargeIn | Partial | Overheard
 Event = (
     WakeWord
     | ChimeStarted
@@ -116,6 +124,7 @@ Event = (
     | Heard
     | BargeIn
     | Partial
+    | Overheard
     | ReplyAudio
     | ReplyDone
     | EndConversation
@@ -314,6 +323,10 @@ def _step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Actio
                 return voice, []
             barge = replace(voice.barge, partials=(*voice.barge.partials, event))
             return _decide(replace(voice, barge=barge), at, timing, final=barge.last_call)
+        case Overheard(text, at):
+            if voice.state in VOICED and voice.barge is None and interrupts(text):
+                return _stop(voice, at, timing)
+            return voice, []
         case EndConversation():
             if voice.state in ("thinking", "speaking", "announce"):
                 return replace(voice, ending=True), []
@@ -345,10 +358,14 @@ def _decide(voice: Voice, at: float, timing: Timing, *, final: bool) -> tuple[Vo
         case "resume":
             return replace(voice, barge=None, deadline=None, voiced_at=at), [Resume()]
         case "stop":
-            listening = replace(
-                voice, state="listening", deadline=at + timing.listen_s, ending=False, awaiting=None, cut_off=True
-            )
-            return listening, [Interrupt()]
+            return _stop(voice, at, timing)
+
+
+def _stop(voice: Voice, at: float, timing: Timing) -> tuple[Voice, list[Action]]:
+    listening = replace(
+        voice, state="listening", deadline=at + timing.listen_s, ending=False, awaiting=None, cut_off=True
+    )
+    return listening, [Interrupt()]
 
 
 def _wake(voice: Voice, at: float, timing: Timing) -> tuple[Voice, list[Action]]:

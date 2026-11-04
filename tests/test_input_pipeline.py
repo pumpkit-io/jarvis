@@ -17,6 +17,7 @@ from jarvis_hub.voice.state import (
     Event,
     Heard,
     Interrupt,
+    Overheard,
     Pause,
     ReplyAudio,
     Resume,
@@ -555,7 +556,7 @@ class Duet:
             seen = len(self.r.events)
             self.r.feed(kind, 0.01, value)
             for event in self.r.events[seen:]:
-                assert isinstance(event, (WakeWord, SpeechStarted, Heard, BargeIn, Partial))
+                assert isinstance(event, (WakeWord, SpeechStarted, Heard, BargeIn, Partial, Overheard))
                 self.step(event)
             self.step(Tick(self.r.t))
 
@@ -653,3 +654,16 @@ def test_a_long_run_of_pure_backchannels_pauses_and_resumes_jarvis_at_most_twice
     assert Interrupt() not in d.actions and d.sent() == []
     assert d.pauses() == [Pause(), Resume(), Pause(), Resume()]
     assert d.voice.state == "speaking" and d.voice.barge is None
+
+
+def test_an_interrupt_after_the_second_barge_in_of_a_run_still_stops_jarvis() -> None:
+    d = Duet()
+    d.speak()
+    d.feed("silence", 0.5)
+    d.say("okay okay okay okay", 3.5)
+    assert d.pauses() == [Pause(), Resume(), Pause(), Resume()]
+    d.say("wait, stop", 0.6)
+    d.feed("silence", 1.0)
+
+    assert Interrupt() in d.actions and d.pauses() == [Pause(), Resume(), Pause(), Resume()]
+    assert d.sent()[-1].interrupted and d.sent()[-1].text.endswith("wait, stop")
