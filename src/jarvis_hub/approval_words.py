@@ -61,6 +61,11 @@ class Lexicons:
                 return f'"{" ".join(phrase)}"'
         return None
 
+    def plain(self, phrase: Words) -> bool:
+        """Whether every word of `phrase` is a word of a yes, filler or a verb: such a phrase names nothing."""
+        known = {w for p in self.yes | self.filler for w in p} | set(self.verbs)
+        return all(w in known for w in phrase)
+
     def says_yes(self, said: Words) -> bool:
         return any(found(said, phrase) for phrase in self.yes)
 

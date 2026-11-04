@@ -158,31 +158,40 @@ class _Names:
 
     @staticmethod
     def of(approval: "Approval") -> "_Names":
-        phrases = _repo_phrases(approval.repo.split("/", 1)[-1]) if approval.repo else set[Words]()
+        phrases = _naming_phrases(approval)
         if approval.action == "merge_pr":
-            phrases |= {("pr",), ("pull", "request")}
-            return _Names(frozenset({int(approval.number or 0)}), frozenset(phrases), frozenset({"merge"}))
+            return _Names(frozenset({int(approval.number or 0)}), phrases, frozenset({"merge"}))
         if approval.action == "delete_branch":
-            branch = str(approval.branch)
-            phrases |= {words(branch), words(branch.rsplit("/", 1)[-1]), ("branch",)}
-            return _Names(numbers(words(branch)), frozenset(phrases), frozenset({"delete"}))
+            return _Names(numbers(words(str(approval.branch))), phrases, frozenset({"delete"}))
         said = words(approval.text)
         post = {int(approval.post)} if approval.post and approval.post.isdigit() else set[int]()
         kinds = LEXICONS.kinds(said)
         if approval.post_action:
             kinds |= {_POST_KINDS[approval.post_action]}
-        return _Names(numbers(said) | post, frozenset(phrases), kinds)
+        return _Names(numbers(said) | post, phrases, kinds)
 
     def features(self) -> set[_Feature]:
         out: set[_Feature] = {("n", n) for n in self.numbers}
         return out | {("p", p) for p in self.phrases} | {("k", k) for k in self.kinds}
 
 
-def _repo_phrases(name: str) -> set[Words]:
-    """How words name a repo: its name, alone or with "repo". "Jarvis" alone is the User addressing Jarvis."""
-    said = words(name)
-    qualified = {form for repo in ("repo", "repository") for form in (said + (repo,), (repo,) + said)}
-    return qualified if said == ("jarvis",) else qualified | {said}
+_NOW: frozenset[Words] = frozenset({("now",), ("ora",), ("adesso",)})
+
+
+def _naming_phrases(approval: "Approval") -> frozenset[Words]:
+    """The phrases that name `approval`: its repo, alone or with "repo"; "PR" for a merge; the branch, its last part
+    and "branch" for a delete. A phrase made only of yes, filler, verbs or "now" names nothing: a word can't be both
+    ("Yes, Jarvis." never names feat/jarvis)."""
+    phrases: set[Words] = set()
+    if approval.repo:
+        name = words(approval.repo.split("/", 1)[-1])
+        phrases |= {name} | {form for repo in ("repo", "repository") for form in (name + (repo,), (repo,) + name)}
+    if approval.action == "merge_pr":
+        phrases |= {("pr",), ("pull", "request")}
+    if approval.action == "delete_branch":
+        branch = str(approval.branch)
+        phrases |= {words(branch), words(branch.rsplit("/", 1)[-1]), ("branch",)}
+    return frozenset(p for p in phrases if not LEXICONS.plain(tuple(w for w in p if (w,) not in _NOW)))
 
 
 def _said(said: Words, phrases: Iterable[Words]) -> set[_Feature]:
@@ -419,7 +428,7 @@ class Approvals:
             others = [a for a in named(heard, pending) if a is not approval]
             what = f"{others[0].id} ({others[0].text})" if others else _spoken(min(stray, key=str))
             return f"Not approved: the User's words name {what}, which is not {approval.id} ({approval.text}). {nothing}"
-        now = {("now",), ("ora",), ("adesso",)} if "schedule" not in own.kinds else set[Words]()
+        now = _NOW if "schedule" not in own.kinds else frozenset[Words]()
         outside = LEXICONS.outside_plain_yes(said, own.phrases | now, own.kinds, own.numbers)
         if outside is not None:
             return (

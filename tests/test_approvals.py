@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from jarvis_hub.agents.backend import Refused
-from jarvis_hub.approvals import Approvals, rules_argv
+from jarvis_hub.approvals import Approval, Approvals, rules_argv
 from jarvis_hub.hub import Hub, Line
 from jarvis_hub.subagent_rules import connector_check
 from jarvis_hub.waits import run_confined
@@ -1931,3 +1931,51 @@ async def test_an_x_post_request_must_say_whether_it_posts_now_or_schedules(
     assert str(results(session.backend, "orchestrator", "report")[0].result).startswith(
         "approval.post_action is post_now or schedule_post"
     )
+
+
+async def decided(specs: list[dict[str, Any]], said: str, approval_id: str) -> Approval | str:
+    """What `decide` returns for `said`, after Jarvis asked about every Approval of `specs` in one turn."""
+    gh = StubGh(
+        prs={f"pumpkit-io/{s['repo']}#{s['pr']}": ("OPEN", HEAD) for s in specs if s["action"] == "merge_pr"},
+        branches={f"pumpkit-io/{s['repo']}:{s['branch']}": TIP for s in specs if s["action"] == "delete_branch"},
+    )
+    approvals = Approvals(org="pumpkit-io", runner=gh, clock=FakeClock(), on_change=lambda: None, log=lambda e: None)
+    asked = [await approvals.request(f"T{i}", spec) for i, spec in enumerate(specs, 1)]
+    approvals.turn_began(None)
+    approvals.turn_ended(completed=True, told=[getattr(a, "id", "") for a in asked], said="")
+    approvals.turn_began(said)
+    return approvals.decide(approval_id)
+
+
+def merge_spec(pr: int = 42, repo: str = "pumpkit") -> dict[str, Any]:
+    return {"action": "merge_pr", "repo": repo, "pr": pr, "sha": HEAD}
+
+
+def delete_spec(branch: str, repo: str = "pumpkit") -> dict[str, Any]:
+    return {"action": "delete_branch", "repo": repo, "branch": branch, "sha": TIP}
+
+
+@pytest.mark.parametrize(
+    ("merge", "branch", "said"),
+    [
+        (merge_spec(repo="jarvis"), "feat/jarvis", "Yes, Jarvis."),
+        (merge_spec(), "chore/it", "Yes, do it."),
+        (merge_spec(), "fix/please", "Yes please"),
+        (merge_spec(), "spike/this", "Yes, this."),
+        (merge_spec(), "go-ahead", "go ahead"),
+        (merge_spec(), "x/the-one", "ok do it and the one"),
+    ],
+)
+async def test_a_bare_yes_never_picks_a_branch_spelled_in_yes_or_filler_words(
+    merge: dict[str, Any], branch: str, said: str
+) -> None:
+    result = await decided([merge, delete_spec(branch, merge["repo"])], said, "A2")
+
+    assert str(result).startswith("Not approved: with more than one Approval in play, a bare yes does not say which.")
+
+
+@pytest.mark.parametrize("said", ["yes, delete feat/old-idea", "yes, the old idea branch"])
+async def test_words_that_name_a_branch_choose_its_delete(said: str) -> None:
+    result = await decided([merge_spec(), delete_spec("feat/old-idea")], said, "A2")
+
+    assert isinstance(result, Approval) and (result.id, result.state) == ("A2", "approved")
