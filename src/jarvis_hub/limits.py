@@ -16,6 +16,9 @@ UNKNOWN_RESET_WAIT = 15 * 60.0
 MIN_WAIT = 60.0
 MAX_WAIT = 15 * 60.0
 # A role's hits stop counting this long after its hold cleared: a retry hits again at once, so a later hit is news.
+# Known limit: the Hub hears of a turn only when it ends, so a first turn after the hold that runs longer than this
+# is expired before `observe` sees it complete, and the reset is then never announced. Telling an in-flight turn
+# apart would need a turn-start hook in every role's runner, for a turn that long being rare.
 STRIKE_TTL = 3600.0
 # A reset further off than this is a weekly window, so the spoken time names its day.
 SAME_DAY = 18 * 3600.0
