@@ -175,7 +175,10 @@ async def test_a_report_asking_for_an_approval_names_the_exact_action_and_the_co
     [asked] = results(session.backend, "orchestrator", "report")
     assert asked.result == f"Reported to the User, asking for Approval A1: merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}."
     assert received(session.backend, "talker")[2] == (
-        f'<event source="orchestrator" task="T1" needs_user="true" approval="A1" details="on screen">{ASK}</event>'
+        f'<event source="orchestrator" task="T1" needs_user="true" approval="A1" details="on screen">{ASK}'
+        f" Ask exactly one Approval question, in the User's language: Do you approve this action: "
+        f"merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}? Italian: Vuole approvare questa azione: "
+        f"merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}?</event>"
     )
     assert output.shown == [f"**Approval A1:** merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}"]
     [status] = results(session.backend, "talker", "status")
@@ -316,8 +319,9 @@ async def test_approve_in_a_turn_that_answers_news_and_not_the_user_is_refused(
     [refused] = results(session.backend, "talker", "approve")
     assert refused.result == (
         "Not approved: approve works only in your reply to the User's own message. Pending Approvals: A1: merge "
-        f"pumpkit-io/pumpkit#42 at commit {HEAD[:12]} (on T1, asked 0 s ago). Name each to the User and ask which "
-        "one they mean, in one question."
+        f"pumpkit-io/pumpkit#42 at commit {HEAD[:12]} (on T1, asked 0 s ago). Ask one exact question, in the User's language: "
+        f"A1: Do you approve this action: merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}? "
+        f"Italian: Vuole approvare questa azione: merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}?"
     )
     assert gh.actions == []
 
@@ -385,8 +389,11 @@ async def test_with_two_pending_a_bare_yes_is_refused_and_naming_the_one_meant_a
     assert bare.result == (
         "Not approved: with more than one Approval in play, a bare yes does not say which. Pending Approvals: "
         f"A1: merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]} (on T1, asked 0 s ago); A2: delete branch "
-        f"feat/old-idea of pumpkit-io/pumpkit at commit {TIP[:12]} (on T2, asked 0 s ago). Name each to the User "
-        "and ask which one they mean, in one question."
+        f"feat/old-idea of pumpkit-io/pumpkit at commit {TIP[:12]} (on T2, asked 0 s ago). "
+        f"Ask one exact question, in the User's language: A1: Do you approve this action: merge pumpkit-io/pumpkit#42 "
+        f"at commit {HEAD[:12]}? Italian: Vuole approvare questa azione: merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}? "
+        f"A2: Do you approve this action: delete branch feat/old-idea of pumpkit-io/pumpkit at commit {TIP[:12]}? "
+        f"Italian: Vuole approvare questa azione: delete branch feat/old-idea of pumpkit-io/pumpkit at commit {TIP[:12]}?"
     )
     assert str(named.result).startswith("Approved A1")
     assert gh.actions == [merge_argv()]
@@ -501,7 +508,10 @@ async def test_a_push_after_the_yes_lapses_the_approval_and_brings_a_fresh_reque
         "request that says what changed.</event>"
     )
     assert received(session.backend, "talker")[-1] == (
-        f'<event source="orchestrator" task="T1" needs_user="true" approval="A2" details="on screen">{fresh}</event>'
+        f'<event source="orchestrator" task="T1" needs_user="true" approval="A2" details="on screen">{fresh}'
+        f" Ask exactly one Approval question, in the User's language: Do you approve this action: "
+        f"merge pumpkit-io/pumpkit#42 at commit {PUSHED[:12]}? Italian: Vuole approvare questa azione: "
+        f"merge pumpkit-io/pumpkit#42 at commit {PUSHED[:12]}?</event>"
     )
 
 
@@ -883,7 +893,7 @@ async def test_a_newer_request_on_the_same_task_replaces_the_one_pending(
             [Text("Right away, sir."), delegate()],
             [Text(ASKED)],
             [Text("Noted, sir."), delegate_to("Check 42 again", "T1")],
-            [Text("Same question, sir: merge 42?")],
+            [Text("Shall I merge 42, sir?")],
             [Text("Merging, sir."), approve("A2")],
         ],
         [[ask_merge()], [ask_merge(spoken="Still green. Merge pumpkit#42?")], [report("T1", "Merged.")]],
@@ -891,7 +901,7 @@ async def test_a_newer_request_on_the_same_task_replaces_the_one_pending(
 
     await asked_to_merge(session)
     await session.say("Check 42 again")
-    await session.replied("Same question, sir: merge 42?")
+    await session.replied("Shall I merge 42, sir?")
     await session.say("Yes.")
     await until(lambda: gh.actions)
     await session.end()
@@ -940,7 +950,10 @@ async def test_an_approval_request_gets_through_quiet_mode_and_the_same_request_
     await session.end()
 
     assert told == [
-        f'<event source="orchestrator" task="T1" needs_user="true" approval="A1" details="on screen">{ASK}</event>'
+        f'<event source="orchestrator" task="T1" needs_user="true" approval="A1" details="on screen">{ASK}'
+        f" Ask exactly one Approval question, in the User's language: Do you approve this action: "
+        f"merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}? Italian: Vuole approvare questa azione: "
+        f"merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}?</event>"
     ]
 
 
@@ -1867,14 +1880,14 @@ async def test_an_x_post_approval_opens_only_the_post_tool_of_its_action(
         output,
         metrics,
         gh,
-        [[Text("Right away, sir."), delegate("Post the launch thread")], [Text("Ready, sir?")], [approve()]],
+        [[Text("Right away, sir."), delegate("Post the launch thread")], [Text("Shall I " + ("schedule" if asking.input["approval"]["post_action"] == "schedule_post" else "post") + " it, sir?")], [approve()]],
         [[asking], [spawn]],
     )
     session.backend.subagent_close_gate = asyncio.Event()
 
     await session.start()
     await session.say("Post the launch thread")
-    await session.replied("Ready, sir?")
+    await session.replied("Shall I " + ("schedule" if asking.input["approval"]["post_action"] == "schedule_post" else "post") + " it, sir?")
     await session.say(words)
     await until(lambda: session.backend.all_sessions("subagent"))
     guard = session.backend.session("subagent").spec.mcp_guard
@@ -1899,13 +1912,13 @@ async def test_a_yes_that_changes_when_a_post_goes_out_is_refused(
         output,
         metrics,
         gh,
-        [[Text("Right away, sir."), delegate("Post the launch thread")], [Text("Ready, sir?")], [approve()]],
+        [[Text("Right away, sir."), delegate("Post the launch thread")], [Text("Shall I " + ("schedule" if asking.input["approval"]["post_action"] == "schedule_post" else "post") + " it, sir?")], [approve()]],
         [[asking]],
     )
 
     await session.start()
     await session.say("Post the launch thread")
-    await session.replied("Ready, sir?")
+    await session.replied("Shall I " + ("schedule" if asking.input["approval"]["post_action"] == "schedule_post" else "post") + " it, sir?")
     await session.say(words)
     await session.end()
 
@@ -1948,7 +1961,22 @@ async def decided(
     approvals = Approvals(org="pumpkit-io", runner=gh, clock=FakeClock(), on_change=lambda: None, log=lambda e: None)
     asked = [await approvals.request(f"T{i}", spec) for i, spec in enumerate(specs, 1)]
     approvals.turn_began(None)
-    approvals.turn_ended(completed=True, told=told or [getattr(a, "id", "") for a in asked], said="")
+    told = told or [getattr(a, "id", "") for a in asked]
+    questions: list[str] = []
+    for approval in asked:
+        assert isinstance(approval, Approval)
+        if approval.id not in told:
+            continue
+        if approval.action == "merge_pr":
+            questions.append(f"merge PR {approval.number}")
+        elif approval.action == "delete_branch":
+            questions.append(f"delete branch {approval.branch}")
+        elif approval.post_action:
+            verb = "schedule" if approval.post_action == "schedule_post" else "post"
+            questions.append(f"{verb} post {approval.post}")
+        else:
+            questions.append(approval.text)
+    approvals.turn_ended(completed=True, told=told, said="Shall I " + " or ".join(questions) + "?")
     if read_back is not None:
         approvals.turn_began("Yes.")
         assert isinstance(approvals.decide(approval_id), str)
@@ -2052,7 +2080,7 @@ async def x_post_guard(spec: dict[str, Any]) -> McpGuard:
     asked = await approvals.request("T1", spec)
     assert isinstance(asked, Approval), asked
     approvals.turn_began(None)
-    approvals.turn_ended(completed=True, told=["A1"], said="")
+    approvals.turn_ended(completed=True, told=["A1"], said="Shall I " + ("schedule" if spec["post_action"] == "schedule_post" else "post") + " post 812?")
     approvals.turn_began("Yes.")
     approved = approvals.decide("A1")
     assert isinstance(approved, Approval), approved
@@ -2392,3 +2420,77 @@ async def test_a_word_naming_another_pending_approval_it_does_not_choose_breaks_
     result = await decided(specs, "Yes.", "A1", read_back="Should I skip PR 42?")
 
     assert isinstance(result, str) and result.startswith("Not approved"), result
+
+
+@pytest.mark.parametrize("reply", [
+    "Would you like a status update, sir?",
+    "Shall I merge PR 42? Would you like a status update, sir?",
+    "The merge is ready, sir.",
+])
+async def test_approval_news_requires_the_talkers_actual_last_question_to_ask_about_the_action(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh, reply: str
+) -> None:
+    session = a_session(
+        clock, output, metrics, gh,
+        [[Text("Right away, sir."), delegate()], [Text(reply)], [approve(), Text("Nothing done, sir.")],
+         [Text("Finished, sir.")]],
+        [[ask_merge()], [report("T1", "Merged.")]],
+    )
+    await session.start()
+    await session.say(MERGE_42)
+    await session.replied(reply)
+    await session.say("Yes.")
+    await session.end()
+    assert gh.actions == []
+    assert str(results(session.backend, "talker", "approve")[0].result).startswith("Not approved:")
+
+
+@pytest.mark.parametrize(("specs", "which", "reply"), [
+    ([merge_spec(), delete_spec("fix/review")], "A2", "Should I review the branch?"),
+    ([merge_spec(repo="review"), merge_spec(43)], "A1", "Should I review PR 42?"),
+    ([merge_spec(repo="review"), merge_spec(43)], "A1", "Should I review and merge PR 42?"),
+])
+async def test_target_words_cannot_supply_the_action_of_a_read_back(
+    specs: list[dict[str, Any]], which: str, reply: str
+) -> None:
+    result = await decided(specs, "Yes.", which, read_back=reply)
+    assert isinstance(result, str) and result.startswith("Not approved:"), result
+
+
+@pytest.mark.parametrize("reply", [
+    "Should I merge or review PR 42?",
+    "Should I merge PR 42 or review it?",
+])
+async def test_an_alternative_action_from_a_repo_name_does_not_ask_for_approval(reply: str) -> None:
+    result = await decided([merge_spec(repo="review"), merge_spec(43)], "Yes.", "A1", read_back=reply)
+    assert isinstance(result, str) and result.startswith("Not approved:"), result
+
+
+@pytest.mark.parametrize("prefix", ["Do you approve this action", "Vuole approvare questa azione"])
+async def test_the_hubs_canonical_question_names_the_entire_pinned_action(prefix: str) -> None:
+    question = f"{prefix}: merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}?"
+    result = await decided([merge_spec(), merge_spec(43)], "Yes.", "A1", read_back=question)
+    assert isinstance(result, Approval) and result.id == "A1", result
+
+
+@pytest.mark.parametrize("read_back", [False, True])
+async def test_a_question_about_two_actions_cannot_be_reduced_to_the_one_in_news(read_back: bool) -> None:
+    gh = StubGh(prs={"pumpkit-io/pumpkit#42": ("OPEN", HEAD)})
+    approvals = Approvals(org="pumpkit-io", runner=gh, clock=FakeClock(), on_change=lambda: None, log=lambda e: None)
+    migration = await approvals.request("T1", posthog("run the database migration"))
+    merge = await approvals.request("T2", merge_spec())
+    assert isinstance(migration, Approval) and isinstance(merge, Approval)
+    approvals.turn_began(None)
+    if read_back:
+        approvals.turn_ended(completed=True, told=[], said="Nothing asked yet.")
+        approvals.turn_began("Yes.")
+        assert isinstance(approvals.decide(migration.id), str)
+    approvals.turn_ended(
+        completed=True, told=[migration.id], said="Shall I run the database migration or merge PR 42?"
+    )
+    approvals.turn_began("Yes.")
+
+    result = approvals.decide(migration.id)
+
+    assert isinstance(result, str) and result.startswith("Not approved:"), result
+    assert migration.state == merge.state == "pending"
