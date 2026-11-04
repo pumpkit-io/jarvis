@@ -75,7 +75,8 @@ class _DeviceStream:
             fill(outdata[:, 0])
 
         self._stream = sd.OutputStream(
-            samplerate=sample_rate, channels=1, dtype="float32", latency="low", callback=callback
+            # Model inference can hold up Python callbacks longer than the device's low-latency buffer.
+            samplerate=sample_rate, channels=1, dtype="float32", latency=0.1, callback=callback
         )
         self._stream.start()
 
