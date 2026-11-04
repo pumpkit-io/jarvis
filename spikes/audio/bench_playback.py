@@ -37,26 +37,36 @@ def main() -> None:
         return stream
 
     errors = []
+    ready = threading.Event()
+    go = threading.Event()
 
     def recognize():
         try:
             stt = Parakeet()
             noise = np.random.default_rng(0).normal(0, 0.01, 16_000).astype(np.float32)
+            stt.transcribe(noise)
+            ready.set()
+            go.wait()
             for _ in range(12):
                 stt.transcribe(noise)
         except Exception as e:
             errors.append(e)
+            ready.set()
 
     tts = KokoroSynthesizer()
     tts.load()
     tts.synthesize("At your service, sir.", "am_liam")
+    worker = threading.Thread(target=recognize, daemon=True)
+    worker.start()
+    assert ready.wait(60), "Recognition did not load"
+    if errors:
+        raise errors[0]
     with patch.object(sd, "OutputStream", silent_stream):
         player = SoundPlayer(tts.sample_rate)
-    worker = threading.Thread(target=recognize, daemon=True)
     try:
         time.sleep(1)
         began = time.perf_counter()
-        worker.start()
+        go.set()
         peak = 0.0
         for _ in range(6):
             samples = tts.synthesize(
