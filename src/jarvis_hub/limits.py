@@ -42,20 +42,42 @@ class LimitClock(Protocol):
     async def sleep(self, seconds: float) -> None: ...
 
 
-def reset_sentence(resets_at: float | None, lang: Lang, now: float) -> str:
-    """"It resets at 3:40 PM." in local time, naming the day when the reset is more than SAME_DAY off; "" when the
-    reset time is unknown. `now` is Unix seconds."""
-    if resets_at is None:
-        return ""
+def _when(resets_at: float, lang: Lang, now: float) -> str:
+    """"at 3:40 PM" in local time, or "on Friday at 3:40 PM" when the reset is more than SAME_DAY off."""
     when = datetime.fromtimestamp(resets_at)
     day = _WEEKDAYS[lang][when.weekday()] if resets_at - now > SAME_DAY else None
     if lang == "it":
-        return f"Si riazzera {f'{day} ' if day else ''}{_italian_clock(when)}."
+        return f"{f'{day} ' if day else ''}{_italian_clock(when)}"
     hour = when.hour % 12 or 12
     clock = f"{hour} {'AM' if when.hour < 12 else 'PM'}" if when.minute == 0 else (
         f"{hour}:{when.minute:02d} {'AM' if when.hour < 12 else 'PM'}"
     )
-    return f"It resets {f'on {day} ' if day else ''}at {clock}."
+    return f"{f'on {day} ' if day else ''}at {clock}"
+
+
+def reset_sentence(resets_at: float | None, lang: Lang, now: float) -> str:
+    """"It resets at 3:40 PM.", or "" when the reset time is unknown. `now` is Unix seconds."""
+    if resets_at is None:
+        return ""
+    when = _when(resets_at, lang, now)
+    return f"Si riazzera {when}." if lang == "it" else f"It resets {when}."
+
+
+def update_sentence(resets_at: float | None, lang: Lang, now: float) -> str:
+    """The reset the User was told has moved: to `resets_at`, or to an unknown time."""
+    if resets_at is None:
+        return "Non è più chiaro quando si riazzera." if lang == "it" else "It's no longer clear when it resets."
+    if lang == "it":
+        return f"Ora dovrebbe riazzerarsi {_when(resets_at, lang, now)}."
+    return f"It's now expected to reset {_when(resets_at, lang, now)}."
+
+
+@dataclass(frozen=True)
+class Notice:
+    """What to tell the User of the limit: the reset, None when unknown, and whether it moves one they heard."""
+
+    resets_at: float | None
+    update: bool
 
 
 @dataclass(frozen=True)
@@ -67,11 +89,16 @@ class SavedLimit:
     strikes: dict[str, int] = field(default_factory=lambda: {})
     cleared: dict[str, float] = field(default_factory=lambda: {})
     reset_told: bool = False
+    told: bool = False
+    told_reset: float | None = None
 
 
 class UsageLimit:
-    """Roles the limit has stopped, each until its own reset. `on_hit` and `on_clear` flag one first hit and one reset
-    per episode, which a role leaves on a completed turn or STRIKE_TTL after its hold cleared."""
+    """Roles the limit has stopped, each until its own reset, and what the User heard of it. The User hears of the
+    limit, not of a role: once that it was reached, again when a hit pushes the reset past what they heard, and that
+    it reset when the last hold clears, if they heard it was reached. An episode, which a role leaves on a completed
+    turn or STRIKE_TTL after its hold cleared, has one reset: hits after it are retries, not news. `on_hit` hears
+    each hit and whether it brings news, `on_clear` the roles back and whether to announce the reset."""
 
     def __init__(
         self,
@@ -93,6 +120,9 @@ class UsageLimit:
         # Struck role, no longer stopped, to the Unix time its hold cleared.
         self._cleared_at: dict[str, float] = {}
         self._reset_told = False
+        # Whether the User heard the limit is on, and the reset they heard, since the last reset they heard.
+        self._told = False
+        self._told_reset: float | None = None
         self._cleared = asyncio.Event()
         self._cleared.set()
         self._timer: asyncio.Task[None] | None = None
@@ -107,6 +137,31 @@ class UsageLimit:
     def resets_at(self, role: str) -> float | None:
         """When the role comes back, or None when it is not stopped or the reset time was never known."""
         return None if role in self._guessed else self._until.get(role)
+
+    def _latest(self) -> float | None:
+        """When the last held role comes back, None when any held role's reset time is unknown."""
+        resets = [self.resets_at(role) for role in self._until]
+        return None if None in resets else max(r for r in resets if r is not None)
+
+    def _news(self) -> bool:
+        if not self._until or self._reset_told:
+            return False
+        if not self._told:
+            return True
+        latest = self._latest()
+        return self._told_reset is not None and (latest is None or latest > self._told_reset)
+
+    def tell(self) -> float | None:
+        """The reset to tell the User, who now has heard it: the latest among the held roles. Only while active."""
+        self._told, self._told_reset = True, self._latest()
+        return self._told_reset
+
+    def news(self) -> Notice | None:
+        """What the User has yet to hear of the limit, now told; None when nothing holds or they heard it all."""
+        if not self._news():
+            return None
+        update = self._told
+        return Notice(self.tell(), update)
 
     def observe(self, role: str, end: TurnEnd) -> None:
         """A turn of `role` ended: a limited one stops the role, a completed one ends its part in the episode."""
@@ -128,7 +183,6 @@ class UsageLimit:
         now = self._wall()
         stale = [r for r in self._strikes if r not in self._until and now - self._cleared_at.get(r, 0.0) >= STRIKE_TTL]
         self._leave_episode(stale)
-        first = not self._strikes
         strikes = self._strikes[role] = self._strikes.get(role, 0) + 1
         self._cleared_at.pop(role, None)
         floor = now + min(MIN_WAIT * 2 ** (strikes - 1), MAX_WAIT)
@@ -142,7 +196,7 @@ class UsageLimit:
         if self._timer is not None:
             self._timer.cancel()
         self._timer = asyncio.create_task(self._run())
-        self._on_hit(role, first)
+        self._on_hit(role, self._news())
 
     def dump(self) -> dict[str, Any]:
         return {
@@ -151,6 +205,8 @@ class UsageLimit:
             "strikes": dict(self._strikes),
             "cleared": dict(self._cleared_at),
             "reset_told": self._reset_told,
+            "told": self._told,
+            "told_reset": self._told_reset,
         }
 
     @staticmethod
@@ -165,12 +221,17 @@ class UsageLimit:
         cleared = {str(role): float(t) for role, t in dict(saved.get("cleared", {})).items()}
         if not isinstance(saved["reset_told"], bool):
             raise TypeError(f"reset_told is {saved['reset_told']!r}, not a bool")
-        return SavedLimit(until, guessed, strikes, cleared, saved["reset_told"])
+        told, told_reset = saved.get("told", False), saved.get("told_reset")
+        if not isinstance(told, bool):
+            raise TypeError(f"told is {told!r}, not a bool")
+        told_reset = None if told_reset is None else float(told_reset)
+        return SavedLimit(until, guessed, strikes, cleared, saved["reset_told"], told, told_reset)
 
     def restore(self, saved: SavedLimit) -> None:
-        """Stops the roles again until their saved reset, without `on_hit`: the User heard of it before. A reset
-        already past clears on the next loop turn, through `on_clear`."""
+        """Stops the roles again until their saved reset, without `on_hit`: what the User has yet to hear is in
+        `news`. A reset already past clears on the next loop turn, through `on_clear`."""
         self._strikes, self._cleared_at, self._reset_told = dict(saved.strikes), dict(saved.cleared), saved.reset_told
+        self._told, self._told_reset = saved.told, saved.told_reset
         if not saved.until:
             return
         self._until, self._guessed = dict(saved.until), set(saved.guessed)
@@ -213,7 +274,8 @@ class UsageLimit:
                 announce = False
                 if not self._until:
                     self._cleared.set()
-                    announce, self._reset_told = not self._reset_told, True
+                    announce, self._told = self._told, False
+                    self._reset_told = self._reset_told or announce
                 self._on_clear(back, announce)
         finally:
             if self._timer is asyncio.current_task():

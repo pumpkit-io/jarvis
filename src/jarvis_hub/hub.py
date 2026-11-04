@@ -29,7 +29,7 @@ from jarvis_hub.agents.backend import (
     TurnEnd,
 )
 from jarvis_hub.config import DEFAULT_TALKER_RESTART_AT
-from jarvis_hub.limits import SavedLimit, UsageLimit, reset_sentence
+from jarvis_hub.limits import SavedLimit, UsageLimit, reset_sentence, update_sentence
 from jarvis_hub.orchestrator import orchestrator_tools
 from jarvis_hub.state import Fields, StateFile, UnreadableState
 from jarvis_hub.subagents import Subagent, SubagentSetup, Subagents, ended_event, kept_line, over_time_event
@@ -401,11 +401,11 @@ class Hub:
         self._deferred: list[_OrchestratorInput] = []
         self._parked_news: list[_TalkerInput] = []
         self._announcing: set[asyncio.Task[None]] = set()
-        # Whether a Talker reply is on screen or being said, and the roles whose limit is told once it ends.
+        # Whether a Talker reply is on screen or being said, and whether the limit's news waits for it to end.
         self._replying = False
-        self._after_reply: list[str] = []
-        # Whether the User heard this episode's limit: a reset they never heard of is not news.
-        self._limit_told = False
+        self._news_after_reply = False
+        # Whether the limit's news is waiting for its turn to be told.
+        self._limit_news_pending = False
         # The User's own text in the Talker turn under way, for the Tasks it delegates.
         self._user_text: str | None = None
         self._subagents = Subagents(
@@ -637,7 +637,9 @@ class Hub:
         if parked:
             self._settled.clear()
         self._limit.restore(limit)
-        self._limit_told = bool(limit.until)
+        # A limited Talker tells the User itself, at their next line.
+        if self._limit.blocks("orchestrator") or self._limit.blocks("subagent"):
+            self._announce_limit_news()
 
     def _restore_held(self, held: list[_TalkerInput], quiet_mode: bool, needs_user: dict[str, str]) -> None:
         """Quiet mode and its news, then the parked news if the Talker is no longer limited, under its rules."""
@@ -956,7 +958,7 @@ class Hub:
                         end = event
                         self._limit.observe("talker", event)
                         if event.outcome == "limited" and show:
-                            shown += self._limit_notice(speech, self._limit.resets_at("talker"))
+                            shown += self._limit_notice(speech, self._limit.tell())
         finally:
             self._talker_gate.turn = None
             self._turn_spoken = self._turn_answers_user = self._replying = False
@@ -966,9 +968,9 @@ class Hub:
             end = TurnEnd("failed", end.usage, "the turn stopped without the Hub interrupting it")
         if show:
             self._output.reply_end()
-        for role in self._after_reply:
-            self._tell_limit(role)
-        self._after_reply.clear()
+        if self._news_after_reply:
+            self._news_after_reply = False
+            self._tell_limit_news()
         # A failed restart has its own notice.
         if end.outcome == "failed" and kind != "restart":
             self._output.notice(f"The Talker failed: {end.error}")
@@ -1173,55 +1175,69 @@ class Hub:
         speech = self._speech if item.spoken else _Silent()
         self._turn_count += 1
         speech.begin(self._lang, turn=self._turn_count, heard_at=item.arrived if item.kind == "user" else None)
-        shown = self._limit_notice(speech, self._limit.resets_at("talker"))
+        shown = self._limit_notice(speech, self._limit.tell())
         speech.end()
         self._output.reply_end()
         self._exchanges.append((item.message, shown))
         return TurnEnd("limited")
 
-    def _limit_notice(self, speech: Speech, resets_at: float | None) -> str:
-        """Prints the cached usage-limit line and the reset time, and says them in the reply `speech` has begun.
-        Returns what was shown."""
+    def _limit_notice(self, speech: Speech, resets_at: float | None, *, update: bool = False) -> str:
+        """Prints that the limit was reached, with the cached line, or that its reset moved, and says it in the reply
+        `speech` has begun. Returns what was shown."""
         lang = self._lang
-        when = reset_sentence(resets_at, lang, self._wall())
-        speech.say("usage_limit", lang, in_reply=True)
-        if when:
-            speech.feed(when)
+        if update:
+            text = update_sentence(resets_at, lang, self._wall())
+            speech.feed(text)
+        else:
+            when = reset_sentence(resets_at, lang, self._wall())
+            speech.say("usage_limit", lang, in_reply=True)
+            if when:
+                speech.feed(when)
+            text = f"{LINES['usage_limit'][lang]} {when}".strip()
         speech.block_end()
-        text = f"{LINES['usage_limit'][lang]} {when}".strip()
         self._output.reply(text)
-        self._limit_told = True
+        # The User heard it, which decides whether its reset is news after a restart.
+        self._persist()
         return text
 
-    def _limit_hit(self, role: str, first: bool) -> None:
+    def _limit_hit(self, role: str, news: bool) -> None:
         self._write({"kind": "usage_limit", "role": role, "resets_at": self._limit.resets_at(role)})
         self._persist()
         # A limited Talker tells the User itself, in the reply that hit it.
-        if first and role != "talker":
-            announcing = asyncio.create_task(self._announce_limit(role))
-            self._announcing.add(announcing)
-            announcing.add_done_callback(self._announcing.discard)
+        if news and role != "talker":
+            self._announce_limit_news()
 
-    async def _announce_limit(self, role: str) -> None:
-        """Tells the User once that the limit was reached: in voice mode as news, when the voice is quiet. Like news
-        that needs the User it gets through Quiet mode, since nothing they ask can be done until the reset."""
+    def _announce_limit_news(self) -> None:
+        if self._limit_news_pending:
+            return
+        self._limit_news_pending = True
+        announcing = asyncio.create_task(self._announce_limit())
+        self._announcing.add(announcing)
+        announcing.add_done_callback(self._announcing.discard)
+
+    async def _announce_limit(self) -> None:
+        """Tells the User the limit's news: in voice mode as news, when the voice is quiet. Like news that needs the
+        User it gets through Quiet mode, since nothing they ask can be done until the reset."""
         if self._floor is not None:
             while not self._input_ended.is_set():
                 await self._quiet()
                 if self._floor.announce():
                     break
         if self._replying:
-            self._after_reply.append(role)
+            self._news_after_reply = True
         else:
-            self._tell_limit(role)
+            self._tell_limit_news()
 
-    def _tell_limit(self, role: str) -> None:
-        if not self._limit.blocks(role):
+    def _tell_limit_news(self) -> None:
+        """Tells what the User has yet to hear of the limit as it stands now, which may be nothing by the time."""
+        self._limit_news_pending = False
+        notice = self._limit.news()
+        if notice is None:
             return
         speech = self._speech if self._floor is None or not self._input_ended.is_set() else _Silent()
         self._turn_count += 1
         speech.begin(self._lang, turn=self._turn_count, heard_at=None)
-        self._limit_notice(speech, self._limit.resets_at(role))
+        self._limit_notice(speech, notice.resets_at, update=notice.update)
         speech.end()
         self._output.reply_end()
 
@@ -1233,7 +1249,7 @@ class Hub:
             self._deferred.clear()
         if "talker" in roles:
             self._unpark()
-        if announce and self._limit_told:
+        if announce:
             text = (
                 "The usage limit has reset. Queued Subagents are starting and any waiting Task carries on. "
                 "Say so in one sentence."
@@ -1241,8 +1257,6 @@ class Hub:
             message = f'<event source="hub" reason="usage_reset">{text}</event>'
             # Ordinary news: batched into one Announcement with the rest, and held in Quiet mode.
             self._queue_news(_TalkerInput(message, "event", self._clock.now(), news="The usage limit has reset."))
-        if announce:
-            self._limit_told = False
         self._persist()
 
     def _park(self, item: _TalkerInput) -> int:

@@ -11,7 +11,7 @@ import pytest
 
 from jarvis_hub.hub import Hub
 from jarvis_hub.agents.backend import TurnEnd
-from jarvis_hub.limits import UsageLimit, reset_sentence
+from jarvis_hub.limits import Notice, UsageLimit, reset_sentence
 from jarvis_hub.voice.language import Lang
 from jarvis_hub.voice.speech import Speech
 from tests.fakes import (
@@ -698,9 +698,10 @@ async def test_a_limit_a_day_after_the_last_one_cleared_is_a_new_episode_even_if
 ) -> None:
     hits: list[tuple[str, bool]] = []
     clears: list[bool] = []
-    limit = UsageLimit(clock, clock.now, lambda role, first: hits.append((role, first)), lambda _, a: clears.append(a))
+    limit = UsageLimit(clock, clock.now, lambda role, news: hits.append((role, news)), lambda _, a: clears.append(a))
 
     limit.observe("subagent", TurnEnd("limited", resets_at=clock.now() + 600))
+    limit.news()
     clock.advance(600)
     await until(lambda: clears == [True])
     limit.observe("orchestrator", TurnEnd("completed"))
@@ -709,6 +710,7 @@ async def test_a_limit_a_day_after_the_last_one_cleared_is_a_new_episode_even_if
 
     assert hits == [("subagent", True), ("subagent", True)]
     assert limit.resets_at("subagent") == clock.now() + 60
+    limit.news()
     clock.advance(60)
     await until(lambda: len(clears) == 2)
     assert clears == [True, True]
@@ -825,3 +827,138 @@ async def test_a_warm_up_limit_that_clears_before_the_user_speaks_is_never_menti
     assert output.replies == ["Hello, sir."]
     assert not any('reason="usage_reset"' in m for m in talker_received(backend))
     await hub.close()
+
+
+async def test_a_notice_held_past_the_hold_that_started_it_tells_the_hold_still_on_and_its_reset(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    replying, orchestrating = asyncio.Event(), asyncio.Event()
+    backend = FakeBackend(
+        clock,
+        [[Text("On it, sir."), delegate("Fix A"), Gate(replying), Text("Working on it.")], [Text("Reset, sir.")]],
+        orchestrator=[[spawn("A"), Gate(orchestrating), Limited(None)]],
+        subagents={"A": [Limited(-30)]},
+    )
+    hub = make_hub(backend, output, metrics)
+    typist = Typist(clock)
+    run = await running(hub, typist)
+    typist.type("Fix A")
+
+    def hits() -> list[str]:
+        return [r["role"] for r in metrics.records if r.get("kind") == "usage_limit"]
+
+    await until(lambda: hits() == ["subagent"])
+    orchestrating.set()
+    await until(lambda: hits() == ["subagent", "orchestrator"])
+    clock.advance(60)
+    await until(lambda: any(r.get("kind") == "usage_reset" for r in metrics.records))
+    replying.set()
+    await until(lambda: len(output.replies) == 2)
+
+    assert output.replies == ["On it, sir. Working on it.", LINE]
+
+    clock.advance(840)
+    await until(lambda: any('reason="usage_reset"' in m for m in talker_received(backend)))
+    await stopped(hub, run)
+
+
+async def test_a_later_hit_that_pushes_the_reset_back_tells_the_user_once(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    orchestrating = asyncio.Event()
+    backend = FakeBackend(
+        clock,
+        [[Text("On it, sir."), delegate("Fix A")]],
+        orchestrator=[[spawn("A"), Gate(orchestrating), Limited(3600)]],
+        subagents={"A": [Limited(600)]},
+    )
+    hub = make_hub(backend, output, metrics)
+    typist = Typist(clock)
+    run = await running(hub, typist)
+    typist.type("Fix A")
+    await until(lambda: any(LINE in r for r in output.replies))
+    orchestrating.set()
+    await until(lambda: len(output.replies) == 3)
+    await asyncio.sleep(0.05)
+
+    assert output.replies == [
+        "On it, sir.",
+        f"{LINE} It resets at 12:26 AM.",
+        "It's now expected to reset at 1:16 AM.",
+    ]
+    await stopped(hub, run)
+
+
+async def test_a_limit_the_user_never_heard_of_is_told_after_a_restart_while_it_holds(
+    clock: FakeClock, metrics: RecordingMetrics, tmp_path: Path
+) -> None:
+    state = tmp_path / ".jarvis" / "state.json"
+    before = RecordingOutput()
+    never = asyncio.Event()
+    first_backend = FakeBackend(
+        clock, [[Text("On it, sir."), delegate("Check the CI"), Gate(never)]], orchestrator=[[Limited(600)]]
+    )
+    first = make_hub(first_backend, before, metrics, state_path=state)
+    typist = Typist(clock)
+    run = await running(first, typist)
+    typist.type("Is the CI green?")
+    await until(lambda: any(r.get("kind") == "usage_limit" for r in metrics.records))
+    await stopped(first, run)
+    assert not any(LINE in r for r in before.replies)
+
+    output = RecordingOutput()
+    second = make_hub(FakeBackend(clock, [[Text("Reset, sir.")]]), output, metrics, state_path=state)
+    run = await running(second, Typist(clock))
+    await until(lambda: output.replies)
+
+    assert output.replies == [f"{LINE} It resets at 12:26 AM."]
+    await stopped(second, run)
+
+
+async def test_a_limit_the_user_never_heard_of_that_reset_during_a_restart_is_not_announced(
+    clock: FakeClock, metrics: RecordingMetrics, tmp_path: Path
+) -> None:
+    state = tmp_path / ".jarvis" / "state.json"
+    never = asyncio.Event()
+    first_backend = FakeBackend(
+        clock, [[Text("On it, sir."), delegate("Check the CI"), Gate(never)]], orchestrator=[[Limited(600)]]
+    )
+    first = make_hub(first_backend, RecordingOutput(), metrics, state_path=state)
+    typist = Typist(clock)
+    run = await running(first, typist)
+    typist.type("Is the CI green?")
+    await until(lambda: any(r.get("kind") == "usage_limit" for r in metrics.records))
+    await stopped(first, run)
+    clock.advance(600)
+
+    output = RecordingOutput()
+    backend = FakeBackend(clock, [[Text("Reset, sir.")]], orchestrator=[[Text("Checking.")]])
+    second = make_hub(backend, output, metrics, state_path=state)
+    run = await running(second, Typist(clock))
+    await until(lambda: sum(r.get("kind") == "usage_reset" for r in metrics.records) == 1)
+    await asyncio.sleep(0.05)
+
+    assert not any(LINE in r for r in output.replies)
+    assert not any('reason="usage_reset"' in m for m in talker_received(backend))
+    await stopped(second, run)
+
+
+async def test_the_notice_names_the_latest_reset_among_the_held_roles_and_drops_once_none_holds(
+    clock: FakeClock,
+) -> None:
+    hits: list[tuple[str, bool]] = []
+    limit = UsageLimit(clock, clock.now, lambda role, news: hits.append((role, news)), lambda roles, announce: None)
+
+    limit.observe("subagent", TurnEnd("limited", resets_at=clock.now() + 600))
+    limit.observe("orchestrator", TurnEnd("limited", resets_at=clock.now() + 1800))
+    assert limit.news() == Notice(clock.now() + 1800, update=False)
+    assert limit.news() is None
+
+    limit.observe("talker", TurnEnd("limited"))
+    assert hits == [("subagent", True), ("orchestrator", True), ("talker", True)]
+    assert limit.news() == Notice(None, update=True)
+
+    clock.advance(1800)
+    await until(lambda: not limit.active)
+    assert limit.news() is None
+    await limit.close()
