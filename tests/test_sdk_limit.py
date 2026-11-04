@@ -1,6 +1,5 @@
 """How the SDK backend tells a usage limit from other failures, and reads when it resets."""
 
-import time
 from collections.abc import AsyncIterator
 
 import pytest
@@ -33,28 +32,28 @@ def rejected(resets_at: int = 1_900_000_000) -> list[RateLimitInfo]:
 
 
 def test_an_error_after_a_rejected_rate_limit_event_is_a_limit_with_the_events_reset_time() -> None:
-    end = turn_end(result(result="You've hit your limit"), "sonnet", None, rejected(1_900_000_000))
+    end = turn_end(result(result="You've hit your limit"), "sonnet", None, rejected(1_900_000_000), now=0)
 
     assert (end.outcome, end.resets_at) == ("limited", 1_900_000_000)
 
 
 def test_a_bare_429_is_a_limit_with_no_reset_time() -> None:
-    end = turn_end(result(api_error_status=429), "sonnet", None)
+    end = turn_end(result(api_error_status=429), "sonnet", None, now=0)
 
     assert (end.outcome, end.resets_at) == ("limited", None)
 
 
 @pytest.mark.parametrize("status", [500, 529, None])
 def test_other_errors_stay_failures(status: int | None) -> None:
-    assert turn_end(result(api_error_status=status), "sonnet", None).outcome == "failed"
+    assert turn_end(result(api_error_status=status), "sonnet", None, now=0).outcome == "failed"
 
 
 def test_a_turn_that_succeeded_is_not_a_limit_whatever_the_events_said() -> None:
-    assert turn_end(result(is_error=False), "sonnet", None, rejected()).outcome == "completed"
+    assert turn_end(result(is_error=False), "sonnet", None, rejected(), now=0).outcome == "completed"
 
 
 def test_an_interrupt_is_not_a_limit() -> None:
-    end = turn_end(result(terminal_reason="aborted_streaming"), "sonnet", None, rejected())
+    end = turn_end(result(terminal_reason="aborted_streaming"), "sonnet", None, rejected(), now=0)
 
     assert end.outcome == "interrupted"
 
@@ -115,11 +114,10 @@ async def test_the_reset_is_the_latest_among_the_windows_still_rejected() -> Non
 
 
 async def test_a_window_with_no_reset_time_counts_as_the_fallback_wait_so_an_earlier_known_reset_is_not_taken() -> None:
-    soon = int(time.time()) + 60
     client = ScriptedClient(
-        [limit_event("rejected", soon, "five_hour"), limit_event("rejected", None, "seven_day"), result()]
+        [limit_event("rejected", 1060, "five_hour"), limit_event("rejected", None, "seven_day"), result()]
     )
-    session = SdkSession(client, "sonnet")  # type: ignore[arg-type]
+    session = SdkSession(client, "sonnet", wall=lambda: 1000.0)  # type: ignore[arg-type]
 
     events = [e async for e in session.send("hi")]
 
@@ -127,10 +125,9 @@ async def test_a_window_with_no_reset_time_counts_as_the_fallback_wait_so_an_ear
 
 
 def test_a_known_reset_later_than_the_fallback_wait_wins_over_a_window_with_none() -> None:
-    late = int(time.time()) + 7200
-    windows = [limit_event("rejected", late).rate_limit_info, limit_event("rejected", None, "seven_day").rate_limit_info]
+    windows = [limit_event("rejected", 8200).rate_limit_info, limit_event("rejected", None, "seven_day").rate_limit_info]
 
-    assert turn_end(result(), "sonnet", None, windows).resets_at == late
+    assert turn_end(result(), "sonnet", None, windows, now=1000).resets_at == 8200
 
 
 class ScriptedClient:

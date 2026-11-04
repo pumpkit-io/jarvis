@@ -199,10 +199,15 @@ def binding(events: Sequence[RateLimitInfo]) -> list[RateLimitInfo]:
 
 
 def turn_end(
-    result: ResultMessage, model: str, last_request: dict[str, Any] | None, rejected: Sequence[RateLimitInfo] = ()
+    result: ResultMessage,
+    model: str,
+    last_request: dict[str, Any] | None,
+    rejected: Sequence[RateLimitInfo] = (),
+    *,
+    now: float,
 ) -> TurnEnd:
     """The context comes from `last_request`, the final model request: the result's usage counts the prompt once per
-    tool round. A limit resets when the last of the `rejected` (`binding`) windows does."""
+    tool round. A limit resets when the last of the `rejected` (`binding`) windows does. `now` is Unix seconds."""
     raw: dict[str, Any] = result.usage or {}
     usage = Usage(
         input_tokens=raw.get("input_tokens", 0),
@@ -224,7 +229,7 @@ def turn_end(
         known = [info.resets_at for info in rejected if info.resets_at is not None]
         resets_at: float | None = max(known) if known else None
         # A window with no reset time holds the fallback wait, which the limit applies to a reset of None.
-        if len(known) < len(rejected) and resets_at is not None and resets_at < time.time() + UNKNOWN_RESET_WAIT:
+        if len(known) < len(rejected) and resets_at is not None and resets_at < now + UNKNOWN_RESET_WAIT:
             resets_at = None
         return TurnEnd("limited", usage, "the usage limit was reached", context, no_context, resets_at)
     if result.is_error:
@@ -236,8 +241,9 @@ def turn_end(
 
 
 class SdkSession:
-    def __init__(self, client: ClaudeSDKClient, model: str) -> None:
+    def __init__(self, client: ClaudeSDKClient, model: str, wall: Callable[[], float] = time.time) -> None:
         self._client = client
+        self._wall = wall
         # The configured name, until the CLI's init message says which model it resolved it to.
         self._model = model
 
@@ -249,7 +255,7 @@ class SdkSession:
             await self._client.query(message)
             async for m in self._client.receive_response():
                 if isinstance(m, ResultMessage):
-                    yield turn_end(m, self._model, last_request, binding(limits))
+                    yield turn_end(m, self._model, last_request, binding(limits), now=self._wall())
                     return
                 if isinstance(m, RateLimitEvent):
                     limits.append(m.rate_limit_info)
