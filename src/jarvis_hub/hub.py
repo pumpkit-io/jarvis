@@ -215,6 +215,8 @@ class _TalkerInput:
     urgent: bool = False
     # The "while you were away" item, and the news it holds.
     away: bool = False
+    # News that the usage limit reset, which a new hit makes untrue before it is told.
+    reset: bool = False
     parts: tuple["_TalkerInput", ...] = ()
 
 
@@ -264,9 +266,9 @@ class _OrchestratorInput:
 # What the state file keeps of a message the Orchestrator has not answered yet.
 _UNANSWERED = Fields(("task_id", "message", "arrived", "last_check"), times=frozenset({"arrived"}))
 # What it keeps of news Quiet mode held that the User has not heard yet.
-_HELD = Fields(("message", "arrived", "details", "news"), times=frozenset({"arrived"}))
+_HELD = Fields(("message", "arrived", "details", "news", "reset"), times=frozenset({"arrived"}))
 # And of news the Talker could not tell while it was limited.
-_PARKED = Fields(("message", "arrived", "details", "news", "urgent", "count"), times=frozenset({"arrived"}))
+_PARKED = Fields(("message", "arrived", "details", "news", "urgent", "count", "reset"), times=frozenset({"arrived"}))
 
 
 class _TurnGate:
@@ -537,6 +539,12 @@ class Hub:
             self._persist()
             return
         held, self._held = self._held, []
+        self._news.appendleft(self._away_item(held, self._clock.now()))
+        self._arrived.set()
+        self._persist()
+
+    @staticmethod
+    def _away_item(held: list[_TalkerInput], arrived: float) -> _TalkerInput:
         # An item is several updates when it is news the limited Talker could not tell in one Announcement.
         count = sum(item.count for item in held)
         listed = "\n".join(f"- {item.news}" for item in held)
@@ -544,9 +552,31 @@ class Hub:
             [f"**While you were away**\n\n{listed}", *(item.details for item in held if item.details)]
         )
         message = "\n".join([away_message(count), *(item.message for item in held)])
-        away = _TalkerInput(message, "event", self._clock.now(), details, count=count, away=True, parts=tuple(held))
-        self._news.appendleft(away)
-        self._arrived.set()
+        return _TalkerInput(message, "event", arrived, details, count=count, away=True, parts=tuple(held))
+
+    def _drop_reset_news(self) -> None:
+        """A new hit makes the news that the limit reset untrue: it is dropped wherever it waits, held or in the
+        away item, and no longer counted as pending or among the updates."""
+        dropped = len(self._held)
+        self._held = [item for item in self._held if not item.reset]
+        dropped -= len(self._held)
+        news: deque[_TalkerInput] = deque()
+        for item in self._news:
+            parts = [part for part in item.parts if not part.reset]
+            if item.reset:
+                dropped += 1
+            elif item.away and len(parts) < len(item.parts):
+                dropped += len(item.parts) - len(parts)
+                if parts:
+                    news.append(self._away_item(parts, item.arrived))
+            else:
+                news.append(item)
+        self._news = news
+        if not dropped:
+            return
+        self._pending -= dropped
+        if self._pending == 0:
+            self._settled.set()
         self._persist()
 
     def _with_away(self, item: _TalkerInput) -> _TalkerInput:
@@ -631,7 +661,8 @@ class Hub:
 
     def _restore_limit(self, limit: SavedLimit, parked: list[_TalkerInput]) -> None:
         """Brings back the usage limit, without telling the User again, and the news the limited Talker kept. A
-        limit that reset while the Hub was down clears at once, with its one Announcement."""
+        limit that reset while the Hub was down clears at once, and its reset is announced once a turn of a held role
+        completes."""
         self._parked_news = parked
         self._pending += sum(item.count for item in parked)
         if parked:
@@ -1202,6 +1233,7 @@ class Hub:
 
     def _limit_hit(self, role: str, news: bool) -> None:
         self._write({"kind": "usage_limit", "role": role, "resets_at": self._limit.resets_at(role)})
+        self._drop_reset_news()
         self._persist()
         # A limited Talker tells the User itself, in the reply that hit it.
         if news and role != "talker":
@@ -1259,7 +1291,9 @@ class Hub:
         )
         message = f'<event source="hub" reason="usage_reset">{text}</event>'
         # Ordinary news: batched into one Announcement with the rest, and held in Quiet mode.
-        self._queue_news(_TalkerInput(message, "event", self._clock.now(), news="The usage limit has reset."))
+        self._queue_news(
+            _TalkerInput(message, "event", self._clock.now(), news="The usage limit has reset.", reset=True)
+        )
         self._persist()
 
     def _park(self, item: _TalkerInput) -> int:

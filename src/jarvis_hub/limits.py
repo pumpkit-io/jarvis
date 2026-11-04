@@ -178,7 +178,9 @@ class UsageLimit:
 
     def observe(self, role: str, end: TurnEnd) -> None:
         """A turn of `role` ended: a limited one stops the role, a completed one ends its part in the episode. When
-        that role was held and nothing is held now, the limit has really reset, if the User was told it was on."""
+        that role was held and nothing is held now, the limit has really reset, if the User was told it was on. An
+        episode that expired before this turn ended silently."""
+        self._expire()
         if end.outcome == "limited":
             self._hit(role, end.resets_at)
         elif end.outcome == "completed" and role not in self._until:
@@ -187,6 +189,16 @@ class UsageLimit:
             if resumed and self._told and not self._until:
                 self._told, self._told_reset = False, None
                 self._on_reset()
+
+    def _expire(self) -> None:
+        """Ends the part in the episode of every role whose hold cleared STRIKE_TTL ago. When none is left the
+        episode is over, and what the User heard of it with it."""
+        now = self._wall()
+        stale = [r for r in self._strikes if r not in self._until and now - self._cleared_at.get(r, 0.0) >= STRIKE_TTL]
+        self._leave_episode(stale)
+        if not self._until and not self._strikes:
+            # Nothing came back to complete: the hold the User heard of is long over, so the next limit is new.
+            self._told, self._told_reset = False, None
 
     def _leave_episode(self, roles: list[str]) -> None:
         for role in roles:
@@ -197,11 +209,6 @@ class UsageLimit:
         """Stops `role` until its reset, but never less than a wait that doubles with each hit in the episode: a
         reset time already past would otherwise retry at once, forever. A reset time not given is guessed."""
         now = self._wall()
-        stale = [r for r in self._strikes if r not in self._until and now - self._cleared_at.get(r, 0.0) >= STRIKE_TTL]
-        self._leave_episode(stale)
-        if not self._until and not self._strikes:
-            # Nothing came back to complete: the hold the User heard of is long over, so this is a new limit.
-            self._told, self._told_reset = False, None
         strikes = self._strikes[role] = self._strikes.get(role, 0) + 1
         self._cleared_at.pop(role, None)
         floor = now + min(MIN_WAIT * 2 ** (strikes - 1), MAX_WAIT)
@@ -250,7 +257,7 @@ class UsageLimit:
 
     def restore(self, saved: SavedLimit) -> None:
         """Stops the roles again until their saved reset, without `on_hit`: what the User has yet to hear is in
-        `news`. A reset already past clears on the next loop turn, through `on_clear`."""
+        `tell_news`. A reset already past clears on the next loop turn, through `on_clear`."""
         self._strikes, self._cleared_at = dict(saved.strikes), dict(saved.cleared)
         self._told, self._told_reset = saved.told, saved.told_reset
         if not saved.until:

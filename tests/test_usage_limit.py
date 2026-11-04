@@ -1050,3 +1050,22 @@ async def test_a_limit_still_on_after_the_hold_cleared_is_not_told_again_and_the
     assert sum('reason="usage_reset"' in m for m in talker_received(backend)) == 1
     assert output.replies[-1] == "The limit has reset, sir."
     await hub.close()
+
+
+async def test_an_episode_that_expired_ends_silently_when_another_role_completes_a_turn_later(
+    clock: FakeClock,
+) -> None:
+    resets: list[None] = []
+    limit = UsageLimit(clock, clock.now, lambda role, news: None, lambda roles: None, lambda: resets.append(None))
+
+    limit.observe("subagent", TurnEnd("limited"))
+    assert limit.tell_news() == Notice(None, update=False)
+    clock.advance(900)
+    await until(lambda: not limit.active)
+    clock.advance(3 * 3600)
+    limit.observe("subagent", TurnEnd("completed"))
+
+    assert resets == []
+    limit.observe("subagent", TurnEnd("limited"))
+    assert limit.tell_news() == Notice(None, update=False)
+    await limit.close()

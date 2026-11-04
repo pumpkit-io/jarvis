@@ -1087,3 +1087,40 @@ async def test_the_usage_limit_reset_is_held_in_quiet_mode_and_counted_with_the_
     assert lines[0].startswith('<event source="hub" away="2">2 updates while you were away')
     assert sorted(line.split()[1] for line in lines[1:]) == ['source="hub"', 'source="orchestrator"']
     assert any('reason="usage_reset"' in line for line in lines[1:])
+
+
+async def test_a_new_limit_drops_the_reset_news_held_in_quiet_mode_so_it_is_never_told_while_limited(
+    rig_for: MakeRig,
+) -> None:
+    limit_line = "I've reached the usage limit, sir."
+    delegating = [Text("Right away, sir."), Tool("delegate", {"request": "Check the CI", "context": ""})]
+    again = [Text("Once more, sir."), Tool("delegate", {"request": "Check again", "context": ""})]
+    report = Tool("report", {"task_id": "T1", "spoken": "The CI is green.", "needs_user": False})
+    rig: Rig = await rig_for(
+        delegating, QUIET, again, [Text(AWAY)], orchestrator=[[Limited(600)], [report], [Limited(600)]]
+    )
+    rig.audio.wake()
+    rig.audio.say("Check the CI")
+    await until(lambda: rig.state == "follow_up")
+    await rig.advance(6)
+    await until(lambda: limit_line in rig.player.texts)
+    await rig.advance(10)
+    rig.audio.wake()
+    rig.audio.say("Quiet mode, please")
+    await until(lambda: rig.state == "follow_up")
+    await rig.advance(6)
+    await rig.advance(600)
+    await until(lambda: reports(rig) == 1)
+    await rig.advance(60)
+    spoken_before = rig.player.texts.count(limit_line)
+
+    rig.typist.type("Check again")
+    await until(lambda: rig.player.texts.count(limit_line) == spoken_before + 1)
+    await rig.advance(60)
+    rig.audio.wake()
+    await rig.advance(6)
+    await until(lambda: AWAY in rig.player.texts)
+
+    lines = talker_received(rig)[-1].splitlines()
+    assert lines[0].startswith('<event source="hub" away="1">1 update while you were away')
+    assert not any('reason="usage_reset"' in m for m in talker_received(rig))
