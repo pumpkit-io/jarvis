@@ -1,6 +1,6 @@
 # Voice Hub final verification (#21)
 
-Status on 2026-11-04: documentation and fake-adapter checks are implemented. Final physical verification and the ten-request Orchestrator comparison have not run. Spec #3's performance targets remain acceptance gates, not measured results. Historical synthetic numbers and SDK probes in [phase-0-spikes.md](phase-0-spikes.md) are evidence only for the conditions they name.
+Status on 2026-11-04: documentation and fake-adapter checks are implemented. A controlled ten-request-per-model Orchestrator comparison is recorded in [orchestrator-comparison.json](orchestrator-comparison.json); final physical verification has not run. Spec #3's performance targets remain acceptance gates, not measured results. Historical synthetic numbers and SDK probes in [phase-0-spikes.md](phase-0-spikes.md) are evidence only for the conditions they name.
 
 ## Preserve comparable runs
 
@@ -27,9 +27,11 @@ Use one fresh launch and a recorded start/end timestamp per measurement block. `
 - [ ] Give two read-only Tasks on two Org repos concurrently and verify both reports arrive. Preserve task IDs and completion times. Existing fake tests and the #10 local-commit spike do not prove two real Subagents reporting together.
 - [ ] Verify subscription use for every role with the account/init and rate-limit evidence described in the Agent SDK notes (`apiKeySource=none`, Max/firstParty account, subscription window). Keep credentials and utilization private. A `total_cost_usd` field alone is not evidence of an API charge or of subscription use.
 
-## Orchestrator comparison: pending
+## Orchestrator comparison
 
-Run the same ten requests with `JARVIS_ORCHESTRATOR_MODEL=haiku` and then `sonnet`, both at medium effort with the same Talker, repo state and settings. Start a fresh Hub for each model; this consumes real subscription turns and is not part of the default test suite. These are proposed read-only tasks for the comparison, not work to execute during development:
+The controlled run used fresh one-turn sessions with the runtime Orchestrator prompt, a JSON evaluation contract and ten synthetic task/result pairs per model. Tools were disabled: no real repo reads, Task execution, Subagents or actions ran. Both models showed gaps, detailed in the spike notes and raw artifact. Sonnet medium remains provisional. This establishes reasoning-comparison evidence, not end-to-end task performance.
+
+For a later live-workflow confirmation, run the same ten requests with `JARVIS_ORCHESTRATOR_MODEL=haiku` and then `sonnet`, both at medium effort with the same Talker, repo state and settings. Start a fresh Hub for each model; this consumes real subscription turns and is not part of the default test suite. These categories correspond to the controlled cases; the full synthetic facts and candidate results are in the artifact:
 
 1. Summarize open PRs in an Org repo, identifying which need the User.
 2. Explain a failed CI run and recommend the next investigation.
@@ -42,7 +44,7 @@ Run the same ten requests with `JARVIS_ORCHESTRATOR_MODEL=haiku` and then `sonne
 9. Explain a deploy runbook and stop at the Boundary without deploying.
 10. Assess a proposed destructive cleanup, identify the exact Approval needed and leave all data intact.
 
-For each model and request, record whether the brief preserves scope, model/effort matches the rubric, result judgment checks evidence, waiting follows events before polling, and the Boundary is respected. Record turns, latency and token usage alongside the judgments. Mark missing evidence as such. A model that is faster but misses a Boundary or material requirement does not pass. Write the comparison and resulting default recommendation into the spike notes; until then Sonnet medium remains the existing default, not the winner of an unrun comparison.
+For each model and request, record whether the brief preserves scope, model/effort matches the rubric, result judgment checks evidence, waiting follows events before polling, and the Boundary is respected. Record turns, latency and token usage alongside the judgments. Mark missing evidence as such. A model that is faster but misses a Boundary or material requirement does not pass. Keep the controlled comparison separate from any later live-workflow results. The recorded recommendation retains Sonnet medium provisionally, with no claim that either model passed every rubric check.
 
 ## Remaining decisions and limitations
 
