@@ -157,12 +157,14 @@ def render(stats: Stats, since: datetime | None, until: datetime | None) -> str:
         total.cache_read_tokens += t.cache_read_tokens
         total.cache_creation_tokens += t.cache_creation_tokens
         total.duration_ms += t.duration_ms
-    skipped = [f"Skipped {stats.skipped} malformed rows."] if stats.skipped else []
+    footer = [f"Usage limit hits: {stats.limit_hits}"]
+    if stats.skipped:
+        footer.append(f"Skipped {stats.skipped} malformed rows.")
     if len(table) == 1:
-        return "\n".join([*out, "No turns logged in this range.", *skipped])
+        return "\n".join([*out, "No turns logged in this range.", "", *footer])
     table.append(_cells("total", total))
     out += _align(table, left=1)
-    out += ["", f"Usage limit hits: {stats.limit_hits}", *skipped, "", "Latency (ms)"]
+    out += ["", *footer, "", "Latency (ms)"]
     latency: list[tuple[str, ...]] = [("role", "metric", "n", "p50", "p90")]
     latency.append(_latency("talker", "first sentence", stats.first_sentence))
     for role in ROLES:

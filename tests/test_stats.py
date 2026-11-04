@@ -97,6 +97,14 @@ def test_an_empty_range_says_so() -> None:
     assert "No turns logged in this range." in render(summarise([]), None, None)
 
 
+def test_limit_hits_are_reported_even_when_no_turn_is_in_range() -> None:
+    hit = {"at": NOW.isoformat(), "kind": "usage_limit", "role": "subagent", "resets_at": None}
+
+    out = render(summarise([hit, hit]), None, None)
+
+    assert "No turns logged in this range." in out and "Usage limit hits: 2" in out
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
