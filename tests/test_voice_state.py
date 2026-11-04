@@ -25,6 +25,7 @@ from jarvis_hub.voice.state import (
     Voice,
     VoiceState,
     WakeWord,
+    barge_in_from,
     step,
 )
 
@@ -416,15 +417,20 @@ def test_the_wake_word_during_a_barge_in_stops_jarvis() -> None:
     assert actions == [SendTurn("What is running?", "en", 22.0, interrupted=True)]
 
 
-def test_barge_in_is_off_for_the_first_quarter_second_of_each_reply_and_after_each_resume() -> None:
-    voice, actions = run(*SPEAKING, BargeIn(11.5, 11.74))
-    assert actions[-1] != Pause()
-    voice, actions = run(BargeIn(11.6, 11.75), start=voice)
+def test_barge_ins_count_from_a_quarter_second_after_each_reply_starts_and_each_resume() -> None:
+    voice, _ = run(*SPEAKING)
+    assert barge_in_from(voice, TIMING) == pytest.approx(11.75)  # pyright: ignore[reportUnknownMemberType]
+    voice, actions = run(BargeIn(11.75, 11.95), start=voice)
     assert actions == [Pause()]
-    voice, actions = run(said("mhm", 12.2, 0.3, 0.3), BargeIn(12.3, 12.44), start=voice)
+    voice, actions = run(said("mhm", 12.2, 0.3, 0.3), start=voice)
     assert actions == [Resume()]
-    voice, actions = run(BargeIn(12.3, 12.45), start=voice)
-    assert actions == [Pause()]
+    assert barge_in_from(voice, TIMING) == pytest.approx(12.45)  # pyright: ignore[reportUnknownMemberType]
+
+
+@pytest.mark.parametrize("state", ["idle", "listening", "thinking", "follow_up"])
+def test_barge_ins_do_not_count_while_jarvis_is_not_heard(state: VoiceState) -> None:
+    assert barge_in_from(Voice(state=state, voiced_at=10.0), TIMING) is None
+    assert barge_in_from(Voice(state="announce"), TIMING) is None
 
 
 def test_a_second_backchannel_pauses_and_resumes_again() -> None:

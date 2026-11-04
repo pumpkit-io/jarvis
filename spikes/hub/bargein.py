@@ -26,7 +26,7 @@ from jarvis_hub.voice.bargein import Partial
 from jarvis_hub.voice.engines import EngineChoice, OpenWakeWord, WebRtcEchoCancellation, load_engines
 from jarvis_hub.voice.input import FRAME, SAMPLE_RATE, Engines, InputPipeline, Listening
 from jarvis_hub.voice.player import Samples
-from jarvis_hub.voice.state import BargeIn, Interrupt, Pause, Resume, Tick, Timing, Voice, WakeWord, step
+from jarvis_hub.voice.state import BargeIn, Interrupt, Pause, Resume, Tick, Timing, Voice, WakeWord, barge_in_from, step
 from jarvis_hub.voice.tts import KokoroSynthesizer
 
 TIMING = Timing(follow_up_s=6.0, announce_follow_up_s=4.0, listen_s=6.0, chime_s=0.5)
@@ -98,8 +98,9 @@ def run_case(engines: Engines, stt: TimedStt, reply24: Samples, user: Samples) -
     reply16 = soxr.resample(reply24, TTS_RATE, SAMPLE_RATE).astype(np.float32)
     frames = len(reply16) // FRAME
     pipeline = InputPipeline(engines, Listening(), record=lambda row: None)
-    pipeline.barge_in(True)
     voice = replace(Voice(state="speaking"), voiced_at=0.0)
+    since = barge_in_from(voice, TIMING)
+    pipeline.barge_in(since)
     rng = np.random.default_rng(0)
     played: list[Samples] = [np.zeros(FRAME, np.float32)] * ECHO_DELAY_FRAMES
     user_start = round(USER_AT_S * 100) * FRAME
@@ -126,6 +127,9 @@ def run_case(engines: Engines, stt: TimedStt, reply24: Samples, user: Samples) -
             if isinstance(event, Partial) and os.environ.get("DEBUG"):
                 print("   partial", repr(event.text), round(event.speech_s, 2), round(event.silent_s, 2))
             voice, actions = step(voice, event, TIMING)
+            if barge_in_from(voice, TIMING) != since:
+                since = barge_in_from(voice, TIMING)
+                pipeline.barge_in(since)
             for action in actions:
                 match action:
                     case Pause():
@@ -133,7 +137,6 @@ def run_case(engines: Engines, stt: TimedStt, reply24: Samples, user: Samples) -
                         out["pauses"].append(round(t, 2))
                     case Resume():
                         paused, k = False, max(0, k - REWIND_FRAMES)
-                        pipeline.barge_in(True)
                         out["decisions"].append(("resume", round(t, 2)))
                     case Interrupt():
                         out["decisions"].append(("stop", round(t, 2)))

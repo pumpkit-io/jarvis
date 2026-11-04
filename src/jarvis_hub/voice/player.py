@@ -26,6 +26,10 @@ class Clip:
         return len(self.samples) / self.sample_rate
 
 
+# How far back Jarvis picks up after a Backchannel, so the word the User spoke over is heard again.
+REWIND_MS = 300
+
+
 class Player(Protocol):
     def play(self, clip: Clip, *, starts_reply: bool = False) -> None:
         """Queue a clip to start the moment the one before it ends; `starts_reply` starts a new `played` record."""
@@ -35,7 +39,7 @@ class Player(Protocol):
         """Fade out and hold the place."""
         ...
 
-    def resume(self, rewind_ms: int = 300) -> None:
+    def resume(self, rewind_ms: int = REWIND_MS) -> None:
         """Go on from `rewind_ms` before where the pause left off, back across earlier clips if need be, fading in."""
         ...
 
@@ -128,7 +132,7 @@ class SoundPlayer:
         with self._lock:
             self._target = 0.0
 
-    def resume(self, rewind_ms: int = 300) -> None:
+    def resume(self, rewind_ms: int = REWIND_MS) -> None:
         with self._lock:
             if self._target == 1.0 or self._stopping:
                 return

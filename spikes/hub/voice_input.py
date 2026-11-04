@@ -198,8 +198,8 @@ class TimedInput:
     def capture(self, on: bool) -> None:
         self._capture.capture(on)
 
-    def barge_in(self, on: bool) -> None:
-        self._capture.barge_in(on)
+    def barge_in(self, since: float | None) -> None:
+        self._capture.barge_in(since)
 
     async def events(self) -> AsyncIterator[InputEvent]:
         async for event in self._capture.events():

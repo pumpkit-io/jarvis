@@ -31,7 +31,7 @@ class Timing:
     chime_s: float
     # From the pause, how long a Barge-in has to be told apart as a Backchannel or an Interruption.
     decide_s: float = 0.8
-    # From when Jarvis's voice starts or resumes, how long echo cancellation gets to settle before a Barge-in counts.
+    # From when Jarvis's voice starts or resumes, how long echo cancellation gets to settle before speech counts.
     guard_s: float = 0.25
 
 
@@ -250,6 +250,16 @@ def stop_phrase(text: str) -> Lang | None:
     return STOP_PHRASES.get(" ".join(_words(text)))
 
 
+def barge_in_from(voice: Voice, timing: Timing) -> float | None:
+    """From when the User's speech over Jarvis counts toward a Barge-in, or None while Jarvis's voice is not heard.
+
+    The audio input applies it, measuring speech from here, so speech already going at that time still counts.
+    """
+    if voice.state not in VOICED or voice.voiced_at is None:
+        return None
+    return voice.voiced_at + timing.guard_s
+
+
 def step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Action]]:
     after, actions = _step(voice, event, timing)
     if after.state not in VOICED:
@@ -292,10 +302,7 @@ def _step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Actio
             window = timing.announce_follow_up_s if voice.state == "announce" else timing.follow_up_s
             return replace(voice, state="follow_up", deadline=at + window), unpause
         case BargeIn(onset, at):
-            heard_since = voice.voiced_at
-            if voice.state not in VOICED or voice.barge is not None or heard_since is None:
-                return voice, []
-            if at < heard_since + timing.guard_s:
+            if barge_in_from(voice, timing) is None or voice.barge is not None:
                 return voice, []
             return replace(voice, barge=Barge(onset), deadline=at + timing.decide_s), [Pause()]
         case Partial(_, at):

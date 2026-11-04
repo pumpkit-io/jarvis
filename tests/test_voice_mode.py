@@ -1367,7 +1367,7 @@ async def test_mhm_twice_resumes_twice(rig_for: MakeRig) -> None:
 
     assert [e for e in rig.player.events if not e.startswith("play")] == ["pause", "resume 300"] * 2
     assert rig.state == "speaking"
-    assert rig.audio.watching[-1] is True
+    assert rig.audio.watching[-1] is not None
 
 
 async def test_a_cough_pauses_jarvis_only_briefly(rig_for: MakeRig) -> None:
@@ -1397,7 +1397,7 @@ async def test_wait_stop_stops_jarvis_and_listens_and_the_turn_says_what_was_hea
     assert rig.player.voices[-1] != "chime"
     talker = rig.backend.session("talker")
     await until(lambda: not talker._sending)  # pyright: ignore[reportPrivateUsage]
-    assert rig.audio.capturing[-1] is True and rig.audio.watching[-1] is False
+    assert rig.audio.capturing[-1] is True and rig.audio.watching[-1] is None
 
     rig.audio.say("Wait, stop.")
     await until(lambda: len(talker_got(rig)) == 2)
@@ -1437,20 +1437,27 @@ async def test_jarvis_said_over_a_reply_always_stops_it(rig_for: MakeRig) -> Non
     assert talker_got(rig)[1] == '<interrupted spoken=""/>\n<user lang="en">What is running?</user>'
 
 
-async def test_speech_as_jarvis_starts_speaking_is_not_a_barge_in(rig_for: MakeRig) -> None:
-    rig = await rig_for(STORY)
+async def test_speech_inside_the_guard_is_ignored_and_a_later_barge_in_still_stops_jarvis(rig_for: MakeRig) -> None:
+    rig = await rig_for([*STORY, AwaitInterrupt()])
     rig.audio.wake()
     await until(lambda: rig.player.voices[-1:] == ["chime"])
     rig.player.hold = True
     rig.audio.say("Tell me a story")
     await until(lambda: rig.state == "speaking")
+    started = rig.clock.now()
+    assert rig.audio.watching[-1] == pytest.approx(started + 0.25)  # pyright: ignore[reportUnknownMemberType]
 
-    rig.audio.barge()
+    rig.audio.barge(held=0.3)
     await rig.advance(0.1)
     rig.audio.partial("Stop")
-    await rig.advance(1.0)
+    await rig.advance(0.4)
+    assert "pause" not in rig.player.events and rig.state == "speaking"
 
-    assert "pause" not in rig.player.events and "stop" not in rig.player.events
+    rig.audio.barge()
+    await until(lambda: rig.player.events[-1:] == ["pause"])
+    rig.audio.partial("Stop")
+    await until(lambda: rig.state == "listening")
+    assert "stop" in rig.player.events
 
 
 async def test_barge_in_is_watched_only_while_jarvis_speaks(rig_for: MakeRig) -> None:
@@ -1460,4 +1467,4 @@ async def test_barge_in_is_watched_only_while_jarvis_speaks(rig_for: MakeRig) ->
     rig.audio.say("Hello")
     await until(lambda: rig.state == "follow_up")
 
-    assert rig.audio.watching == [True, False]
+    assert [since is not None for since in rig.audio.watching] == [True, False]

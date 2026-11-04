@@ -11,7 +11,21 @@ import pytest
 from jarvis_hub.voice.bargein import Partial
 from jarvis_hub.voice.input import Engines, InputPipeline, Listening
 from jarvis_hub.voice.player import Samples
-from jarvis_hub.voice.state import BargeIn, Heard, SpeechStarted, WakeWord
+from jarvis_hub.voice.state import (
+    BargeIn,
+    Event,
+    Heard,
+    Pause,
+    ReplyAudio,
+    Resume,
+    SpeechStarted,
+    Tick,
+    Timing,
+    Voice,
+    WakeWord,
+    barge_in_from,
+    step,
+)
 
 RATE = 16_000
 FRAME = 160
@@ -336,7 +350,7 @@ def partials(r: Rig) -> list[Partial]:
 
 def test_speech_held_over_jarvis_for_the_minimum_is_a_barge_in_from_its_onset() -> None:
     r = rig()
-    r.pipeline.barge_in(True)
+    r.pipeline.barge_in(T0)
     r.feed("silence", 0.3)
     r.feed("speech", 0.18)
     assert barge_ins(r) == []
@@ -351,7 +365,7 @@ def test_speech_held_over_jarvis_for_the_minimum_is_a_barge_in_from_its_onset() 
 def test_a_barge_in_is_transcribed_at_about_400_and_700_ms_from_a_little_before_its_onset() -> None:
     r = rig()
     r.stt.text = "okay"
-    r.pipeline.barge_in(True)
+    r.pipeline.barge_in(T0)
     r.feed("silence", 1.0)
     r.feed("speech", 0.35)
     r.feed("silence", 1.0)
@@ -371,7 +385,7 @@ def test_a_barge_in_is_transcribed_at_about_400_and_700_ms_from_a_little_before_
 
 def test_a_cough_shorter_than_the_minimum_is_no_barge_in() -> None:
     r = rig()
-    r.pipeline.barge_in(True)
+    r.pipeline.barge_in(T0)
     r.feed("speech", 0.12)
     r.feed("silence", 0.1)
     r.feed("speech", 0.12)
@@ -383,7 +397,7 @@ def test_a_cough_shorter_than_the_minimum_is_no_barge_in() -> None:
 
 def test_the_minimum_speech_is_a_setting() -> None:
     r = rig(bargein_min_speech_s=0.4)
-    r.pipeline.barge_in(True)
+    r.pipeline.barge_in(T0)
     r.feed("speech", 0.3)
     assert barge_ins(r) == []
     r.feed("speech", 0.15)
@@ -393,8 +407,8 @@ def test_the_minimum_speech_is_a_setting() -> None:
 def test_without_barge_in_watching_speech_is_nothing() -> None:
     r = rig()
     r.feed("speech", 1.0)
-    r.pipeline.barge_in(True)
-    r.pipeline.barge_in(False)
+    r.pipeline.barge_in(T0)
+    r.pipeline.barge_in(None)
     r.feed("silence", 1.0)
     r.feed("speech", 1.0)
 
@@ -407,7 +421,7 @@ def test_jarvis_cancelled_out_of_the_input_is_never_a_barge_in() -> None:
             return np.zeros_like(frame)
 
     r = rig(echo=CancelsAll())
-    r.pipeline.barge_in(True)
+    r.pipeline.barge_in(T0)
     r.feed("speech", 2.0)
 
     assert r.events == []
@@ -415,9 +429,9 @@ def test_jarvis_cancelled_out_of_the_input_is_never_a_barge_in() -> None:
 
 def test_watching_again_forgets_the_barge_in_and_needs_speech_held_anew() -> None:
     r = rig()
-    r.pipeline.barge_in(True)
+    r.pipeline.barge_in(T0)
     r.feed("speech", 0.5)
-    r.pipeline.barge_in(True)
+    r.pipeline.barge_in(T0)
     r.feed("speech", 1.0)
     assert len(barge_ins(r)) == 1
     assert len(partials(r)) == 1
@@ -429,11 +443,11 @@ def test_watching_again_forgets_the_barge_in_and_needs_speech_held_anew() -> Non
 
 def test_a_turn_after_a_barge_in_keeps_the_users_audio_from_its_onset() -> None:
     r = rig()
-    r.pipeline.barge_in(True)
+    r.pipeline.barge_in(T0)
     r.feed("silence", 1.0)
     r.feed("speech", 0.5)
     r.pipeline.capture(True)
-    r.pipeline.barge_in(False)
+    r.pipeline.barge_in(None)
     r.feed("speech", 1.0)
     r.feed("silence", 0.6)
 
@@ -444,7 +458,7 @@ def test_a_turn_after_a_barge_in_keeps_the_users_audio_from_its_onset() -> None:
 
 def test_each_time_the_barge_in_goes_quiet_it_is_transcribed_once() -> None:
     r = rig()
-    r.pipeline.barge_in(True)
+    r.pipeline.barge_in(T0)
     r.feed("speech", 0.8)
     r.feed("silence", 0.3)
     r.feed("speech", 0.2)
@@ -457,9 +471,77 @@ def test_each_time_the_barge_in_goes_quiet_it_is_transcribed_once() -> None:
 
 def test_a_barge_in_ends_with_its_speech() -> None:
     r = rig()
-    r.pipeline.barge_in(True)
+    r.pipeline.barge_in(T0)
     r.feed("speech", 0.3)
     r.feed("silence", 2.0)
     r.feed("speech", 0.3)
 
     assert len(barge_ins(r)) == 2
+
+
+TIMING = Timing(follow_up_s=6.0, announce_follow_up_s=4.0, listen_s=6.0, chime_s=0.5)
+
+
+class Duet:
+    """The pipeline's events through the voice state machine, which tells the pipeline from when Barge-ins count as
+    voice mode does, with Jarvis speaking a reply from `speak`."""
+
+    def __init__(self) -> None:
+        self.r = rig()
+        self.voice = Voice()
+        self.actions: list[object] = []
+        self.since: float | None = None
+        self.step(WakeWord(T0))
+        self.step(Heard("Tell me a story", "en", T0))
+
+    def step(self, event: Event) -> None:
+        self.voice, actions = step(self.voice, event, TIMING)
+        self.actions += actions
+        if (since := barge_in_from(self.voice, TIMING)) != self.since:
+            self.since = since
+            self.r.pipeline.barge_in(since)
+
+    def speak(self) -> None:
+        self.step(ReplyAudio(self.r.t, T0))
+
+    def feed(self, kind: str, seconds: float) -> None:
+        for _ in range(round(seconds * 100)):
+            seen = len(self.r.events)
+            self.r.feed(kind, 0.01)
+            for event in self.r.events[seen:]:
+                assert isinstance(event, (WakeWord, SpeechStarted, Heard, BargeIn, Partial))
+                self.step(event)
+            self.step(Tick(self.r.t))
+
+
+def test_echo_inside_the_guard_does_not_stop_a_later_barge_in() -> None:
+    d = Duet()
+    d.speak()
+    d.feed("speech", 0.22)
+    d.feed("silence", 0.3)
+    d.feed("speech", 1.5)
+
+    assert Pause() in d.actions
+
+
+def test_the_user_still_talking_as_a_reply_starts_is_a_barge_in_once_the_guard_has_passed() -> None:
+    d = Duet()
+    d.feed("speech", 0.3)
+    d.speak()
+    d.feed("speech", 1.5)
+
+    assert Pause() in d.actions
+
+
+def test_a_second_barge_in_just_after_a_resume_still_pauses() -> None:
+    d = Duet()
+    d.speak()
+    d.feed("silence", 0.5)
+    d.r.stt.text = "Mhm."
+    d.feed("speech", 0.3)
+    d.feed("silence", 0.2)
+    assert d.actions[-2:] == [Pause(), Resume()]
+    d.r.stt.text = "Wait"
+    d.feed("speech", 1.0)
+
+    assert [a for a in d.actions if a in (Pause(), Resume())] == [Pause(), Resume(), Pause()]

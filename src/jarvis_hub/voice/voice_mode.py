@@ -15,7 +15,6 @@ from jarvis_hub.voice.player import Player
 from jarvis_hub.voice.speech import ClipName, Metrics, Speech, SpeechClock
 from jarvis_hub.voice.state import (
     CAPTURING,
-    VOICED,
     Action,
     AnnouncementBegins,
     Chime,
@@ -34,12 +33,10 @@ from jarvis_hub.voice.state import (
     Timing,
     Voice,
     VoiceState,
+    barge_in_from,
     step,
 )
 from jarvis_hub.voice.tts import Synthesizer
-
-# How far back Jarvis picks up after a Backchannel, so the word the User spoke over is heard again.
-REWIND_MS = 300
 
 
 class AudioInput(Protocol):
@@ -51,8 +48,8 @@ class AudioInput(Protocol):
         """Whether speech becomes turns. The Wake word is listened for either way."""
         ...
 
-    def barge_in(self, on: bool) -> None:
-        """Whether speech held over Jarvis's voice is reported as a Barge-in, with partial transcripts.
+    def barge_in(self, since: float | None) -> None:
+        """Report speech held from `since` on as a Barge-in, with partial transcripts, or nothing with None.
         Each call forgets the Barge-in under way, so the next one needs speech held anew."""
         ...
 
@@ -141,6 +138,7 @@ class VoiceMode:
         self._notice = notice
         self._debug = debug
         self._voice = Voice()
+        self._barge_in_from: float | None = None
         # What the User heard of the voice they last cut off, for their next turn.
         self._heard_before_cut = ""
         self._idle = asyncio.Event()
@@ -235,6 +233,10 @@ class VoiceMode:
         after = self._voice.state
         if after != before:
             self._transition(before, after, event)
+        # After capture: a turn that starts now keeps the speech of the Barge-in that stopped Jarvis.
+        if (since := barge_in_from(self._voice, self._timing)) != self._barge_in_from:
+            self._barge_in_from = since
+            self._audio.barge_in(since)
         if self._voice.woke_at != woke_at:
             self._woke()
         return actions
@@ -266,10 +268,6 @@ class VoiceMode:
         capturing = after in CAPTURING
         if capturing != (before in CAPTURING):
             self._audio.capture(capturing)
-        # After capture: a turn that starts now keeps the speech of the Barge-in that stopped Jarvis.
-        voiced = after in VOICED
-        if voiced != (before in VOICED):
-            self._audio.barge_in(voiced)
         try:
             self._metrics.record({"kind": "voice", "from": before, "to": after, "on": type(event).__name__})
         except Exception as e:
@@ -294,8 +292,7 @@ class VoiceMode:
                 self._player.pause()
                 self._debug_notice("voice: paused for a Barge-in")
             case Resume():
-                self._player.resume(REWIND_MS)
-                self._audio.barge_in(self._voice.state in VOICED)
+                self._player.resume()
                 self._debug_notice("voice: resumed after a Backchannel")
             case Interrupt():
                 if self._voice.cut_off:

@@ -13,7 +13,7 @@ import time
 from collections import deque
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
@@ -151,7 +151,8 @@ class InputPipeline:
         # The start of the current unbroken speech, and whether it has already made a Barge-in.
         self._run: float | None = None
         self._run_spent = False
-        self._watching = False
+        # From when speech counts toward a Barge-in; None while not watching.
+        self._barge_from: float | None = None
         # The onset of the Barge-in under way, when its partials are due, and whether its going quiet was transcribed.
         self._barge: float | None = None
         self._partials_due: list[float] = []
@@ -162,9 +163,10 @@ class InputPipeline:
         if not on:
             self._turn = None
 
-    def barge_in(self, on: bool) -> None:
-        """Watch for Barge-ins, or stop. Either way the one under way is forgotten, and its speech raises no other."""
-        self._watching = on
+    def barge_in(self, since: float | None) -> None:
+        """Watch for Barge-ins in speech from `since` on, or stop with None. Either way the one under way is forgotten,
+        and its speech raises no other."""
+        self._barge_from = since
         self._barge = None
         self._partials_due = []
 
@@ -206,12 +208,13 @@ class InputPipeline:
 
     def _barge_events(self, at: float) -> list[InputEvent]:
         events: list[InputEvent] = []
-        run = self._run
-        held = run is not None and self._last_speech - run >= self._s.bargein_min_speech_s
-        if self._watching and self._barge is None and run is not None and held and not self._run_spent:
-            self._barge, self._run_spent, self._quiet_told = run, True, False
-            self._partials_due = [run + offset for offset in self._s.bargein_partials_s]
-            events.append(BargeIn(run, at))
+        since = self._barge_from
+        start = None if self._run is None or since is None else max(self._run, since)
+        held = start is not None and self._last_speech - start >= self._s.bargein_min_speech_s
+        if self._barge is None and start is not None and held and not self._run_spent:
+            self._barge, self._run_spent, self._quiet_told = start, True, False
+            self._partials_due = [start + offset for offset in self._s.bargein_partials_s]
+            events.append(BargeIn(start, at))
         if self._barge is None:
             return events
         quiet = at - self._last_speech >= TALKING_GAP_S
@@ -323,9 +326,13 @@ class Microphone:
 
 
 @dataclass(frozen=True)
-class _Switch:
-    name: Literal["capture", "barge_in"]
+class _Capture:
     on: bool
+
+
+@dataclass(frozen=True)
+class _BargeIn:
+    since: float | None
 
 
 # A real microphone never gives exact digital silence for this long; macOS gives it when access is denied.
@@ -355,7 +362,7 @@ class Capture:
         self._notice = notice
         self._source: FrameSource = source if source is not None else Microphone()
         # Frames and switches in the order they happened; None stops the thread.
-        self._frames: queue.SimpleQueue[tuple[Pcm, float] | _Switch | None] = queue.SimpleQueue()
+        self._frames: queue.SimpleQueue[tuple[Pcm, float] | _Capture | _BargeIn | None] = queue.SimpleQueue()
         self._max_backlog = round(backlog_s * 100)
         self._backlog = 0
         self._behind = False
@@ -374,10 +381,10 @@ class Capture:
         threading.Thread(target=self._run, name="capture", daemon=True).start()
 
     def capture(self, on: bool) -> None:
-        self._frames.put(_Switch("capture", on))
+        self._frames.put(_Capture(on))
 
-    def barge_in(self, on: bool) -> None:
-        self._frames.put(_Switch("barge_in", on))
+    def barge_in(self, since: float | None) -> None:
+        self._frames.put(_BargeIn(since))
 
     def reference(self, samples: Samples, rate: int) -> None:
         if (echo := self._echo) is not None:
@@ -427,11 +434,11 @@ class Capture:
         self._on_loop(self._notice, 'Listening for "Hey Jarvis".')
         silent = 0
         while (item := self._frames.get()) is not None:
-            if isinstance(item, _Switch):
-                if item.name == "capture":
-                    pipeline.capture(item.on)
-                else:
-                    pipeline.barge_in(item.on)
+            if isinstance(item, _Capture):
+                pipeline.capture(item.on)
+                continue
+            if isinstance(item, _BargeIn):
+                pipeline.barge_in(item.since)
                 continue
             with self._backlog_lock:
                 self._backlog -= 1

@@ -25,7 +25,7 @@ from jarvis_hub.limits import UsageLimit
 from jarvis_hub.voice.language import Lang
 from jarvis_hub.subagents import Refusal, Subagent, SubagentSetup
 from jarvis_hub.waits import WaitSetup
-from jarvis_hub.voice.player import Clip, Samples
+from jarvis_hub.voice.player import REWIND_MS, Clip, Samples
 from jarvis_hub.voice.bargein import Partial
 from jarvis_hub.voice.state import BargeIn, Heard, InputEvent, SpeechStarted, WakeWord
 
@@ -600,7 +600,7 @@ class RecordingPlayer:
     def pause(self) -> None:
         self.events.append("pause")
 
-    def resume(self, rewind_ms: int = 300) -> None:
+    def resume(self, rewind_ms: int = REWIND_MS) -> None:
         self.events.append(f"resume {rewind_ms}")
 
     def stop(self) -> None:
@@ -633,7 +633,8 @@ class ScriptedAudio:
         self._clock = clock
         self._queue: asyncio.Queue[InputEvent] = asyncio.Queue()
         self.capturing: list[bool] = []
-        self.watching: list[bool] = []
+        # Each `barge_in` call's `since`.
+        self.watching: list[float | None] = []
         self._onset = 0.0
 
     def wake(self) -> None:
@@ -648,9 +649,13 @@ class ScriptedAudio:
         self._queue.put_nowait(Heard(text, lang, self._clock.now()))
 
     def barge(self, held: float = 0.2) -> None:
-        """Speech over Jarvis that began `held` seconds ago and has held since."""
-        self._onset = self._clock.now() - held
-        self._queue.put_nowait(BargeIn(self._onset, self._clock.now()))
+        """Speech over Jarvis that began `held` seconds ago and has held since: a Barge-in once 200 ms of it fall
+        after the latest `barge_in` call's `since`, as the pipeline counts it."""
+        now, since = self._clock.now(), self.watching[-1] if self.watching else None
+        if since is None or now - max(now - held, since) < 0.2 - 1e-9:
+            return
+        self._onset = max(now - held, since)
+        self._queue.put_nowait(BargeIn(self._onset, now))
 
     def partial(self, text: str, *, silent: float = 0.0) -> None:
         """What STT makes of the Barge-in's speech so far, which went quiet `silent` seconds ago."""
@@ -660,8 +665,8 @@ class ScriptedAudio:
     def capture(self, on: bool) -> None:
         self.capturing.append(on)
 
-    def barge_in(self, on: bool) -> None:
-        self.watching.append(on)
+    def barge_in(self, since: float | None) -> None:
+        self.watching.append(since)
 
     async def events(self) -> AsyncIterator[InputEvent]:
         while True:
