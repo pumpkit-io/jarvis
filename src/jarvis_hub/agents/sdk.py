@@ -3,6 +3,7 @@
 import json
 import re
 import shlex
+import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from typing import Any
 
@@ -45,6 +46,7 @@ from jarvis_hub.agents.backend import (
     TurnEnd,
     Usage,
 )
+from jarvis_hub.limits import UNKNOWN_RESET_WAIT
 
 TOOL_SERVER = "jarvis"
 # How the CLI reports a turn stopped by interrupt(); is_error is set for these too, so it cannot tell them apart.
@@ -187,8 +189,7 @@ def _window(result: ResultMessage, model: str) -> int | None:
 
 
 def binding(events: Sequence[RateLimitInfo]) -> list[RateLimitInfo]:
-    """The windows that stop the turn: each window's latest event of the turn, where it is rejected and extra usage
-    is not paying for the overflow. With extra usage on, a rejected window does not stop a request."""
+    """The windows that stop the turn: each window's latest event, when rejected with no extra usage paying for it."""
     latest = {info.rate_limit_type: info for info in events}
     return [
         info
@@ -200,11 +201,8 @@ def binding(events: Sequence[RateLimitInfo]) -> list[RateLimitInfo]:
 def turn_end(
     result: ResultMessage, model: str, last_request: dict[str, Any] | None, rejected: Sequence[RateLimitInfo] = ()
 ) -> TurnEnd:
-    """`last_request` is the usage of the turn's final model request: the context as that request saw it.
-
-    The result's own usage adds up every request of the turn, which would count the prompt once per tool round.
-    `rejected` is the turn's `binding` windows; the limit resets when the last of them does.
-    """
+    """The context comes from `last_request`, the final model request: the result's usage counts the prompt once per
+    tool round. A limit resets when the last of the `rejected` (`binding`) windows does."""
     raw: dict[str, Any] = result.usage or {}
     usage = Usage(
         input_tokens=raw.get("input_tokens", 0),
@@ -224,7 +222,10 @@ def turn_end(
         return TurnEnd("interrupted", usage, context=context, no_context=no_context)
     if result.is_error and (rejected or result.api_error_status == HTTP_TOO_MANY_REQUESTS):
         known = [info.resets_at for info in rejected if info.resets_at is not None]
-        resets_at = max(known) if known else None
+        resets_at: float | None = max(known) if known else None
+        # A window with no reset time holds the fallback wait, which the limit applies to a reset of None.
+        if len(known) < len(rejected) and resets_at is not None and resets_at < time.time() + UNKNOWN_RESET_WAIT:
+            resets_at = None
         return TurnEnd("limited", usage, "the usage limit was reached", context, no_context, resets_at)
     if result.is_error:
         detail = "; ".join(result.errors or []) or result.result or result.subtype

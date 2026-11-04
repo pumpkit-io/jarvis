@@ -1,5 +1,6 @@
 """How the SDK backend tells a usage limit from other failures, and reads when it resets."""
 
+import time
 from collections.abc import AsyncIterator
 
 import pytest
@@ -111,6 +112,25 @@ async def test_the_reset_is_the_latest_among_the_windows_still_rejected() -> Non
     events = [e async for e in session.send("hi")]
 
     assert events == [TurnEnd("limited", error="the usage limit was reached", resets_at=5_000)]
+
+
+async def test_a_window_with_no_reset_time_counts_as_the_fallback_wait_so_an_earlier_known_reset_is_not_taken() -> None:
+    soon = int(time.time()) + 60
+    client = ScriptedClient(
+        [limit_event("rejected", soon, "five_hour"), limit_event("rejected", None, "seven_day"), result()]
+    )
+    session = SdkSession(client, "sonnet")  # type: ignore[arg-type]
+
+    events = [e async for e in session.send("hi")]
+
+    assert events == [TurnEnd("limited", error="the usage limit was reached", resets_at=None)]
+
+
+def test_a_known_reset_later_than_the_fallback_wait_wins_over_a_window_with_none() -> None:
+    late = int(time.time()) + 7200
+    windows = [limit_event("rejected", late).rate_limit_info, limit_event("rejected", None, "seven_day").rate_limit_info]
+
+    assert turn_end(result(), "sonnet", None, windows).resets_at == late
 
 
 class ScriptedClient:
