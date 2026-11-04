@@ -5,6 +5,7 @@ import threading
 from collections.abc import AsyncIterator, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import CoroutineType
 from typing import Any, Literal
 
 import numpy as np
@@ -47,8 +48,11 @@ class FakeClock:
             sleeper.set()
         self._sleepers.clear()
 
-    async def sleep(self, seconds: float) -> None:
-        deadline = self.t + seconds
+    def sleep(self, seconds: float) -> "CoroutineType[Any, Any, None]":
+        # The deadline is taken at the call: a task made to sleep may first run after the test advanced the clock.
+        return self._sleep_until(self.t + seconds)
+
+    async def _sleep_until(self, deadline: float) -> None:
         while self.t < deadline:
             woken = asyncio.Event()
             self._sleepers.append(woken)

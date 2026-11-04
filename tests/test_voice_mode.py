@@ -357,7 +357,7 @@ async def test_a_spoken_ask_for_max_effort_reaches_the_subagent_and_its_end_is_a
     await rig.advance(6)
     assert rig.state == "idle"
     finish.set()
-    await until(lambda: "The typo fix is up, sir." in rig.player.texts)
+    await until(lambda: "The typo fix is up, sir." in rig.player.texts and rig.state == "follow_up")
 
     [subagent] = rig.backend.all_sessions("subagent")
     assert subagent.spec.effort == "max"
@@ -379,7 +379,8 @@ async def test_end_conversation_on_a_typed_line_leaves_the_spoken_exchange_its_f
     await until(lambda: rig.state == "thinking")
     typed_done.set()
     await until(lambda: "Green, sir." in rig.player.texts)
-    await until(lambda: rig.state != "speaking")
+    # The reply's text is played before its speaking state is stepped, so wait until both have passed.
+    await until(lambda: rig.state not in ("thinking", "speaking"))
 
     assert rig.state == "follow_up"
 
@@ -991,6 +992,8 @@ async def test_news_held_in_quiet_mode_survives_a_crash_and_opens_the_turn_after
         await arrive(first, arrival)
 
     second = await rig_for([Text(AWAY), Text(" Main is green, sir.")], state_path=crash(state, tmp_path))
+    # The warm-up turn runs in the background, so it is counted once it has gone to the Talker.
+    await until(lambda: talker_received(second) != [])
     turns = len(talker_received(second))
     await second.advance(60)
     assert len(talker_received(second)) == turns
@@ -1019,6 +1022,8 @@ async def test_after_a_restart_quiet_mode_holds_a_recovery_report_that_repeats_t
     second = await rig_for(
         [Text("One update, sir.")], state_path=crash(state, tmp_path), orchestrator=[[again]]
     )
+    # The warm-up turn runs in the background, so it is counted once it has gone to the Talker.
+    await until(lambda: talker_received(second) != [])
     turns = len(talker_received(second))
     await until(lambda: second.backend.all_sessions("orchestrator") != [])
     await second.advance(60)
