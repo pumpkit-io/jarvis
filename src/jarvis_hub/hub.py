@@ -404,6 +404,8 @@ class Hub:
         # Whether a Talker reply is on screen or being said, and the roles whose limit is told once it ends.
         self._replying = False
         self._after_reply: list[str] = []
+        # Whether the User heard this episode's limit: a reset they never heard of is not news.
+        self._limit_told = False
         # The User's own text in the Talker turn under way, for the Tasks it delegates.
         self._user_text: str | None = None
         self._subagents = Subagents(
@@ -635,6 +637,7 @@ class Hub:
         if parked:
             self._settled.clear()
         self._limit.restore(limit)
+        self._limit_told = bool(limit.until)
 
     def _restore_held(self, held: list[_TalkerInput], quiet_mode: bool, needs_user: dict[str, str]) -> None:
         """Quiet mode and its news, then the parked news if the Talker is no longer limited, under its rules."""
@@ -1187,6 +1190,7 @@ class Hub:
         speech.block_end()
         text = f"{LINES['usage_limit'][lang]} {when}".strip()
         self._output.reply(text)
+        self._limit_told = True
         return text
 
     def _limit_hit(self, role: str, first: bool) -> None:
@@ -1212,6 +1216,8 @@ class Hub:
             self._tell_limit(role)
 
     def _tell_limit(self, role: str) -> None:
+        if not self._limit.blocks(role):
+            return
         speech = self._speech if self._floor is None or not self._input_ended.is_set() else _Silent()
         self._turn_count += 1
         speech.begin(self._lang, turn=self._turn_count, heard_at=None)
@@ -1227,7 +1233,7 @@ class Hub:
             self._deferred.clear()
         if "talker" in roles:
             self._unpark()
-        if announce:
+        if announce and self._limit_told:
             text = (
                 "The usage limit has reset. Queued Subagents are starting and any waiting Task carries on. "
                 "Say so in one sentence."
@@ -1235,6 +1241,8 @@ class Hub:
             message = f'<event source="hub" reason="usage_reset">{text}</event>'
             # Ordinary news: batched into one Announcement with the rest, and held in Quiet mode.
             self._queue_news(_TalkerInput(message, "event", self._clock.now(), news="The usage limit has reset."))
+        if announce:
+            self._limit_told = False
         self._persist()
 
     def _park(self, item: _TalkerInput) -> int:

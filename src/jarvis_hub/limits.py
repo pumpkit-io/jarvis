@@ -15,6 +15,8 @@ UNKNOWN_RESET_WAIT = 15 * 60.0
 # The least a limit holds, doubled for each further hit of the same role in an episode, up to MAX_WAIT.
 MIN_WAIT = 60.0
 MAX_WAIT = 15 * 60.0
+# A role's hits stop counting this long after its hold cleared: a retry hits again at once, so a later hit is news.
+STRIKE_TTL = 3600.0
 # A reset further off than this is a weekly window, so the spoken time names its day.
 SAME_DAY = 18 * 3600.0
 
@@ -58,23 +60,18 @@ def reset_sentence(resets_at: float | None, lang: Lang, now: float) -> str:
 
 @dataclass(frozen=True)
 class SavedLimit:
-    """What the state file keeps of the limit: each stopped role's reset as Unix seconds, the roles whose reset is a
-    guess, each role's hits since its last successful turn, and whether this episode's reset was announced."""
+    """What the state file keeps of the limit, as `UsageLimit.dump` writes it. Times are Unix seconds."""
 
     until: dict[str, float] = field(default_factory=lambda: {})
     guessed: frozenset[str] = frozenset()
     strikes: dict[str, int] = field(default_factory=lambda: {})
+    cleared: dict[str, float] = field(default_factory=lambda: {})
     reset_told: bool = False
 
 
 class UsageLimit:
-    """Roles the limit has stopped, each until its own reset.
-
-    An episode runs from the first hit until every role it stopped has had a successful turn, so a reset that turns
-    out early (the next call is limited again) is not news. `on_hit` hears of every hit, with whether it is the
-    episode's first, which is the one the User is told of; `on_clear` of every set of roles that comes back, with
-    whether to announce the reset: once per episode, when no role is stopped any more.
-    """
+    """Roles the limit has stopped, each until its own reset. `on_hit` and `on_clear` flag one first hit and one reset
+    per episode, which a role leaves on a completed turn or STRIKE_TTL after its hold cleared."""
 
     def __init__(
         self,
@@ -91,8 +88,10 @@ class UsageLimit:
         self._until: dict[str, float] = {}
         # Roles whose reset time is a guess.
         self._guessed: set[str] = set()
-        # Role to its hits since its last successful turn: the episode is open while any role has one.
+        # Role to its hits in the episode, which is open while any role has one.
         self._strikes: dict[str, int] = {}
+        # Struck role, no longer stopped, to the Unix time its hold cleared.
+        self._cleared_at: dict[str, float] = {}
         self._reset_told = False
         self._cleared = asyncio.Event()
         self._cleared.set()
@@ -113,15 +112,25 @@ class UsageLimit:
         """A turn of `role` ended: a limited one stops the role, a completed one ends its part in the episode."""
         if end.outcome == "limited":
             self._hit(role, end.resets_at)
-        elif end.outcome == "completed" and self._strikes.pop(role, None) is not None and not self._strikes:
+        elif end.outcome == "completed":
+            self._leave_episode([role])
+
+    def _leave_episode(self, roles: list[str]) -> None:
+        for role in roles:
+            self._strikes.pop(role, None)
+            self._cleared_at.pop(role, None)
+        if not self._strikes:
             self._reset_told = False
 
     def _hit(self, role: str, resets_at: float | None) -> None:
         """Stops `role` until its reset, but never less than a wait that doubles with each hit in the episode: a
         reset time already past would otherwise retry at once, forever. A reset time not given is guessed."""
+        now = self._wall()
+        stale = [r for r in self._strikes if r not in self._until and now - self._cleared_at.get(r, 0.0) >= STRIKE_TTL]
+        self._leave_episode(stale)
         first = not self._strikes
         strikes = self._strikes[role] = self._strikes.get(role, 0) + 1
-        now = self._wall()
+        self._cleared_at.pop(role, None)
         floor = now + min(MIN_WAIT * 2 ** (strikes - 1), MAX_WAIT)
         self._guessed.discard(role)
         if resets_at is None:
@@ -140,6 +149,7 @@ class UsageLimit:
             "until": dict(self._until),
             "guessed": sorted(self._guessed),
             "strikes": dict(self._strikes),
+            "cleared": dict(self._cleared_at),
             "reset_told": self._reset_told,
         }
 
@@ -152,14 +162,15 @@ class UsageLimit:
         if not guessed <= until.keys():
             raise ValueError(f"guessed roles {sorted(guessed - until.keys())} have no reset time")
         strikes = {str(role): int(n) for role, n in dict(saved["strikes"]).items()}
+        cleared = {str(role): float(t) for role, t in dict(saved.get("cleared", {})).items()}
         if not isinstance(saved["reset_told"], bool):
             raise TypeError(f"reset_told is {saved['reset_told']!r}, not a bool")
-        return SavedLimit(until, guessed, strikes, saved["reset_told"])
+        return SavedLimit(until, guessed, strikes, cleared, saved["reset_told"])
 
     def restore(self, saved: SavedLimit) -> None:
         """Stops the roles again until their saved reset, without `on_hit`: the User heard of it before. A reset
         already past clears on the next loop turn, through `on_clear`."""
-        self._strikes, self._reset_told = dict(saved.strikes), saved.reset_told
+        self._strikes, self._cleared_at, self._reset_told = dict(saved.strikes), dict(saved.cleared), saved.reset_told
         if not saved.until:
             return
         self._until, self._guessed = dict(saved.until), set(saved.guessed)
@@ -192,10 +203,13 @@ class UsageLimit:
                 if (wait := soonest - self._wall()) > 0:
                     await self._clock.sleep(wait)
                     continue
-                back = frozenset(role for role, until in self._until.items() if until <= self._wall())
+                now = self._wall()
+                back = frozenset(role for role, until in self._until.items() if until <= now)
                 for role in back:
                     del self._until[role]
                     self._guessed.discard(role)
+                    if role in self._strikes:
+                        self._cleared_at[role] = now
                 announce = False
                 if not self._until:
                     self._cleared.set()
