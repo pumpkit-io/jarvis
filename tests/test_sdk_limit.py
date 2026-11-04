@@ -15,13 +15,24 @@ def result(**fields: object) -> ResultMessage:
     return ResultMessage(**{**base, **fields})  # type: ignore[arg-type]
 
 
-def limit_event(status: str, resets_at: int | None = 1_900_000_000, kind: str = "five_hour") -> RateLimitEvent:
-    info = RateLimitInfo(status=status, resets_at=resets_at, rate_limit_type=kind)  # type: ignore[arg-type]
+def limit_event(
+    status: str, resets_at: int | None = 1_900_000_000, kind: str = "five_hour", overage: str | None = None
+) -> RateLimitEvent:
+    info = RateLimitInfo(
+        status=status,  # type: ignore[arg-type]
+        resets_at=resets_at,
+        rate_limit_type=kind,  # type: ignore[arg-type]
+        overage_status=overage,  # type: ignore[arg-type]
+    )
     return RateLimitEvent(rate_limit_info=info, uuid="u", session_id="s")
 
 
+def rejected(resets_at: int = 1_900_000_000) -> list[RateLimitInfo]:
+    return [limit_event("rejected", resets_at).rate_limit_info]
+
+
 def test_an_error_after_a_rejected_rate_limit_event_is_a_limit_with_the_events_reset_time() -> None:
-    end = turn_end(result(result="You've hit your limit"), "sonnet", None, limit_event("rejected", 1_900_000_000))
+    end = turn_end(result(result="You've hit your limit"), "sonnet", None, rejected(1_900_000_000))
 
     assert (end.outcome, end.resets_at) == ("limited", 1_900_000_000)
 
@@ -38,19 +49,17 @@ def test_other_errors_stay_failures(status: int | None) -> None:
 
 
 def test_a_turn_that_succeeded_is_not_a_limit_whatever_the_events_said() -> None:
-    assert turn_end(result(is_error=False), "sonnet", None, limit_event("rejected")).outcome == "completed"
+    assert turn_end(result(is_error=False), "sonnet", None, rejected()).outcome == "completed"
 
 
 def test_an_interrupt_is_not_a_limit() -> None:
-    end = turn_end(result(terminal_reason="aborted_streaming"), "sonnet", None, limit_event("rejected"))
+    end = turn_end(result(terminal_reason="aborted_streaming"), "sonnet", None, rejected())
 
     assert end.outcome == "interrupted"
 
 
 async def test_the_session_keeps_the_latest_rejected_event_and_ignores_warnings() -> None:
-    client = ScriptedClient(
-        [limit_event("allowed_warning", 1), limit_event("rejected", 2), limit_event("allowed", 3), result()]
-    )
+    client = ScriptedClient([limit_event("allowed_warning", 1), limit_event("rejected", 2), result()])
     session = SdkSession(client, "sonnet")  # type: ignore[arg-type]
 
     events = [e async for e in session.send("hi")]
@@ -58,13 +67,61 @@ async def test_the_session_keeps_the_latest_rejected_event_and_ignores_warnings(
     assert events == [TurnEnd("limited", error="the usage limit was reached", resets_at=2)]
 
 
+@pytest.mark.parametrize(
+    ("turns", "outcome"),
+    [
+        ([[limit_event("rejected"), result(api_error_status=429)]], "limited"),
+        ([[limit_event("rejected", overage="allowed"), result(api_error_status=529)]], "failed"),
+        ([[limit_event("rejected", overage="allowed_warning"), result(api_error_status=500)]], "failed"),
+        ([[limit_event("rejected", overage="allowed"), result(api_error_status=429)]], "limited"),
+        ([[limit_event("allowed_warning"), result(api_error_status=529)]], "failed"),
+        ([[limit_event("rejected"), result(is_error=False)], [result(api_error_status=529)]], "failed"),
+        ([[limit_event("rejected"), limit_event("allowed"), result(api_error_status=529)]], "failed"),
+    ],
+    ids=[
+        "rejected and 429",
+        "rejected with overage allowed and 529",
+        "rejected with overage warning and 500",
+        "rejected with overage allowed and 429",
+        "a warning and 529",
+        "a rejected event in an earlier turn",
+        "a window rejected then allowed again",
+    ],
+)
+async def test_what_counts_as_the_usage_limit(turns: list[list[object]], outcome: str) -> None:
+    session = SdkSession(ScriptedClient(*turns), "sonnet")  # type: ignore[arg-type]
+
+    ends = [[e async for e in session.send("hi")][-1] for _ in turns]
+
+    assert isinstance(ends[-1], TurnEnd) and ends[-1].outcome == outcome
+
+
+async def test_the_reset_is_the_latest_among_the_windows_still_rejected() -> None:
+    client = ScriptedClient(
+        [
+            limit_event("rejected", 5_000, "seven_day"),
+            limit_event("rejected", 2_000, "five_hour"),
+            limit_event("rejected", 9_000, "seven_day_opus"),
+            limit_event("allowed", 9_500, "seven_day_opus"),
+            result(),
+        ]
+    )
+    session = SdkSession(client, "sonnet")  # type: ignore[arg-type]
+
+    events = [e async for e in session.send("hi")]
+
+    assert events == [TurnEnd("limited", error="the usage limit was reached", resets_at=5_000)]
+
+
 class ScriptedClient:
-    def __init__(self, messages: list[object]) -> None:
-        self._messages = messages
+    """Each `send` gets the next turn's messages."""
+
+    def __init__(self, *turns: list[object]) -> None:
+        self._turns = list(turns)
 
     async def query(self, message: str) -> None:
         pass
 
     async def receive_response(self) -> AsyncIterator[object]:
-        for m in self._messages:
+        for m in self._turns.pop(0):
             yield m

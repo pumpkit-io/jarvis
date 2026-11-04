@@ -3,7 +3,7 @@
 import json
 import re
 import shlex
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from typing import Any
 
 from claude_agent_sdk import (
@@ -26,6 +26,7 @@ from claude_agent_sdk.types import (
     HookInput,
     HookJSONOutput,
     McpServerConfig,
+    RateLimitInfo,
     SystemPromptPreset,
     ThinkingConfig,
 )
@@ -185,13 +186,24 @@ def _window(result: ResultMessage, model: str) -> int | None:
     return family[0]["contextWindow"] if len(family) == 1 else None
 
 
+def binding(events: Sequence[RateLimitInfo]) -> list[RateLimitInfo]:
+    """The windows that stop the turn: each window's latest event of the turn, where it is rejected and extra usage
+    is not paying for the overflow. With extra usage on, a rejected window does not stop a request."""
+    latest = {info.rate_limit_type: info for info in events}
+    return [
+        info
+        for info in latest.values()
+        if info.status == "rejected" and info.overage_status not in ("allowed", "allowed_warning")
+    ]
+
+
 def turn_end(
-    result: ResultMessage, model: str, last_request: dict[str, Any] | None, rejected: RateLimitEvent | None = None
+    result: ResultMessage, model: str, last_request: dict[str, Any] | None, rejected: Sequence[RateLimitInfo] = ()
 ) -> TurnEnd:
     """`last_request` is the usage of the turn's final model request: the context as that request saw it.
 
     The result's own usage adds up every request of the turn, which would count the prompt once per tool round.
-    `rejected` is the turn's last rate-limit event with status "rejected", which carries when the limit resets.
+    `rejected` is the turn's `binding` windows; the limit resets when the last of them does.
     """
     raw: dict[str, Any] = result.usage or {}
     usage = Usage(
@@ -210,8 +222,9 @@ def turn_end(
             no_context = f"no single model_usage entry is {model!r}: {', '.join(sorted(result.model_usage))}"
     if result.terminal_reason in INTERRUPTED_REASONS:
         return TurnEnd("interrupted", usage, context=context, no_context=no_context)
-    if result.is_error and (rejected is not None or result.api_error_status == HTTP_TOO_MANY_REQUESTS):
-        resets_at = rejected.rate_limit_info.resets_at if rejected is not None else None
+    if result.is_error and (rejected or result.api_error_status == HTTP_TOO_MANY_REQUESTS):
+        known = [info.resets_at for info in rejected if info.resets_at is not None]
+        resets_at = max(known) if known else None
         return TurnEnd("limited", usage, "the usage limit was reached", context, no_context, resets_at)
     if result.is_error:
         detail = "; ".join(result.errors or []) or result.result or result.subtype
@@ -230,15 +243,15 @@ class SdkSession:
     async def send(self, message: str) -> AsyncIterator[AgentEvent]:
         blocks: dict[int, dict[str, Any]] = {}
         last_request: dict[str, Any] | None = None
-        rejected: RateLimitEvent | None = None
+        limits: list[RateLimitInfo] = []
         try:
             await self._client.query(message)
             async for m in self._client.receive_response():
                 if isinstance(m, ResultMessage):
-                    yield turn_end(m, self._model, last_request, rejected)
+                    yield turn_end(m, self._model, last_request, binding(limits))
                     return
-                if isinstance(m, RateLimitEvent) and m.rate_limit_info.status == "rejected":
-                    rejected = m
+                if isinstance(m, RateLimitEvent):
+                    limits.append(m.rate_limit_info)
                 if isinstance(m, SystemMessage) and m.subtype == "init" and isinstance(m.data.get("model"), str):
                     self._model = m.data["model"]
                 if not isinstance(m, StreamEvent) or m.parent_tool_use_id is not None:
