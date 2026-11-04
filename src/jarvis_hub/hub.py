@@ -395,7 +395,7 @@ class Hub:
         self._interrupted: list[str] = []
         # The Orchestrator's messages from posting until their turn ends, saved so a restart loses none.
         self._unanswered: list[_OrchestratorInput] = []
-        self._limit = UsageLimit(clock, wall, self._limit_hit, self._limit_cleared)
+        self._limit = UsageLimit(clock, wall, self._limit_hit, self._limit_cleared, self._limit_reset)
         # Held until the usage limit resets, each still counted in `_pending` so a text-mode run waits for it: the
         # Orchestrator's messages, which stay unanswered and so saved, and the news the limited Talker could not take.
         self._deferred: list[_OrchestratorInput] = []
@@ -1241,7 +1241,7 @@ class Hub:
         speech.end()
         self._output.reply_end()
 
-    def _limit_cleared(self, roles: frozenset[str], announce: bool) -> None:
+    def _limit_cleared(self, roles: frozenset[str]) -> None:
         self._write({"kind": "usage_reset", "roles": sorted(roles)})
         if "orchestrator" in roles:
             for deferred in self._deferred:
@@ -1249,14 +1249,17 @@ class Hub:
             self._deferred.clear()
         if "talker" in roles:
             self._unpark()
-        if announce:
-            text = (
-                "The usage limit has reset. Queued Subagents are starting and any waiting Task carries on. "
-                "Say so in one sentence."
-            )
-            message = f'<event source="hub" reason="usage_reset">{text}</event>'
-            # Ordinary news: batched into one Announcement with the rest, and held in Quiet mode.
-            self._queue_news(_TalkerInput(message, "event", self._clock.now(), news="The usage limit has reset."))
+        self._persist()
+
+    def _limit_reset(self) -> None:
+        """A turn of a held role completed after its hold cleared: the reset is real, so the User hears of it."""
+        text = (
+            "The usage limit has reset. Queued Subagents are starting and any waiting Task carries on. "
+            "Say so in one sentence."
+        )
+        message = f'<event source="hub" reason="usage_reset">{text}</event>'
+        # Ordinary news: batched into one Announcement with the rest, and held in Quiet mode.
+        self._queue_news(_TalkerInput(message, "event", self._clock.now(), news="The usage limit has reset."))
         self._persist()
 
     def _park(self, item: _TalkerInput) -> int:

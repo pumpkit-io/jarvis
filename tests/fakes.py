@@ -317,7 +317,7 @@ class FakeBackend:
 
 def idle_limit(clock: FakeClock) -> UsageLimit:
     """A usage limit that nothing has hit, for a Subagents built without a Hub."""
-    return UsageLimit(clock, clock.now, lambda role, opened: None, lambda roles, everyone: None)
+    return UsageLimit(clock, clock.now, lambda role, opened: None, lambda roles: None, lambda: None)
 
 
 class RecordingOutput:

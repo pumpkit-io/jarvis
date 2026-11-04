@@ -86,6 +86,7 @@ class SavedLimit:
 
     until: dict[str, float] = field(default_factory=lambda: {})
     guessed: frozenset[str] = frozenset()
+    reported: dict[str, float] = field(default_factory=lambda: {})
     strikes: dict[str, int] = field(default_factory=lambda: {})
     cleared: dict[str, float] = field(default_factory=lambda: {})
     told: bool = False
@@ -94,31 +95,37 @@ class SavedLimit:
 
 class UsageLimit:
     """Roles the limit has stopped, each until its own reset, and what the User heard of it. The User hears of the
-    limit, not of a role: once that it was reached, again when a hit pushes the reset past what they heard, and that
-    it reset when the last hold clears, if they heard it was reached. A hit after an announced reset is news again,
-    since the User believes the limit is over. `on_hit` hears each hit and whether it brings news, `on_clear` the
-    roles back and whether to announce the reset."""
+    limit, not of a role: once that it was reached, again when a hit moves the reset later than they heard or makes
+    it unknown, and that it reset only once a turn of a role the limit held completes after its hold cleared, since
+    only then has work really resumed. A retry that is limited again is silent. A hit after an announced reset is
+    news again, since the User believes the limit is over. `on_hit` hears each hit and whether it brings news,
+    `on_clear` the roles whose hold ran out, `on_reset` that the reset is to be announced."""
 
     def __init__(
         self,
         clock: LimitClock,
         wall: Callable[[], float],
         on_hit: Callable[[str, bool], None],
-        on_clear: Callable[[frozenset[str], bool], None],
+        on_clear: Callable[[frozenset[str]], None],
+        on_reset: Callable[[], None],
     ) -> None:
         self._clock = clock
         self._wall = wall
         self._on_hit = on_hit
         self._on_clear = on_clear
+        self._on_reset = on_reset
         # Role to the Unix time it comes back.
         self._until: dict[str, float] = {}
         # Roles whose reset time is a guess.
         self._guessed: set[str] = set()
+        # Role to the reset its last hit reported, before the wait that backs off: what the User's notice compares.
+        self._reported: dict[str, float] = {}
         # Role to its hits in the episode, which is open while any role has one.
         self._strikes: dict[str, int] = {}
         # Struck role, no longer stopped, to the Unix time its hold cleared.
         self._cleared_at: dict[str, float] = {}
-        # Whether the User heard the limit is on, and the reset they heard, since the last reset they heard.
+        # Whether the User heard the limit is on, and the reset they heard, since the last reset they heard. Stays
+        # set while a hold has cleared but no held role has completed a turn yet.
         self._told = False
         self._told_reset: float | None = None
         self._cleared = asyncio.Event()
@@ -141,13 +148,21 @@ class UsageLimit:
         resets = [self.resets_at(role) for role in self._until]
         return None if None in resets else max(r for r in resets if r is not None)
 
+    def _latest_reported(self) -> float | None:
+        """Like `_latest`, but from the resets the hits reported, so a retry that backs off is not a later reset."""
+        resets = [None if r in self._guessed else self._reported.get(r, self._until[r]) for r in self._until]
+        return None if None in resets else max(r for r in resets if r is not None)
+
     def _news(self) -> bool:
         if not self._until:
             return False
         if not self._told:
             return True
-        latest = self._latest()
-        return self._told_reset is not None and (latest is None or latest > self._told_reset)
+        if self._told_reset is None:
+            return False
+        latest = self._latest_reported()
+        # A reset already past when reported only says "soon": it moves nothing the User heard.
+        return latest is None or latest > max(self._told_reset, self._wall())
 
     def tell(self) -> float | None:
         """The reset to tell the User, who now has heard it: the latest among the held roles. Only while active."""
@@ -162,11 +177,16 @@ class UsageLimit:
         return Notice(self.tell(), update)
 
     def observe(self, role: str, end: TurnEnd) -> None:
-        """A turn of `role` ended: a limited one stops the role, a completed one ends its part in the episode."""
+        """A turn of `role` ended: a limited one stops the role, a completed one ends its part in the episode. When
+        that role was held and nothing is held now, the limit has really reset, if the User was told it was on."""
         if end.outcome == "limited":
             self._hit(role, end.resets_at)
-        elif end.outcome == "completed":
+        elif end.outcome == "completed" and role not in self._until:
+            resumed = role in self._strikes
             self._leave_episode([role])
+            if resumed and self._told and not self._until:
+                self._told, self._told_reset = False, None
+                self._on_reset()
 
     def _leave_episode(self, roles: list[str]) -> None:
         for role in roles:
@@ -179,13 +199,19 @@ class UsageLimit:
         now = self._wall()
         stale = [r for r in self._strikes if r not in self._until and now - self._cleared_at.get(r, 0.0) >= STRIKE_TTL]
         self._leave_episode(stale)
+        if not self._until and not self._strikes:
+            # Nothing came back to complete: the hold the User heard of is long over, so this is a new limit.
+            self._told, self._told_reset = False, None
         strikes = self._strikes[role] = self._strikes.get(role, 0) + 1
         self._cleared_at.pop(role, None)
         floor = now + min(MIN_WAIT * 2 ** (strikes - 1), MAX_WAIT)
         self._guessed.discard(role)
+        self._reported.pop(role, None)
         if resets_at is None:
             self._guessed.add(role)
             resets_at = now + UNKNOWN_RESET_WAIT
+        else:
+            self._reported[role] = resets_at
         self._until[role] = max(resets_at, floor)
         self._cleared.clear()
         # Restarted so a role that comes back sooner than the one it is sleeping for is not kept waiting.
@@ -198,6 +224,7 @@ class UsageLimit:
         return {
             "until": dict(self._until),
             "guessed": sorted(self._guessed),
+            "reported": dict(self._reported),
             "strikes": dict(self._strikes),
             "cleared": dict(self._cleared_at),
             "told": self._told,
@@ -212,13 +239,14 @@ class UsageLimit:
         guessed = frozenset(str(role) for role in roles)
         if not guessed <= until.keys():
             raise ValueError(f"guessed roles {sorted(guessed - until.keys())} have no reset time")
+        reported = {str(role): float(t) for role, t in dict(saved.get("reported", {})).items() if role in until}
         strikes = {str(role): int(n) for role, n in dict(saved["strikes"]).items()}
         cleared = {str(role): float(t) for role, t in dict(saved.get("cleared", {})).items()}
         told, told_reset = saved.get("told", False), saved.get("told_reset")
         if not isinstance(told, bool):
             raise TypeError(f"told is {told!r}, not a bool")
         told_reset = None if told_reset is None else float(told_reset)
-        return SavedLimit(until, guessed, strikes, cleared, told, told_reset)
+        return SavedLimit(until, guessed, reported, strikes, cleared, told, told_reset)
 
     def restore(self, saved: SavedLimit) -> None:
         """Stops the roles again until their saved reset, without `on_hit`: what the User has yet to hear is in
@@ -228,6 +256,7 @@ class UsageLimit:
         if not saved.until:
             return
         self._until, self._guessed = dict(saved.until), set(saved.guessed)
+        self._reported = dict(saved.reported)
         self._cleared.clear()
         self._timer = asyncio.create_task(self._run())
 
@@ -262,13 +291,12 @@ class UsageLimit:
                 for role in back:
                     del self._until[role]
                     self._guessed.discard(role)
+                    self._reported.pop(role, None)
                     if role in self._strikes:
                         self._cleared_at[role] = now
-                announce = False
                 if not self._until:
                     self._cleared.set()
-                    announce, self._told = self._told, False
-                self._on_clear(back, announce)
+                self._on_clear(back)
         finally:
             if self._timer is asyncio.current_task():
                 self._timer = None
