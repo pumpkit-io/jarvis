@@ -1932,8 +1932,15 @@ async def test_an_x_post_request_must_say_whether_it_posts_now_or_schedules(
     )
 
 
-async def decided(specs: list[dict[str, Any]], said: str, approval_id: str) -> Approval | str:
-    """What `decide` returns for `said`, after Jarvis asked about every Approval of `specs` in one turn."""
+async def decided(
+    specs: list[dict[str, Any]],
+    said: str,
+    approval_id: str,
+    told: list[str] | None = None,
+    read_back: str | None = None,
+) -> Approval | str:
+    """What `decide` returns for `said`, after Jarvis asked about the Approvals `told` (every one of `specs` by
+    default) in one turn, and, with `read_back`, after a bare yes was refused and Jarvis replied `read_back`."""
     gh = StubGh(
         prs={f"pumpkit-io/{s['repo']}#{s['pr']}": ("OPEN", HEAD) for s in specs if s["action"] == "merge_pr"},
         branches={f"pumpkit-io/{s['repo']}:{s['branch']}": TIP for s in specs if s["action"] == "delete_branch"},
@@ -1941,7 +1948,11 @@ async def decided(specs: list[dict[str, Any]], said: str, approval_id: str) -> A
     approvals = Approvals(org="pumpkit-io", runner=gh, clock=FakeClock(), on_change=lambda: None, log=lambda e: None)
     asked = [await approvals.request(f"T{i}", spec) for i, spec in enumerate(specs, 1)]
     approvals.turn_began(None)
-    approvals.turn_ended(completed=True, told=[getattr(a, "id", "") for a in asked], said="")
+    approvals.turn_ended(completed=True, told=told or [getattr(a, "id", "") for a in asked], said="")
+    if read_back is not None:
+        approvals.turn_began("Yes.")
+        assert isinstance(approvals.decide(approval_id), str)
+        approvals.turn_ended(completed=True, told=[], said=read_back)
     approvals.turn_began(said)
     return approvals.decide(approval_id)
 
@@ -2213,3 +2224,105 @@ async def test_rules_printed_before_the_no_rulesets_error_still_keep_the_branch(
 
     refused, _ = results(session.backend, "orchestrator", "report")
     assert str(refused.result).startswith("Not asked: feat/old-idea is a protected branch of pumpkit-io/pumpkit")
+
+
+def posthog(description: str) -> dict[str, Any]:
+    return {"action": "subagent_action", "repo": "pumpkit", "grants": ["posthog_config"], "description": description}
+
+
+DEPLOY: dict[str, Any] = {
+    "action": "subagent_action", "repo": "pumpkit", "grants": [], "description": "deploy pumpkit release 42 now"
+}
+
+
+@pytest.mark.parametrize(
+    ("specs", "said"),
+    [
+        ([posthog("delete the PostHog dashboard Merge Stats")], "Merge it."),
+        ([posthog("delete the PostHog dashboard Post signups")], "Post it now."),
+        (
+            [posthog("delete the PostHog dashboard Post signups"), delete_spec("feat/jarvis", "jarvis")],
+            "Yes, post it now.",
+        ),
+        ([posthog("set PostHog flag merge-queue rollout to 9 percent"), merge_spec(6)], "Yes, merge 9."),
+        (
+            [posthog("turn off the PostHog survey on release notes"), delete_spec("feat/jarvis", "jarvis")],
+            "Release it.",
+        ),
+        ([DEPLOY], "Yes, deploy."),
+        ([DEPLOY], "Yes, release 42."),
+        ([DEPLOY], "Yes, the pumpkit repo."),
+        ([DEPLOY], "Do it now."),
+    ],
+)
+async def test_an_orchestrators_action_is_never_named_by_the_words_of_its_description(
+    specs: list[dict[str, Any]], said: str
+) -> None:
+    result = await decided(specs, said, "A1", told=["A1"])
+
+    assert isinstance(result, str) and result.startswith("Not approved"), result
+
+
+@pytest.mark.parametrize("said", ["Yes.", "Yes, go ahead.", "Do it, please."])
+async def test_a_plain_yes_approves_an_orchestrators_action_when_it_was_the_one_thing_asked(said: str) -> None:
+    specs = [posthog("set PostHog flag merge-queue rollout to 9 percent"), merge_spec(6)]
+
+    result = await decided(specs, said, "A1", told=["A1"])
+
+    assert isinstance(result, Approval) and result.id == "A1", result
+
+
+@pytest.mark.parametrize(("which", "said"), [("A1", "Yes, schedule it."), ("A2", "Yes."), ("A2", "Yes, go ahead.")])
+async def test_an_orchestrators_action_asked_beside_another_is_never_approved(which: str, said: str) -> None:
+    result = await decided([x_post(post="9", publish_at=FRIDAY_9), DEPLOY], said, which)
+
+    assert (which == "A1") == isinstance(result, Approval), result
+
+
+async def test_a_yes_naming_another_pending_approval_never_approves_the_orchestrators_action() -> None:
+    result = await decided([DEPLOY, merge_spec(6)], "Yes, merge 6.", "A1", ["A1"])
+
+    assert isinstance(result, str) and result.startswith("Not approved"), result
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Understood, sir. I won't merge 42 then; it stays open.",
+        "Very well, sir, I will not merge 42?",
+        "You mean merging 42, sir.",
+        "You mean merging 42 or deleting feat/jarvis, sir?",
+    ],
+)
+async def test_a_reply_that_is_not_one_plain_question_about_one_approval_is_no_read_back(reply: str) -> None:
+    specs = [merge_spec(42), delete_spec("feat/jarvis", "jarvis")]
+
+    result = await decided(specs, "Yes.", "A1", read_back=reply)
+
+    assert isinstance(result, str) and result.startswith("Not approved"), result
+
+
+@pytest.mark.parametrize(
+    ("specs", "reply"),
+    [
+        ([merge_spec(42), delete_spec("feat/jarvis", "jarvis")], "You mean merging 42, sir?"),
+        (
+            [posthog("delete the PostHog dashboard Merge Stats"), merge_spec(6)],
+            "Shall I delete the PostHog dashboard Merge Stats?",
+        ),
+    ],
+)
+async def test_a_question_reading_back_one_approval_lets_a_plain_yes_approve_it(
+    specs: list[dict[str, Any]], reply: str
+) -> None:
+    result = await decided(specs, "Yes.", "A1", read_back=reply)
+
+    assert isinstance(result, Approval) and result.id == "A1", result
+
+
+async def test_a_number_any_pending_approval_holds_is_ambiguous_even_when_that_one_was_not_asked() -> None:
+    specs = [merge_spec(9), merge_spec(10), x_post(publish_at=FRIDAY_9)]
+
+    result = await decided(specs, "yes 9", "A1", told=["A1", "A2"])
+
+    assert isinstance(result, str) and result.startswith("Not approved"), result

@@ -201,7 +201,8 @@ class _Names:
             post = {int(approval.post)} if approval.post and approval.post.isdigit() else set[int]()
             kinds = LEXICONS.kinds(said) | {_POST_KINDS[approval.post_action]}
             return _Names(frozenset(post), phrases, kinds, held, numbers(said) - post)
-        return _Names(numbers(said), phrases, LEXICONS.kinds(said))
+        # The Orchestrator wrote the text, so no word of it names the action; its numbers stay ambiguous for others.
+        return _Names(frozenset(), frozenset(), frozenset(), spoken=numbers(said))
 
     def features(self) -> set[_Feature]:
         out: set[_Feature] = {("n", n) for n in self.numbers}
@@ -221,6 +222,11 @@ def _without_numbers(phrase: Words) -> list[Words]:
             runs.append(phrase[start:i])
         start = i + n
     return runs
+
+
+def _free_text(approval: "Approval") -> bool:
+    """Whether `approval` is a Subagent action said in the Orchestrator's words: words never name it."""
+    return approval.action == "subagent_action" and approval.post_action is None
 
 
 def _naming_phrases(approval: "Approval") -> frozenset[Words]:
@@ -261,11 +267,29 @@ def _spoken(feature: _Feature) -> str:
     return f'"{" ".join(cast(Words, value)) if kind == "p" else value}"'
 
 
-def named(text: str, among: list["Approval"]) -> list["Approval"]:
-    """The Approvals `text` names by something no other of `among` shares: "merge" only when one is a merge."""
+def named(text: str, among: list["Approval"], ambiguous: frozenset[int] | None = None) -> list["Approval"]:
+    """The Approvals `text` names by something no other of `among` shares: "merge" only when one is a merge. The
+    `ambiguous` numbers, by default those `among` hold, name nothing."""
     names = {a.id: _Names.of(a).features() for a in among}
-    said = _said(words(text), (p for a in among for p in _Names.of(a).phrases), _held(among))
+    held = _held(among) if ambiguous is None else ambiguous
+    said = _said(words(text), (p for a in among for p in _Names.of(a).phrases), held)
     return [a for a in among if (names[a.id] & said) - set().union(*(names[b.id] for b in among if b is not a))]
+
+
+def _read_back(reply: str, pending: list["Approval"]) -> list["Approval"]:
+    """The Approvals `reply` asks the User about: none unless it is a question with no hold word ("I won't merge 42
+    then." asks nothing). It names them by their targets or, one in the Orchestrator's words, by its whole text."""
+    if not reply.strip().endswith("?") or LEXICONS.holding_back(reply.replace("?", " ")) is not None:
+        return []
+    said = list(words(reply))
+    read: list[Approval] = []
+    for approval in filter(_free_text, pending):
+        text = words(approval.text)
+        for i in found(said, text):
+            read += [approval] if approval not in read else []
+            # Its words are its text, not names of the others: "merge" in it never reads back a merge.
+            said[i : i + len(text)] = ["_"] * len(text)
+    return named(" ".join(said), pending, _held(pending)) + read
 
 
 def _held(among: Iterable["Approval"]) -> frozenset[int]:
@@ -482,7 +506,7 @@ class Approvals:
         self._read_back = False
         if not completed:
             self._last_said = ()
-        elif self._read_back_open and (read := named(said, self.pending())):
+        elif self._read_back_open and (read := _read_back(said, self.pending())):
             self._last_said, self._read_back = tuple(a.id for a in read), True
         else:
             self._last_said = tuple(told)
@@ -524,9 +548,12 @@ class Approvals:
         if approval not in candidates:
             self._read_back_open = True
             return f"Not approved: {approval.id} was not the last thing you asked the User about. {listing}"
+        if _free_text(approval):
+            return self._free_text_refusal(approval, candidates, said, listing)
         own = _Names.of(approval)
+        ambiguous = _held(pending)
         if len(candidates) > 1 or (len(pending) > 1 and not self._read_back):
-            chosen = named(heard, candidates)
+            chosen = named(heard, candidates, ambiguous)
             self._read_back_open = True
             if not chosen:
                 return f"Not approved: with more than one Approval in play, a bare yes does not say which. {listing}"
@@ -536,7 +563,7 @@ class Approvals:
         stray = _said(said, (p for a in pending for p in _Names.of(a).phrases)) - own.features()
         stray -= {("n", n) for n in own.held}
         if stray:
-            others = [a for a in named(heard, pending) if a is not approval]
+            others = [a for a in named(heard, pending, ambiguous) if a is not approval]
             what = f"{others[0].id} ({others[0].text})" if others else _spoken(min(stray, key=str))
             return f"Not approved: the User's words name {what}, which is not {approval.id} ({approval.text}). {nothing}"
         now = _NOW if "schedule" not in own.kinds else frozenset[Words]()
@@ -545,6 +572,26 @@ class Approvals:
             return (
                 f'Not approved: the User\'s words hold "{outside}", which is not part of a plain yes. {nothing} To '
                 f'approve, they say a plain yes, such as "{_plain_yes(approval)}".'
+            )
+        return None
+
+    def _free_text_refusal(
+        self, approval: Approval, candidates: list[Approval], said: Words, listing: str
+    ) -> str | None:
+        """Why a yes does not approve an action in the Orchestrator's words: it counts only as a plain yes, and only
+        when that action was the one thing just asked."""
+        if candidates != [approval] or len(self._last_said) != 1:
+            self._read_back_open = True
+            return (
+                f"Not approved: {approval.id} ({approval.text}) is approved only by a plain yes right after you asked "
+                f"about it alone. {listing}"
+            )
+        outside = LEXICONS.outside_plain_yes(said, (), frozenset(), frozenset())
+        if outside is not None:
+            return (
+                f'Not approved: the User\'s words hold "{outside}", which is not part of a plain yes. Nothing was '
+                'done; tell them so, and ask again only if they want it. To approve, they say a plain yes, such as '
+                '"yes, go ahead".'
             )
         return None
 
