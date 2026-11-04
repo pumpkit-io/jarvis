@@ -1979,3 +1979,10 @@ async def test_words_that_name_a_branch_choose_its_delete(said: str) -> None:
     result = await decided([merge_spec(), delete_spec("feat/old-idea")], said, "A2")
 
     assert isinstance(result, Approval) and (result.id, result.state) == ("A2", "approved")
+
+
+@pytest.mark.parametrize("said", ["yes ²", "yes, merge ٤٢"])
+async def test_digits_other_than_ascii_are_not_a_number_and_refuse_the_yes(said: str) -> None:
+    result = await decided([merge_spec()], said, "A1")
+
+    assert isinstance(result, str) and "which is not part of a plain yes" in result

@@ -147,12 +147,12 @@ _NUMBER_LEAD = frozenset({"number", "numero", "n"})
 
 
 def number_spans(said: Words) -> list[tuple[int, int, int]]:
-    """Where each whole number is said, as (start, length, value): in digits or as English or Italian words up to
+    """Where each whole number is said, as (start, length, value): in ASCII digits or as English or Italian words up to
     999, longest reading first."""
     out: list[tuple[int, int, int]] = []
     i = 0
     while i < len(said):
-        if said[i].isdigit():
+        if said[i].isascii() and said[i].isdigit():
             out.append((i, 1, int(said[i])))
             i += 1
             continue
