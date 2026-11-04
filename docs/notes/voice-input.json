@@ -1,0 +1,107 @@
+{
+  "date": "2026-11-03",
+  "ready_s": 4.92,
+  "wake_alone": {
+    "recall_at_0.5": {
+      "Hey Jarvis": "10/10",
+      "Hi Jarvis": "9/10",
+      "Ehi Jarvis": "3/10",
+      "Jarvis": "7/10"
+    },
+    "wake_after_phrase_end_ms": {
+      "n": 29,
+      "p50": 166.1,
+      "p90": 354.7,
+      "max": 386.5
+    },
+    "wake_phrase_sent_as_a_turn": 2
+  },
+  "one_breath": {
+    "turns": 30,
+    "missed": 1,
+    "transcript_exact": 16,
+    "transcript_within_one_word": 18,
+    "speech_end_to_turn_ms": {
+      "n": 29,
+      "p50": 756.5,
+      "p90": 803.8,
+      "max": 2254.1
+    },
+    "stt_ms": {
+      "n": 29,
+      "p50": 138.4,
+      "p90": 228.4,
+      "max": 249.0
+    },
+    "smart_turn_ms": {
+      "n": 29,
+      "p50": 23.9,
+      "p90": 30.9,
+      "max": 32.2
+    }
+  },
+  "pause_for_chime": {
+    "turns": 30,
+    "missed": 0,
+    "transcript_exact": 22,
+    "transcript_within_one_word": 24,
+    "speech_end_to_turn_ms": {
+      "n": 30,
+      "p50": 786.8,
+      "p90": 1040.6,
+      "max": 2161.7
+    },
+    "stt_ms": {
+      "n": 30,
+      "p50": 144.4,
+      "p90": 233.5,
+      "max": 382.8
+    },
+    "smart_turn_ms": {
+      "n": 30,
+      "p50": 24.0,
+      "p90": 31.8,
+      "max": 34.2
+    }
+  },
+  "follow_up": {
+    "window_s": 3.0,
+    "follow_up_turns_heard": "6/6"
+  },
+  "stop_phrases": "2/2 idled at once with no turn sent",
+  "requests_while_idle_sent": 0,
+  "requests_while_idle_played": 6,
+  "memory": {
+    "footprint_mb_at_start": 35.0,
+    "footprint_mb_after": 2140.0,
+    "mlx_active_mb": 1549,
+    "mlx_peak_mb": 2444,
+    "budget_mb": 4096
+  },
+  "versions": {
+    "parakeet-mlx": "0.6.0",
+    "openwakeword": "0.6.0",
+    "onnxruntime": "1.31.1",
+    "livekit": "1.2.0",
+    "mlx": "0.32.4",
+    "kokoro-mlx": "0.1.4"
+  },
+  "machine": "arm64",
+  "aec": "webrtc",
+  "settings": {
+    "listening": {
+      "wake_threshold": 0.5,
+      "vad_threshold": 0.5,
+      "end_silence_s": 0.5,
+      "end_extend_s": 1.5,
+      "smart_turn_threshold": 0.5,
+      "preroll_s": 1.5
+    },
+    "timing": {
+      "follow_up_s": 3.0,
+      "announce_follow_up_s": 2.0,
+      "listen_s": 3.0,
+      "chime_s": 0.5
+    }
+  }
+}

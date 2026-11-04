@@ -1,0 +1,333 @@
+{
+  "engine": "whisper.cpp server :2022 (ggml-small.bin)",
+  "source": "synthetic",
+  "load_ms": 105,
+  "latency_ms_p50": {
+    "short_all": 511.9,
+    "long_all": 604.2,
+    "short_en": 540.0,
+    "short_it": 488.9,
+    "long_en": 623.2,
+    "long_it": 592.2
+  },
+  "wer_pct": {
+    "all": 7.6,
+    "en": 2.7,
+    "it": 12.9
+  },
+  "partials": {
+    "0.4s": {
+      "ms_p50": 446.2,
+      "ms_max": 478.1,
+      "samples": [
+        "en01: 'What are you?' <- 'What are you working on?'",
+        "en02: '' <- 'Open a PR for the typo fix.'",
+        "en03: 'Canceled.' <- 'Cancel that.'",
+        "en04: 'is the sea.' <- 'Is the CI green on pumpkit?'",
+        "en05: '' <- 'Merge pull request forty two.'",
+        "en06: 'Wait.' <- 'Wait, stop.'"
+      ]
+    },
+    "0.6s": {
+      "ms_p50": 460.4,
+      "ms_max": 571.6,
+      "samples": [
+        "en01: 'What are you working for?' <- 'What are you working on?'",
+        "en02: 'Open a PR.' <- 'Open a PR for the typo fix.'",
+        "en03: 'Cancel that.' <- 'Cancel that.'",
+        "en04: 'is the sea.' <- 'Is the CI green on pumpkit?'",
+        "en05: '' <- 'Merge pull request forty two.'",
+        "en06: 'Wait.' <- 'Wait, stop.'"
+      ]
+    },
+    "0.8s": {
+      "ms_p50": 610.8,
+      "ms_max": 917.4,
+      "samples": [
+        "en01: 'What are you working for?' <- 'What are you working on?'",
+        "en02: 'Open a PR for me.' <- 'Open a PR for the typo fix.'",
+        "en03: 'Cancel that.' <- 'Cancel that.'",
+        "en04: 'is the C.I. Green.' <- 'Is the CI green on pumpkit?'",
+        "en05: 'Merge pool required.' <- 'Merge pull request forty two.'",
+        "en06: 'Wait.' <- 'Wait, stop.'"
+      ]
+    }
+  },
+  "memory_mb": {
+    "rss": 114,
+    "footprint": 740.0
+  },
+  "memory_note": "server process",
+  "clips": {
+    "en01": {
+      "lang": "en",
+      "kind": "short",
+      "seconds": 1.81,
+      "ms_p50": 534.2,
+      "ref": "What are you working on?",
+      "hyp": "What are you working on?",
+      "detected_lang": "english"
+    },
+    "en02": {
+      "lang": "en",
+      "kind": "short",
+      "seconds": 2.58,
+      "ms_p50": 598.4,
+      "ref": "Open a PR for the typo fix.",
+      "hyp": "Open a PR for the Typo fix.",
+      "detected_lang": "english"
+    },
+    "en03": {
+      "lang": "en",
+      "kind": "short",
+      "seconds": 1.37,
+      "ms_p50": 516.0,
+      "ref": "Cancel that.",
+      "hyp": "Cancel that.",
+      "detected_lang": "english"
+    },
+    "en04": {
+      "lang": "en",
+      "kind": "short",
+      "seconds": 2.22,
+      "ms_p50": 567.3,
+      "ref": "Is the CI green on pumpkit?",
+      "hyp": "Is the sea eye green on Pumpkit?",
+      "detected_lang": "english"
+    },
+    "en05": {
+      "lang": "en",
+      "kind": "short",
+      "seconds": 2.33,
+      "ms_p50": 517.0,
+      "ref": "Merge pull request forty two.",
+      "hyp": "Merge pool request 42",
+      "detected_lang": "english"
+    },
+    "en06": {
+      "lang": "en",
+      "kind": "short",
+      "seconds": 1.7,
+      "ms_p50": 543.7,
+      "ref": "Wait, stop.",
+      "hyp": "Wait, stop!",
+      "detected_lang": "english"
+    },
+    "en07": {
+      "lang": "en",
+      "kind": "short",
+      "seconds": 2.38,
+      "ms_p50": 608.0,
+      "ref": "Thanks Jarvis, that's all.",
+      "hyp": "Thanks, Jarvis. That's all.",
+      "detected_lang": "english"
+    },
+    "en08": {
+      "lang": "en",
+      "kind": "short",
+      "seconds": 1.79,
+      "ms_p50": 507.8,
+      "ref": "Turn on quiet mode.",
+      "hyp": "Turn on quiet mode.",
+      "detected_lang": "english"
+    },
+    "en09": {
+      "lang": "en",
+      "kind": "short",
+      "seconds": 1.95,
+      "ms_p50": 536.2,
+      "ref": "Show me the open issues.",
+      "hyp": "Show me the open issues.",
+      "detected_lang": "english"
+    },
+    "en10": {
+      "lang": "en",
+      "kind": "short",
+      "seconds": 2.58,
+      "ms_p50": 602.2,
+      "ref": "How many users signed up this week?",
+      "hyp": "How many users signed up this week?",
+      "detected_lang": "english"
+    },
+    "en11": {
+      "lang": "en",
+      "kind": "long",
+      "seconds": 6.3,
+      "ms_p50": 584.0,
+      "ref": "Open an issue in pumpkit about the scheduler skipping posts when the timezone changes, and assign it to me.",
+      "hyp": "Open an issue in Pumpkit about the scheduler skipping posts\n when the time zone changes and assign it to me.",
+      "detected_lang": "english"
+    },
+    "en12": {
+      "lang": "en",
+      "kind": "long",
+      "seconds": 6.32,
+      "ms_p50": 633.8,
+      "ref": "Ask a subagent to review the open pull request on motion studio and tell me if anything blocks the merge.",
+      "hyp": "Ask a sub agent to review the open pool request on motion\n studio and tell me if anything blocks the merge.",
+      "detected_lang": "english"
+    },
+    "en13": {
+      "lang": "en",
+      "kind": "long",
+      "seconds": 6.71,
+      "ms_p50": 602.6,
+      "ref": "Actually, instead of a new branch, add the fix to the existing pull request and rerun the tests on CI.",
+      "hyp": "Actually, instead of a new branch, add the fix to the\n existing pull request and rerun the tests on CI.",
+      "detected_lang": "english"
+    },
+    "en14": {
+      "lang": "en",
+      "kind": "long",
+      "seconds": 6.49,
+      "ms_p50": 650.7,
+      "ref": "When the deploy finishes, check the error rate in PostHog and let me know if it went up compared with yesterday.",
+      "hyp": "When the deploy finishes, check the error rate in post-hog\n and let me know if it went up compared with yesterday.",
+      "detected_lang": "english"
+    },
+    "en15": {
+      "lang": "en",
+      "kind": "long",
+      "seconds": 5.99,
+      "ms_p50": 623.2,
+      "ref": "Write a short summary of what changed in the sdlc skills this week and put the details on screen.",
+      "hyp": "Write a short summary of what changed in the SDLC skills\n this week and put the details on screen.",
+      "detected_lang": "english"
+    },
+    "it01": {
+      "lang": "it",
+      "kind": "short",
+      "seconds": 2.01,
+      "ms_p50": 493.8,
+      "ref": "Su cosa stai lavorando?",
+      "hyp": "Su cosa stai lavorando?",
+      "detected_lang": "italian"
+    },
+    "it02": {
+      "lang": "it",
+      "kind": "short",
+      "seconds": 2.46,
+      "ms_p50": 576.3,
+      "ref": "Apri una PR per la correzione.",
+      "hyp": "Apri una piere per la correzione.",
+      "detected_lang": "italian"
+    },
+    "it03": {
+      "lang": "it",
+      "kind": "short",
+      "seconds": 1.16,
+      "ms_p50": 463.8,
+      "ref": "Annulla.",
+      "hyp": "a nulla.",
+      "detected_lang": "italian"
+    },
+    "it04": {
+      "lang": "it",
+      "kind": "short",
+      "seconds": 2.2,
+      "ms_p50": 495.1,
+      "ref": "La CI è verde su pumpkit?",
+      "hyp": "La ciae verde su un pchit.",
+      "detected_lang": "italian"
+    },
+    "it05": {
+      "lang": "it",
+      "kind": "short",
+      "seconds": 2.16,
+      "ms_p50": 478.7,
+      "ref": "Aspetta, un attimo.",
+      "hyp": "Aspetta, un attimo!",
+      "detected_lang": "italian"
+    },
+    "it06": {
+      "lang": "it",
+      "kind": "short",
+      "seconds": 2.49,
+      "ms_p50": 484.6,
+      "ref": "Grazie Jarvis, basta così.",
+      "hyp": "Grazie Jarvis, basta così.",
+      "detected_lang": "italian"
+    },
+    "it07": {
+      "lang": "it",
+      "kind": "short",
+      "seconds": 2.39,
+      "ms_p50": 481.1,
+      "ref": "Attiva la modalità silenziosa.",
+      "hyp": "attiva la modalità silenziosa",
+      "detected_lang": "italian"
+    },
+    "it08": {
+      "lang": "it",
+      "kind": "short",
+      "seconds": 2.01,
+      "ms_p50": 493.2,
+      "ref": "Mostrami le issue aperte.",
+      "hyp": "Mostrami le isciwe perte.",
+      "detected_lang": "italian"
+    },
+    "it09": {
+      "lang": "it",
+      "kind": "short",
+      "seconds": 2.55,
+      "ms_p50": 497.6,
+      "ref": "Quanti utenti si sono iscritti oggi?",
+      "hyp": "quanti utenti si sono iscritti oggi?",
+      "detected_lang": "italian"
+    },
+    "it10": {
+      "lang": "it",
+      "kind": "short",
+      "seconds": 1.97,
+      "ms_p50": 478.2,
+      "ref": "Sì, procedi pure.",
+      "hyp": "Si, procedi pure.",
+      "detected_lang": "italian"
+    },
+    "it11": {
+      "lang": "it",
+      "kind": "long",
+      "seconds": 6.14,
+      "ms_p50": 587.5,
+      "ref": "Apri una issue su pumpkit per il problema dei post programmati che saltano quando cambia il fuso orario.",
+      "hyp": "Apri una issue su Pumpkit per il problema dei post program\nmatiche saltano quando cambia il fuso orario.",
+      "detected_lang": "italian"
+    },
+    "it12": {
+      "lang": "it",
+      "kind": "long",
+      "seconds": 6.06,
+      "ms_p50": 590.1,
+      "ref": "Chiedi a un subagente di rivedere la pull request aperta su motion studio e dimmi se qualcosa blocca il merge.",
+      "hyp": "Chiedi a un subagente di rivedere la pull request aperta su\n motion studio e dimmi se qualcosa blocca il match.",
+      "detected_lang": "italian"
+    },
+    "it13": {
+      "lang": "it",
+      "kind": "long",
+      "seconds": 6.35,
+      "ms_p50": 605.8,
+      "ref": "Anzi, invece di un nuovo branch, aggiungi la correzione alla pull request esistente e rilancia i test.",
+      "hyp": "Anzi, invece di un nuovo branch, aggiungi la correzione\n alla pull request esistente e rilancia i test.",
+      "detected_lang": "italian"
+    },
+    "it14": {
+      "lang": "it",
+      "kind": "long",
+      "seconds": 6.04,
+      "ms_p50": 614.2,
+      "ref": "Quando finisce il deploy, controlla il tasso di errori su PostHog e dimmi se è salito rispetto a ieri.",
+      "hyp": "Quando finisce\n il deploy controlla il tasso di errori su postog e dimmi se\n è salito rispetto a ieri.",
+      "detected_lang": "italian"
+    },
+    "it15": {
+      "lang": "it",
+      "kind": "long",
+      "seconds": 6.51,
+      "ms_p50": 592.2,
+      "ref": "Scrivi un breve riassunto di cosa è cambiato nelle skill sdlc questa settimana e mostrami i dettagli.",
+      "hyp": "Scrivi un breveri assunto di cosa è cambiato nelle schile\n SDLC questa settimana e mostrami i dettagli.",
+      "detected_lang": "italian"
+    }
+  }
+}

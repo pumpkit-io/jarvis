@@ -1,0 +1,61 @@
+[project]
+name = "jarvis-hub"
+version = "0.1.0"
+description = "The Jarvis Hub: the always-running process that holds the conversation and runs the agents."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "claude-agent-sdk>=0.2.177,<0.3",
+    "rich>=13",
+    "kokoro-mlx>=0.1.4,<0.2",
+    "mlx>=0.32.4",
+    "numpy>=2",
+    "sounddevice>=0.5",
+    "lingua-language-detector>=2.2",
+    # misaki needs this spaCy model and otherwise pip-installs it into whatever virtualenv is active.
+    "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+    "parakeet-mlx==0.6.0",
+    "openwakeword==0.6.0",
+    "onnxruntime>=1.20",
+    "livekit==1.2.0",
+]
+
+[project.scripts]
+jarvis-hub = "jarvis_hub.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+# For the spaCy model wheel, which is not on PyPI.
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jarvis_hub"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "pyright>=1.1.390",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "real_model: talks to the real model on the Max subscription; runs only with JARVIS_REAL_MODEL_TESTS=1",
+    "real_github: reads the Org on GitHub through gh; runs only with JARVIS_REAL_GITHUB_TESTS=1",
+]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+venvPath = "."
+venv = ".venv"
+
+[tool.uv]
+# Apple Silicon only (MLX); openWakeWord's tflite-runtime has no wheel to resolve elsewhere.
+environments = ["sys_platform == 'darwin' and platform_machine == 'arm64'"]

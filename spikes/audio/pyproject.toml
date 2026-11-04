@@ -1,0 +1,29 @@
+[project]
+name = "jarvis-audio-spikes"
+version = "0.0.0"
+description = "Throwaway Phase 0 audio benchmarks for the Jarvis v2 Hub (Ticket #5)."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "parakeet-mlx",
+  "mlx-whisper",
+  "kokoro-mlx",
+  "openwakeword>=0.6",
+  "onnxruntime",
+  "livekit",
+  "jiwer",
+  "lingua-language-detector",
+  "sounddevice",
+  "soundfile",
+  "numpy",
+  "scipy",
+  "psutil",
+  "httpx",
+  "huggingface-hub",
+  "transformers",
+  # misaki needs this spaCy model and otherwise pip-installs it into whatever venv is active.
+  "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+]
+
+[tool.uv]
+package = false
+environments = ["sys_platform == 'darwin' and platform_machine == 'arm64'"]

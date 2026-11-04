@@ -1,0 +1,2610 @@
+{
+ "about": "Numbers behind docs/notes/phase-0-spikes.md, section Tasks and the Orchestrator. One run per entry of spikes/hub/delegation.py over the 20 lines of docs/notes/talker-delegation.txt; a turn's line is the line it answered, or for an event turn the line whose Task it relayed (the last line typed before it). Times in ms from the line or event reaching the Hub; p50 and p90 interpolate linearly between ranks. text_before_first_tool is null for a turn without tool calls.",
+ "prompts": {
+  "A": "Hard rule: text before the first tool call; one sentence, delegate, then end your turn.",
+  "B": "A, plus the status example and 'end your turn with nothing more said'; delegate's result also carried a hint to end the turn.",
+  "C": "B without the hint in delegate's result, and 'say nothing after it' for 'end your turn'.",
+  "D": "C, plus delegate's description saying there is nothing to add after calling it. The committed prompts/talker.md and hub.py."
+ },
+ "stub_question": {
+  "broad": "the stub asked which repo for any Task message mentioning an issue",
+  "narrow": "the stub asked which repo only for a request starting 'Open an issue' or 'Apri una issue'"
+ },
+ "runs": [
+  {
+   "run": 1,
+   "talker_model": "sonnet",
+   "effort": "low",
+   "prompt": "A",
+   "stub_question": "broad",
+   "stub_report_delay_s": 0.0,
+   "ran_alongside_another_run": false,
+   "date": "2026-11-03",
+   "claude_agent_sdk": "0.2.177",
+   "claude_cli": "2.1.317",
+   "summary": {
+    "tool_using_turns": 17,
+    "text_before_first_tool": 14,
+    "first_tool_delegate": 12,
+    "first_tool_delegate_text_first": 12,
+    "first_tool_status": 3,
+    "first_tool_status_text_first": 0,
+    "user_turns": 20,
+    "user_first_sentence_p50": 1118,
+    "user_first_sentence_p90": 2141,
+    "user_first_sentence_p50_without_line_1": 1116
+   },
+   "turns": [
+    {
+     "line": 1,
+     "kind": "user",
+     "tools": [
+      "delegate",
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 2698,
+     "first_sentence_ms": 3161,
+     "outcome": "completed"
+    },
+    {
+     "line": 1,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 3103,
+     "first_sentence_ms": 3489,
+     "outcome": "completed"
+    },
+    {
+     "line": 2,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": false,
+     "first_delta_ms": 2052,
+     "first_sentence_ms": 2052,
+     "outcome": "completed"
+    },
+    {
+     "line": 3,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 695,
+     "first_sentence_ms": 1206,
+     "outcome": "completed"
+    },
+    {
+     "line": 3,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1331,
+     "first_sentence_ms": 1729,
+     "outcome": "completed"
+    },
+    {
+     "line": 4,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 569,
+     "first_sentence_ms": 1053,
+     "outcome": "completed"
+    },
+    {
+     "line": 4,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1526,
+     "first_sentence_ms": 2002,
+     "outcome": "completed"
+    },
+    {
+     "line": 5,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 700,
+     "first_sentence_ms": 700,
+     "outcome": "completed"
+    },
+    {
+     "line": 5,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1442,
+     "first_sentence_ms": 1908,
+     "outcome": "completed"
+    },
+    {
+     "line": 6,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 644,
+     "first_sentence_ms": 1119,
+     "outcome": "completed"
+    },
+    {
+     "line": 6,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1430,
+     "first_sentence_ms": 1780,
+     "outcome": "completed"
+    },
+    {
+     "line": 7,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": false,
+     "first_delta_ms": 2133,
+     "first_sentence_ms": 2133,
+     "outcome": "completed"
+    },
+    {
+     "line": 8,
+     "kind": "user",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 907,
+     "first_sentence_ms": 1047,
+     "outcome": "completed"
+    },
+    {
+     "line": 9,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 750,
+     "first_sentence_ms": 1148,
+     "outcome": "completed"
+    },
+    {
+     "line": 9,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1469,
+     "first_sentence_ms": 1822,
+     "outcome": "completed"
+    },
+    {
+     "line": 10,
+     "kind": "user",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 658,
+     "first_sentence_ms": 1092,
+     "outcome": "completed"
+    },
+    {
+     "line": 11,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 686,
+     "first_sentence_ms": 686,
+     "outcome": "completed"
+    },
+    {
+     "line": 11,
+     "kind": "event",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 2272,
+     "first_sentence_ms": 2378,
+     "outcome": "completed"
+    },
+    {
+     "line": 11,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1562,
+     "first_sentence_ms": 1562,
+     "outcome": "completed"
+    },
+    {
+     "line": 12,
+     "kind": "user",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 986,
+     "first_sentence_ms": 1085,
+     "outcome": "completed"
+    },
+    {
+     "line": 13,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 602,
+     "first_sentence_ms": 1116,
+     "outcome": "completed"
+    },
+    {
+     "line": 13,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1434,
+     "first_sentence_ms": 1787,
+     "outcome": "completed"
+    },
+    {
+     "line": 14,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": false,
+     "first_delta_ms": 2212,
+     "first_sentence_ms": 2213,
+     "outcome": "completed"
+    },
+    {
+     "line": 15,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 569,
+     "first_sentence_ms": 569,
+     "outcome": "completed"
+    },
+    {
+     "line": 15,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1402,
+     "first_sentence_ms": 1891,
+     "outcome": "completed"
+    },
+    {
+     "line": 16,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 675,
+     "first_sentence_ms": 675,
+     "outcome": "completed"
+    },
+    {
+     "line": 16,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1373,
+     "first_sentence_ms": 1847,
+     "outcome": "completed"
+    },
+    {
+     "line": 17,
+     "kind": "user",
+     "tools": [
+      "show"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 934,
+     "first_sentence_ms": 1076,
+     "outcome": "completed"
+    },
+    {
+     "line": 18,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 678,
+     "first_sentence_ms": 1216,
+     "outcome": "completed"
+    },
+    {
+     "line": 18,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 2133,
+     "first_sentence_ms": 2133,
+     "outcome": "completed"
+    },
+    {
+     "line": 19,
+     "kind": "user",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1165,
+     "first_sentence_ms": 1208,
+     "outcome": "completed"
+    },
+    {
+     "line": 20,
+     "kind": "user",
+     "tools": [
+      "end_conversation"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 683,
+     "first_sentence_ms": 1167,
+     "outcome": "completed"
+    }
+   ]
+  },
+  {
+   "run": 2,
+   "talker_model": "sonnet",
+   "effort": "low",
+   "prompt": "B",
+   "stub_question": "broad",
+   "stub_report_delay_s": 0.0,
+   "ran_alongside_another_run": false,
+   "date": "2026-11-03",
+   "claude_agent_sdk": "0.2.177",
+   "claude_cli": "2.1.317",
+   "summary": {
+    "tool_using_turns": 18,
+    "text_before_first_tool": 15,
+    "first_tool_delegate": 13,
+    "first_tool_delegate_text_first": 12,
+    "first_tool_status": 4,
+    "first_tool_status_text_first": 3,
+    "user_turns": 20,
+    "user_first_sentence_p50": 1116,
+    "user_first_sentence_p90": 2538,
+    "user_first_sentence_p50_without_line_1": 1087
+   },
+   "turns": [
+    {
+     "line": 1,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 2528,
+     "first_sentence_ms": 2528,
+     "outcome": "completed"
+    },
+    {
+     "line": 1,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1352,
+     "first_sentence_ms": 1772,
+     "outcome": "completed"
+    },
+    {
+     "line": 2,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 621,
+     "first_sentence_ms": 985,
+     "outcome": "completed"
+    },
+    {
+     "line": 3,
+     "kind": "user",
+     "tools": [
+      "delegate",
+      "end_conversation"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 626,
+     "first_sentence_ms": 892,
+     "outcome": "completed"
+    },
+    {
+     "line": 3,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 3538,
+     "first_sentence_ms": 3970,
+     "outcome": "completed"
+    },
+    {
+     "line": 4,
+     "kind": "user",
+     "tools": [
+      "delegate",
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 691,
+     "first_sentence_ms": 691,
+     "outcome": "completed"
+    },
+    {
+     "line": 4,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 3438,
+     "first_sentence_ms": 3756,
+     "outcome": "completed"
+    },
+    {
+     "line": 5,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 664,
+     "first_sentence_ms": 896,
+     "outcome": "completed"
+    },
+    {
+     "line": 5,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1411,
+     "first_sentence_ms": 1737,
+     "outcome": "completed"
+    },
+    {
+     "line": 6,
+     "kind": "user",
+     "tools": [
+      "delegate",
+      "end_conversation"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 696,
+     "first_sentence_ms": 1182,
+     "outcome": "completed"
+    },
+    {
+     "line": 6,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 2882,
+     "first_sentence_ms": 3393,
+     "outcome": "completed"
+    },
+    {
+     "line": 7,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 644,
+     "first_sentence_ms": 1031,
+     "outcome": "completed"
+    },
+    {
+     "line": 8,
+     "kind": "user",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1141,
+     "first_sentence_ms": 1254,
+     "outcome": "completed"
+    },
+    {
+     "line": 9,
+     "kind": "user",
+     "tools": [
+      "delegate",
+      "end_conversation"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 703,
+     "first_sentence_ms": 703,
+     "outcome": "completed"
+    },
+    {
+     "line": 9,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 2500,
+     "first_sentence_ms": 2910,
+     "outcome": "completed"
+    },
+    {
+     "line": 10,
+     "kind": "user",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1031,
+     "first_sentence_ms": 1349,
+     "outcome": "completed"
+    },
+    {
+     "line": 11,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 663,
+     "first_sentence_ms": 1144,
+     "outcome": "completed"
+    },
+    {
+     "line": 11,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1492,
+     "first_sentence_ms": 1826,
+     "outcome": "completed"
+    },
+    {
+     "line": 12,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 737,
+     "first_sentence_ms": 891,
+     "outcome": "completed"
+    },
+    {
+     "line": 12,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1222,
+     "first_sentence_ms": 1555,
+     "outcome": "completed"
+    },
+    {
+     "line": 13,
+     "kind": "user",
+     "tools": [
+      "delegate",
+      "end_conversation"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 732,
+     "first_sentence_ms": 1232,
+     "outcome": "completed"
+    },
+    {
+     "line": 13,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 2780,
+     "first_sentence_ms": 3224,
+     "outcome": "completed"
+    },
+    {
+     "line": 14,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 667,
+     "first_sentence_ms": 959,
+     "outcome": "completed"
+    },
+    {
+     "line": 15,
+     "kind": "user",
+     "tools": [
+      "delegate",
+      "end_conversation"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 631,
+     "first_sentence_ms": 631,
+     "outcome": "completed"
+    },
+    {
+     "line": 15,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 2544,
+     "first_sentence_ms": 3012,
+     "outcome": "completed"
+    },
+    {
+     "line": 16,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 613,
+     "first_sentence_ms": 1087,
+     "outcome": "completed"
+    },
+    {
+     "line": 16,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1554,
+     "first_sentence_ms": 1822,
+     "outcome": "completed"
+    },
+    {
+     "line": 17,
+     "kind": "user",
+     "tools": [
+      "delegate",
+      "end_conversation"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 1210,
+     "first_sentence_ms": 1223,
+     "outcome": "completed"
+    },
+    {
+     "line": 17,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 3058,
+     "first_sentence_ms": 3200,
+     "outcome": "completed"
+    },
+    {
+     "line": 18,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": false,
+     "first_delta_ms": 2631,
+     "first_sentence_ms": 2631,
+     "outcome": "completed"
+    },
+    {
+     "line": 18,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 2733,
+     "first_sentence_ms": 2815,
+     "outcome": "completed"
+    },
+    {
+     "line": 19,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": false,
+     "first_delta_ms": 2828,
+     "first_sentence_ms": 2828,
+     "outcome": "completed"
+    },
+    {
+     "line": 20,
+     "kind": "user",
+     "tools": [
+      "end_conversation"
+     ],
+     "text_before_first_tool": false,
+     "first_delta_ms": 1879,
+     "first_sentence_ms": 1879,
+     "outcome": "completed"
+    }
+   ]
+  },
+  {
+   "run": 3,
+   "talker_model": "sonnet",
+   "effort": "low",
+   "prompt": "C",
+   "stub_question": "narrow",
+   "stub_report_delay_s": 0.0,
+   "ran_alongside_another_run": false,
+   "date": "2026-11-03",
+   "claude_agent_sdk": "0.2.177",
+   "claude_cli": "2.1.317",
+   "summary": {
+    "tool_using_turns": 18,
+    "text_before_first_tool": 18,
+    "first_tool_delegate": 13,
+    "first_tool_delegate_text_first": 13,
+    "first_tool_status": 4,
+    "first_tool_status_text_first": 4,
+    "user_turns": 20,
+    "user_first_sentence_p50": 1129,
+    "user_first_sentence_p90": 1714,
+    "user_first_sentence_p50_without_line_1": 1106
+   },
+   "turns": [
+    {
+     "line": 1,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 2919,
+     "first_sentence_ms": 3329,
+     "outcome": "completed"
+    },
+    {
+     "line": 1,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1457,
+     "first_sentence_ms": 1902,
+     "outcome": "completed"
+    },
+    {
+     "line": 2,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 697,
+     "first_sentence_ms": 1040,
+     "outcome": "completed"
+    },
+    {
+     "line": 3,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 686,
+     "first_sentence_ms": 1000,
+     "outcome": "completed"
+    },
+    {
+     "line": 3,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1351,
+     "first_sentence_ms": 1776,
+     "outcome": "completed"
+    },
+    {
+     "line": 4,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 706,
+     "first_sentence_ms": 706,
+     "outcome": "completed"
+    },
+    {
+     "line": 4,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1379,
+     "first_sentence_ms": 1850,
+     "outcome": "completed"
+    },
+    {
+     "line": 5,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 661,
+     "first_sentence_ms": 661,
+     "outcome": "completed"
+    },
+    {
+     "line": 5,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1403,
+     "first_sentence_ms": 1403,
+     "outcome": "completed"
+    },
+    {
+     "line": 6,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 1124,
+     "first_sentence_ms": 1620,
+     "outcome": "completed"
+    },
+    {
+     "line": 6,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1485,
+     "first_sentence_ms": 1955,
+     "outcome": "completed"
+    },
+    {
+     "line": 7,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 721,
+     "first_sentence_ms": 1152,
+     "outcome": "completed"
+    },
+    {
+     "line": 8,
+     "kind": "user",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1181,
+     "first_sentence_ms": 1212,
+     "outcome": "completed"
+    },
+    {
+     "line": 9,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 700,
+     "first_sentence_ms": 1193,
+     "outcome": "completed"
+    },
+    {
+     "line": 9,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1429,
+     "first_sentence_ms": 1774,
+     "outcome": "completed"
+    },
+    {
+     "line": 10,
+     "kind": "user",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 925,
+     "first_sentence_ms": 1315,
+     "outcome": "completed"
+    },
+    {
+     "line": 11,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 685,
+     "first_sentence_ms": 964,
+     "outcome": "completed"
+    },
+    {
+     "line": 11,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1461,
+     "first_sentence_ms": 1752,
+     "outcome": "completed"
+    },
+    {
+     "line": 12,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 674,
+     "first_sentence_ms": 1007,
+     "outcome": "completed"
+    },
+    {
+     "line": 12,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1302,
+     "first_sentence_ms": 1302,
+     "outcome": "completed"
+    },
+    {
+     "line": 13,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 748,
+     "first_sentence_ms": 1193,
+     "outcome": "completed"
+    },
+    {
+     "line": 13,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1429,
+     "first_sentence_ms": 1911,
+     "outcome": "completed"
+    },
+    {
+     "line": 14,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 608,
+     "first_sentence_ms": 608,
+     "outcome": "completed"
+    },
+    {
+     "line": 15,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 749,
+     "first_sentence_ms": 1256,
+     "outcome": "completed"
+    },
+    {
+     "line": 15,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1471,
+     "first_sentence_ms": 1912,
+     "outcome": "completed"
+    },
+    {
+     "line": 16,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 815,
+     "first_sentence_ms": 815,
+     "outcome": "completed"
+    },
+    {
+     "line": 16,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1536,
+     "first_sentence_ms": 1998,
+     "outcome": "completed"
+    },
+    {
+     "line": 17,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 2533,
+     "first_sentence_ms": 2563,
+     "outcome": "completed"
+    },
+    {
+     "line": 17,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1240,
+     "first_sentence_ms": 1741,
+     "outcome": "completed"
+    },
+    {
+     "line": 18,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 648,
+     "first_sentence_ms": 1106,
+     "outcome": "completed"
+    },
+    {
+     "line": 18,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1349,
+     "first_sentence_ms": 1803,
+     "outcome": "completed"
+    },
+    {
+     "line": 19,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 1087,
+     "first_sentence_ms": 1259,
+     "outcome": "completed"
+    },
+    {
+     "line": 20,
+     "kind": "user",
+     "tools": [
+      "end_conversation"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 616,
+     "first_sentence_ms": 1072,
+     "outcome": "completed"
+    }
+   ]
+  },
+  {
+   "run": 4,
+   "talker_model": "sonnet",
+   "effort": "low",
+   "prompt": "D",
+   "stub_question": "narrow",
+   "stub_report_delay_s": 0.0,
+   "ran_alongside_another_run": true,
+   "date": "2026-11-03",
+   "claude_agent_sdk": "0.2.177",
+   "claude_cli": "2.1.317",
+   "summary": {
+    "tool_using_turns": 17,
+    "text_before_first_tool": 17,
+    "first_tool_delegate": 13,
+    "first_tool_delegate_text_first": 13,
+    "first_tool_status": 3,
+    "first_tool_status_text_first": 3,
+    "user_turns": 20,
+    "user_first_sentence_p50": 1133,
+    "user_first_sentence_p90": 1673,
+    "user_first_sentence_p50_without_line_1": 1120
+   },
+   "turns": [
+    {
+     "line": 1,
+     "kind": "user",
+     "tools": [
+      "delegate",
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 2494,
+     "first_sentence_ms": 2942,
+     "outcome": "completed"
+    },
+    {
+     "line": 1,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 2812,
+     "first_sentence_ms": 3144,
+     "outcome": "completed"
+    },
+    {
+     "line": 2,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 607,
+     "first_sentence_ms": 960,
+     "outcome": "completed"
+    },
+    {
+     "line": 3,
+     "kind": "user",
+     "tools": [
+      "delegate",
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 835,
+     "first_sentence_ms": 835,
+     "outcome": "completed"
+    },
+    {
+     "line": 3,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 2858,
+     "first_sentence_ms": 3314,
+     "outcome": "completed"
+    },
+    {
+     "line": 4,
+     "kind": "user",
+     "tools": [
+      "delegate",
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 709,
+     "first_sentence_ms": 1166,
+     "outcome": "completed"
+    },
+    {
+     "line": 4,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 2552,
+     "first_sentence_ms": 3007,
+     "outcome": "completed"
+    },
+    {
+     "line": 5,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 708,
+     "first_sentence_ms": 1209,
+     "outcome": "completed"
+    },
+    {
+     "line": 5,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1720,
+     "first_sentence_ms": 2160,
+     "outcome": "completed"
+    },
+    {
+     "line": 6,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 839,
+     "first_sentence_ms": 1254,
+     "outcome": "completed"
+    },
+    {
+     "line": 6,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1687,
+     "first_sentence_ms": 2047,
+     "outcome": "completed"
+    },
+    {
+     "line": 7,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 764,
+     "first_sentence_ms": 1120,
+     "outcome": "completed"
+    },
+    {
+     "line": 8,
+     "kind": "user",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1007,
+     "first_sentence_ms": 1114,
+     "outcome": "completed"
+    },
+    {
+     "line": 9,
+     "kind": "user",
+     "tools": [
+      "delegate",
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 686,
+     "first_sentence_ms": 686,
+     "outcome": "completed"
+    },
+    {
+     "line": 9,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 2408,
+     "first_sentence_ms": 2822,
+     "outcome": "completed"
+    },
+    {
+     "line": 10,
+     "kind": "user",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1213,
+     "first_sentence_ms": 1213,
+     "outcome": "completed"
+    },
+    {
+     "line": 11,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 830,
+     "first_sentence_ms": 1253,
+     "outcome": "completed"
+    },
+    {
+     "line": 11,
+     "kind": "event",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 2758,
+     "first_sentence_ms": 2874,
+     "outcome": "completed"
+    },
+    {
+     "line": 11,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1741,
+     "first_sentence_ms": 2067,
+     "outcome": "completed"
+    },
+    {
+     "line": 12,
+     "kind": "user",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1038,
+     "first_sentence_ms": 1641,
+     "outcome": "completed"
+    },
+    {
+     "line": 13,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 670,
+     "first_sentence_ms": 1116,
+     "outcome": "completed"
+    },
+    {
+     "line": 13,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1880,
+     "first_sentence_ms": 2189,
+     "outcome": "completed"
+    },
+    {
+     "line": 14,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 726,
+     "first_sentence_ms": 726,
+     "outcome": "completed"
+    },
+    {
+     "line": 15,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 697,
+     "first_sentence_ms": 697,
+     "outcome": "completed"
+    },
+    {
+     "line": 15,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1585,
+     "first_sentence_ms": 1974,
+     "outcome": "completed"
+    },
+    {
+     "line": 16,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 730,
+     "first_sentence_ms": 730,
+     "outcome": "completed"
+    },
+    {
+     "line": 16,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1672,
+     "first_sentence_ms": 1989,
+     "outcome": "completed"
+    },
+    {
+     "line": 17,
+     "kind": "user",
+     "tools": [
+      "delegate",
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 1934,
+     "first_sentence_ms": 1958,
+     "outcome": "completed"
+    },
+    {
+     "line": 17,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 2746,
+     "first_sentence_ms": 3079,
+     "outcome": "completed"
+    },
+    {
+     "line": 18,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 644,
+     "first_sentence_ms": 1146,
+     "outcome": "completed"
+    },
+    {
+     "line": 18,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1624,
+     "first_sentence_ms": 1974,
+     "outcome": "completed"
+    },
+    {
+     "line": 19,
+     "kind": "user",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1464,
+     "first_sentence_ms": 1555,
+     "outcome": "completed"
+    },
+    {
+     "line": 20,
+     "kind": "user",
+     "tools": [
+      "end_conversation"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 680,
+     "first_sentence_ms": 1001,
+     "outcome": "completed"
+    }
+   ]
+  },
+  {
+   "run": 5,
+   "talker_model": "haiku",
+   "effort": "low",
+   "prompt": "D",
+   "stub_question": "narrow",
+   "stub_report_delay_s": 0.0,
+   "ran_alongside_another_run": true,
+   "date": "2026-11-03",
+   "claude_agent_sdk": "0.2.177",
+   "claude_cli": "2.1.317",
+   "summary": {
+    "tool_using_turns": 17,
+    "text_before_first_tool": 9,
+    "first_tool_delegate": 12,
+    "first_tool_delegate_text_first": 7,
+    "first_tool_status": 4,
+    "first_tool_status_text_first": 2,
+    "user_turns": 20,
+    "user_first_sentence_p50": 1292,
+    "user_first_sentence_p90": 1867,
+    "user_first_sentence_p50_without_line_1": 1182
+   },
+   "turns": [
+    {
+     "line": 1,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 3011,
+     "first_sentence_ms": 3011,
+     "outcome": "completed"
+    },
+    {
+     "line": 1,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 2261,
+     "first_sentence_ms": 2570,
+     "outcome": "completed"
+    },
+    {
+     "line": 2,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": false,
+     "first_delta_ms": 1782,
+     "first_sentence_ms": 1840,
+     "outcome": "completed"
+    },
+    {
+     "line": 3,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 532,
+     "first_sentence_ms": 532,
+     "outcome": "completed"
+    },
+    {
+     "line": 3,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1781,
+     "first_sentence_ms": 2015,
+     "outcome": "completed"
+    },
+    {
+     "line": 4,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 748,
+     "first_sentence_ms": 864,
+     "outcome": "completed"
+    },
+    {
+     "line": 4,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 2410,
+     "first_sentence_ms": 2588,
+     "outcome": "completed"
+    },
+    {
+     "line": 5,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": false,
+     "first_delta_ms": 1803,
+     "first_sentence_ms": 1803,
+     "outcome": "completed"
+    },
+    {
+     "line": 5,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1263,
+     "first_sentence_ms": 1459,
+     "outcome": "completed"
+    },
+    {
+     "line": 6,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 797,
+     "first_sentence_ms": 797,
+     "outcome": "completed"
+    },
+    {
+     "line": 6,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1483,
+     "first_sentence_ms": 1721,
+     "outcome": "completed"
+    },
+    {
+     "line": 7,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 914,
+     "first_sentence_ms": 1015,
+     "outcome": "completed"
+    },
+    {
+     "line": 8,
+     "kind": "user",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1051,
+     "first_sentence_ms": 1182,
+     "outcome": "completed"
+    },
+    {
+     "line": 9,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": false,
+     "first_delta_ms": 2096,
+     "first_sentence_ms": 2110,
+     "outcome": "completed"
+    },
+    {
+     "line": 9,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1715,
+     "first_sentence_ms": 2047,
+     "outcome": "completed"
+    },
+    {
+     "line": 10,
+     "kind": "user",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 833,
+     "first_sentence_ms": 1045,
+     "outcome": "completed"
+    },
+    {
+     "line": 11,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 679,
+     "first_sentence_ms": 679,
+     "outcome": "completed"
+    },
+    {
+     "line": 11,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1676,
+     "first_sentence_ms": 1925,
+     "outcome": "completed"
+    },
+    {
+     "line": 12,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": false,
+     "first_delta_ms": 1698,
+     "first_sentence_ms": 1719,
+     "outcome": "completed"
+    },
+    {
+     "line": 12,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1393,
+     "first_sentence_ms": 1667,
+     "outcome": "completed"
+    },
+    {
+     "line": 13,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": false,
+     "first_delta_ms": 1680,
+     "first_sentence_ms": 1680,
+     "outcome": "completed"
+    },
+    {
+     "line": 13,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1375,
+     "first_sentence_ms": 1624,
+     "outcome": "completed"
+    },
+    {
+     "line": 14,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": false,
+     "first_delta_ms": 1373,
+     "first_sentence_ms": 1434,
+     "outcome": "completed"
+    },
+    {
+     "line": 15,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": false,
+     "first_delta_ms": 1760,
+     "first_sentence_ms": 1760,
+     "outcome": "completed"
+    },
+    {
+     "line": 15,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1627,
+     "first_sentence_ms": 1682,
+     "outcome": "completed"
+    },
+    {
+     "line": 16,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 594,
+     "first_sentence_ms": 594,
+     "outcome": "completed"
+    },
+    {
+     "line": 16,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1379,
+     "first_sentence_ms": 1611,
+     "outcome": "completed"
+    },
+    {
+     "line": 17,
+     "kind": "user",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1481,
+     "first_sentence_ms": 1531,
+     "outcome": "completed"
+    },
+    {
+     "line": 18,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 772,
+     "first_sentence_ms": 838,
+     "outcome": "completed"
+    },
+    {
+     "line": 18,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1428,
+     "first_sentence_ms": 1724,
+     "outcome": "completed"
+    },
+    {
+     "line": 19,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 809,
+     "first_sentence_ms": 1023,
+     "outcome": "completed"
+    },
+    {
+     "line": 20,
+     "kind": "user",
+     "tools": [
+      "end_conversation"
+     ],
+     "text_before_first_tool": false,
+     "first_delta_ms": 1333,
+     "first_sentence_ms": 1401,
+     "outcome": "completed"
+    }
+   ]
+  },
+  {
+   "run": 6,
+   "talker_model": "sonnet",
+   "effort": "low",
+   "prompt": "D",
+   "stub_question": "narrow",
+   "stub_report_delay_s": 3.0,
+   "ran_alongside_another_run": false,
+   "date": "2026-11-03",
+   "claude_agent_sdk": "0.2.177",
+   "claude_cli": "2.1.317",
+   "summary": {
+    "tool_using_turns": 17,
+    "text_before_first_tool": 17,
+    "first_tool_delegate": 13,
+    "first_tool_delegate_text_first": 13,
+    "first_tool_status": 3,
+    "first_tool_status_text_first": 3,
+    "user_turns": 20,
+    "user_first_sentence_p50": 1086,
+    "user_first_sentence_p90": 1320,
+    "user_first_sentence_p50_without_line_1": 1083
+   },
+   "turns": [
+    {
+     "line": 1,
+     "kind": "user",
+     "tools": [
+      "delegate",
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 2455,
+     "first_sentence_ms": 2994,
+     "outcome": "completed"
+    },
+    {
+     "line": 1,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 679,
+     "first_sentence_ms": 936,
+     "outcome": "completed"
+    },
+    {
+     "line": 2,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 570,
+     "first_sentence_ms": 570,
+     "outcome": "completed"
+    },
+    {
+     "line": 3,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 630,
+     "first_sentence_ms": 1083,
+     "outcome": "completed"
+    },
+    {
+     "line": 3,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 680,
+     "first_sentence_ms": 1105,
+     "outcome": "completed"
+    },
+    {
+     "line": 4,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 623,
+     "first_sentence_ms": 1090,
+     "outcome": "completed"
+    },
+    {
+     "line": 4,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 665,
+     "first_sentence_ms": 1064,
+     "outcome": "completed"
+    },
+    {
+     "line": 5,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 589,
+     "first_sentence_ms": 950,
+     "outcome": "completed"
+    },
+    {
+     "line": 5,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 657,
+     "first_sentence_ms": 1015,
+     "outcome": "completed"
+    },
+    {
+     "line": 6,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 575,
+     "first_sentence_ms": 997,
+     "outcome": "completed"
+    },
+    {
+     "line": 6,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 707,
+     "first_sentence_ms": 1172,
+     "outcome": "completed"
+    },
+    {
+     "line": 7,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 592,
+     "first_sentence_ms": 953,
+     "outcome": "completed"
+    },
+    {
+     "line": 8,
+     "kind": "user",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 944,
+     "first_sentence_ms": 1047,
+     "outcome": "completed"
+    },
+    {
+     "line": 9,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 641,
+     "first_sentence_ms": 1114,
+     "outcome": "completed"
+    },
+    {
+     "line": 9,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 602,
+     "first_sentence_ms": 1047,
+     "outcome": "completed"
+    },
+    {
+     "line": 10,
+     "kind": "user",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 935,
+     "first_sentence_ms": 1053,
+     "outcome": "completed"
+    },
+    {
+     "line": 11,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 615,
+     "first_sentence_ms": 1114,
+     "outcome": "completed"
+    },
+    {
+     "line": 11,
+     "kind": "event",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 1601,
+     "first_sentence_ms": 1811,
+     "outcome": "completed"
+    },
+    {
+     "line": 11,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 618,
+     "first_sentence_ms": 1004,
+     "outcome": "completed"
+    },
+    {
+     "line": 12,
+     "kind": "user",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 912,
+     "first_sentence_ms": 1256,
+     "outcome": "completed"
+    },
+    {
+     "line": 13,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 695,
+     "first_sentence_ms": 1157,
+     "outcome": "completed"
+    },
+    {
+     "line": 13,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 712,
+     "first_sentence_ms": 1140,
+     "outcome": "completed"
+    },
+    {
+     "line": 14,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 557,
+     "first_sentence_ms": 557,
+     "outcome": "completed"
+    },
+    {
+     "line": 15,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 647,
+     "first_sentence_ms": 647,
+     "outcome": "completed"
+    },
+    {
+     "line": 15,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 728,
+     "first_sentence_ms": 1172,
+     "outcome": "completed"
+    },
+    {
+     "line": 16,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 688,
+     "first_sentence_ms": 1151,
+     "outcome": "completed"
+    },
+    {
+     "line": 16,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 621,
+     "first_sentence_ms": 955,
+     "outcome": "completed"
+    },
+    {
+     "line": 17,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 1119,
+     "first_sentence_ms": 1158,
+     "outcome": "completed"
+    },
+    {
+     "line": 17,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 628,
+     "first_sentence_ms": 1047,
+     "outcome": "completed"
+    },
+    {
+     "line": 18,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 683,
+     "first_sentence_ms": 1155,
+     "outcome": "completed"
+    },
+    {
+     "line": 18,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 687,
+     "first_sentence_ms": 1140,
+     "outcome": "completed"
+    },
+    {
+     "line": 19,
+     "kind": "user",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1784,
+     "first_sentence_ms": 1894,
+     "outcome": "completed"
+    },
+    {
+     "line": 20,
+     "kind": "user",
+     "tools": [
+      "end_conversation"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 645,
+     "first_sentence_ms": 1081,
+     "outcome": "completed"
+    }
+   ]
+  },
+  {
+   "run": 7,
+   "talker_model": "haiku",
+   "effort": "low",
+   "prompt": "D",
+   "stub_question": "narrow",
+   "stub_report_delay_s": 3.0,
+   "ran_alongside_another_run": false,
+   "date": "2026-11-03",
+   "claude_agent_sdk": "0.2.177",
+   "claude_cli": "2.1.317",
+   "summary": {
+    "tool_using_turns": 17,
+    "text_before_first_tool": 15,
+    "first_tool_delegate": 10,
+    "first_tool_delegate_text_first": 9,
+    "first_tool_status": 6,
+    "first_tool_status_text_first": 5,
+    "user_turns": 20,
+    "user_first_sentence_p50": 934,
+    "user_first_sentence_p90": 1606,
+    "user_first_sentence_p50_without_line_1": 926
+   },
+   "turns": [
+    {
+     "line": 1,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 2976,
+     "first_sentence_ms": 3014,
+     "outcome": "completed"
+    },
+    {
+     "line": 2,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": false,
+     "first_delta_ms": 1501,
+     "first_sentence_ms": 1595,
+     "outcome": "completed"
+    },
+    {
+     "line": 3,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 1308,
+     "first_sentence_ms": 1329,
+     "outcome": "completed"
+    },
+    {
+     "line": 3,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 810,
+     "first_sentence_ms": 1017,
+     "outcome": "completed"
+    },
+    {
+     "line": 4,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 539,
+     "first_sentence_ms": 539,
+     "outcome": "completed"
+    },
+    {
+     "line": 4,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 845,
+     "first_sentence_ms": 953,
+     "outcome": "completed"
+    },
+    {
+     "line": 5,
+     "kind": "user",
+     "tools": [
+      "delegate",
+      "delegate",
+      "cancel"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 613,
+     "first_sentence_ms": 613,
+     "outcome": "completed"
+    },
+    {
+     "line": 5,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1107,
+     "first_sentence_ms": 1349,
+     "outcome": "completed"
+    },
+    {
+     "line": 6,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": false,
+     "first_delta_ms": 1707,
+     "first_sentence_ms": 1707,
+     "outcome": "completed"
+    },
+    {
+     "line": 6,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 631,
+     "first_sentence_ms": 908,
+     "outcome": "completed"
+    },
+    {
+     "line": 7,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 1097,
+     "first_sentence_ms": 1097,
+     "outcome": "completed"
+    },
+    {
+     "line": 8,
+     "kind": "user",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1011,
+     "first_sentence_ms": 1162,
+     "outcome": "completed"
+    },
+    {
+     "line": 9,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 674,
+     "first_sentence_ms": 674,
+     "outcome": "completed"
+    },
+    {
+     "line": 9,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 561,
+     "first_sentence_ms": 798,
+     "outcome": "completed"
+    },
+    {
+     "line": 10,
+     "kind": "user",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1177,
+     "first_sentence_ms": 1264,
+     "outcome": "completed"
+    },
+    {
+     "line": 11,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 536,
+     "first_sentence_ms": 536,
+     "outcome": "completed"
+    },
+    {
+     "line": 11,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1223,
+     "first_sentence_ms": 1223,
+     "outcome": "completed"
+    },
+    {
+     "line": 12,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 588,
+     "first_sentence_ms": 588,
+     "outcome": "completed"
+    },
+    {
+     "line": 12,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 559,
+     "first_sentence_ms": 851,
+     "outcome": "completed"
+    },
+    {
+     "line": 13,
+     "kind": "user",
+     "tools": [
+      "status",
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 516,
+     "first_sentence_ms": 516,
+     "outcome": "completed"
+    },
+    {
+     "line": 13,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 520,
+     "first_sentence_ms": 765,
+     "outcome": "completed"
+    },
+    {
+     "line": 14,
+     "kind": "user",
+     "tools": [
+      "status"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 600,
+     "first_sentence_ms": 600,
+     "outcome": "completed"
+    },
+    {
+     "line": 15,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 943,
+     "first_sentence_ms": 943,
+     "outcome": "completed"
+    },
+    {
+     "line": 15,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 656,
+     "first_sentence_ms": 869,
+     "outcome": "completed"
+    },
+    {
+     "line": 16,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 635,
+     "first_sentence_ms": 635,
+     "outcome": "completed"
+    },
+    {
+     "line": 16,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 639,
+     "first_sentence_ms": 888,
+     "outcome": "completed"
+    },
+    {
+     "line": 17,
+     "kind": "user",
+     "tools": [
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 1378,
+     "first_sentence_ms": 1378,
+     "outcome": "completed"
+    },
+    {
+     "line": 17,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 618,
+     "first_sentence_ms": 801,
+     "outcome": "completed"
+    },
+    {
+     "line": 18,
+     "kind": "user",
+     "tools": [
+      "status",
+      "delegate"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 615,
+     "first_sentence_ms": 615,
+     "outcome": "completed"
+    },
+    {
+     "line": 18,
+     "kind": "event",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 562,
+     "first_sentence_ms": 791,
+     "outcome": "completed"
+    },
+    {
+     "line": 19,
+     "kind": "user",
+     "tools": [],
+     "text_before_first_tool": null,
+     "first_delta_ms": 1096,
+     "first_sentence_ms": 1233,
+     "outcome": "completed"
+    },
+    {
+     "line": 20,
+     "kind": "user",
+     "tools": [
+      "end_conversation"
+     ],
+     "text_before_first_tool": true,
+     "first_delta_ms": 613,
+     "first_sentence_ms": 926,
+     "outcome": "completed"
+    }
+   ]
+  }
+ ],
+ "end_to_end": {
+  "about": "`jarvis-hub --text` with the real Talker (sonnet, low) and the real Orchestrator (sonnet, medium) against the real Org, two lines piped at launch: 'What PRs are open in pumpkit?' and 'Is CI green on the main branch of jarvis?'. Rows in the order the Hub wrote them; Orchestrator times run from the delegate call to the end of its turn.",
+  "rows": [
+   {
+    "role": "talker",
+    "kind": "warm_up",
+    "task": null,
+    "tools": [],
+    "tool_before_text": false,
+    "wait_ms": 0,
+    "first_delta_ms": 1144,
+    "first_sentence_ms": 1401,
+    "total_ms": 1424,
+    "outcome": "completed"
+   },
+   {
+    "role": "talker",
+    "kind": "user",
+    "task": null,
+    "tools": [
+     "delegate"
+    ],
+    "tool_before_text": false,
+    "wait_ms": 1725,
+    "first_delta_ms": 2372,
+    "first_sentence_ms": 2841,
+    "total_ms": 3693,
+    "outcome": "completed"
+   },
+   {
+    "role": "talker",
+    "kind": "user",
+    "task": null,
+    "tools": [
+     "delegate"
+    ],
+    "tool_before_text": false,
+    "wait_ms": 3692,
+    "first_delta_ms": 4339,
+    "first_sentence_ms": 4842,
+    "total_ms": 5647,
+    "outcome": "completed"
+   },
+   {
+    "role": "orchestrator",
+    "kind": "task",
+    "task": "T1",
+    "tools": [
+     "Bash",
+     "report"
+    ],
+    "tool_before_text": null,
+    "wait_ms": 337,
+    "first_delta_ms": null,
+    "first_sentence_ms": null,
+    "total_ms": 5068,
+    "outcome": "completed"
+   },
+   {
+    "role": "talker",
+    "kind": "event",
+    "task": null,
+    "tools": [],
+    "tool_before_text": false,
+    "wait_ms": 0,
+    "first_delta_ms": 681,
+    "first_sentence_ms": 1094,
+    "total_ms": 1107,
+    "outcome": "completed"
+   },
+   {
+    "role": "orchestrator",
+    "kind": "task",
+    "task": "T2",
+    "tools": [
+     "Bash",
+     "Bash",
+     "Bash",
+     "report"
+    ],
+    "tool_before_text": null,
+    "wait_ms": 3064,
+    "first_delta_ms": null,
+    "first_sentence_ms": null,
+    "total_ms": 12022,
+    "outcome": "completed"
+   },
+   {
+    "role": "talker",
+    "kind": "event",
+    "task": null,
+    "tools": [],
+    "tool_before_text": false,
+    "wait_ms": 3,
+    "first_delta_ms": 634,
+    "first_sentence_ms": 878,
+    "total_ms": 1250,
+    "outcome": "completed"
+   }
+  ]
+ }
+}

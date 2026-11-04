@@ -1,0 +1,3 @@
+# Push first when waiting on work
+
+Everything shares the User's Max limits, and a model that checks on work in a loop spends them on nothing. When a Task waits, the Orchestrator uses, in order: the completion event the Hub posts when a Subagent ends; a Watcher, which is a process in the Hub that waits on something that announces its own end (such as `gh run watch`) and costs no tokens; and a Check, a Hub timer with backoff and a 60-second minimum, only when nothing will announce the change. An agent sleeping inside a shell command, or a model checking the same thing repeatedly, is never acceptable.

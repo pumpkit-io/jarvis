@@ -1,0 +1,97 @@
+{
+  "run": "synthetic/speaker-run",
+  "seconds": 58.0,
+  "raw_mic": {
+    "jarvis_only_s": [
+      0.0,
+      31.9
+    ],
+    "jarvis_only": {
+      "triggers": 6,
+      "per_minute": 11.3,
+      "speech_frame_pct": 86.8
+    },
+    "user_barge_ins_detected": "1/3",
+    "matching_jarvis_span_triggered": "3/3"
+  },
+  "webrtc": {
+    "delay=0ms": {
+      "jarvis_only_s": [
+        0.0,
+        31.9
+      ],
+      "jarvis_only": {
+        "triggers": 0,
+        "per_minute": 0.0,
+        "speech_frame_pct": 0.0
+      },
+      "user_barge_ins_detected": "3/3",
+      "matching_jarvis_span_triggered": "0/3"
+    },
+    "delay=20ms": {
+      "jarvis_only_s": [
+        0.0,
+        31.9
+      ],
+      "jarvis_only": {
+        "triggers": 0,
+        "per_minute": 0.0,
+        "speech_frame_pct": 0.0
+      },
+      "user_barge_ins_detected": "3/3",
+      "matching_jarvis_span_triggered": "0/3"
+    },
+    "delay=40ms": {
+      "jarvis_only_s": [
+        0.0,
+        31.9
+      ],
+      "jarvis_only": {
+        "triggers": 0,
+        "per_minute": 0.0,
+        "speech_frame_pct": 0.0
+      },
+      "user_barge_ins_detected": "3/3",
+      "matching_jarvis_span_triggered": "0/3"
+    },
+    "delay=60ms": {
+      "jarvis_only_s": [
+        0.0,
+        31.9
+      ],
+      "jarvis_only": {
+        "triggers": 0,
+        "per_minute": 0.0,
+        "speech_frame_pct": 0.1
+      },
+      "user_barge_ins_detected": "3/3",
+      "matching_jarvis_span_triggered": "0/3"
+    },
+    "delay=80ms": {
+      "jarvis_only_s": [
+        0.0,
+        31.9
+      ],
+      "jarvis_only": {
+        "triggers": 0,
+        "per_minute": 0.0,
+        "speech_frame_pct": 0.4
+      },
+      "user_barge_ins_detected": "3/3",
+      "matching_jarvis_span_triggered": "0/3"
+    },
+    "delay=120ms": {
+      "jarvis_only_s": [
+        0.0,
+        31.9
+      ],
+      "jarvis_only": {
+        "triggers": 0,
+        "per_minute": 0.0,
+        "speech_frame_pct": 0.5
+      },
+      "user_barge_ins_detected": "3/3",
+      "matching_jarvis_span_triggered": "0/3"
+    }
+  }
+}

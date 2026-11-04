@@ -1,0 +1,30 @@
+{
+  "source": "synthetic",
+  "engines": {
+    "mlx-whisper whisper-large-v3-turbo": {
+      "correct": "30/30",
+      "ms_p50": 0.43,
+      "wrong": []
+    },
+    "parakeet-mlx parakeet-tdt-0.6b-v3": {
+      "correct": "28/30",
+      "ms_p50": 0.03,
+      "wrong": [
+        "en05: 'Merge pull request 42.' -> it",
+        "it04: 'La C verde su Pump Kit.' -> en"
+      ]
+    },
+    "whisper.cpp server :2022 (ggml-small.bin)": {
+      "correct": "29/30",
+      "ms_p50": 0.03,
+      "wrong": [
+        "it04: 'La ciae verde su un pchit.' -> en"
+      ]
+    },
+    "whisper.cpp server :2023 (ggml-large-v3-turbo.bin)": {
+      "correct": "30/30",
+      "ms_p50": 0.04,
+      "wrong": []
+    }
+  }
+}

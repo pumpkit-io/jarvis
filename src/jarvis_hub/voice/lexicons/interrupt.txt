@@ -1,0 +1,23 @@
+# Hard interrupts: any of these said over Jarvis stops it, even after a Backchannel.
+# One phrase per line, English and Italian; case, punctuation and hyphens don't matter.
+# A Backchannel phrase wins over a hard interrupt inside it: "no problem" resumes, "no" alone stops.
+jarvis
+wait
+stop
+hold on
+hang on
+no
+actually
+sorry
+pause
+aspetta
+aspetti
+fermo
+ferma
+fermati
+basta
+un attimo
+un momento
+un secondo
+scusa
+anzi

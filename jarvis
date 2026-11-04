@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Starts Jarvis in a voice conversation. Extra arguments go to claude, e.g. ./jarvis --continue.
+# The Hub owns the conversation; flags pass through to jarvis-hub.
 set -euo pipefail
 
 # Follow symlinks such as ~/.local/bin/jarvis so the session opens in this repo.
@@ -11,4 +11,4 @@ while [[ -L "$src" ]]; do
 done
 cd "$(cd "$(dirname "$src")" && pwd)"
 
-exec claude --dangerously-skip-permissions --model sonnet --effort low "/voicemode:converse" "$@"
+exec uv run jarvis-hub "$@"

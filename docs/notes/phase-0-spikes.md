@@ -1,0 +1,555 @@
+# Phase 0 spikes
+
+Results of the Phase 0 spikes for the voice Hub (Spec #3). Each section belongs to one Ticket: `## Agent SDK` to #4, `## Audio` to #5, `## Talker in the Hub` to #7, which answers the open questions #4 left, and `## Tasks and the Orchestrator` to #8. The throwaway scripts live under `spikes/`, never in Hub code.
+
+## Agent SDK
+
+Ticket #4, run on 2026-11-03 on the M3.
+
+**Versions:** `claude-agent-sdk` 0.2.177 (Python 3.13 via `uv`), driving the installed `claude` CLI 2.1.317 (on `PATH`) through `cli_path`. The SDK also ships its own CLI binary (2.1.317 here) and uses it when `cli_path` is unset, so the Hub sets `cli_path` explicitly. Model aliases resolved to `claude-haiku-5-5`, `claude-sonnet-5-5` and `claude-opus-5-5`.
+
+Scripts: `spikes/agent/caps.py`, `matrix.py`, `latency.py`, and the baseline harness in `spikes/agent/baseline/`. Raw output: `spikes/agent/results/*.json`, valid JSON with the versions inside. Run each with `env -u ANTHROPIC_API_KEY uv run python <script>` from `spikes/agent/`. `matrix.py --runs N` appends N runs to its file, so every run stays committed.
+
+### Verdicts
+
+| Criterion | Result |
+|---|---|
+| Baseline, end of speech to first audio | **Waiting on the User.** Harness built and dry-run on old logs; the measured run needs the User speaking (one session with #5). |
+| SDK on the Max login, no API key | Confirmed. |
+| Streamed text deltas | Confirmed. |
+| `interrupt()` mid-stream | Confirmed. |
+| String system prompt replaces the default | Confirmed. |
+| `setting_sources=[]` loads nothing | Confirmed, with built-in leftovers noted below. |
+| In-process tool callable | Confirmed. |
+| `tools=[]` plus in-process MCP only | Confirmed. |
+| Effort and thinking matrix | Done. Every value accepted by every model; Haiku needs `effort="low"` to stop thinking. |
+| Talker latency ≤ 1.0 s p50 to first sentence | **Missed by both.** Haiku 1.21 s, Sonnet 1.06 s. Recommend Sonnet at low effort as the Talker default (see below). |
+
+### Subscription, not API
+
+`ANTHROPIC_API_KEY` was removed from the environment of every run. Evidence the calls drew on the Max subscription:
+
+- the `init` message reports `apiKeySource: "none"`;
+- `get_server_info()["account"]` reports `subscriptionType: "Claude Max"`, `apiProvider: "firstParty"`;
+- the stream carries a `RateLimitEvent` for the subscription's `five_hour` window with `status: "allowed"`. The committed results keep only the window type and status: the raw event also holds utilization and overage fields, which `caps.py` drops because the repo is public.
+
+`ResultMessage.total_cost_usd` is still filled in (about $0.001 on the second turn's `ResultMessage` of a two-turn Haiku chat). It is a notional figure, not a charge. The Hub should log usage from `usage` and the rate-limit events, and must not present `total_cost_usd` as spend.
+
+### SDK capabilities
+
+All with `ClaudeSDKClient`, one session, two or more turns.
+
+- **Two turns.** The second turn recalled the first ("41, plus one" gave "42"), same `session_id`.
+- **Text deltas.** `include_partial_messages=True` yields `StreamEvent`s whose `event` is the raw API event; text arrives as `content_block_delta` with `delta.type == "text_delta"`.
+- **Interrupt.** Asked to count to 300, `interrupt()` was called once more than 40 characters had streamed (`chars_at_interrupt` 41), yet 89 characters had arrived by the time the `ResultMessage` came (last line "33"), so 48 characters of deltas arrived after the call. The `ResultMessage` followed 11 ms after `interrupt()`, with `subtype: "error_during_execution"` and `terminal_reason: "aborted_streaming"`. The next `query()` on the same client answered normally. The Hub should read `terminal_reason`, not `is_error`, to tell an interrupt from a failure. For Barge-in this means the Hub must drop every text delta that arrives after it calls `interrupt()` and stop its TTS queue itself; it cannot rely on the stream going quiet at once.
+- **String system prompt.** `system_prompt="Your name is Zorblax…"` gave "Zorblax", and the whole request was 906 input tokens: Claude Code's default prompt is gone.
+- **`setting_sources=[]`.** Run in this repo, whose project settings carry the SessionStart hook: no hook ran, no user plugins, no MCP servers, 56 slash commands; request size 883 tokens. With `setting_sources` omitted: the hook ran, 10 plugins, 9 MCP servers, 119 slash commands, 66,262 tokens. Still present with `[]`: four built-in plugins (`cc-plugin-*`), 20 bundled skills and the five built-in agent types. They are inert for the Talker, which has no Skill or Agent tool. For the Orchestrator, pass `skills=[]` if the bundled skill listing should stay out of its prompt.
+- **In-process tool.** A `@tool` registered through `create_sdk_mcp_server("jarvis", …)` was called as `mcp__jarvis__lookup_code`; the Python handler ran in-process and its result reached the reply.
+- **No built-in tools.** With `tools=[]` and that server, `init.tools` was exactly `["mcp__jarvis__lookup_code"]`. Asked to run `ls`, the model answered "NO_SHELL" without any tool call.
+
+### Effort and thinking per model
+
+`matrix.py` sent one short arithmetic prompt per cell (`effort` alone, `thinking` alone, and `effort="low"` with thinking disabled), three runs, all committed in `results/matrix.json`. "Thinks" means thinking tokens were produced on that prompt in every run; the pattern was the same in all three.
+
+| | default | `low` | `medium` | `high` | `xhigh` | `max` | `thinking` disabled | adaptive | enabled (budget 2048) | `low` + disabled |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Haiku | thinks | **none** | thinks | thinks | thinks | thinks | **thinks** | thinks | thinks | **none** |
+| Sonnet | none | none | none | none | none | none | none | none | none | none |
+| Opus | none | none | none | none | none | **thinks** | none | none | none | none |
+
+Haiku thought 24–156 tokens per cell (max at 114–156). Opus at `max` thought 24–44 tokens; at `xhigh` it did not think on this prompt. Sonnet never thought, at any setting.
+
+- **Every value is accepted by every model.** No error, no warning on stderr, including `xhigh` and `max` on Haiku and Sonnet. The SDK documents `xhigh` as falling back to `high` outside Opus. So the CLI rejects nothing: the Hub's check is only the `JARVIS_MAX_EFFORT` cap, plus mapping `xhigh` to `high` for non-Opus models if it wants honest logs.
+- **Haiku 5.5 ignores `thinking={"type": "disabled"}` on its own** and keeps thinking (24–55 tokens on this prompt). Only `effort="low"` turns thinking off. The Talker on Haiku therefore needs `effort="low"`, with or without the thinking setting.
+- Haiku at `low` answered the arithmetic wrong every time (6 of 6 rows over the three runs: `low` and `low` plus disabled, 11:25 for 12:25). Irrelevant to small talk, worth knowing before giving Haiku `low` any Subagent work.
+- The fixed thinking budget was accepted everywhere, but Sonnet never thought and Opus thought only at `max`, so whether the budget is honoured on these models is unproven. The SDK treats a budget as on/off (adaptive) on newer models; use `effort` to steer them.
+
+### Talker latency
+
+`latency.py`: one warm `ClaudeSDKClient` per configuration, a short Jarvis-style system prompt kept byte-identical across turns, the in-process `delegate` and `status` tools, `tools=[]`, `setting_sources=[]`, one uncounted warm-up turn, then the same 20 utterances (10 English, 10 Italian: small talk, "open a PR", "what's running", "stop", "aspetta, apri invece una issue" and so on). Each utterance is tagged `talk` or `work` by what the User asks for, not by what the model did. Time runs from `client.query()` to the first text delta and to the end of the first sentence (`.?!` followed by a space, or the end of a text block). Turns are numbered 0-19 as the rows of `results/latency.json`: turn 0 is the first counted turn, and the warm-up is not stored.
+
+Cache reads (`cache_read`). Turn 0, a talk turn, read 1,052 tokens for both models; the ranges below cover turns 1-19.
+
+- The other talk turns read 11.9-15.1k (Haiku) and 11.1-13.4k (Sonnet).
+- Most work turns read far more: 23.6-29.5k for 8 of Haiku's 10, 22.1-26.3k for 7 of Sonnet's 10. Against the nearest talk turns before and after them within turns 1-19, that is 11.7-14.9k more for Haiku and 11.0-13.3k more for Sonnet, and the gap grows through the session: Haiku's turn 15 read 28,773 against 14,295 at turn 14, and its turn 17 read 29,514 against 14,569 at turn 16.
+- Haiku's turn 1 (a work turn, tool before text) read 16,959, above the talk range and below the other work turns.
+- Haiku's turn 18 (14,971, no tool before text) and Sonnet's three remaining work turns (turns 1, 9 and 18: 11,660, 11,888 and 13,280) sit inside the talk range. Sonnet's turn 1 is 11,660; its tool call came after text, inferred from the reply.
+- The rows record only whether a tool came before the first text, so the jump is not tied to tool calls. A second API call in the turn would explain it, but these rows cannot show that.
+
+`api_ms` is the per-turn delta of `duration_api_ms`, which is cumulative on a persistent client. In f29b80a every results file opened with a plain-text header line holding the SDK version and the CLI's path, with no CLI version, so none was valid JSON; `latency.json` held the cumulative values in `api_ms` (row 0 = 2515) and no `kind`. e672e82 rewrote `latency.json` as JSON without rerunning it: it added the `versions` block (CLI 2.1.317), which no run of `latency.py` wrote, derived `api_ms`, `api_ms_cumulative` and the `kind` tags from the recorded values, and set row 0's `api_ms` to null, because the warm-up total was not kept as a baseline. Every timing and cache read is unchanged from the f29b80a run. A rerun would fill row 0. The other two files differ: `matrix.json` gained two new runs in e672e82 (its first run is the f29b80a one, unchanged), and `caps.json` was rerun in 9e3713f, after which 0f826d3 replaced its plugin and MCP server names with counts without a rerun.
+
+| Talker | First delta p50 | p90 | First sentence p50 | p90 | Tool called before any text |
+|---|---|---|---|---|---|
+| Haiku, `effort="low"`, thinking disabled | 1.17 s | 2.18 s | 1.21 s | 2.18 s | 9 of 20 turns |
+| Sonnet, `effort="low"`, thinking disabled | 0.70 s | 2.31 s | 1.06 s | 2.31 s | 2 of 20 turns, both `status` |
+
+Split by kind of utterance, the same 10 in each group for both models (first sentence p50):
+
+| | Talk (small talk, thanks, stop) | Work (repo work, status, cancel) |
+|---|---|---|
+| Haiku | 0.85 s | **1.75 s** |
+| Sonnet | 1.11 s | 0.94 s |
+
+Over the 9 work utterances that Haiku answered with a tool call first (leaving out "aspetta, apri invece una issue"), Haiku is 1.82 s and Sonnet 0.82 s.
+
+The first counted turn (turn 0) is slow for both models and sits inside the headline numbers above, which are kept as recorded. Without it (19 turns):
+
+| Talker | First delta p50 | p90 | First sentence p50 | p90 |
+|---|---|---|---|---|
+| Haiku | 0.97 s | 2.06 s | 1.06 s | 2.06 s |
+| Sonnet | 0.66 s | 2.26 s | 1.06 s | 2.26 s |
+
+Without it Haiku is at 1.06 s p50, still above the target. Sonnet's p50 barely moves, from 1.062 s to 1.055 s.
+
+**Verdict.** Neither meets the ≤ 1.0 s p50 target. Haiku is faster when it only talks, but it called a tool before saying anything on 9 of the 10 work turns: 6 delegations, the 2 `status` turns (where a tool first is expected) and the cancel. That ignores the prompt's speak-first rule on delegations, so the User would wait for the tool round trip (work p50 about 1.75 s) before hearing "Right away, sir". Sonnet spoke first on all 6 true delegations (0.52–1.06 s) and called a tool first only on the two `status` turns. Its two slower speak-first work turns were the "Cancel the last task" refusal (1.4 s) and the "Aspetta" clarifying question (1.5 s). Its work p50 is 0.94 s, and overall it missed the target by 62 ms.
+
+**Recommendation:** make Sonnet at `effort="low"`, thinking disabled, the Talker default, replacing the Haiku default in the Spec, because the speak-first rule is what keeps acknowledgments under a second. Keep the model in `JARVIS_TALKER_MODEL` and rerun this script against the real Talker prompt in Ticket #7: if a firmer speak-first prompt fixes Haiku, Haiku wins back the default. The Phase 2 mitigations still apply to close the remaining gap: early first-clause emission and the cached holding line at 1.2 s. The cost: Sonnet draws more of the Max limits than Haiku per Talker turn.
+
+Two findings for the sentence splitter (Ticket on spoken replies): text blocks before and after a tool call arrive with no space between them ("Right away, sir.The task is underway"), so the end of a text block must count as a sentence end; and the first counted turn of a session (turn 0) is slow (2.3 s Sonnet, 3.1 s Haiku). `latency.py` already sends a warm-up turn before it, yet turn 0 still read only 1,052 tokens from the cache, against 11.1-12.1k on turns 3 and 4, the first turns after it with no tool call for either model. So the warm-up as done did not warm the cache, and the cause is unknown. Open question for Ticket #7: find what warms the Talker's cache at launch, and measure the first real turn against it.
+
+### Baseline: today's launcher
+
+**Status: waiting on the User's recording session** (shared with Ticket #5). It cannot be faked: it needs the User speaking.
+
+How it is measured. `./jarvis` runs `converse` in a loop: each call speaks, then records until VoiceMode hears its silence threshold (1000 ms), transcribes, and returns; the model then makes the next call, which synthesises and plays. For each turn, `spikes/agent/baseline/analyze.py` takes
+
+- end of speech = `RECORDING_END` − the silence threshold, from VoiceMode's event log;
+- first audio = `TTS_FIRST_AUDIO` of the next `converse` call;
+
+and splits the gap into silence tail, STT, tool return, model time (PostToolUse of one `converse` to PreToolUse of the next, from the hook log) and TTS time to first audio. Turns where the model ran other tools in between are counted, and reported separately as "talk-only".
+
+Steps for the session. `./jarvis` follows its symlink and starts in the main checkout, where `spikes/` only exists after merge, so give absolute paths. From any directory, with `WT` the absolute path of the checkout holding this branch:
+
+0. Close every other VoiceMode client (any other Claude session that can call `converse`) first. Their events land in the same log and the same time window. VoiceMode tags a listening call's events with that call's session id, and the analyzer leaves out events tagged with another call's id, but `TOOL_REQUEST_END` and every event of a speak-only call carry no id, so the analyzer cannot tell those apart. Run the baseline with no other converse session open.
+1. `JARVIS_BASELINE_DIR=$WT/spikes/agent/baseline jarvis --settings $WT/spikes/agent/baseline/settings.json`. The settings add `PreToolUse`, `PostToolUse` and `PostToolUseFailure` hooks (a failed `converse` call fires the last instead of `PostToolUse`) that run `python3 "$JARVIS_BASELINE_DIR/hook.py"` and append timestamps and the session id to `hooks.jsonl` beside it (gitignored). Without `JARVIS_BASELINE_DIR` set (or pointing at a folder with no `hook.py`) the command prints a warning to stderr and exits 0, so a missing variable cannot block tool calls; it also means nothing is logged. Each hook starts `python3` (about 30-50 ms per hook, two per turn), so the measured baseline slightly overstates today's launcher. The hook command was run the way `settings.json` runs it, from `/` with that variable set, and wrote both entries.
+2. Talk for about 10 turns of ordinary conversation, English and Italian, with no repo work, so the model needs no tools between turns. Then exit. Each launch is its own session in the hook log.
+3. `python3 $WT/spikes/agent/baseline/analyze.py`. It analyses the most recent session only (`--list-sessions` shows all, `--session <id>` picks one, `--session all` takes every hooked session's time window together, so any unhooked VoiceMode sessions inside that span are counted too), reads `~/.voicemode/logs/events/` for that session's time window, and prints the hooked-call count, each turn, how many turns were skipped for inconsistent timings and how many fell back to VoiceMode's own timestamp for a missing hook entry (counted, not skipped; the lookups never reach past the next call's start), how many calls were dropped for a start with no end (a call with no `RECORDING_END` is skipped with the inconsistent turns; events of other tools are ignored), how many events another VoiceMode client tagged with its own session id were left out, how many unusable log lines were skipped (invalid JSON, not an object, a required field missing or of the wrong type), and the p50 and p90. The window and the most recent session come from the earliest and latest hook timestamps, whatever their order in the file. `python3 $WT/spikes/agent/baseline/test_analyze.py` runs the synthetic check of that pairing. It exits with an error when the hook log is empty or missing, rather than analysing every VoiceMode event ever logged.
+4. Record the totals here.
+
+Dry run on the User's VoiceMode logs from 2026-11-01: 26 turns, end of speech to first audio p50 8.2 s, p90 17.7 s; STT p50 1.4 s, model p50 3.8 s, TTS to first audio p50 1.7 s, plus the 1.0 s silence tail. These numbers come from the analyzer as first committed in f29b80a. With no hook log it took model time from VoiceMode's own tool events (one call's `TOOL_REQUEST_END` to the next call's `TOOL_REQUEST_START`) and could not separate other tools. The current analyzer refuses to run without hook entries and the VoiceMode log is not committed, so the committed files cannot reproduce them; f29b80a's `analyze.py` run on that log does. Indicative only, not the baseline: different voice, unknown model and effort, and turns that may include tool work.
+
+## Audio
+
+Ticket #5, first pass run on 2026-11-03 on the User's MacBook Pro (Apple M3 Pro, 18 GB), without the User. Every number here comes from synthetic speech: macOS `say` voices reading the same 30 clips, 12 pause takes and four Wake word phrasings the User will record (`spikes/audio/corpus.py`; 10 synthetic takes per phrasing, where the User records 20), plus public audiobooks for false accepts. Synthetic speech is clean and evenly paced, so it proves the pipelines and gives speed and memory, but **accuracy on the User's voice, Wake word recall, echo on the real speakers and Smart Turn on real pauses wait on the recording session**. Leaders named below are provisional unless the criterion doesn't depend on the User's voice.
+
+**Results:** every number in this section is in `spikes/audio/results/` (tracked, numbers and synthetic transcripts only), and `uv run summarise.py` from `spikes/audio/` prints them all. The User's recordings and anything transcribed from them stay in `spikes/audio/data/` (gitignored). A few facts come from outside those files and are marked *(not in the results)*.
+
+**Versions:** Python 3.12 via `uv` (3.12 because `kokoro-mlx` requires `<3.13`); package versions are pinned in `spikes/audio/uv.lock` (`parakeet-mlx` 0.6.0, `mlx` 0.32.4, `kokoro-mlx` 0.1.4, `openwakeword` 0.6.0 among them). VoiceMode's services: whisper.cpp server on :2022 running `ggml-small.bin` and Kokoro-FastAPI on :8880 (their versions are *not in the results*). Models: `mlx-community/parakeet-tdt-0.6b-v3`, `mlx-community/whisper-large-v3-turbo`, `ggml-large-v3-turbo.bin`, `mlx-community/Kokoro-82M-bf16`, openWakeWord `hey_jarvis_v0.1`, `pipecat-ai/smart-turn-v3` (`v3.2-cpu` and `v3.0`).
+
+Scripts: `spikes/audio/` (`uv run <script>` from there). `make_synthetic.py` renders the corpus; `bench_stt.py`, `bench_lang.py`, `bench_tts.py`, `bench_wake.py`, `bench_aec.py`, `bench_smart_turn.py`, `bench_memory.py`, `bench_claude_idle.py` measure; `session.py` is the recording session; `report.py` writes its results here; `test_session.py` checks the session kit without a mic. The synthetic clips were resampled from `say`'s 22.05 kHz output by linear interpolation; the scripts now use `scipy`'s `resample_poly`, so a rerun on freshly rendered clips can differ slightly. The synthetic pause takes were rendered later, with `resample_poly`.
+
+### Verdicts
+
+| Criterion | Result |
+|---|---|
+| Recording session | **Kit ready, waiting on the User.** `cd spikes/audio && uv run session.py`, about 44 minutes with the User (34 without the #4 baseline step, 41 without the optional headphones step), then about 78 minutes unattended: an hour of the room with a video playing, then the analysis. |
+| STT latency, partials, memory | **Measured.** `parakeet-mlx` is 2.5 to 6 times faster than VoiceMode's whisper.cpp small, 5.5 to 15 times faster than `mlx-whisper` turbo and 9.5 to 26 times faster than whisper.cpp turbo, and the only engine under 100 ms on 0.4 to 0.8 s partials. |
+| STT word error rate on the User's clips | **Waiting on the User.** Synthetic WER: parakeet 2.2 %, mlx-whisper turbo 2.2 %, whisper.cpp turbo 2.9 %, VoiceMode's small 7.6 %. Provisional leader: `parakeet-mlx`. |
+| TTS | **Chosen: `kokoro-mlx` in-process.** First audio 222 ms (EN) and 240 ms (IT) against 358 and 371 ms for VoiceMode's server; `am_liam` and `im_nicola` present in both; speed 1.0. Doesn't depend on the User's voice. |
+| Echo cancellation | **Pipeline proven, acoustic run waiting on the User.** On digital echo the WebRTC APM takes VAD speech frames during Jarvis alone from 86.8 % to at most 0.5 % and detects 3 of 3 Barge-ins over the echo, against 1 of 3 on the raw mic. The Voice Processing I/O helper is built for the session. Headphones mode, with echo cancellation off, is scored by an optional session step. |
+| Wake word recall | **Waiting on the User.** Synthetic, at threshold 0.5: "Hey Jarvis" 10/10, "Hi Jarvis" 9/10, "Jarvis" 7/10, "Ehi Jarvis" 5/10. The last two are at risk. The session records 20 takes per phrasing, so 95 % is 19 of 20. |
+| Wake word false accepts per hour | **Measured on public audio: 0 per hour at threshold 0.5** over 11.5 h of English and Italian audiobooks; at 0.3, 5 false accepts, 0.43 per hour (all in the Italian book). The session adds 5 minutes of the room with a video playing while the User is there, and an unattended hour of it for the per-hour figure. |
+| Wake word licence | openWakeWord code is Apache-2.0; the pretrained `hey_jarvis` model is CC BY-NC-SA 4.0 (non-commercial: fine here; the README notes it in Ticket #21) *(not in the results)*. Porcupine not run: it needs a Picovoice AccessKey, which needs an account. |
+| Smart Turn v3 | **Inference measured: 15.4 ms p50, 26.9 ms max** (v3.2 cpu, 8.3 MB). From its verdicts on synthetic speech, a turn ends 587 ms after the User stops on average, 413 ms sooner than VoiceMode's 1000 ms silence threshold, but it cut 4 of 8 synthetic mid-sentence pauses short (the 1000 ms threshold cut 2). The session's pause step measures both on the User's real pauses. |
+| Memory | **Within budget.** The whole audio stack in one process takes 2.42 GB with parakeet or 2.78 GB with mlx-whisper, against the 4 GB audio-stack budget. Needs an MLX cache cap. Three idle `claude` sessions, measured apart, add 0.59 GB (198 MB each), 3.02 or 3.37 GB in all. |
+| Chosen STT, echo cancellation, Wake word | **Waiting on the User.** |
+
+### STT
+
+30 clips (15 EN, 15 IT; 20 short of 1.16 to 2.58 s, 10 long of 5.99 to 6.71 s), p50 of three runs after a warm-up. "2 s" is the p50 over short clips, "6 s" over long ones. Partials are the first 0.4, 0.6 and 0.8 s from speech onset of each short clip. WER is on lowercased text without punctuation, counting "Pump Kit" as "pumpkit", "42" as "forty two" and similar spellings as equal (`EQUIVALENTS` in `bench_stt.py`).
+
+| Engine | 2 s | 6 s | Partials 0.4 / 0.6 / 0.8 s | WER all / EN / IT | Memory |
+|---|---|---|---|---|---|
+| `parakeet-mlx` tdt-0.6b-v3, in-process | 105 ms | 238 ms | 84 / 90 / 98 ms | 2.2 / 0.0 / 4.5 % | 1.2 GB MLX active, load 1.6 s |
+| `mlx-whisper` large-v3-turbo, in-process | 1,258 ms | 1,320 ms | 1,243 / 1,234 / 1,256 ms | 2.2 / 2.7 / 1.5 % | 1.5 GB MLX active, load 5.4 s |
+| whisper.cpp `ggml-small` (VoiceMode :2022) | 512 ms | 604 ms | 446 / 460 / 611 ms | 7.6 / 2.7 / 12.9 % | 0.74 GB footprint |
+| whisper.cpp large-v3-turbo (spike-only :2023) | 2,155 ms | 2,255 ms | 2,139 / 2,155 / 2,146 ms | 2.9 / 1.4 / 4.5 % | 1.86 GB footprint |
+
+Parakeet's speed-up, the other engine's p50 over parakeet's: against whisper.cpp small 4.9× on 2 s clips, 2.5× on 6 s clips and 5.1 to 6.2× on partials; against `mlx-whisper` 12.0×, 5.5× and 12.8 to 14.9×; against whisper.cpp turbo 20.5×, 9.5× and 21.8 to 25.6×. An earlier parakeet run on the same afternoon was faster (80 ms on 2 s clips) but is *not in the results*. Findings:
+
+- **Whisper's cost is flat.** Both Whisper builds encode a 30 s window whatever the clip length, so a 0.4 s snippet costs about as much as a 6 s clip (`mlx-whisper` 1,243 against 1,320 ms). That rules Whisper out for Barge-in partials, which the Spec wants at about 400 and 700 ms into the User's speech.
+- **Parakeet partials are usable from about 0.6 s.** The six partials kept per length are the first six English short clips. At 0.4 s three are empty and three have a start: "What are you doing?" (three right words, then a guess), "Cancel" and "Wait.". At 0.6 s all six have text, two of them with a wrong last word where the snippet cuts a word ("What are you worth?", "Merge cooler."). At 0.8 s all six have one to five words ("Wait." to "What are you working on?"), all right except "Merge pool request.". Enough for the hard-interrupt and Backchannel lexicons.
+- **Parakeet reports no language.** The Hub picks the reply voice from the User's language, so with parakeet it needs text language detection. `lingua` restricted to EN and IT got 28/30 on parakeet's transcripts in 0.03 ms; both misses were short, mixed clips ("Merge pull request 42.", "La C verde su Pump Kit."). The Hub should keep the previous language when detection isn't confident. `mlx-whisper`'s own detection got 30/30.
+- **VoiceMode's server translates Italian unless asked not to.** whisper.cpp's server defaults to English when the request names no language, and returned English translations of the Italian clips (that run is *not in the results*). The numbers above pass `language=auto`.
+- The large-v3-turbo whisper.cpp server ran on :2023 from VoiceMode's binary and a downloaded model in `~/.cache/jarvis-spikes/whisper/`, and was stopped afterwards; VoiceMode's own config was not touched.
+
+### TTS
+
+The 12-word sentences in `corpus.py` (`TTS_SENTENCES`), speed 1.0, p50 of five runs after a warm-up.
+
+| Engine | First audio EN (`am_liam`) | First audio IT (`im_nicola`) | Memory |
+|---|---|---|---|
+| `kokoro-mlx` in-process, `generate_stream` | 222 ms | 240 ms | 313 MB MLX active, load 0.6 s |
+| VoiceMode Kokoro-FastAPI :8880, streamed PCM | 358 ms | 371 ms | 2.0 GB footprint |
+
+- `kokoro-mlx` yields one chunk per sentence, so first audio is the whole sentence. That fits the Hub, which synthesises sentence by sentence anyway.
+- Both voices exist in both engines; `kokoro-mlx` picks Italian G2P (espeak) from the `im_` prefix *(not in the results)*.
+- **VoiceMode's server restarts itself every 25 requests**: its launchd plist sets `UVICORN_LIMIT_MAX_REQUESTS=25` *(not in the results)*. The first request for each voice took 895 ms (EN) and 827 ms (IT), against 358 and 371 ms warm. In a Hub that sends one request per sentence, a restart would be a silent gap every few replies.
+- `misaki` downloads its spaCy model with `pip` into whatever virtualenv is active, and did so into another repo's venv during this spike (reverted). The Hub must declare `en-core-web-sm` as a dependency, as `spikes/audio/pyproject.toml` now does.
+
+### Echo cancellation
+
+`bench_aec.py simulate` plays Jarvis's lines (Kokoro, EN and IT) through a toy room (35 ms delay plus a decaying tail), adds noise, overlays three User clips in the second half, and runs Silero VAD (512-sample frames, p > 0.5) on the raw mic and on the WebRTC APM output (echo cancellation, noise suppression and high-pass on, 10 ms frames, reference through `process_reverse_stream`).
+
+| Path | VAD speech frames during Jarvis alone | User Barge-ins detected over the echo | Same Jarvis audio alone fired VAD |
+|---|---|---|---|
+| Raw mic | 86.8 % | 1/3 | 3/3 |
+| WebRTC APM, stream delay 0 to 40 ms | 0.0 % | 3/3 | 0/3 |
+| WebRTC APM, stream delay 60 to 120 ms | 0.1 to 0.5 % | 3/3 | 0/3 |
+
+A Barge-in counts as detected only when VAD holds speech for 200 ms on frames where the same Jarvis audio, heard alone, had none. Jarvis's lines play twice and the User speaks only over the second play, so each User window has a twin in the first play with the same echo and no User; one VAD frame either side of the twin's speech is also excluded, for jitter between plays. Counting any 200 ms of speech in the User's window, as the first pass did, credited the raw mic with 3 of 3 although its echo alone fires VAD in all three twins. Running STT on the window and matching the cue words was the alternative; it was not chosen because "mhm" and "okay" are often transcribed as nothing or as other words, so it would fail real Barge-ins rather than echo.
+
+Digital echo is linear and easy, so this only proves the pipeline. The session's speaker run measures the real thing: Jarvis's lines twice over (about a minute) on the built-in speakers, recorded with a sample-aligned duplex stream, the User silent for the first half and speaking five cued Backchannels and Interruptions in the second. The same run then repeats through macOS Voice Processing I/O (`vpio_playrec.swift`, compiled by the session; compiled here but not run, since it plays aloud and needs the mic). The helper reports when its recording and its playback started, so the cues and the Jarvis-only window are placed in its own recording's time; a run that fails or records silence is discarded and offered again, never scored. The WebRTC pass plays and records on one duplex stream and starts the cue clock when the first sample reaches the speaker. `bench_aec.py analyse` reports Barge-in triggers (VAD speech held 200 ms) per minute on Jarvis alone and the User Barge-ins detected over the echo, for the raw mic, WebRTC at six stream delays and VPIO. Headphones mode should need none of this, since there is no echo path. The session's optional headphones step checks it: the same lines and cues through headphones, recorded by the built-in mic with no echo cancellation, scored like the raw mic above (`aec-headphones-run.json`).
+
+### Wake word
+
+openWakeWord `hey_jarvis_v0.1`, ONNX, 80 ms frames; a take counts when its peak score reaches the threshold. Synthetic takes: 10 per phrasing from nine `say` voices at random rates (Italian voices for "Ehi Jarvis"). The session records 20 per phrasing, so the Spec's 95 % recall is 19 of 20 for each phrasing.
+
+| Phrasing | @0.3 | @0.5 | @0.7 | Median peak |
+|---|---|---|---|---|
+| Hey Jarvis | 10/10 | 10/10 | 10/10 | 0.998 |
+| Hi Jarvis | 9/10 | 9/10 | 9/10 | 0.998 |
+| Ehi Jarvis | 7/10 | 5/10 | 4/10 | 0.528 |
+| Jarvis | 8/10 | 7/10 | 7/10 | 0.970 |
+
+These are without openWakeWord's VAD gate. With `vad_threshold=0.5` every phrasing scores the same except bare "Jarvis", which drops to 7/10, 6/10 and 6/10 (median peak 0.867): the gate pulled one take's peak from 0.955 down to 0.256. The "Hi Jarvis" miss is one take that peaked at 0.273. If the User's "Ehi Jarvis" and bare "Jarvis" also fall short of 95 %, the Ticket's open question applies: Porcupine's built-in `jarvis` keyword (needs a free AccessKey and an account) or a custom openWakeWord model trained on synthetic "Ehi Jarvis" and "Jarvis" clips (no account, a few hours of training) *(not in the results)*.
+
+#### False accepts
+
+11.54 hours of read speech that never says "Jarvis", streamed through the model in 80 ms frames, one detection per 2 s:
+
+| Audio | Hours | @0.3 | @0.5 | @0.7 |
+|---|---|---|---|---|
+| LibriSpeech `dev-clean` (English, many speakers) | 5.39 | 0 / 0 | 0 / 0 | 0 / 0 |
+| LibriVox *Il giornalino di Gian Burrasca* (Italian, one reader) | 6.15 | 5 / 3 | 0 / 0 | 0 / 0 |
+
+Each cell is false accepts without / with `vad_threshold=0.5`. At threshold 0.5 that is 0 per hour over 11.54 hours. At 0.3 it is 0.43 per hour over both books (0.26 with VAD), all of it in the Italian book (0.81 per hour there, 0.49 with VAD), still under the Spec's 1 per hour. Model cost is 3.4 to 3.8 % of one core in real time. Read audiobooks are cleaner than a room with a video playing, so the session records that twice: 5 minutes while the User is there, and an unattended hour at the end that gives false accepts per hour. Minutes near silence, where the video had stopped, are reported and left out of the hours; a false accept in one still counts, so the rate can only be overstated. The User's own speech near "Jarvis" is untested.
+
+### Smart Turn v3
+
+ONNX on CPU, one inter-op thread, including Whisper feature extraction; audio is the last 8 s with zeros padded at the start, as Pipecat does (padding at the end, as the upstream sample script does, flipped most verdicts to "complete" in a trial *not in the results*). Every verdict is on what the pipeline would send Smart Turn: the turn up to 500 ms into the silence that triggered it, with the recording's own trailing audio where it has it and zeros only where it ends sooner. Complete turns are the 30 clips, up to 500 ms after their speech ends; cut-off turns are the 10 long clips stopped at the quietest word gap near their middle, followed by 500 ms of zeros.
+
+| Model | Inference p50 (max) | Complete judged complete | Cut-off judged incomplete |
+|---|---|---|---|
+| `smart-turn-v3.2-cpu.onnx` (8.3 MB) | 15.4 ms (26.9 ms) | 29/30 | 5/10 |
+| `smart-turn-v3.0.onnx` (8.4 MB) | 14.5 ms (61.0 ms) | 23/30 | 8/10 |
+
+The synthetic run also has the 12 pause takes (`PAUSE_TAKES` in `corpus.py`): eight sentences with a 900 ms silence at a marked point, pauses found from 0.90 to 1.04 s long, and four without. `bench_smart_turn.py` scores each paused take up to 500 ms into its pause (should be incomplete; a pause shorter than 500 ms never reaches Smart Turn) and each whole take up to 500 ms after its speech (should be complete).
+
+| Model | Cut at the pause judged incomplete | Whole pause take judged complete |
+|---|---|---|
+| `smart-turn-v3.2-cpu.onnx` | 4/8 | 11/12 |
+| `smart-turn-v3.0.onnx` | 5/8 | 10/12 |
+
+The end-of-turn saving comes from these verdicts, following the Spec: after 500 ms of VAD silence Smart Turn runs, "complete" ends the turn, and "incomplete" keeps listening up to 1.5 s more. Each complete turn (the 30 clips and the 12 whole pause takes) ends at 500 ms plus inference, and one judged incomplete is charged the whole 1.5 s extension, so the saving is a lower bound. A real pause judged complete is a premature cut and is counted apart, as is a pause longer than a fixed threshold.
+
+| Model | Complete turns judged incomplete | Mean end of turn | Saved against 800 / 1000 / 1500 ms | Pauses cut short: Smart Turn / 800 / 1000 / 1500 ms |
+|---|---|---|---|---|
+| `smart-turn-v3.2-cpu.onnx` | 2/42 | 587 ms | 213 / 413 / 913 ms | 4/8 / 8/8 / 2/8 / 0/8 |
+| `smart-turn-v3.0.onnx` | 9/42 | 836 ms | -36 / 164 / 664 ms | 3/8 / 8/8 / 2/8 / 0/8 |
+
+Against VoiceMode's 1000 ms threshold today, v3.2 ends turns 413 ms sooner on average, and cuts short 4 of the 8 pauses where 1000 ms cuts 2. Synthetic pauses are a fixed 900 ms silence inside evenly paced speech, and the synthetic cut-offs are word gaps, so neither says how the User pauses; the session's pause step records the same 12 sentences in the User's voice, and the same computation runs on them.
+
+### Memory
+
+`bench_memory.py`: one process loads the STT, `kokoro-mlx` with both voices, openWakeWord with Silero VAD, Smart Turn v3.2 and the WebRTC APM, runs each, then reuses STT and TTS three times. MLX's buffer cache is capped at 256 MB. Uncapped, freed buffers swell the footprint: the STT benchmark's parakeet process reached 3.9 GB (2.5 GB of it MLX cache) and the TTS benchmark's process 4.8 GB, so the Hub must call `mx.set_cache_limit`.
+
+| Stack | Audio stack footprint | MLX peak during load |
+|---|---|---|
+| parakeet STT | 2.42 GB | 2.77 GB |
+| mlx-whisper STT | 2.78 GB | 3.10 GB |
+
+Both are under the 4 GB (4096 MB) audio-stack budget on the 18 GB machine. Using VoiceMode's servers instead would add their own processes (0.74 GB for whisper small, 1.86 GB for turbo, 2.0 GB for Kokoro).
+
+`claude` is outside that budget and measured apart. `bench_claude_idle.py` starts three `claude` sessions (2.1.317) in a pty in a trusted repo with no hooks, lets them sit at the prompt for 60 s without sending one, so no model is called, and reads each process's footprint: 198, 198 and 199 MB, 0.59 GB for the three. That is the `claude` process alone; MCP servers it starts are separate processes and not counted. With the audio stack, that comes to 3.02 GB (parakeet) or 3.37 GB (mlx-whisper). For comparison, the six `claude` processes running during the memory benchmark, busy or idle, had a median footprint of 292.5 and 290.5 MB (`claude_processes_seen` in the memory results).
+
+### The recording session
+
+`cd spikes/audio && uv run session.py` runs these steps in order; `--only <step>` runs one, `--redo` records takes again even when they exist, and otherwise every step skips takes already on disk, so it can stop and resume. Recordings go to `spikes/audio/data/recordings/` (gitignored). `caffeinate` keeps the Mac awake from start to finish, analysis included. Closing the terminal or killing the session stops the turbo server and the Voice Processing I/O helper on the way out.
+
+1. **Preflight** (2 min): built-in mic and speakers, a 3 s level check, and a stop if macOS gives the terminal no mic access.
+2. **Baseline, Ticket #4** (about 10 min): points at #4's hook-based harness in `spikes/agent/baseline/` (steps in `## Agent SDK` above, Baseline) and waits.
+3. **Clips** (about 10 min): the 30 sentences, Enter to start and stop, keep or redo.
+4. **Pauses** (about 4 min): 12 sentences, 8 with a marked mid-sentence pause; right after each paused take the step checks it heard the pause, and asks for the take again if not.
+5. **Wake word** (about 5 min): "Hey Jarvis", "Hi Jarvis", "Ehi Jarvis", "Jarvis", twenty 2.5 s takes each on a cue, about 3 s per take. Twenty instead of ten adds about 2 minutes.
+6. **Speaker run** (about 10 min): the WebRTC pass, the Voice Processing I/O pass, then 5 minutes of the room with a video or podcast playing, for false accepts. A Voice Processing I/O pass interrupted or without its cue marks is redone on resume; a helper that does not compile (or no `swiftc`), or that does not start playing within 30 s, fails the pass instead of hanging.
+7. **Headphones, optional** (about 3 min): Jarvis's lines and the same cues through headphones, the built-in mic recording, no echo cancellation. Type `s` to skip it when no headphones are to hand. The step re-reads the audio devices when the User presses Enter, so headphones connected during the session are found, and plays to them explicitly rather than to whatever was the default at start. The step asks for the headphones to be disconnected afterwards, since the room step plays on the speakers.
+8. **Room, unattended** (60 min): the User starts a long video or podcast, an hour or more, and walks away with the Mac on power and the lid open. The step records twelve 5-minute chunks with `caffeinate` keeping the Mac awake. If it is interrupted, finished chunks are kept and `uv run session.py --only room` records only the missing ones, then `--only analyse` runs the analysis.
+9. **Analysis** (about 18 min, unattended, straight after the room run): starts a temporary large-v3-turbo server on :2023 and waits until it answers with a success status (if something already listens on :2023, it names the process and leaves the turbo row out rather than measure it; preflight warns about this at the start), runs every bench on the recordings (`bench_stt.py` measures :2023 only when the listener is the server the session started, passed as `--turbo-pid`), stops the server, and writes a results block into this section with `report.py` (a rerun replaces it). Numbers go to `spikes/audio/results/` without transcripts or home paths; a missing server, a failed bench or a crashed STT engine is printed in a banner, not skipped silently. A bench still running after 40 minutes is stopped with every process it started and reported the same way: in a dry run the turbo server stopped answering mid-request and held the analysis for 28 minutes until it was stopped by hand.
+
+With the User: about 44 minutes (34 without the baseline, 41 without headphones). Unattended: about 78 minutes.
+
+## Talker in the Hub
+
+Ticket #7, run on 2026-11-03 on the M3: `claude-agent-sdk` 0.2.177 on Python 3.12, `claude` CLI 2.1.317 through `cli_path`, Talker on `sonnet` (resolved to `claude-sonnet-5-5`) at `effort="low"` with thinking disabled (ADR 0005), Max login, `ANTHROPIC_API_KEY` unset. Every number below is in `docs/notes/talker-in-the-hub.json`, per turn, with no message text.
+
+### The claude.ai connectors, and why Phase 0's turn 0 was slow
+
+`setting_sources=[]` does not keep out the claude.ai connectors of the logged-in account. They join the session after its first query: on this account the second query's `init` listed 24 `mcp__claude_ai_*` tools (Claude Docs and Pumpkit, `post_now` among them) next to `tools=[]`. Their schemas add about 10k tokens to every request and change the prefix, so the turn after the first one misses the cache. In a probe on the Talker prompt without the fix, the warm-up wrote 1,284 tokens to the cache, the first real turn then wrote 10,253 and read nothing, and took 2.43 s to its first delta; the next two turns read 8,546 and 10,277. That matches Phase 0: turn 0 slow, and talk turns reading 11-15k from the cache although the request was under 1k tokens. Phase 0's latency numbers therefore carried these extra tokens.
+
+`strict_mcp_config=True` (the CLI's `--strict-mcp-config`) removes them. The Hub sets it on every session. With it, `init.tools` is exactly the Hub's tools on every turn (`tests/test_real_model.py` checks two turns), and a Talker request is about 1.3k tokens at the start of a launch, growing with the conversation (3.6k by turn 20 of run 2 below). Keeping the connectors out also matters beyond latency: the Talker could otherwise see tools such as Pumpkit's `post_now`, which the Boundary reserves for the User.
+
+The CLI also makes one Haiku request of 1,185 input tokens early in each session (seen in `model_usage`); it is the CLI's own, outside our control, and did not delay the reply.
+
+### Does the warm-up warm the cache?
+
+Yes, once the connectors are out. The Hub sends one `<event source="hub">` message at launch and hides the reply. Probe, with a nonce appended to the prompt so the cache started cold, two launches each way:
+
+| | First real turn, first delta | Its cache read |
+|---|---|---|
+| No warm-up | 4.24 s, 1.16 s | 0 (wrote 1,303 and 1,301) |
+| Warm-up first | 0.73 s, 0.84 s | 721, 726 |
+
+The warm-up itself reached its first delta in 1.26-1.67 s in the four probe launches that had one and the two runs below, and in 2.82 s and 4.59 s in two other launches. It read 1,284 tokens when the prompt had been cached a few minutes before. After it, the first real turn reads about 720 tokens: the system prompt and setup, not the warm-up exchange. The full previous request is read only from the second real turn on (1.3k and up), so something in the first user turn's request changes after it; it costs about 610 tokens of cache writes once and no visible latency. In both 20-turn runs below, the first real turn reached its first delta in 0.73 s and 0.80 s.
+
+The warm-up runs in the background (ADR 0006): the prompt appears at once, and a turn typed before the warm-up ends waits for it. Turn times count from when the line arrived, and `wait_ms` records the wait. In four launches with lines 1 and 2 of the small-talk file, two with the first line ready at launch and two with it 4 s later:
+
+| First line typed | Wait | First sentence |
+|---|---|---|
+| At launch | 1.70 s, 1.75 s | 2.72 s, 2.79 s |
+| 4 s after launch | 0, 0 | 1.03 s, 1.05 s |
+
+### Small talk latency in text mode
+
+`env -u ANTHROPIC_API_KEY uv run jarvis-hub --text < docs/notes/talker-small-talk.txt` (20 lines, 10 English and 10 Italian, small talk only: the Talker has no tools yet), timed by the Hub from sending the message to the first text delta and to the end of the first sentence (`.?!` followed by a space or the end of a delta, or the end of a text block: Phase 0's definition). Per-turn rows go to `.jarvis/metrics.jsonl`. Both runs had the warm-up on the start path, as in 07b423b, so no turn waited for it. Run 1 used the first draft of `prompts/talker.md`; run 2 the prompt as of 07b423b, which asks for a short opening sentence and states the User's name plainly (run 1's wording, "the voice of {user}'s assistant", left the model unsure what to call the User). The prompt's first line changed after both runs to drop "assistant", a term GLOSSARY.md avoids.
+
+| Run | First delta p50 | p90 | First sentence p50 | p90 | First sentence ≤ 1.0 s |
+|---|---|---|---|---|---|
+| 1 (first prompt draft) | 0.83 s | 1.55 s | 1.16 s | 1.84 s | 1 of 20 |
+| 2 (prompt as of 07b423b) | 0.85 s | 3.21 s | 1.20 s | 3.73 s | 5 of 20 |
+
+**Verdict: missed, and accepted by the User on 2026-11-03.** Small talk reaches the first sentence in 1.16-1.20 s at p50, against the target of about 1 s; the first delta arrives in 0.83-0.85 s, so the model's time to first token is most of it. Run 2's p90 comes from four slow turns (2.71-8.11 s) during what looked like a slow patch on the API side; its other 16 turns sat between 0.74 and 1.78 s. A shorter opening sentence helped the fast turns (5 at or under a second against 1) but not the median. The rest of the gap is #9's work: emitting the first clause early on `,;:` once it has six words, and the cached holding line at 1.2 s. Haiku was 0.85 s on small talk in Phase 0 but fails the speak-first rule (ADR 0005). The Haiku rerun with a firmer speak-first prompt that #4 asked for needs `delegate`, so it moves to the Tasks ticket (#8).
+
+### Interrupting from the keyboard
+
+Ctrl-C in the terminal reaches the `claude` CLI as well, because it runs in the Hub's process group, and the CLI exits. So in text mode Ctrl-C ends the conversation (exit 130), not a reply. `Hub.interrupt()` works through the backend (tested with the fake and against the real model); a keyboard or spoken trigger for it needs the CLI out of the terminal's process group, which the SDK does not offer.
+
+## Tasks and the Orchestrator
+
+Ticket #8, run on 2026-11-03 on the M3: `claude-agent-sdk` 0.2.177, `claude` CLI 2.1.317 through `cli_path`, Max login, `ANTHROPIC_API_KEY` unset, the Talker at `effort="low"` with thinking disabled. Every number below is in `docs/notes/talker-delegation.json`, per turn, with no message text beyond the fixed lines of `docs/notes/talker-delegation.txt`.
+
+### Speak first, then delegate
+
+`spikes/hub/delegation.py` drives the real Hub with the real Talker and a stub Orchestrator, so a run costs only Talker turns. The stub answers each Task with one fixed report, and asks which repo a requested issue should go in, so the next line answers it through `task_id`. The script types each of the 20 lines (English and Italian: look-ups, status, cancel, answers, a summary on screen, goodbye) once the Hub has gone quiet. That timing left `cancel` untested: by the time lines 8 and 10 ("Annulla l'ultima attività.", "Cancel that.") were typed, the stub had already reported on the Task they meant, and in every run the Talker answered both without a tool call. The one `cancel` in the data is Haiku dropping its own duplicate delegation on line 5 (run 7). Cancelling a running Task is covered by the fake-backend tests only. A turn is tool-using when it calls any Hub tool; the Talker's relays of reports count too. Four versions of the speak-first wording were tried (`prompts` in the data file); D is the committed one.
+
+| Run | Talker | Wording | Stub reports | Tool-using turns | Text before the first tool |
+|---|---|---|---|---|---|
+| 1 | Sonnet | A | at once | 17 | 14 |
+| 2 | Sonnet | B | at once | 18 | 15 |
+| 3 | Sonnet | C | at once | 18 | 18 |
+| 4 | Sonnet | D | at once, alongside run 5 | 17 | 17 |
+| 5 | Haiku | D | at once, alongside run 4 | 17 | 9 |
+| 6 | Sonnet | D | after 3 s | 17 | 17 |
+| 7 | Haiku | D | after 3 s | 17 | 15 |
+
+- **Sonnet meets the 95% target on the committed wording:** 17 of 17 in both runs. It spoke first on every delegation in every run but one (run 2, line 18). With wording A its three misses were the three `status` turns, as in Phase 0; naming `status` in the hard rule fixed them (4 of 4, 3 of 3, 3 of 3 in runs 3, 4 and 6).
+- **Wording B backfired.** Its extra line in `delegate`'s result, "End your turn", made Sonnet call `end_conversation` after 6 of its delegations (lines 3, 6, 9, 13, 15 and 17). The result went back to `{"task_id", "queued"}` and the hint was dropped.
+- **Haiku misses it:** 9 of 17 (run 5) and 15 of 17 (run 7) on the committed wording, going tool-first on 5 of 12 and 1 of 10 delegations. It also misjudged requests: in run 7 it answered line 1 with `status` instead of delegating, and on line 5 delegated the answer twice, then cancelled the duplicate. **The Talker stays on Sonnet (ADR 0005).**
+- Sonnet called `status` right after `delegate` on 5 lines in run 4 and on 1 in run 6. In run 4 the stub had already reported, so the check found the Task done. With the 3 s delay it mostly stopped.
+- Sonnet often adds a second short sentence after `delegate` returns ("Right away, sir."), in the transcripts of every run. It delays nothing, since the first sentence is already out, but the prompt does not fully stop it.
+- First sentence of the User's turns, p50 and p90: Sonnet 1.09 s and 1.32 s (run 6), Haiku 0.93 s and 1.61 s (run 7). Runs 4 and 5 ran at the same time, so their timings are not comparable.
+
+### End to end against the Org
+
+`jarvis-hub --text` with the real Talker and the real Orchestrator (Sonnet, `effort="medium"`), two lines piped at launch: the open PRs in pumpkit and whether CI is green on jarvis main (the `end_to_end` rows). Both answers matched `gh` checked by hand.
+
+| Task | Waited in the queue | Bash calls | Report, from the `delegate` call |
+|---|---|---|---|
+| T1, open PRs | 0.34 s | 1 | 5.07 s |
+| T2, CI on jarvis main | 3.06 s, behind T1 | 3 | 12.02 s |
+
+The Talker relayed each report with its first sentence 1.09 s and 0.88 s after it arrived, and the details for T2 were on screen and in `.jarvis/show.log` before the relay began.
+
+### The Orchestrator cannot change a repo
+
+The Orchestrator runs under `permission_mode="dontAsk"` with Read, Grep and Glob on the allowlist and Bash off it, so the CLI denies every Bash call by default. A `PreToolUse` hook on Bash (`on_failure="block"`) is the only thing that can allow one, through the Hub's `check`; ADR 0007 has the design and `src/jarvis_hub/read_only.py` the list of reads. A probe on 2026-11-03 confirmed both halves: under `dontAsk` without the hook, `gh repo list` was denied, and with it, the hook's allow let it run.
+
+`tests/test_real_model.py` (opt-in) checks this against the real CLI. The Orchestrator's `init.tools` on both of two turns is exactly Bash, Glob, Grep, Read and `mcp__jarvis__report`, with `permissionMode` `dontAsk` and no claude.ai connector. Given a prompt that runs whatever it is told, `gh repo view` ran and the hook refused `gh label create`. In a repo whose config sets `diff.external`, the model's `git diff` ran as the hook rewrote it, with `--no-ext-diff`, and the program never ran. A first version of that test sent four commands in one message, and on Haiku it also saw `gh api -X POST …` and a read chained with a write refused by the hook. Sent alone, though, the model declines to try the bare `gh api -X POST` or splits the chain into two commands, so the test keeps the two commands it tries every time, and the table tests cover the rest.
+
+### The turn cap counts per message
+
+The Orchestrator is one persistent session with `max_turns=12`. An opt-in test (`test_max_turns_caps_each_message_not_the_whole_session`, run 2026-11-03 on Haiku) sent three messages to one session capped at 2 turns, each needing two (a tool call, then the reply): all three completed. With a cap of 1, each message failed on its own with "Reached maximum number of turns (1)". So the CLI's cap applies to each message, which is the per-message cap the ticket asks for, and the Hub adds none of its own.
+
+## Spoken replies
+
+Ticket #9, run on 2026-11-03 on the M3: `jarvis-hub --text --speak` with `kokoro-mlx` 0.1.4 in the Hub's process (`mlx` 0.32.4, `Kokoro-82M-bf16`, speed 1.0, MLX cache capped at 256 MB), the Talker on Sonnet at `effort="low"` with thinking disabled, through the MacBook Pro speakers. Every number below is in `docs/notes/spoken-replies.json`, per turn, with no message text. Eight small-talk lines from `docs/notes/talker-small-talk.txt`, English and Italian in turn, each typed once the reply before it had finished playing, so every turn started from silence.
+
+| From the typed line | p50 | p90 | max |
+|---|---|---|---|
+| First text delta | 691 ms | 730 ms | 731 ms |
+| First piece out of the splitter | 909 ms | 1,118 ms | 1,157 ms |
+| First audio due to start in the player | 1,050 ms | 1,256 ms | 1,290 ms |
+| First sound from the speakers (78 ms later) | 1,128 ms | 1,334 ms | 1,368 ms |
+| First piece to its audio in the player | 140 ms | 149 ms | 162 ms |
+
+- **First audio within about 300 ms of the first sentence: met, counted from when the splitter releases the sentence.** Synthesis of the first piece took 119-162 ms; the speakers add 78 ms of output latency (PortAudio's figure for a `low` latency stream), so sound leaves the speakers about 220 ms after the sentence is ready. Counted from when the sentence's text arrives, first sound was about 310-320 ms on the turns where the 100 ms settle wait applied (below), so the target is not met on those turns by that count. No gaps: every later sentence was synthesised and queued before the one ahead of it ended.
+- **Typed turn to first sound from the speakers: 1.13 s at p50, 1.33 s at p90.** The player starts the audio 78 ms before that (1.05 s and 1.26 s), and the speakers add the rest. That is the number Spec story 12 cares about; with voice input, end-of-turn detection adds to it.
+- **A sentence at the end of a delta goes after 100 ms of quiet.** A first run waited for the space after "sir.", as the Spec words the rule, and on 2 of 8 turns the next delta came 217 and 487 ms later. The splitter now also reports a sentence end at the end of its text, never after a digit (Phase 0's "3." then "5"), an abbreviation or inside backticks, and Speech cuts it if no delta follows within 100 ms. Those two turns of the second run paid 100 ms each.
+- **Known limit of the 100 ms settle cut, pending the User's decision.** A bare domain such as "pumpkit." whose "io/..." arrives more than 100 ms later is spoken in two pieces. The Talker prompt forbids URLs, so it should be rare. The settle cut stays as it is until the User decides whether to accept that or to give it up.
+- **The holding line waits 1.5 s.** The Talker's first sentence takes 1.09-1.20 s at p50 and 1.32 s at p90 (sections above), so the plan's 1.2 s would cut in on about half the turns, and "One moment, sir." plus the real sentence behind it would then start later than the sentence alone. At 1.5 s it never fired on these eight turns, whose first piece came by 1.16 s at most, so the holding line did nothing to close #7's gap. Neither did the early first clause, which never fired either (below): the first piece came at 909 ms p50 against #7's 1.16-1.20 s (255-287 ms sooner), and the first delta alone came sooner by 140-155 ms (691 ms against 831 and 846 ms). The rest, 115-132 ms, is the time from first delta to first sentence: 218 ms here (909 minus 691) against 333 and 350 ms in #7, all as differences of p50s, which add up to the gap. Taken as the median of each turn's own delta-to-sentence time instead, the three agree: 264 ms here, 282.5 and 250 ms in #7. So the first delta coming sooner is the firm part of the account; a faster sentence after it is not supported on that second measure. Both compare eight turns here with #7's twenty, so either is indicative only. The holding line plays only after a User turn, counting from when the Talker starts on it, never before relayed news, and only when nothing else is playing or queued.
+- **The first clause goes early** on `,;:` once it has six words, which on these turns never fired: the Talker opens with a short sentence ("Good evening, sir.") as its prompt asks.
+- **Startup:** loading the voice and synthesising the cached lines (chime, holding line, startup line, "Very good, sir." and the usage-limit line, in both languages) took 3.49 s, in the background; the warm-up's first delta came in 1.12 s meanwhile. The startup line plays when they are ready. The usage-limit line stops before the reset time, which #16 says after it.
+- **Memory:** the Hub process, voice loaded, is 976 MB after startup and 1,061 MB after the eight turns (`footprint`), against the 313 MB of MLX memory Phase 0 measured for the model alone; most of the rest is the libraries `kokoro-mlx` pulls in through misaki (spaCy, and torch through spacy-curated-transformers). The `claude` processes are separate and not counted.
+- **Synthesis is GPU-bound and sensitive to load.** Earlier in the day, with the machine at a load average of 11 and a virtual machine running, the same model took 450-870 ms per sentence (12 words: about 750 ms) against 120-160 ms here. On a busy machine the 300 ms target would be missed, though the pipeline still keeps sentences gap-free.
+- **The voice follows the User's language.** `<user lang=…>` now carries it. Typed lines are detected by counting function words of each language first, then `lingua` (EN and IT, preloaded at launch), keeping the previous language when lingua is under 0.8, or 0.9 for one word. Function words come first because lingua alone read "Apri una issue su pumpkit per il bug del login" as English (0.76) from its English nouns. A capital "I" counts as English, except at the start of a sentence before a lowercase word, where it may be the Italian article ("Ok. I test passano") and counts for neither. On the 40 lines of the two text-mode files, this got every line right; "Stop." keeps the previous language.
+- `misaki` pulls in `en-core-web-sm`; the Hub now declares it, so nothing is pip-installed into another environment.
+
+## Listening
+
+Ticket #12, run on 2026-11-03 on the M3 without the User: no microphone, no model call. `spikes/hub/voice_input.py` pushes #5's synthetic clips (`say` voices, `spikes/audio/data/synthetic` in the #5 worktree) as 10 ms frames, in real time, through the Hub's real input path (`Capture`: WebRTC APM, openWakeWord `hey_jarvis`, Silero VAD, Smart Turn v3.2, parakeet-mlx, the pass-through speaker gate) into `VoiceMode`, which runs the voice state machine and answers each turn with a canned line in the real Kokoro voice through a silent player. Numbers only, no transcripts, are in `docs/notes/voice-input.json`. Versions: parakeet-mlx 0.6.0, openwakeword 0.6.0, onnxruntime 1.31.1, livekit 1.2.0, mlx 0.32.4, kokoro-mlx 0.1.4. Thresholds at their defaults; the run's windows were shortened to 3 s to save time (`TIMING` in the script), which changes no logic.
+
+**Engines are provisional.** The recording session (#5) has not happened, so these are Phase 0's leaders, each behind a protocol in `jarvis_hub.voice.input` and loaded in one place, `jarvis_hub.voice.engines.load_engines`: swapping one for the session's pick (Voice Processing I/O for echo cancellation, a custom or Porcupine Wake word, another STT) adds an adapter there and a choice to `JARVIS_AEC`, `JARVIS_WAKE_ENGINE` or `JARVIS_STT_ENGINE`, nothing else.
+
+| Measure | Result |
+|---|---|
+| Wake word, phrase alone, threshold 0.5 | "Hey Jarvis" 10/10, "Hi Jarvis" 9/10, **"Ehi Jarvis" 3/10**, bare "Jarvis" 7/10 |
+| Wake word, end of phrase to the event in the Hub | p50 166 ms, p90 355 ms, max 387 ms |
+| "Hey Jarvis, <request>" in one breath (150 ms gap), 30 clips | 29 heard; end of speech to the turn reaching the Hub p50 757 ms, p90 804 ms, max 2,254 ms |
+| "Hey Jarvis", 1 s pause, request, 30 clips | 30 heard; p50 787 ms, p90 1,041 ms, max 2,162 ms |
+| STT per turn (parakeet, whole turn) | p50 138-144 ms, p90 228-234 ms, max 383 ms |
+| Smart Turn per verdict | p50 24 ms, max 34 ms |
+| A turn in the Follow-up window without the Wake word | 6/6 heard |
+| Stop phrases on their own ("That's all.", "Grazie Jarvis.") | 2/2 idled at once, no turn sent |
+| Requests with no Wake word while idle | 0 of 6 reached the Hub |
+| Startup to listening | 4.9 s (engines and the voice load in parallel, in the background) |
+| Memory, whole audio stack in one process | 2,140 MB footprint (MLX active 1,549 MB, peak 2,444 MB), against the 4 GB budget |
+
+- **End of turn is 500 ms of silence plus about 250 ms of work.** The p50 of 757-787 ms is the 500 ms VAD silence (measured from the end of the last loud 10 ms frame, so up to one 32 ms VAD window more), Smart Turn's 24 ms, parakeet's 140 ms, and the frame and event-loop hand-offs. The max of about 2.2 s is a turn Smart Turn judged incomplete, which waits the whole 1.5 s extension: the cost of "incomplete" on a turn that was in fact complete. Phase 0 saw 2 of 42 complete turns judged incomplete; this run did not count them (the script now records `turns_judged_incomplete`).
+- **Smart Turn gets exactly the turn up to 500 ms into the silence**, as #5's review fixed; STT gets the same audio, so the extension's silence is never transcribed.
+- **The wake phrase is cut from the turn by time, not by text.** Parakeet hears the synthetic wake phrase as "A Jarvis", "E i Jarvis", "Ey, Charles", "Hey George" or "Agearwood", so in an earlier run a text strip let many bare wake phrases through as turns. The pipeline now drops the words parakeet times as ending before the Wake word hit (`after=` on the transcriber), with the text strip kept as a fallback, plus one more: a first word within one letter of "Jarvis" ("Harvis", "Jarvid", "Jorvis") is dropped, since the hit can come just before parakeet's end of the word. The run above had the time cut but not that last fallback: 2 of 40 bare wake phrases still went through as one-word turns ("week.", "Charles."), and some one-breath turns began with a "Jarvis" remnant, which the fallback removes when replayed on the same transcripts. An Italian one-breath turn can lose its first words ("Apri una") with the wake phrase, when parakeet times them as ending before the hit.
+- **The pre-roll keeps "Hey Jarvis, open…" whole.** VAD runs in every state, so when the Wake word turns capture on mid-phrase the turn starts 200 ms before the phrase's onset, up to the 1.5 s pre-roll.
+- **Transcripts.** Exact against the script: 16 of 29 in one breath, 22 of 30 after a pause; most misses are spellings the Talker reads past ("Pump Kit", "42", "sub-agent", "Ci"), a "post hoc" for PostHog, and the wake remnants above. Language is not reported by parakeet; the Hub detects it from the text (`detect_language`, #9), keeping the previous language when unsure.
+- **"Ehi Jarvis" is the known weak spot**, 3/10 here against 5/10 in Phase 0 (the echo canceller's noise suppression sits in front of the model now), and bare "Jarvis" 7/10. Both wait on the User's own takes in the recording session; if they stay short of 95 %, a custom openWakeWord model or Porcupine (#5's open question).
+- **Echo cancellation was on but had nothing to cancel**: the run plays nothing through speakers. Its acoustic test needs the session's speaker run. The player feeds every block it plays, silence included, to the APM at 24 kHz, which the APM takes as it is; how far that takes the echo down is unmeasured until that run.
+- **Not verified without the User:** the device path (`Microphone`, sounddevice at 16 kHz in 160-sample blocks), microphone permission, echo on the real speakers, recall and false wakes on the User's voice, and Smart Turn on real pauses.
+
+### Manual script, for the User
+
+Run `./jarvis` (or `uv run jarvis-hub --debug` to see each transition), in a quiet room on the MacBook's speakers, then again with `--headphones`. Tick each line.
+
+- [ ] Startup: "At your service, sir." plays, `[hub] Listening for "Hey Jarvis".` appears within about 10 s, then silence.
+- [ ] Say "Hey Jarvis", wait for the chime, ask "What time is it?". The words appear on screen after `»`, and the answer is spoken.
+- [ ] Stay silent. About 6 s after the answer ends, Jarvis goes idle without a word (`--debug`: `follow_up -> idle`).
+- [ ] Say "What's the weather?" with no Wake word: nothing happens, and `metrics.jsonl` shows no new Talker turn.
+- [ ] Say "Hey Jarvis, what are you working on?" in one breath: the turn on screen starts at "what", and it is answered.
+- [ ] Within 6 s of the answer, ask a follow-up with no Wake word: it is answered.
+- [ ] Say "That's all": "Very good, sir." and idle at once, with no Talker turn in `metrics.jsonl`.
+- [ ] Say "Ehi Jarvis, su cosa stai lavorando?": the reply is in Italian with the Italian voice. Note how often "Ehi Jarvis" and bare "Jarvis" wake it.
+- [ ] Ask something with a long answer and say "Hey Jarvis" while it speaks: it stops, chimes and listens.
+- [ ] Type a line while idle: the reply is text only and Jarvis does not chime or listen.
+- [ ] On speakers, let a long answer play: Jarvis must not hear itself (no turn appears on screen from its own voice).
+
+## Barge-in
+
+Ticket #17. While Jarvis speaks (`speaking` or `announce`), the input pipeline watches the echo-cancelled microphone. Unbroken speech held for `JARVIS_BARGEIN_MIN_SPEECH_MS` (200) pauses the player. Speech counts only from `JARVIS_BARGEIN_GUARD_MS` (250) after Jarvis's voice starts or resumes, while the APM settles: the state machine gives that time (`barge_in_from`) and the pipeline measures held speech from it, so echo inside the guard is ignored and the User already talking as a reply starts pauses it 200 ms after the guard ends. (The first build rejected a Barge-in inside the guard in the state machine, which left the pipeline holding it, so no other fired until half a second of silence.) Parakeet transcribes the Barge-in from 300 ms before its onset: at 400 and 700 ms, then every 300 ms while the User keeps talking and it is still undecided, and once more each time the speech goes quiet for 200 ms. `jarvis_hub.voice.bargein.decide`, pure, reads the latest partial:
+
+1. Any phrase of `lexicons/interrupt.txt` (wait, stop, hold on, no, actually, Jarvis, aspetta, un attimo, fermo, anzi…): stop, unless it lies inside a longer Backchannel phrase ("no" in "no problem"). The Wake word stops Jarvis in the state machine, before any partial.
+2. Words that are not all Backchannel (`lexicons/backchannel.txt`: okay, mhm, yeah, right, no problem, all right, sì, certo, va bene, vabbè, ho capito…): stop once there are three, once the speech has run 700 ms (compared at 650 ms, since VAD reads speech held throughout a chunk short at the 700 ms partial), or once it has gone quiet; otherwise wait.
+3. Only Backchannels, or no words at all (noise, or only STT marks such as `[BLANK_AUDIO]`, `[Music]`, `(coughs)`): resume once the speech has gone quiet.
+4. At `JARVIS_BARGEIN_DECIDE_MS` (800) after the pause, the decision is made: still talking with words other than Backchannels stops, anything else resumes, so a slow "sì, certo" resumes. The one exception is a User still talking whose every word so far is a Backchannel: Jarvis waits for one more partial, up to `last_partial_s` (500 ms) more, so 1.3 s from the pause, because "okay, actually…" starts like a Backchannel and the interrupt comes after it. That partial decides at once (an interrupt or any other words stop, Backchannels alone resume), and with no partial by then Jarvis resumes.
+
+Resume rewinds 300 ms and the Backchannel never becomes a turn. Stop flushes the player, interrupts and drains the Talker, and listens with no chime; the turn keeps the User's audio from the onset and reaches the Talker as `<interrupted spoken="…"/>` (the player's record of what was heard) then `<user>`. A Wake word that cuts Jarvis off does the same, plus its chime. With `--headphones` (or `JARVIS_AEC=off`) the same logic runs on the raw microphone, so it assumes headphones.
+
+An unbroken run of speech (no VAD gap) makes at most two Barge-ins. The first one's speech raises no other, except once: when Jarvis resumes with the User still talking, as over "okay okay okay, actually…", the speech from the end of the new guard counts as a second Barge-in. After that second one resumes, the run never pauses Jarvis again, so a long string of Backchannels gives two short pauses, not a stutter. The pipeline still transcribes the rest of the run every 300 ms, from the second Barge-in's onset, as `Overheard` events, which stop Jarvis only on a phrase of `interrupt.txt` (the Wake word among them): "okay okay okay… wait, stop" in one breath stops Jarvis and becomes the turn, while more Backchannels change nothing. A gap in the speech ends the run and lifts the cap.
+
+### Decision log and clips
+
+Ticket #19. Each Barge-in writes one `kind: "bargein"` row to `.jarvis/metrics.jsonl` (the file `jarvis-hub stats` already reads, so the log has one writer and one reader; `jarvis_hub.voice.bargein_log` lists the fields): onset, the guard it counted from, each partial with its time and speech length, the decision (`resume`, `stop`, `wake`, `overheard-stop` for an interrupt said after the run's last Barge-in, or `ended` when the reply finished while paused), onset to decision, whether the deadline was extended for one more partial, Wake word hits, and what Jarvis had said at the pause. The rows hold what the User said, so they stay in `.jarvis/`.
+
+A resume row waits for what comes next. It is marked `repeated` when, within 8 s of the resume, the User started a new Barge-in after their speech had gone quiet, or their next turn cut Jarvis off or holds a hard interrupt ("wait", "no"). Speech that ran on through the resume ("okay okay okay…") is one run and no repeat. The heuristic is a guess, so the row keeps what it saw (`next`). `jarvis-hub stats --bargein [--since/--until]` reports counts by decision, onset-to-decision and first-partial percentiles, and the share of resumes marked repeated.
+
+`JARVIS_AUDIO_CLIPS=on` also saves clips under `.jarvis/clips/`: `bargein-*.wav` from 300 ms before the onset to the decision, and `turn-*.wav` for each of the User's turns, each with a `.json` sidecar of its timing and language (a guess from the words, for turns). Off, nothing is written. `JARVIS_CLIPS_MAX_COUNT`, `JARVIS_CLIPS_MAX_DAYS` and `JARVIS_CLIPS_MAX_MB` bound them, oldest first, at startup and with each clip written.
+
+### File-driven check
+
+`spikes/hub/bargein.py`, last run on 2026-11-04 on the M3 after fix round 1: Jarvis's reply (Kokoro `am_liam` / `im_nicola`) goes to the WebRTC APM as the reference and into the "microphone" 40 ms late at 40 % level, with the User's phrase (Kokoro `af_heart` / `if_sara`) mixed in 2.5 s later. Frames run through the real `InputPipeline` (APM, openWakeWord, Silero, parakeet) and the pure state machine in audio time; the reply pauses, rewinds and stops as the player would. Numbers only in `docs/notes/bargein.json`.
+
+| Case | Outcome | Onset to decision (audio) |
+|---|---|---|
+| "Okay.", "Yeah, right.", "No problem." | resume | 785-1,043 ms |
+| "Sì, certo.", "Va bene." | resume | 1,046-1,165 ms |
+| "Mhm." | **stop**, expected resume: parakeet heard Kokoro's "Mhm." as "Yeah no." | 657 ms |
+| "Wait, stop.", "Actually, open an issue instead." | stop | 440 ms |
+| "Hey Jarvis." | stop (STT heard "Jarvis"; openWakeWord missed the synthetic voice) | 754 ms |
+| "Aspetta, un attimo.", "Anzi, apri una issue." | stop | 491-915 ms |
+| "Actually, open an issue instead." begun 0.3 s before the reply | paused at 0.48 s into the reply, then stop | 640 ms |
+| Noise, 150 ms and 400 ms | never paused: below the minimum, and Silero does not take noise for speech | |
+| Jarvis's echo alone, EN and IT, about 8 s each | never paused | |
+
+- 15 of 16 as expected. Each partial costs parakeet about 77 ms (median; the first of the run about 200 ms), which comes on top of the times above, since frames queue behind it and catch up: resume at up to 1.24 s from the User's first sound, stop at up to 1.0 s.
+- **The talking-at-start case needs a converged APM.** With a fresh WebRTC APM and the User talking from the reply's first frame, the APM suppresses both voices and nothing pauses; started 0.1 s in, it pauses only at 1.4 s. The session keeps one canceller, converged on the replies before, so the case first runs 4 s of the other reply's echo through it.
+- **The quiet partial came from this run.** Silero's speech probability lingers about 100-150 ms past the end of a word, so a finished "okay" still looked like speech at the 700 ms partial (0.12 s quiet) and the deadline stopped Jarvis. Transcribing again as the speech goes quiet resumes it right then.
+- **Kokoro's "Mhm." is a weak stand-in**: runs have heard it as "Ham milk", "Hammer.", "Yeah no." and "Handle." and stopped; one run heard "Mhm." and resumed. A real "mhm" may also come out of parakeet as a word; the Barge-in decision log (#19) will show which, and its spelling goes in `backchannel.txt`.
+- **The echo here is linear and clean**, so "never paused" on echo alone checks the guard and the logic, not the APM on real speakers. That needs the manual script.
+
+### Manual script, for the User
+
+Ask "Tell me a long story about a lighthouse" (or anything with a reply of 20 s or more), then say each line over the reply. Run it once with `uv run jarvis-hub --headphones --debug` on headphones, then with `uv run jarvis-hub --debug` on the MacBook's speakers. `--debug` prints `voice: paused for a Barge-in` and `voice: resumed after a Backchannel`.
+
+- [ ] "Okay": Jarvis pauses, then carries on within about 1 s, a word or so back, and nothing appears after `»`.
+- [ ] "Mhm", then a few seconds later "mhm" again: it resumes both times.
+- [ ] A cough, and a door shut nearby: at most a brief pause, then it carries on.
+- [ ] "Wait, stop": it stops without a chime and listens; the reply to "wait, stop" is a few words at most.
+- [ ] "Actually, open an issue instead": it stops; the turn on screen starts at "Actually"; the next reply takes up the issue and does not repeat the story.
+- [ ] "Jarvis": it stops, chimes and listens.
+- [ ] "Okay okay okay okay…" without a break for about 5 s: at most two pauses, and it carries on.
+- [ ] "Okay okay okay okay…" for about 4 s, then "wait, stop" in the same breath: at most two pauses, then it stops and the turn on screen ends with "wait, stop".
+- [ ] "Sì, certo" and "aspetta, un attimo" over an Italian reply: the first resumes, the second stops.
+- [ ] On speakers only: let Jarvis speak for 10 minutes in all (long answers, news) with nobody talking. No pause, no stop, and no turn from its own voice. Count any `paused for a Barge-in`. This is the check for the known speaker-echo risk: Barge-in partials are not passed through the speaker gate, so echo the APM leaves in, held 200 ms, pauses Jarvis, and a word STT makes of it ("no", "wait", "Jarvis") stops it.
+
+## Subagents
+
+Ticket #10, run on 2026-11-03 on the M3: `claude-agent-sdk` 0.2.177, `claude` CLI 2.1.317 through `cli_path`, Max login, `ANTHROPIC_API_KEY` unset.
+
+### Asking for xhigh or max
+
+`asked_effort` in `src/jarvis_hub/subagent_rules.py` grants `xhigh` or `max` only on an affirmative request in a fixed form, such as "use max effort", "run it at xhigh effort", "max effort" as its own clause, "effort: max" as the whole sentence, or "usa lo sforzo massimo", and denies everything else. Both levels need the word "effort" (or "sforzo", "impegno"), so "use xhigh resolution images" does not grant. The ask must open its sentence or a comma clause, after nothing but "ok", "please", "sure", "yes", "sì", "va bene" or "per favore", and must close the sentence, with at most a short "on it" or "for this one" and a "please" or "grazie"; this keeps reported speech, descriptions and sarcasm out ("Tony said to use max effort", "Oh great, use max effort and burn all my credits", "Effort=max was the bug"). Three review rounds of a denylist (any match anywhere, vetoed by negating words) kept finding false grants such as "Forget max effort" and "Max effort is unnecessary", so the rule is inverted: a matching turn is still denied whole when any sentence naming an effort also holds a negating, limiting, comparing or hedging word or a question, or when a later sentence retracts ("actually", "never mind", "just kidding", "back to normal", "anzi"). The latest turn that names any effort level, high, medium and low included, or retracts decides, so "Make it high." after "Use max effort." denies (`asked_effort` returns `None`, not `high`); a turn that is or opens with "no", "nah", "nope", "ignore that", "never mind", "just kidding" or "no grazie" takes back what came before. False denies are accepted by design, including "No, use max effort.", "Run it at x-high." and "Use max effort, then open a PR.": the refusal tells the Orchestrator the plain words to ask the User for, and saying them once costs less than a Subagent at `max` the User never asked for. The rule has known false grants it does not try to close: a comma clause after someone else's words ("Tony said, use max effort.") and a request under a condition stated in an earlier clause ("In case the tests fail later, use max effort."). Their cost is bounded: no Subagent runs above `JARVIS_MAX_EFFORT`, and the concurrency cap limits how many run at once. `tests/test_subagent_rules.py` holds every case.
+
+### What a Subagent session sees
+
+A Subagent runs with the preset prompt plus `prompts/subagent.md`, `prompts/working-rules.md` and `prompts/boundary.md`, `setting_sources=["user", "project"]` and `bypassPermissions`. A probe on Haiku in a scratch repo, two messages each: without `disallowed_tools` the second turn's `init` listed 189 tools, with MCP servers Claude Docs, DigitalOcean, PostHog and the VoiceMode plugin; with the VoiceMode servers disallowed it listed 186 and no VoiceMode tool. The first turn listed 28 tools and no MCP server: as for the Talker in #7, connectors join after the first query. Pumpkit's connector was not attached that day. `tests/test_real_model.py` (opt-in) checks `permissionMode` `bypassPermissions`, Bash, Edit and Skill present, no VoiceMode tool, and a `PreToolUse` hook's deny of a connector call reaching the model as an error under `bypassPermissions` (ADR 0008).
+
+### One writing Subagent end to end
+
+`spikes/hub/subagent.py` drives the real Hub with stub Talker and Orchestrator and one real Subagent (Sonnet at `effort="low"`), `writes=true` on animate-pixel-art, whose brief says to commit a scratch file and stop before pushing. For the run the clone's `remote.origin.pushurl` pointed at a path that cannot be pushed to, then was unset.
+
+- The Hub made the worktree with the sdlc `worktree.sh create` on `chore/jarvis-scratch-check`, locked it under `jarvis S1 (T1): Jarvis scratch check`, and released the lock at the end.
+- The Subagent made one Bash call (write, add, commit) and ended 4.9 s after its session opened; the whole run took 7.3 s. Its report followed the preamble's format.
+- The completion event reached the Orchestrator with `status="done"`, the report, and the Hub's account of the branch: two commits not on `origin/main` (worktree.sh's `.gitignore` commit, since the repo had no worktrees doc, and the scratch file), nothing uncommitted, not pushed. `git ls-remote` showed no such branch on GitHub.
+- The progress log `.jarvis/subagents/S1.jsonl` held the start, the Bash call, the report and the turn's end with usage.
+- `worktree.sh finish` refused the worktree as neither merged nor pushed (exit 5), so the worktree and the branch stay in animate-pixel-art until the User removes them.
+
+Opening a PR, the cap, the time limit, cancelling and two Tasks side by side are covered by the fake-backend tests in `tests/test_subagents.py` only.
+
+## Hub launcher (#20)
+
+`./jarvis` now starts `uv run jarvis-hub`; arguments and chained relative symlinks are covered with a stub `uv`, without starting an agent. Voice launch preconnects the Orchestrator in the background without a prompt. A connection failure is shown and the next Task retries; shutdown cancels and awaits an unfinished connection. The Talker keeps ADR 0006's hidden background warm-up, which uses one subscription call. This supersedes the ticket's literal “no prompt” for the Talker; it does not change the accepted startup decision.
+
+The existing Hub tests cover whole-utterance stop phrases, typed turns staying silent in voice mode, the Talker's `end_conversation`, and the cached filler after 1.2 seconds. These are fake-adapter checks, not microphone measurements.
+
+Manual launch check, pending the recording session:
+
+1. With models already downloaded, time `./jarvis` until the startup line has played and the terminal says it is listening. Record elapsed time and `ears_loaded.load_ms` from `.jarvis/metrics.jsonl`; the target is at most 10 seconds. First-time downloads are setup, not this measurement.
+2. Wait for the one `warm_up` record. Say “Hey Jarvis”, then “that's all”. Expect “Very good, sir.” followed by silence. Compare model-turn records before and after: the stop phrase adds none.
+3. Repeat with “thanks Jarvis”, “stand by”, “go to sleep”, “grazie Jarvis” and “basta così”. The Italian phrases use the Italian cached response. In a new turn, say “that's all I need to know about the failing CI”; this longer request must reach the Talker.
+4. While voice mode is idle, type a question. Expect a terminal reply, no spoken reply and no Wake word chime. Check `--headphones`, `--debug` and launch from the optional symlink.
+
+No physical readiness time or microphone result was collected for this ticket. The recording session and the Listening and Barge-in checklists remain required before calling voice verification complete.
+
+## Documentation and final verification (#21)
+
+The README now covers setup, run modes, every setting group, troubleshooting and the pretrained wake model's license. `.env.example` includes the Spec's `JARVIS_TTS_ENGINE`; `kokoro` is the only supported choice and unsupported values are refused. The Repo catalog describes the Python Hub. openWakeWord's upstream README license section was checked on 2026-11-04: its code is Apache 2.0 and included pretrained models are CC BY-NC-SA 4.0.
+
+[voice-hub-verification.md](voice-hub-verification.md) is the reproducible checklist for the remaining acceptance work, including the existing recording scripts, a ten-request Haiku/Sonnet comparison procedure, sample selection, timing definitions and reporting requirements. No new microphone recordings or physical measurements were performed for this ticket. The controlled real-model comparison below supplies the previously pending model evidence. All final latency percentiles, the live baseline comparison, 30-minute idle behavior, real wake recall/false wakes, speaker/headphone Barge-in, two real Subagents reporting, whole-Hub idle CPU and peak memory, and per-role subscription verification remain pending. Existing synthetic/component measurements stay in their original sections and are not presented as final verification.
+
+### Controlled Orchestrator comparison, 2026-11-04
+
+[orchestrator-comparison.json](orchestrator-comparison.json) records ten realistic synthetic task/result pairs for each model, their sanitized replies and usage, the full appended prompt and evaluation contract, and manual rubric notes. `spikes/hub/orchestrator_comparison.py` reproduces the run. Each case started a fresh session using the runtime Orchestrator preset and prompt plus a JSON evaluation contract, medium effort, one model turn, no built-in or MCP tools, no settings and strict MCP configuration. Every query first checked `Claude Max` / `firstParty` account metadata; each init reported `apiKeySource=none` and an empty tool list. Model identities were `claude-haiku-5-5` and `claude-sonnet-5-5`, SDK 0.2.177, installed CLI version recorded in the artifact. All 20 calls completed. Subscription rate events included `seven_day: allowed_warning`; no further queries were made.
+
+Elapsed time from query to completed reply, including tool-free reasoning and JSON generation: Haiku median 8,885.5 ms, 96,188 ms total; Sonnet median 6,232.5 ms, 67,062 ms total. Result usage totaled 17,608 output tokens for Haiku and 6,241 for Sonnet, including any thinking tokens. These are subscription usage counters, not prices. This is one sequential run, Haiku first, with no randomization or repeated samples; it is not a general model-speed benchmark or user acknowledgment latency measurement.
+
+Both models rejected unsupported status, CI, spec-completion, verification and destructive-action claims, and used completion events/Watchers/Checks instead of endorsing model polling. Their briefs usually bounded the proposed read-only work and asked for concrete evidence. The cross-repo candidate result was accepted by Haiku only as a plausible ownership proposal with missing evidence; Sonnet refused it as an incomplete repo comparison. That difference is recorded, not treated as an objective accuracy score.
+
+Neither passed every rubric check. Haiku selected Sonnet/high for hard race debugging and Sonnet/medium for review instead of the rubric's Opus/high. Sonnet selected Haiku/low for a PR review and Sonnet/medium for hard race debugging, cross-repo design and result review. Haiku's failed-CI reply and Sonnet's cross-repo reply incorrectly said a read-only Subagent gets no worktree; ADR 0009 and the Hub actually give detached worktrees. Sonnet's typo-planning next step proposed implementation despite “no implementation yet”, and said to discard the bad branch without an explicit deletion Approval. That is a scope failure and ambiguous unsafe cleanup advice, not an executed action: no tool was available. Haiku instead kept implementation conditional and asked about discarding changes.
+
+Verdict: retain Sonnet at medium provisionally. It was faster and used fewer output tokens here, but neither model is a clean rubric-compliance winner, and this run does not establish that Haiku can replace Sonnet across live Tasks. The comparison requirement now has real model evidence and a qualified verdict; live tool use, Subagent execution and physical voice acceptance remain separate unverified gates. No default, authentication setting, repo or external service was changed by the comparison.

@@ -1,0 +1,8 @@
+[project]
+name = "agent-spikes"
+version = "0.0.0"
+description = "Throwaway Phase 0 spikes for the Agent SDK and Talker latency. Not Hub code."
+requires-python = ">=3.12"
+dependencies = [
+    "claude-agent-sdk>0.1.59",
+]
