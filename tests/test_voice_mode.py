@@ -19,6 +19,7 @@ from tests.fakes import (
     FakeClock,
     FakeTts,
     Gate,
+    Limited,
     RecordingMetrics,
     RecordingOutput,
     RecordingPlayer,
@@ -1051,3 +1052,38 @@ async def test_a_recovery_report_outside_quiet_mode_is_an_announcement_once_jarv
     assert second.player.texts[-2:] == ["", NEWS]
     assert second.states()[-2:] == ["announce", "follow_up"]
     arrival.set()
+
+
+async def test_the_usage_limit_reset_is_held_in_quiet_mode_and_counted_with_the_news_that_waited_for_it(
+    rig_for: MakeRig,
+) -> None:
+    limit_line = "I've reached the usage limit, sir."
+    delegating = [Text("Right away, sir."), Tool("delegate", {"request": "Check the CI", "context": ""})]
+    report = Tool("report", {"task_id": "T1", "spoken": "The CI is green.", "needs_user": False})
+    rig: Rig = await rig_for(delegating, QUIET, [Text(AWAY)], orchestrator=[[Limited(600)], [report]])
+    rig.audio.wake()
+    rig.audio.say("Check the CI")
+    await until(lambda: rig.state == "follow_up")
+    await rig.advance(6)
+    # Like news that needs the User, the limit itself is announced once Jarvis is idle.
+    await until(lambda: limit_line in rig.player.texts)
+    await rig.advance(10)
+    rig.audio.wake()
+    rig.audio.say("Quiet mode, please")
+    await until(lambda: rig.state == "follow_up")
+    await rig.advance(6)
+    assert rig.state == "idle"
+    turns = len(talker_received(rig))
+
+    await rig.advance(600)
+    await until(lambda: reports(rig) == 1)
+    await rig.advance(60)
+    assert len(talker_received(rig)) == turns
+
+    rig.audio.wake()
+    await rig.advance(6)
+    await until(lambda: AWAY in rig.player.texts)
+    lines = talker_received(rig)[-1].splitlines()
+    assert lines[0].startswith('<event source="hub" away="2">2 updates while you were away')
+    assert sorted(line.split()[1] for line in lines[1:]) == ['source="hub"', 'source="orchestrator"']
+    assert any('reason="usage_reset"' in line for line in lines[1:])

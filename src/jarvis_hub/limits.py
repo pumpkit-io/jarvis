@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 from collections.abc import Callable
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Protocol
 
 from jarvis_hub.voice.language import Lang
 
@@ -88,6 +88,29 @@ class UsageLimit:
             self._timer.cancel()
         self._timer = asyncio.create_task(self._run())
         self._on_hit(role, opened)
+
+    def dump(self) -> dict[str, Any]:
+        """For the state file: each stopped role's reset as Unix seconds, and the roles whose reset is a guess."""
+        return {"until": dict(self._until), "guessed": sorted(self._guessed)}
+
+    @staticmethod
+    def load(saved: dict[str, Any]) -> tuple[dict[str, float], set[str]]:
+        """What `dump` saved, checked; ValueError or TypeError when it is not."""
+        until = {str(role): float(t) for role, t in dict(saved.get("until") or {}).items()}
+        roles: list[Any] = list(saved.get("guessed") or [])
+        guessed = {str(role) for role in roles}
+        if not guessed <= until.keys():
+            raise ValueError(f"guessed roles {sorted(guessed - until.keys())} have no reset time")
+        return until, guessed
+
+    def restore(self, until: dict[str, float], guessed: set[str]) -> None:
+        """Stops the roles again until their saved reset, without `on_hit`: the User heard of it before. A reset
+        already past clears on the next loop turn, through `on_clear`."""
+        if not until:
+            return
+        self._until, self._guessed = dict(until), set(guessed)
+        self._cleared.clear()
+        self._timer = asyncio.create_task(self._run())
 
     async def wait_clear(self, stop: asyncio.Event) -> None:
         """Returns once no role is stopped, or `stop` is set."""

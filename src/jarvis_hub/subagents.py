@@ -160,7 +160,8 @@ class SubagentSetup:
 
 class Subagents:
     """The registry and runner. `on_end` hears of every Subagent that ends, `on_over_time` of each limit passed, and
-    `on_turn` of each turn's result with its duration. While `limit` is active nothing new starts."""
+    `on_turn` of each turn's result with its duration, and `on_start` of each leaving the queue. While `limit` is
+    active nothing new starts."""
 
     def __init__(
         self,
@@ -172,6 +173,7 @@ class Subagents:
         on_over_time: Callable[[Subagent], None],
         on_turn: Callable[[Subagent, SessionSpec, TurnEnd, int], None],
         limit: UsageLimit,
+        on_start: Callable[[Subagent], None] = lambda subagent: None,
     ) -> None:
         self._setup = setup
         self._backend = backend
@@ -179,6 +181,7 @@ class Subagents:
         self._on_end = on_end
         self._on_over_time = on_over_time
         self._on_turn = on_turn
+        self._on_start = on_start
         self._limit = limit
         self._slots = asyncio.Semaphore(setup.cap)
         self._all: dict[str, Subagent] = {}
@@ -281,15 +284,21 @@ class Subagents:
 
     def restore(self, subagents: list[Subagent]) -> list[Subagent]:
         """Brings back loaded Subagents. One the old Hub never saw end is marked interrupted and returned, its
-        worktree still to free with `free_interrupted`."""
+        worktree still to free with `free_interrupted`; one that never started stays queued for `start`."""
         cut_off: list[Subagent] = []
         for subagent in subagents:
             self._all[subagent.id] = subagent
             self._ids = max(self._ids, numbered(subagent.id, "S"))
+            if subagent.state == "queued" and subagent.started is None:
+                continue
             if subagent.state not in FINISHED:
                 subagent.state = "interrupted"
                 cut_off.append(subagent)
         return cut_off
+
+    def queued(self) -> list[Subagent]:
+        """Subagents not started yet, in the order they were created: after `restore`, the ones to start again."""
+        return [s for s in self._all.values() if s.state == "queued" and s.started is None]
 
     async def free_interrupted(self, subagent: Subagent) -> None:
         """Releases the lock of a Subagent cut off by a crash, as its own end would have: the session holding it is
@@ -324,6 +333,7 @@ class Subagents:
             held = await self._take_slot(subagent)
             if held and not subagent.stop.is_set():
                 subagent.state, subagent.started = "running", self._clock.now()
+                self._on_start(subagent)
                 end, text = await self._session(subagent)
         except Exception as e:
             end = TurnEnd("failed", error=f"{type(e).__name__}: {e}")
@@ -444,6 +454,11 @@ class Subagents:
     async def _finish(self, subagent: Subagent, end: TurnEnd, text: str) -> None:
         """Settles its state and report, frees its worktree and tells `on_end`, whatever fails on the way."""
         stopped = subagent.stop.is_set()
+        if self._closing and stopped and subagent.started is None and end.outcome != "failed":
+            # Nothing done yet, so nothing for the Orchestrator to judge: it stays queued, worktree and lock kept,
+            # and the next launch starts it.
+            self._on_end(subagent)
+            return
         if end.outcome == "completed":
             state: SubagentState = "done"
             report = text or "It ended without a report."

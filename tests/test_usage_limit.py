@@ -4,6 +4,7 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -353,3 +354,168 @@ def test_the_reset_time_is_spoken_in_local_time_and_names_the_day_when_it_is_far
     resets_at: float | None, lang: Lang, expected: str
 ) -> None:
     assert reset_sentence(resets_at, lang, now=1000) == expected
+
+
+async def stopped(hub: Hub, run: "asyncio.Task[None]") -> None:
+    """Closes the Hub as a restart would, with the input still open."""
+    await hub.close()
+    run.cancel()
+    await asyncio.wait([run])
+
+
+async def test_a_usage_limit_and_its_reset_time_survive_a_restart(
+    clock: FakeClock, metrics: RecordingMetrics, tmp_path: Path
+) -> None:
+    state = tmp_path / ".jarvis" / "state.json"
+    before = RecordingOutput()
+    first = make_hub(FakeBackend(clock, [[Limited(3600)]]), before, metrics, state_path=state)
+    typist = Typist(clock)
+    run = await running(first, typist)
+    typist.type("Hello")
+    await until(lambda: before.replies)
+    await stopped(first, run)
+    clock.advance(1800)
+
+    output = RecordingOutput()
+    backend = FakeBackend(clock, [[Text("The limit has reset, sir.")], [Text("Hello again, sir.")]])
+    second = make_hub(backend, output, metrics, state_path=state)
+    typist = Typist(clock)
+    run = await running(second, typist)
+    typist.type("Hi")
+    await until(lambda: output.replies)
+
+    assert output.replies == [f"{LINE} It resets at 1:16 AM."]
+    assert len(talker_received(backend)) == 1  # only the warm-up: the limited Talker is not called
+
+    clock.advance(1800)
+    await until(lambda: len(output.replies) == 2)
+    typist.type("Hi again")
+    await until(lambda: len(output.replies) == 3)
+    assert output.replies[1:] == ["The limit has reset, sir.", "Hello again, sir."]
+    typist.end()
+    await run
+    await second.close()
+
+
+async def test_news_the_limited_talker_could_not_tell_survives_a_restart_and_is_told_after_the_reset(
+    clock: FakeClock, metrics: RecordingMetrics, tmp_path: Path
+) -> None:
+    state = tmp_path / ".jarvis" / "state.json"
+    before = RecordingOutput()
+    first_backend = FakeBackend(
+        clock,
+        [[Text("Right away, sir."), delegate("Check the CI")], [Limited(600)]],
+        orchestrator=[[report("T1", "The CI is green.")]],
+    )
+    first = make_hub(first_backend, before, metrics, state_path=state)
+    typist = Typist(clock)
+    run = await running(first, typist)
+    typist.type("Is the CI green?")
+    await until(lambda: any(LINE in r for r in before.replies))
+    await stopped(first, run)
+
+    output = RecordingOutput()
+    backend = FakeBackend(clock, [[Text("The CI is green, sir.")], [Text("The limit has reset, sir.")]])
+    second = make_hub(backend, output, metrics, state_path=state)
+    typist = Typist(clock)
+    run = await running(second, typist)
+    typist.end()
+    await asyncio.sleep(0.05)
+    assert not run.done() and len(talker_received(backend)) == 1
+
+    clock.advance(600)
+    await run
+
+    assert output.replies == ["The CI is green, sir.", "The limit has reset, sir."]
+    assert "The CI is green." in talker_received(backend)[1]
+    await second.close()
+
+
+async def test_an_orchestrator_message_held_for_the_limit_survives_a_restart_and_goes_after_the_reset(
+    clock: FakeClock, metrics: RecordingMetrics, tmp_path: Path
+) -> None:
+    state = tmp_path / ".jarvis" / "state.json"
+    before = RecordingOutput()
+    first_backend = FakeBackend(
+        clock, [[Text("Right away, sir."), delegate("Check the CI")]], orchestrator=[[Limited(1800)]]
+    )
+    first = make_hub(first_backend, before, metrics, state_path=state)
+    typist = Typist(clock)
+    run = await running(first, typist)
+    typist.type("Is the CI green?")
+    await until(lambda: any(LINE in r for r in before.replies))
+    [task_message] = first_backend.session("orchestrator").received
+    await stopped(first, run)
+
+    output = RecordingOutput()
+    backend = FakeBackend(
+        clock,
+        [[Text("The limit has reset, sir.")], [Text("The CI is green, sir.")]],
+        orchestrator=[[report("T1", "The CI is green.")]],
+    )
+    second = make_hub(backend, output, metrics, state_path=state)
+    typist = Typist(clock)
+    run = await running(second, typist)
+    typist.end()
+    await asyncio.sleep(0.05)
+    assert backend.all_sessions("orchestrator") == []
+
+    clock.advance(1800)
+    await run
+
+    [recovery] = backend.session("orchestrator").received
+    assert recovery.startswith('<event source="hub" reason="restart">')
+    assert f'<unanswered task="T1">{task_message}</unanswered>' in recovery
+    assert output.replies == ["The limit has reset, sir.", "The CI is green, sir."]
+    await second.close()
+
+
+async def test_a_subagent_queued_for_the_limit_survives_a_restart_and_starts_after_the_reset(
+    clock: FakeClock, metrics: RecordingMetrics, tmp_path: Path
+) -> None:
+    state = tmp_path / ".jarvis" / "state.json"
+    first_brief, second_brief = "Fix the first typo.", "Fix the second typo."
+    before = RecordingOutput()
+    first_backend = FakeBackend(
+        clock,
+        [
+            [Text("Right away, sir."), delegate("Fix the typos")],
+            [Text("A second one, sir."), delegate("Fix another", task_id="T1")],
+        ],
+        orchestrator=[[spawn(first_brief)], [spawn(second_brief)]],
+        subagents={first_brief: [Limited(600)]},
+    )
+    first = make_hub(first_backend, before, metrics, state_path=state)
+    typist = Typist(clock)
+    run = await running(first, typist)
+    typist.type("Fix the typos")
+    await until(lambda: any(LINE in r for r in before.replies))
+    typist.type("And another")
+    await until(lambda: len(first_backend.session("orchestrator").tool_results) == 2)
+    await stopped(first, run)
+    saved = {s["id"]: s["state"] for s in json.loads(state.read_text())["subagents"]}
+    assert saved == {"S1": "interrupted", "S2": "queued"}
+
+    output = RecordingOutput()
+    backend = FakeBackend(
+        clock,
+        orchestrator=[[report("T1", "The first fix was cut off; the second waits.")], [report("T1", "Done.")]],
+        subagents={second_brief: [Text("Fixed.")]},
+    )
+    second = make_hub(backend, output, metrics, state_path=state)
+    typist = Typist(clock)
+    run = await running(second, typist)
+    typist.end()
+    await until(lambda: backend.all_sessions("orchestrator") != [])
+    await asyncio.sleep(0.05)
+    recovery = backend.session("orchestrator").received[0]
+    assert '<interrupted id="S1"' in recovery and "S2 queued" in recovery
+    assert backend.all_sessions("subagent") == []
+
+    clock.advance(600)
+    await run
+
+    [queued] = backend.all_sessions("subagent")
+    assert queued.received == [second_brief]
+    assert backend.session("orchestrator").received[1].startswith('<event source="subagent" id="S2" task="T1"')
+    await second.close()

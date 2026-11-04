@@ -751,6 +751,8 @@ async def test_a_restored_subagent_releases_by_the_holder_saved_not_one_worked_o
     args = {"repo": "pumpkit", "title": "T", "brief": "b", "model": "haiku", "effort": "low", "writes": True}
     subagent = await first.prepare("T1", args, [])
     assert isinstance(subagent, Subagent)
+    # One that had started: a restored Subagent that never did stays queued instead.
+    subagent.state, subagent.started = "running", clock.now()
     saved = json.loads(json.dumps(first.dump({"T1"}, lambda t: t)))
 
     def newer_format(subagent_id: str, task_id: str, title: str) -> str:

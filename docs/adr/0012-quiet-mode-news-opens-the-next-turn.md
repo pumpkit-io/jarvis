@@ -22,4 +22,5 @@ News that queued while the User had the floor goes out as one Announcement: one 
 - A spoken turn that is a stop phrase sends nothing to the Talker, so after "that's all" the held news is announced once Jarvis is idle.
 - Text mode has no Announcements (ADR 0010), so `quiet_mode` there changes nothing and says so.
 - Quiet mode, the news it held and the per-Task `needs_user` record are saved in the state file (ADR 0011), so a restart neither drops held news nor announces a repeat it would have held. Held news the User has not heard yet, including news in a Talker turn the restart cut off, comes back held until the next Wake word, or waiting to be announced if the Wake word had already ended Quiet mode; news cut off mid-turn may be heard twice.
+- The Announcement that the Usage limit has reset is ordinary news: batched with the rest and held in Quiet mode. The one saying the limit was reached gets through Quiet mode like news that needs the User, since until the reset nothing the User asks can be done.
 - News a recovery turn reports follows the same rules as any other: held in Quiet mode, otherwise an Announcement once Jarvis is idle.

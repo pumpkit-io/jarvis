@@ -265,6 +265,8 @@ class _OrchestratorInput:
 _UNANSWERED = Fields(("task_id", "message", "arrived", "last_check"), times=frozenset({"arrived"}))
 # What it keeps of news Quiet mode held that the User has not heard yet.
 _HELD = Fields(("message", "arrived", "details", "news"), times=frozenset({"arrived"}))
+# And of news the Talker could not tell while it was limited.
+_PARKED = Fields(("message", "arrived", "details", "news", "urgent", "count"), times=frozenset({"arrived"}))
 
 
 class _TurnGate:
@@ -395,7 +397,7 @@ class Hub:
         self._unanswered: list[_OrchestratorInput] = []
         self._limit = UsageLimit(clock, wall, self._limit_hit, self._limit_cleared)
         # Held until the usage limit resets, each still counted in `_pending` so a text-mode run waits for it: the
-        # Orchestrator's messages, and the news the limited Talker could not take.
+        # Orchestrator's messages, which stay unanswered and so saved, and the news the limited Talker could not take.
         self._deferred: list[_OrchestratorInput] = []
         self._parked_news: list[_TalkerInput] = []
         self._announcing: set[asyncio.Task[None]] = set()
@@ -409,6 +411,8 @@ class Hub:
             on_over_time=self._subagent_over_time,
             on_turn=self._subagent_turn,
             limit=self._limit,
+            # Saved at once: a crash must not leave it saved as queued, which the next launch would start again.
+            on_start=lambda subagent: self._persist(),
         )
         self._waits = Waits(setup=waits, clock=clock, on_watcher_end=self._watcher_ended, on_check=self._check_due)
 
@@ -587,6 +591,8 @@ class Hub:
             "quiet_mode": self._quiet_mode,
             "held": [_HELD.dump(i, to_wall) for i in self._unheard()],
             "needs_user": self._needs_user,
+            "usage_limit": self._limit.dump(),
+            "parked": [_PARKED.dump(i, to_wall) for i in self._parked_news],
         }
         try:
             self._state.save(data)
@@ -602,7 +608,7 @@ class Hub:
         waiting = [part for item in self._news for part in item.parts]
         return [*self._telling, *waiting, *self._held]
 
-    def _restore_held(self, held: list[_TalkerInput], quiet_mode: bool, needs_user: dict[str, str]) -> None:
+    def _restore_quiet_mode(self, held: list[_TalkerInput], quiet_mode: bool, needs_user: dict[str, str]) -> None:
         """Brings back Quiet mode and its news; news released before the restart but not yet heard goes out again."""
         if self._floor is None:
             for item in held:
@@ -617,6 +623,21 @@ class Hub:
             self._quiet_mode = True
         else:
             self._release_held()
+
+    def _restore_limit(self, limit: "tuple[dict[str, float], set[str]]", parked: list[_TalkerInput]) -> None:
+        """Brings back the usage limit, without telling the User again, and the news the limited Talker kept. A
+        limit that reset while the Hub was down clears at once, with its one Announcement."""
+        self._parked_news = parked
+        self._pending += sum(item.count for item in parked)
+        if parked:
+            self._settled.clear()
+        self._limit.restore(*limit)
+
+    def _restore_held(self, held: list[_TalkerInput], quiet_mode: bool, needs_user: dict[str, str]) -> None:
+        """Quiet mode and its news, then the parked news if the Talker is no longer limited, under its rules."""
+        self._restore_quiet_mode(held, quiet_mode, needs_user)
+        if self._parked_news and not self._limit.blocks("talker"):
+            self._unpark()
 
     def _restore(self) -> "Coroutine[Any, Any, None] | None":
         """Brings back what the last launch saved; returns the recovery to run in the background, if any."""
@@ -643,30 +664,40 @@ class Hub:
             held = [_TalkerInput(kind="event", **_HELD.load(r, from_wall)) for r in data["held"]]
             quiet_mode = data["quiet_mode"] is True
             needs_user = {str(task): str(key) for task, key in dict(data["needs_user"]).items()}
+            # Absent from a file saved before the usage limit was kept.
+            limit = UsageLimit.load(data.get("usage_limit") or {})
+            parked = [_TalkerInput(kind="event", **_PARKED.load(r, from_wall)) for r in data.get("parked", [])]
         except (KeyError, TypeError, ValueError, IndexError, AttributeError) as e:
             self._output.notice(self._state.set_aside(f"could not be read whole ({type(e).__name__}: {e})"))
             return None
+        self._restore_limit(limit, parked)
         if not tasks:
             self._restore_held(held, quiet_mode, needs_user)
             return None
         self._tasks.restore(tasks)
         cut_off = self._subagents.restore(subagents)
+        queued = self._subagents.queued()
         self._waits.restore(waits)
         self._unanswered = unanswered
         interrupted = [s for s in map(self._subagents.get, told) if s is not None]
         self._interrupted = [s.id for s in interrupted]
         # After the rest, since releasing held news saves the state file.
         self._restore_held(held, quiet_mode, needs_user)
-        # A restored Watcher ends on its own, and the recovery message is news still to come.
-        self._pending += 1 + sum(isinstance(w, Watcher) for w in waits)
+        # A restored Watcher or queued Subagent ends on its own, and the recovery message is news still to come.
+        self._pending += 1 + sum(isinstance(w, Watcher) for w in waits) + len(queued)
         self._settled.clear()
-        return self._recover(tasks, cut_off, interrupted + cut_off, problems)
+        return self._recover(tasks, cut_off, interrupted + cut_off, queued, problems)
 
     async def _recover(
-        self, tasks: list[Task], cut_off: list[Subagent], interrupted: list[Subagent], problems: list[str]
+        self,
+        tasks: list[Task],
+        cut_off: list[Subagent],
+        interrupted: list[Subagent],
+        queued: list[Subagent],
+        problems: list[str],
     ) -> None:
         """Frees the worktrees of Subagents a crash cut off, tells the Orchestrator what was pending, and only then
-        starts the restored waits, so an overdue Check never reaches it before the recovery message."""
+        starts the restored waits and queued Subagents, so neither reaches it before the recovery message."""
         try:
             for subagent in cut_off:
                 await self._subagents.free_interrupted(subagent)
@@ -679,6 +710,9 @@ class Hub:
             self._interrupted = []
         finally:
             self._waits.resume()
+            # Each still waits for the usage limit, when the restored one holds.
+            for subagent in queued:
+                self._subagents.start(subagent)
             self._handled()
 
     async def _talk(self) -> None:
@@ -966,8 +1000,9 @@ class Hub:
                     self._fail(task, error)
                 self._output.notice(f"The Orchestrator failed on {item.task_id}: {error}")
             finally:
-                answered = {id(item), *map(id, item.carried)}
-                self._unanswered = [i for i in self._unanswered if id(i) not in answered]
+                if not any(d is item for d in self._deferred):
+                    answered = {id(item), *map(id, item.carried)}
+                    self._unanswered = [i for i in self._unanswered if id(i) not in answered]
                 self._handled()
 
     async def _orchestrator_turn(self, item: _OrchestratorInput) -> None:
@@ -1152,7 +1187,6 @@ class Hub:
     def _limit_hit(self, role: str, opened: bool) -> None:
         self._write({"kind": "usage_limit", "role": role, "resets_at": self._limit.resets_at(role)})
         self._persist()
-        # The User must know Jarvis cannot work, so like news that needs them it gets through Quiet mode.
         # A limited Talker tells the User itself, in the reply that hit it.
         if opened and role != "talker":
             announcing = asyncio.create_task(self._announce_limit(role))
@@ -1160,7 +1194,8 @@ class Hub:
             announcing.add_done_callback(self._announcing.discard)
 
     async def _announce_limit(self, role: str) -> None:
-        """Tells the User once that the limit was reached: in voice mode as news, when the voice is quiet."""
+        """Tells the User once that the limit was reached: in voice mode as news, when the voice is quiet. Like news
+        that needs the User it gets through Quiet mode, since nothing they ask can be done until the reset."""
         if self._floor is not None:
             while not self._input_ended.is_set():
                 await self._quiet()
