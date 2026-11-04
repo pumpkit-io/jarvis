@@ -1,0 +1,36 @@
+# Backchannels: said over Jarvis, alone or several together, Jarvis carries on.
+# One phrase per line, English and Italian; case, punctuation and hyphens don't matter.
+okay
+ok
+mhm
+mm
+mmm
+hmm
+hm
+mm-hmm
+uh-huh
+yeah
+yep
+yes
+right
+sure
+got it
+i see
+cool
+nice
+great
+thanks
+thank you
+sì
+si
+certo
+esatto
+va bene
+giusto
+perfetto
+ok va bene
+capito
+d'accordo
+bene
+ottimo
+grazie
