@@ -8,7 +8,7 @@ Pumpkit reaches a session under two server names, so its reads are listed once (
 
 The hook is an SDK callback the Hub registers when it opens the session, not a hook from a settings file, so a repo cannot turn it off. A real-model check on 2026-11-03 put `"disableAllHooks": true` in a scratch repo's `.claude/settings.json`, and then in its `.claude/settings.local.json`, and the hook still denied the call each time; `tests/test_real_model.py` (opt-in) repeats that check.
 
-Planned for ticket #15, not built yet: when an Approval covers an action a Subagent carries out through a connector, such as an X post through Pumpkit (ADR 0004), the Hub will widen that one Subagent's allowlist by the tools the Approval names, and no further. Until then every connector tool off the list is denied.
+When an Approval covers an action a Subagent carries out through a connector, such as an X post through Pumpkit (ADR 0004), the Hub widens that one Subagent's check by the tools the Approval's grants name, for one call while the Approval is unexpired (ADR 0013). Every other connector tool off the list stays denied.
 
 ## Considered Options
 
