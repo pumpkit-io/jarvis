@@ -16,8 +16,8 @@ from jarvis_hub.tasks import ago
 from jarvis_hub.waits import Runner
 
 ApprovalAction = Literal["merge_pr", "delete_branch", "subagent_action"]
-# pending: asked, no answer yet. approved: the User said yes; the Hub is running it, or a Subagent is still to take it.
-# granted: a Subagent holds it. used, lapsed, expired, withdrawn: spent, never live again.
+# pending: asked. approved: the User said yes, and the Hub runs it or a Subagent is to take it. granted: a Subagent
+# holds it. used, lapsed, expired, withdrawn: spent.
 ApprovalState = Literal["pending", "approved", "granted", "used", "lapsed", "expired", "withdrawn"]
 LIVE: frozenset[ApprovalState] = frozenset({"pending", "approved", "granted"})
 HUB_ACTIONS = ("merge_pr", "delete_branch")

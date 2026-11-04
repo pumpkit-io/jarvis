@@ -726,7 +726,7 @@ async def test_an_approved_x_post_goes_to_a_subagent_whose_brief_carries_it_and_
     )
     allowed, other, again = verdicts
     assert allowed is None
-    assert other == connector_check("mcp__claude_ai_Pumpkit__delete_scheduled_post")
+    assert other == connector_check("mcp__claude_ai_Pumpkit__delete_scheduled_post", {})
     assert again is not None and again.reason == f"A1 is used, so {POST_NOW} needs a fresh Approval."
 
 
