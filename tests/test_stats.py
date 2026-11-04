@@ -15,7 +15,7 @@ NOW = datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc)
 def row(role: str, minutes_ago: float, *, usage: tuple[int, int, int, int] = (0, 0, 0, 0), **fields: Any) -> dict[str, Any]:
     names = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens")
     at = (NOW - timedelta(minutes=minutes_ago)).isoformat(timespec="milliseconds")
-    return {"at": at, "kind": "user", "role": role, "usage": dict(zip(names, usage)), **fields}
+    return {"at": at, "kind": "user", "role": role, "usage": dict(zip(names, usage)), "duration_ms": 0, **fields}
 
 
 @pytest.mark.parametrize(
@@ -65,10 +65,24 @@ def test_rows_that_are_not_a_session_result_are_not_counted_as_turns() -> None:
     assert stats.limit_hits == 1
 
 
-def test_a_row_from_before_durations_were_logged_counts_as_a_turn_without_one() -> None:
-    stats = summarise([row("talker", 1, usage=(3, 0, 0, 0))])
+def test_malformed_rows_are_skipped_and_counted() -> None:
+    good = row("talker", 1, usage=(3, 0, 0, 0), duration_ms=10)
+    rows: list[object] = [
+        good,
+        None,
+        ["not", "an", "object"],
+        {**good, "at": "yesterday"},
+        {**good, "usage": {"input_tokens": "3"}},
+        {**good, "usage": "3 tokens"},
+        {**good, "duration_ms": None},
+        {key: value for key, value in good.items() if key != "duration_ms"},
+        {**good, "role": "stranger"},
+    ]
 
-    assert (stats.roles["talker"].turns, stats.roles["talker"].durations) == (1, [])
+    stats = summarise(rows)
+
+    assert (stats.roles["talker"].turns, stats.roles["talker"].input_tokens, stats.skipped) == (1, 3, 8)
+    assert "Skipped 8 malformed rows." in render(stats, None, None)
 
 
 def test_the_range_keeps_rows_from_since_up_to_but_not_including_until() -> None:
@@ -101,6 +115,12 @@ def test_a_bare_date_is_local_midnight() -> None:
     assert parse_when("2026-11-01", NOW) == datetime(2026, 11, 1).astimezone()
 
 
+def test_a_bare_date_as_the_end_of_the_range_includes_that_whole_day() -> None:
+    assert parse_when("2026-11-01", NOW, end=True) == datetime(2026, 11, 2).astimezone()
+    assert parse_when("2026-11-01T08:00", NOW, end=True) == datetime(2026, 11, 1, 8).astimezone()
+    assert parse_when("24h", NOW, end=True) == NOW - timedelta(hours=24)
+
+
 def test_a_time_flag_that_is_neither_is_refused() -> None:
     with pytest.raises(ValueError, match="neither a time ago"):
         parse_when("yesterday", NOW)
@@ -110,8 +130,10 @@ def test_the_log_is_read_past_a_line_cut_short(tmp_path: Path) -> None:
     log = tmp_path / "metrics.jsonl"
     log.write_text(json.dumps(row("talker", 1)) + '\n{"at": "2026-11\n\n' + json.dumps(row("subagent", 1)) + "\n")
 
-    assert [r["role"] for r in read_rows(log)] == ["talker", "subagent"]
-    assert read_rows(tmp_path / "none.jsonl") == []
+    stats = summarise(read_rows(log))
+
+    assert ({role: t.turns for role, t in stats.roles.items()}, stats.skipped) == ({"talker": 1, "subagent": 1}, 1)
+    assert list(read_rows(tmp_path / "none.jsonl")) == []
 
 
 def test_the_report_has_a_row_per_role_a_total_and_latency_percentiles() -> None:

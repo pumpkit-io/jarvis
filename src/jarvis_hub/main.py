@@ -383,7 +383,7 @@ def _ignored_in_text(error: str) -> None:
 def print_stats(settings: Settings, since: str | None, until: str | None, stdout: TextIO) -> None:
     now = datetime.now(timezone.utc)
     start = parse_when(since, now) if since else None
-    end = parse_when(until, now) if until else None
+    end = parse_when(until, now, end=True) if until else None
     stats = summarise(read_rows(settings.runtime_dir / "metrics.jsonl"), start, end)
     stdout.write(render(stats, start, end) + "\n")
 
@@ -397,7 +397,9 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", metavar="stats")
     stats = commands.add_parser("stats", help="print usage and latency per role from the metrics log")
     stats.add_argument("--since", help="start of the range: a time ago like 24h or 7d, or a date like 2026-11-01")
-    stats.add_argument("--until", help="end of the range, written like --since; default now")
+    stats.add_argument(
+        "--until", help="end of the range, written like --since (a bare date takes in that whole day); default now"
+    )
     args = parser.parse_args()
 
     if args.command == "stats":

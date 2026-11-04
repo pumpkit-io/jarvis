@@ -24,6 +24,16 @@ _WEEKDAYS: dict[Lang, tuple[str, ...]] = {
 }
 
 
+def _italian_clock(when: datetime) -> str:
+    """"alle 15:40", with Italian's own forms for one o'clock, midnight and noon."""
+    if when.minute == 0 and when.hour in (0, 12):
+        return "a mezzanotte" if when.hour == 0 else "a mezzogiorno"
+    clock = f"{when.hour}" if when.minute == 0 else f"{when.hour}:{when.minute:02d}"
+    if when.hour == 1:
+        return "all'una" if when.minute == 0 else f"all'{clock}"
+    return f"alle {clock}"
+
+
 class LimitClock(Protocol):
     def now(self) -> float: ...
 
@@ -31,14 +41,14 @@ class LimitClock(Protocol):
 
 
 def reset_sentence(resets_at: float | None, lang: Lang, now: float) -> str:
-    """"It resets at 3:40 PM, sir." in local time, or "" when the reset time is unknown. `now` is Unix seconds."""
+    """"It resets at 3:40 PM." in local time, naming the day when the reset is more than SAME_DAY off; "" when the
+    reset time is unknown. `now` is Unix seconds."""
     if resets_at is None:
         return ""
     when = datetime.fromtimestamp(resets_at)
     day = _WEEKDAYS[lang][when.weekday()] if resets_at - now > SAME_DAY else None
     if lang == "it":
-        clock = f"{when.hour}" if when.minute == 0 else f"{when.hour}:{when.minute:02d}"
-        return f"Si riazzera {f'{day} ' if day else ''}alle {clock}."
+        return f"Si riazzera {f'{day} ' if day else ''}{_italian_clock(when)}."
     hour = when.hour % 12 or 12
     clock = f"{hour} {'AM' if when.hour < 12 else 'PM'}" if when.minute == 0 else (
         f"{hour}:{when.minute:02d} {'AM' if when.hour < 12 else 'PM'}"
