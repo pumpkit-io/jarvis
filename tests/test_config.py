@@ -205,6 +205,13 @@ def test_voice_settings_out_of_range_are_refused(checkout: Path, line: str) -> N
         load_settings(checkout, environ={})
 
 
+@pytest.mark.parametrize("name", ["JARVIS_FOLLOWUP_SECONDS", "JARVIS_END_SILENCE_MS", "JARVIS_CLIPS_MAX_MB"])
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_nonfinite_voice_numbers_are_configuration_errors(checkout: Path, name: str, value: str) -> None:
+    with pytest.raises(ConfigError, match=name):
+        load_settings(checkout, environ={name: value})
+
+
 def test_text_mode_warns_about_a_bad_voice_setting_and_starts_on_the_defaults(checkout: Path) -> None:
     (checkout / ".env").write_text("JARVIS_AEC=maybe\nJARVIS_FOLLOWUP_SECONDS=8\nJARVIS_MAX_SUBAGENTS=2\n")
     warnings: list[str] = []

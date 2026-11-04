@@ -149,7 +149,7 @@ def load_settings(
             value = float(raw)
         except ValueError:
             raise ConfigError(f"{name}={raw!r} is not a number") from None
-        if value < low or value > high or (low_open and value == low):
+        if not math.isfinite(value) or value < low or value > high or (low_open and value == low):
             raise ConfigError(f"{name}={raw!r} is out of range ({low:g} to {high:g})")
         return value
 
