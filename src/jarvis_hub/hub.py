@@ -183,8 +183,9 @@ def event_message(
 
 def approval_brief(approval: Approval) -> str:
     """What a Subagent's brief carries of the Approval it acts on; the User's words are the Hub's record of them."""
-    post = f" for Pumpkit post {approval.post}" if approval.post else ""
-    tools = f" It lets you call {', '.join(approval.tools)}{post}, once." if approval.tools else ""
+    arguments = escape(json.dumps(approval.post_arguments), quote=False)
+    pinned = f" once, with exactly these arguments: {arguments}" if approval.post else ", once"
+    tools = f" It lets you call {', '.join(approval.tools)}{pinned}." if approval.tools else ""
     return (
         f'\n\n<approval id="{approval.id}">\n'
         f"The User approved exactly this, once: {escape(approval.text, quote=False)}.{tools}\n"

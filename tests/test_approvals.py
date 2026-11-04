@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from jarvis_hub.agents.backend import Refused
+from jarvis_hub.agents.backend import McpGuard, Refused
 from jarvis_hub.approvals import Approval, Approvals, rules_argv
 from jarvis_hub.hub import Hub, Line
 from jarvis_hub.subagent_rules import connector_check
@@ -62,13 +62,7 @@ def ask_delete(task_id: str = "T1", branch: str = "feat/old-idea", sha: str = TI
 
 
 def ask_post(task_id: str = "T1") -> Tool:
-    approval = {
-        "action": "subagent_action",
-        "description": "post Pumpkit post 812 on X now, as the thread you read",
-        "grants": ["x_post"],
-        "post": "812",
-        "post_action": "post_now",
-    }
+    approval = {"action": "subagent_action", "grants": ["x_post"], "post": "812", "post_action": "post_now"}
     spoken = "The launch thread is ready. Shall I post it now?"
     return Tool("report", {"task_id": task_id, "spoken": spoken, "needs_user": True, "approval": approval})
 
@@ -715,14 +709,14 @@ async def test_an_approved_x_post_goes_to_a_subagent_whose_brief_carries_it_and_
 
     assert orchestrator[1] == (
         '<event source="hub" task="T1" approval="A1" status="approved">The User approved A1 (post Pumpkit post 812 '
-        "on X now, as the thread you read) in these words: 'Yes, post it.'. Start the Subagent that carries it out "
+        "on X now) in these words: 'Yes, post it.'. Start the Subagent that carries it out "
         "with approval_id A1; its brief then carries the Approval.</event>"
     )
     assert subagent.received[0] == (
         'Post Pumpkit post 812 on X now.\n\n<approval id="A1">\n'
-        "The User approved exactly this, once: post Pumpkit post 812 on X now, as the thread you read. It lets you "
-        "call mcp__claude_ai_Pumpkit__post_now, mcp__pumpkit__post_now for Pumpkit post 812, once.\nTheir words: "
-        "Yes, post it.\n</approval>"
+        "The User approved exactly this, once: post Pumpkit post 812 on X now. It lets you call "
+        'mcp__claude_ai_Pumpkit__post_now, mcp__pumpkit__post_now once, with exactly these arguments: {"post_id": '
+        '"812"}.\nTheir words: Yes, post it.\n</approval>'
     )
     allowed, other, again = verdicts
     assert allowed is None
@@ -1547,12 +1541,7 @@ async def test_an_x_post_approval_opens_the_post_tools_for_its_own_post_only(
 async def test_an_x_post_request_must_name_the_post(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh
 ) -> None:
-    approval = {
-        "action": "subagent_action",
-        "description": "post the launch thread on X",
-        "grants": ["x_post"],
-        "post_action": "post_now",
-    }
+    approval = {"action": "subagent_action", "grants": ["x_post"], "post_action": "post_now"}
     asking = Tool("report", {"task_id": "T1", "spoken": "Post it?", "needs_user": True, "approval": approval})
     session = a_session(
         clock, output, metrics, gh, [[Text("Right away, sir."), delegate()]], [[asking, report("T1", "No.")]]
@@ -1830,23 +1819,32 @@ async def test_a_branch_in_a_repo_whose_plan_has_no_rulesets_can_be_deleted(
     assert gh.branches == {}
 
 
+FRIDAY_9 = "2026-11-06T09:00:00+01:00"
+
+
 def ask_schedule() -> Tool:
     approval = {
         "action": "subagent_action",
-        "description": "schedule Pumpkit post 812 for Friday at 9:00",
         "grants": ["x_post"],
         "post": "812",
         "post_action": "schedule_post",
+        "publish_at": FRIDAY_9,
     }
     spoken = "The launch thread is ready. Shall I schedule it for Friday at nine?"
     return Tool("report", {"task_id": "T1", "spoken": spoken, "needs_user": True, "approval": approval})
 
 
 @pytest.mark.parametrize(
-    ("asking", "words", "opened", "closed"),
+    ("asking", "words", "opened", "arguments", "closed"),
     [
-        (ask_post(), "Yes, post it now.", POST_NOW, "mcp__claude_ai_Pumpkit__schedule_post"),
-        (ask_schedule(), "Yes, schedule it.", "mcp__pumpkit__schedule_post", "mcp__pumpkit__post_now"),
+        (ask_post(), "Yes, post it now.", POST_NOW, {"post_id": "812"}, "mcp__claude_ai_Pumpkit__schedule_post"),
+        (
+            ask_schedule(),
+            "Yes, schedule it.",
+            "mcp__pumpkit__schedule_post",
+            {"post_id": "812", "publish_at": FRIDAY_9},
+            "mcp__pumpkit__post_now",
+        ),
     ],
 )
 async def test_an_x_post_approval_opens_only_the_post_tool_of_its_action(
@@ -1857,6 +1855,7 @@ async def test_an_x_post_approval_opens_only_the_post_tool_of_its_action(
     asking: Tool,
     words: str,
     opened: str,
+    arguments: dict[str, object],
     closed: str,
 ) -> None:
     spawn = Tool(
@@ -1881,7 +1880,7 @@ async def test_an_x_post_approval_opens_only_the_post_tool_of_its_action(
     guard = session.backend.session("subagent").spec.mcp_guard
     assert guard is not None
     other = guard(closed, {"post_id": "812"})
-    own = guard(opened, {"post_id": "812"})
+    own = guard(opened, arguments)
     session.backend.subagent_close_gate.set()
     await session.end()
 
@@ -1917,7 +1916,7 @@ async def test_a_yes_that_changes_when_a_post_goes_out_is_refused(
 async def test_an_x_post_request_must_say_whether_it_posts_now_or_schedules(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh
 ) -> None:
-    approval = {"action": "subagent_action", "description": "post 812", "grants": ["x_post"], "post": "812"}
+    approval = {"action": "subagent_action", "grants": ["x_post"], "post": "812"}
     asking = Tool("report", {"task_id": "T1", "spoken": "Post it?", "needs_user": True, "approval": approval})
     session = a_session(
         clock, output, metrics, gh, [[Text("Right away, sir."), delegate()]], [[asking, report("T1", "No.")]]
@@ -2009,3 +2008,131 @@ async def test_a_ruleset_rule_that_keeps_a_branch_counts_on_any_page_of_the_rule
 
     refused, _ = results(session.backend, "orchestrator", "report")
     assert str(refused.result).startswith("Not asked: feat/old-idea is a protected branch of pumpkit-io/pumpkit")
+
+
+async def x_post_guard(spec: dict[str, Any]) -> McpGuard:
+    """The connector check of Subagent S1 holding A1, the approved x_post request `spec`."""
+    approvals = Approvals(org="pumpkit-io", runner=StubGh(), clock=FakeClock(), on_change=lambda: None, log=lambda e: None)
+    asked = await approvals.request("T1", spec)
+    assert isinstance(asked, Approval), asked
+    approvals.turn_began(None)
+    approvals.turn_ended(completed=True, told=["A1"], said="")
+    approvals.turn_began("Yes.")
+    approved = approvals.decide("A1")
+    assert isinstance(approved, Approval), approved
+    approvals.hand_to(approved, "S1")
+    return approvals.guard("A1", "S1", connector_check)
+
+
+def x_post(**fields: object) -> dict[str, Any]:
+    return {"action": "subagent_action", "grants": ["x_post"], "post": "812", "post_action": "schedule_post"} | fields
+
+
+SCHEDULE = "mcp__claude_ai_Pumpkit__schedule_post"
+COMMUNITY = "1493446837214187523"
+
+
+@pytest.mark.parametrize(
+    ("spec", "text"),
+    [
+        (x_post(post_action="post_now"), "post Pumpkit post 812 on X now"),
+        (x_post(publish_at=FRIDAY_9), "schedule Pumpkit post 812 on X for Friday 6 November 2026 at 09:00 UTC+01:00"),
+        (
+            x_post(publish_at="2026-11-06T08:00Z", community=COMMUNITY, share_with_followers=True),
+            f"schedule Pumpkit post 812 on X for Friday 6 November 2026 at 08:00 UTC, in community {COMMUNITY}, "
+            "shared with followers",
+        ),
+    ],
+)
+async def test_an_x_post_request_is_said_in_the_hubs_words_from_what_it_will_publish_and_when(
+    spec: dict[str, Any], text: str
+) -> None:
+    approvals = Approvals(org="pumpkit-io", runner=StubGh(), clock=FakeClock(), on_change=lambda: None, log=lambda e: None)
+
+    asked = await approvals.request("T1", spec)
+
+    assert isinstance(asked, Approval) and asked.text == text
+
+
+@pytest.mark.parametrize(
+    ("spec", "refusal"),
+    [
+        (x_post(post_action="post_now", description="schedule post 812 for Friday"), "approval.description"),
+        (x_post(), "approval.publish_at"),
+        (x_post(post_action="post_now", publish_at=FRIDAY_9), "approval.publish_at"),
+        (x_post(publish_at="2026-11-06T09:00:00"), "approval.publish_at"),
+        (x_post(publish_at="Friday at nine"), "approval.publish_at"),
+        (x_post(publish_at=FRIDAY_9, share_with_followers=True), "approval.share_with_followers"),
+        (x_post(publish_at=FRIDAY_9, share_with_followers="yes", community=COMMUNITY), "approval.share_with_followers"),
+        (x_post(publish_at=FRIDAY_9, grants=["x_post", "posthog_config"]), "approval.grants"),
+    ],
+)
+async def test_an_x_post_request_that_does_not_pin_exactly_what_is_published_is_refused(
+    spec: dict[str, Any], refusal: str
+) -> None:
+    approvals = Approvals(org="pumpkit-io", runner=StubGh(), clock=FakeClock(), on_change=lambda: None, log=lambda e: None)
+
+    asked = await approvals.request("T1", spec)
+
+    assert isinstance(asked, Refused) and asked.reason.startswith(refusal)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "allowed"),
+    [
+        ({"post_id": "812", "publish_at": FRIDAY_9, "community": COMMUNITY}, True),
+        ({"post_id": "812", "publish_at": "2026-11-06T08:00:00Z", "community": COMMUNITY}, True),
+        ({"post_id": "812", "publish_at": "2026-11-06T08:00:00Z", "community": COMMUNITY, "share_with_followers": False}, True),
+        ({"post_id": "812", "publish_at": "2026-11-07T09:00:00+01:00", "community": COMMUNITY}, False),
+        ({"post_id": "812", "publish_at": FRIDAY_9}, False),
+        ({"post_id": "812", "publish_at": FRIDAY_9, "community": "999"}, False),
+        ({"post_id": "812", "publish_at": FRIDAY_9, "community": COMMUNITY, "share_with_followers": True}, False),
+        ({"post_id": "812", "publish_at": FRIDAY_9, "community": COMMUNITY, "parts": ["other text"]}, False),
+        ({"post_id": "812", "publish_at": "soon", "community": COMMUNITY}, False),
+    ],
+)
+async def test_a_scheduled_x_post_grant_opens_only_for_the_approved_time_and_place(
+    arguments: dict[str, object], allowed: bool
+) -> None:
+    guard = await x_post_guard(x_post(publish_at=FRIDAY_9, community=COMMUNITY))
+
+    verdict = guard(SCHEDULE, arguments)
+
+    if allowed:
+        assert verdict is None
+    else:
+        assert verdict is not None and verdict.reason.startswith("A1 covers exactly")
+
+
+async def test_a_post_now_grant_refuses_a_community_it_was_not_approved_for() -> None:
+    guard = await x_post_guard(x_post(post_action="post_now"))
+
+    verdict = guard(POST_NOW, {"post_id": "812", "community": COMMUNITY})
+
+    assert verdict is not None and verdict.reason.startswith("A1 covers exactly")
+
+
+@pytest.mark.parametrize(("said", "approved"), [("Yes, schedule 812.", True), ("Yes, 9.", False), ("Yes, 2026.", False)])
+async def test_only_the_post_id_names_a_scheduled_x_post_never_the_numbers_of_its_time(said: str, approved: bool) -> None:
+    result = await decided([x_post(publish_at=FRIDAY_9)], said, "A1")
+
+    assert isinstance(result, Approval) == approved, result
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("publish_at", "2026-11-07T09:00:00+01:00"), ("community", "999"), ("share_with_followers", True)],
+)
+async def test_a_saved_x_post_whose_time_or_place_was_changed_is_dropped_on_restart(field: str, value: object) -> None:
+    def make() -> Approvals:
+        return Approvals(org="pumpkit-io", runner=StubGh(), clock=FakeClock(), on_change=lambda: None, log=lambda e: None)
+
+    first = make()
+    await first.request("T1", x_post(publish_at=FRIDAY_9, community=COMMUNITY))
+    [record] = first.dump({"T1"}, lambda t: t)
+
+    _, dropped = make().restore(Approvals.load([record | {field: value}], lambda t: t))
+    _, kept = make().restore(Approvals.load([record], lambda t: t))
+
+    assert kept == []
+    assert dropped == ["Dropped Approval A1 from the state file: it does not match the action it names."]

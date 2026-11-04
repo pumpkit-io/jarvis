@@ -1,9 +1,11 @@
 """Approvals (ADR 0004, ADR 0013): the User's recorded yes to one exact Boundary action, decided by the Hub from the
 User's own words. The Hub merges and deletes branches itself; any other action goes to one Subagent, for one call."""
 
+import json
 import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from html import escape
 from typing import Any, Literal, Protocol, cast, get_args
 
@@ -35,6 +37,7 @@ GRANTS: dict[str, tuple[str, ...]] = {
 }
 
 _POST = re.compile(r"[A-Za-z0-9_-]{1,64}")
+_COMMUNITY = re.compile(r"[A-Za-z0-9_:/.?=&%-]{1,200}")
 _SHA = re.compile(r"[0-9a-f]{40}")
 _REPO = re.compile(r"(?:(?P<owner>[A-Za-z0-9-]+)/)?(?P<name>[A-Za-z0-9._-]+)")
 # What git accepts as a branch name, narrowed: no leading dash or slash, no `..`, `//`, `@{`, `.lock` or trailing `/`.
@@ -93,6 +96,11 @@ class Approval:
     post: str | None = None
     # Whether an `x_post` grant posts now or schedules.
     post_action: PostAction | None = None
+    # When a scheduled post goes out, ISO 8601 with its UTC offset.
+    publish_at: str | None = None
+    # The X community an `x_post` goes to instead of the profile.
+    community: str | None = None
+    share_with_followers: bool = False
     state: ApprovalState = "pending"
     # The User's message that approved it, verbatim from the Hub's own record of the turn.
     words: str | None = None
@@ -108,6 +116,18 @@ class Approval:
             for tool in GRANTS.get(grant, ())
             if grant != "x_post" or tool.endswith(f"__{self.post_action}")
         )
+
+    @property
+    def post_arguments(self) -> dict[str, object]:
+        """The exact arguments an `x_post` grant's tool must be called with."""
+        arguments: dict[str, object] = {"post_id": self.post}
+        if self.publish_at:
+            arguments["publish_at"] = self.publish_at
+        if self.community:
+            arguments["community"] = self.community
+        if self.share_with_followers:
+            arguments["share_with_followers"] = True
+        return arguments
 
     def line(self, now: float) -> str:
         return f"{self.id} {self.state}, asked {ago(now - self.created)} ago: {self.text}"
@@ -127,6 +147,9 @@ _SAVED = Fields(
         "grants",
         "post",
         "post_action",
+        "publish_at",
+        "community",
+        "share_with_followers",
         "state",
         "words",
         "approved",
@@ -167,11 +190,11 @@ class _Names:
         if approval.action == "delete_branch":
             return _Names(numbers(words(str(approval.branch))), phrases, frozenset({"delete"}))
         said = words(approval.text)
-        post = {int(approval.post)} if approval.post and approval.post.isdigit() else set[int]()
-        kinds = LEXICONS.kinds(said)
         if approval.post_action:
-            kinds |= {_POST_KINDS[approval.post_action]}
-        return _Names(numbers(said) | post, phrases, kinds)
+            # The Hub wrote the text: its date and time name nothing, and "post" may stand for the post itself.
+            post = {int(approval.post)} if approval.post and approval.post.isdigit() else set[int]()
+            return _Names(frozenset(post), phrases, LEXICONS.kinds(said) | {_POST_KINDS[approval.post_action]})
+        return _Names(numbers(said), phrases, LEXICONS.kinds(said))
 
     def features(self) -> set[_Feature]:
         out: set[_Feature] = {("n", n) for n in self.numbers}
@@ -224,6 +247,72 @@ def named(text: str, among: list["Approval"]) -> list["Approval"]:
     names = {a.id: _Names.of(a).features() for a in among}
     said = _said(words(text), (p for a in among for p in _Names.of(a).phrases))
     return [a for a in among if (names[a.id] & said) - set().union(*(names[b.id] for b in among if b is not a))]
+
+
+def _x_post(task_id: str, spec: dict[str, Any], grants: list[str], repo: str, now: float) -> Approval | Refused:
+    """An `x_post` Approval, said in the Hub's words from what it publishes, where and when, so the User hears
+    exactly what the grant allows."""
+    if grants != ["x_post"]:
+        return Refused("approval.grants: x_post is granted alone, in an Approval of its own.")
+    if spec.get("description"):
+        return Refused(
+            "approval.description is left out with x_post: the Hub says the action from post, post_action, "
+            "publish_at and community."
+        )
+    post = str(spec.get("post") or "").strip()
+    if not _POST.fullmatch(post):
+        return Refused(
+            "approval.post is the Pumpkit post id the X post publishes, such as 812: x_post opens the post tools "
+            "for that post only."
+        )
+    post_action = str(spec.get("post_action") or "")
+    if post_action not in get_args(PostAction):
+        return Refused("approval.post_action is post_now or schedule_post: x_post opens only the post tool it names.")
+    when = _instant(spec.get("publish_at"))
+    if post_action == "post_now" and spec.get("publish_at"):
+        return Refused("approval.publish_at is left out of post_now, which publishes at once.")
+    if post_action == "schedule_post" and (when is None or when.second or when.microsecond):
+        return Refused(
+            "approval.publish_at is when schedule_post publishes: ISO 8601 on a whole minute with its UTC offset, "
+            "such as 2026-11-06T09:00:00+01:00."
+        )
+    community = " ".join(str(spec.get("community") or "").split()) or None
+    if community is not None and not _COMMUNITY.fullmatch(community):
+        return Refused("approval.community is the X community's URL or id, or left out for the profile.")
+    share = spec.get("share_with_followers", False)
+    if not isinstance(share, bool) or (share and community is None):
+        return Refused("approval.share_with_followers is true or false, and true only with a community.")
+    text = f"post Pumpkit post {post} on X now"
+    if when is not None:
+        offset = when.strftime("%z")
+        zone = "UTC" if offset == "+0000" else f"UTC{offset[:3]}:{offset[3:]}"
+        text = f"schedule Pumpkit post {post} on X for {when:%A} {when.day} {when:%B %Y at %H:%M} {zone}"
+    text += f", in community {community}" if community else ""
+    text += ", shared with followers" if share else ""
+    publish_at = when.isoformat() if when is not None else None
+    kind = cast(PostAction, post_action)
+    return Approval(
+        "", task_id, "subagent_action", repo, now, text, grants=grants, post=post, post_action=kind,
+        publish_at=publish_at, community=community, share_with_followers=share,
+    )
+
+
+def _instant(value: object) -> datetime | None:
+    """`value` as a time with its UTC offset, or None when it is not one."""
+    try:
+        when = datetime.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        return None
+    return when if when is not None and when.utcoffset() is not None else None
+
+
+def _same_post_call(approval: Approval, tool_input: Mapping[str, object]) -> bool:
+    """Whether a post tool's arguments are exactly those `approval` pins; a time may be written in another offset."""
+    given = {k: v for k, v in tool_input.items() if not (k in ("community", "share_with_followers") and not v)}
+    pinned = approval.post_arguments
+    if given.keys() != pinned.keys() or any(given[k] != pinned[k] for k in pinned if k != "publish_at"):
+        return False
+    return "publish_at" not in pinned or _instant(given["publish_at"]) == _instant(pinned["publish_at"])
 
 
 def approval_event(approval: Approval, status: str, text: str) -> str:
@@ -297,29 +386,7 @@ class Approvals:
     def _shaped(self, task_id: str, action: ApprovalAction, spec: dict[str, Any]) -> Approval | Refused:
         now = self._clock.now()
         if action == "subagent_action":
-            description = " ".join(str(spec.get("description") or "").split())
-            if not description:
-                return Refused("approval.description is required: the one exact action, as the User will hear it.")
-            raw: object = spec.get("grants") or []
-            grants = [str(g) for g in cast(list[object], raw)] if isinstance(raw, list) else None
-            if grants is None or any(g not in GRANTS for g in grants):
-                return Refused(f"approval.grants lists any of {', '.join(GRANTS)}, or nothing.")
-            repo = self._repo(spec.get("repo")) if spec.get("repo") else ""
-            if isinstance(repo, Refused):
-                return repo
-            post = str(spec.get("post") or "").strip() if "x_post" in grants else None
-            if post is not None and not _POST.fullmatch(post):
-                return Refused(
-                    "approval.post is the Pumpkit post id the X post publishes, such as 812: x_post opens the post "
-                    "tools for that post only."
-                )
-            post_action = str(spec.get("post_action") or "") if "x_post" in grants else None
-            if post_action is not None and post_action not in get_args(PostAction):
-                return Refused(
-                    "approval.post_action is post_now or schedule_post: x_post opens only the post tool it names."
-                )
-            kind = cast(PostAction | None, post_action)
-            return Approval("", task_id, action, repo, now, description, grants=grants, post=post, post_action=kind)
+            return self._subagent_action(task_id, spec, now)
         repo = self._repo(spec.get("repo"))
         if isinstance(repo, Refused):
             return repo
@@ -340,6 +407,21 @@ class Approvals:
             return Refused("approval.branch is a branch name, such as feat/old-idea.")
         text = f"delete branch {branch} of {repo} at commit {sha[:12]}"
         return Approval("", task_id, action, repo, now, text, branch=branch, sha=sha)
+
+    def _subagent_action(self, task_id: str, spec: dict[str, Any], now: float) -> Approval | Refused:
+        raw: object = spec.get("grants") or []
+        grants = [str(g) for g in cast(list[object], raw)] if isinstance(raw, list) else None
+        if grants is None or any(g not in GRANTS for g in grants):
+            return Refused(f"approval.grants lists any of {', '.join(GRANTS)}, or nothing.")
+        repo = self._repo(spec.get("repo")) if spec.get("repo") else ""
+        if isinstance(repo, Refused):
+            return repo
+        if "x_post" in grants:
+            return _x_post(task_id, spec, grants, repo, now)
+        description = " ".join(str(spec.get("description") or "").split())
+        if not description:
+            return Refused("approval.description is required: the one exact action, as the User will hear it.")
+        return Approval("", task_id, "subagent_action", repo, now, description, grants=grants)
 
     def _repo(self, value: object) -> str | Refused:
         match = _REPO.fullmatch(str(value or "").strip())
@@ -556,6 +638,9 @@ class Approvals:
             post_id = str(tool_input.get("post_id") or "")
             if approval.post is not None and tool_name in GRANTS["x_post"] and post_id != approval.post:
                 return Refused(f"{approval.id} covers Pumpkit post {approval.post} only, not {post_id}.")
+            if tool_name in GRANTS["x_post"] and not _same_post_call(approval, tool_input):
+                pinned, given = json.dumps(approval.post_arguments), json.dumps(dict(tool_input), default=str)
+                return Refused(f"{approval.id} covers exactly {tool_name} with {pinned}, not {given}.")
             approval.state, approval.outcome = "used", f"{subagent_id} called {tool_name}."
             self._on_change()
             return None
@@ -633,15 +718,21 @@ class Approvals:
             "pr": approval.number,
             "branch": approval.branch,
             "sha": approval.sha,
-            "description": approval.text,
+            "description": None if "x_post" in approval.grants else approval.text,
             "grants": cast(object, approval.grants),
             "post": approval.post,
             "post_action": approval.post_action,
+            "publish_at": approval.publish_at,
+            "community": approval.community,
+            "share_with_followers": approval.share_with_followers,
         }
         shaped = self._shaped(approval.task_id, approval.action, spec)
         if isinstance(shaped, Refused):
             return shaped.reason
-        fields = ("repo", "text", "number", "branch", "sha", "grants", "post", "post_action")
+        fields = (
+            "repo", "text", "number", "branch", "sha", "grants", "post", "post_action", "publish_at", "community",
+            "share_with_followers",
+        )
         if any(getattr(shaped, f) != getattr(approval, f) for f in fields):
             return "it does not match the action it names."
         return None
