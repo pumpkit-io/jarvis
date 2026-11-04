@@ -273,6 +273,8 @@ class FakeBackend:
         # Holds a Subagent's open, or its session's close, until set: a CLI that never answers.
         self.subagent_open_gate = subagent_open_gate
         self.subagent_close_gate = subagent_close_gate
+        # Opens of a Subagent's session begun, counted before the gate holds them.
+        self.subagent_opens = 0
 
     def wall(self) -> float:
         """Unix seconds for the Hub's usage limit: the fake clock, so a reset comes when a test advances it."""
@@ -280,6 +282,7 @@ class FakeBackend:
 
     async def open(self, spec: SessionSpec) -> FakeSession:
         if spec.role == "subagent":
+            self.subagent_opens += 1
             if self.subagent_open_gate is not None:
                 await self.subagent_open_gate.wait()
             if self.subagent_open_error is not None:

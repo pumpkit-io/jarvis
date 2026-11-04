@@ -668,7 +668,8 @@ async def test_closing_does_not_hang_on_a_subagent_whose_session_never_opens(
     typist = Typist(clock)
     running = asyncio.create_task(hub.run(typist.lines()))
     typist.type(TYPO)
-    await until(lambda: results(backend, "spawn_subagent"))
+    # Closing before the run has started takes the "never started" path, which keeps the lock.
+    await until(lambda: backend.subagent_opens)
     async with asyncio.timeout(1):
         await hub.close()
     running.cancel()
