@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import pytest
@@ -6,6 +7,44 @@ import pytest
 from jarvis_hub.voice.player import Clip, SoundPlayer
 
 RATE = 1000  # Samples per second, so a millisecond is a sample.
+
+
+def test_device_buffers_speech_across_a_short_inference_scheduling_stall(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sounddevice as sd  # pyright: ignore[reportMissingTypeStubs]
+
+    class BufferedDevice:
+        def __init__(self, **settings: Any) -> None:
+            self.rate = settings["samplerate"]
+            self.latency = 0.035375 if settings["latency"] == "low" else float(settings["latency"])
+            self.callback = settings["callback"]
+            devices.append(self)
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def render_through_stall(self, stall_s: float) -> np.ndarray:
+            buffered = np.empty((round(self.rate * self.latency), 1), np.float32)
+            self.callback(buffered, len(buffered), None, None)
+            heard = np.zeros(round(self.rate * stall_s), np.float32)
+            copied = min(len(heard), len(buffered))
+            heard[:copied] = buffered[:copied, 0]
+            return heard
+
+    devices: list[BufferedDevice] = []
+    monkeypatch.setattr(sd, "OutputStream", BufferedDevice)
+    player = SoundPlayer(24_000)
+    try:
+        samples = np.full(24_000, 0.25, np.float32)
+        player.play(Clip("A continuous sentence.", "am_liam", samples, 24_000))
+        np.testing.assert_array_equal(devices[0].render_through_stall(0.05), 0.25)
+    finally:
+        player.close()
 
 
 class FakeStream:
