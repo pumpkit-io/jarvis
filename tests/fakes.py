@@ -5,6 +5,7 @@ import threading
 from collections.abc import AsyncIterator, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import CoroutineType
 from typing import Any, Literal
 
 import numpy as np
@@ -48,8 +49,11 @@ class FakeClock:
             sleeper.set()
         self._sleepers.clear()
 
-    async def sleep(self, seconds: float) -> None:
-        deadline = self.t + seconds
+    def sleep(self, seconds: float) -> "CoroutineType[Any, Any, None]":
+        # The deadline is taken at the call: a task made to sleep may first run after the test advanced the clock.
+        return self._sleep_until(self.t + seconds)
+
+    async def _sleep_until(self, deadline: float) -> None:
         while self.t < deadline:
             woken = asyncio.Event()
             self._sleepers.append(woken)
@@ -419,11 +423,16 @@ class FakeWorkspace:
         self.locks[path] = holder
         return path
 
-    async def release(self, worktree: Path) -> None:
+    async def release(self, worktree: Path, holder: str) -> str | None:
+        if self.locks.get(worktree, holder) != holder:
+            return f"its lock is held by {self.locks[worktree]} now, so it was left in place."
         self.released.append(worktree)
         self.locks.pop(worktree, None)
+        return None
 
-    async def discard(self, worktree: Path) -> str | None:
+    async def discard(self, worktree: Path, holder: str) -> str | None:
+        if self.locks.get(worktree, holder) != holder:
+            return f"its lock is held by {self.locks[worktree]} now, so it was left in place."
         self.locks.pop(worktree, None)
         self.discarded.append(worktree)
         return self.keep.get(worktree)
@@ -459,6 +468,7 @@ def make_hub(
     watch_limit: float = 6 * 3600.0,
     **options: Any,
 ) -> Hub:
+    options.setdefault("wall", backend.wall)
     setup = SubagentSetup(
         session=subagent_spec,
         workspace=workspace or FakeWorkspace(),
@@ -476,7 +486,6 @@ def make_hub(
         metrics=metrics,
         subagents=setup,
         waits=WaitSetup(org="pumpkit-io", runner=runner or StubRunner(), watch_limit=watch_limit),
-        wall=backend.wall,
         **options,
     )
 

@@ -327,10 +327,16 @@ def test_audio_of_an_event_reply_while_a_spoken_turn_waits_is_not_its_answer() -
     assert voice.state == "thinking"
 
 
-def test_an_announcement_begun_while_idle_is_one_the_wake_word_interrupts() -> None:
-    voice, actions = run(AnnouncementBegins(10.0), WakeWord(10.2))
+def test_an_announcement_begun_while_idle_chimes_and_is_one_the_wake_word_interrupts() -> None:
+    voice, actions = run(AnnouncementBegins(10.0), ChimeStarted(10.0), WakeWord(10.6))
     assert voice.state == "listening"
-    assert actions == [Interrupt(), Chime()]
+    assert actions == [Chime(), Interrupt(), Chime()]
+
+
+def test_a_wake_word_during_the_announcement_chime_is_ignored() -> None:
+    voice, actions = run(AnnouncementBegins(10.0), ChimeStarted(10.0), WakeWord(10.2))
+    assert voice.state == "announce"
+    assert actions == [Chime()]
 
 
 @pytest.mark.parametrize("state", ["listening", "thinking", "speaking", "follow_up", "announce"])

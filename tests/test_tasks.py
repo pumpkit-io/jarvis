@@ -454,6 +454,7 @@ async def test_each_role_gets_only_its_own_hub_tools(
         "cancel",
         "show",
         "end_conversation",
+        "quiet_mode",
     ]
     assert [t.name for t in backend.session("orchestrator").spec.tools] == [
         "report",
@@ -714,3 +715,22 @@ async def test_in_text_mode_news_reaches_the_talker_in_the_order_it_arrives(
         '<event source="orchestrator" task="T1" needs_user="false"',
         '<user lang="en" typed="true"',
     ]
+
+
+async def test_quiet_mode_in_text_mode_holds_nothing(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    backend = FakeBackend(
+        clock,
+        [[Text("Very well, sir."), Tool("quiet_mode", {"on": True})], [Text("On it."), delegate()], [Text("Two.")]],
+        orchestrator=[[report("T1", "Two PRs are open in pumpkit.")]],
+    )
+    hub = make_hub(backend, output, metrics)
+
+    await hub.start()
+    await hub.run(lines(clock, "Quiet mode, please", ASK_PRS))
+
+    [result] = results(backend, "talker", "quiet_mode")
+    assert result.result == "Quiet mode is for voice mode; here news only appears on screen, so nothing changed."
+    assert talker_messages(backend)[-1].startswith('<event source="orchestrator" task="T1"')
+    assert output.replies[-1] == "Two."

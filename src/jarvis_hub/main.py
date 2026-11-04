@@ -244,6 +244,7 @@ def settings_hub(
         subagents=subagent_setup(settings),
         waits=WaitSetup(org=settings.org),
         talker_restart_at=settings.talker_restart_at,
+        state_path=settings.runtime_dir / "state.json",
         **options,
     )
 
@@ -353,7 +354,7 @@ async def voice_mode(
         if stdin.isatty():
             stdout.write(PROMPT)
             stdout.flush()
-        await hub.run(merge(_typed_lines(stdin, clock), conversation.lines(hub.interrupt)))
+        await hub.run(merge(_typed_lines(stdin, clock), conversation.lines(hub.interrupt, hub.woke)))
     finally:
         try:
             await hub.close()

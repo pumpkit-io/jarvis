@@ -1,8 +1,11 @@
-"""The Hub's record of every Task this launch: what the Talker asks about, answered without a model call."""
+"""The Hub's record of every Task this launch, and the open ones from before a restart: what the Talker asks about,
+answered without a model call."""
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal, get_args
+
+from jarvis_hub.state import Fields, TimeShift, numbered, one_of
 
 TaskState = Literal["queued", "working", "needs_user", "done", "failed", "cancelled"]
 FINISHED: frozenset[TaskState] = frozenset({"done", "failed", "cancelled"})
@@ -71,15 +74,47 @@ class Task:
         self.state = "cancelled"
         return True
 
+    @property
+    def open(self) -> bool:
+        """Not yet finished; a cancelled one with a message still queued counts."""
+        return self.state not in FINISHED or (bool(self.waiting) and not self.cancelled)
+
+
+_SAVED = Fields(("id", "request", "created", "state", "last_report", "reports", "words"), times=frozenset({"created"}))
+
 
 class Tasks:
     def __init__(self) -> None:
         self._tasks: dict[str, Task] = {}
+        self._ids = 0
 
     def create(self, request: str, now: float) -> Task:
-        task = Task(id=f"T{len(self._tasks) + 1}", request=request, created=now)
+        self._ids += 1
+        task = Task(id=f"T{self._ids}", request=request, created=now)
         self._tasks[task.id] = task
         return task
+
+    def dump(self, to_wall: TimeShift) -> list[dict[str, Any]]:
+        """The open Tasks, for the state file; finished ones end with the launch (story 24)."""
+        return [_SAVED.dump(t, to_wall) for t in self._tasks.values() if t.open]
+
+    @staticmethod
+    def load(records: list[dict[str, Any]], from_wall: TimeShift) -> list[Task]:
+        """Saved Tasks, checked whole and not yet restored. Their queued messages come back with the recovery
+        message, so a queued one is working on it."""
+        tasks: list[Task] = []
+        for r in records:
+            task = Task(**_SAVED.load(r, from_wall))
+            numbered(task.id, "T")
+            if one_of(task.state, get_args(TaskState)) == "queued":
+                task.state = "working"
+            tasks.append(task)
+        return tasks
+
+    def restore(self, tasks: list[Task]) -> None:
+        for task in tasks:
+            self._tasks[task.id] = task
+            self._ids = max(self._ids, numbered(task.id, "T"))
 
     def get(self, task_id: object) -> Task | None:
         return self._tasks.get(str(task_id).strip().upper()) if task_id else None
@@ -92,7 +127,7 @@ class Tasks:
 
     def open_status(self, now: float, subagents: Callable[[str], list[str]] = lambda task_id: []) -> str:
         """Like `status`, for the Tasks not yet finished (a cancelled one with a message still queued counts)."""
-        open_tasks = [t for t in self._tasks.values() if t.state not in FINISHED or (t.waiting and not t.cancelled)]
+        open_tasks = [t for t in self._tasks.values() if t.open]
         return "\n".join(self._lines(reversed(open_tasks), now, subagents)) if open_tasks else "No open Tasks."
 
     @staticmethod

@@ -275,6 +275,8 @@ async def test_subagents_past_the_cap_wait_in_a_queue_and_each_starts_as_a_slot_
     await hub.start()
     running = asyncio.create_task(hub.run(lines(clock, "Two fixes")))
     await until(lambda: len(results(backend, "spawn_subagent")) == 2)
+    await until(lambda: [s.received for s in backend.all_sessions("subagent")] == [["one"]])
+    # Time for the queued Subagent to start, if the cap let it.
     await asyncio.sleep(0.01)
 
     states = [json.loads(r.result or "")["state"] for r in results(backend, "spawn_subagent")]
@@ -332,7 +334,8 @@ async def test_past_the_time_limit_the_orchestrator_is_asked_to_check_with_the_u
 
     await hub.start()
     running = asyncio.create_task(hub.run(lines(clock, TYPO)))
-    await until(lambda: backend.all_sessions("subagent"))
+    # The time limit's sleep starts after the session opens, and an advance before it would be lost.
+    await until(lambda: backend.all_sessions("subagent") and clock.sleepers)
     clock.advance(3600)
     await running
 
@@ -698,7 +701,7 @@ async def test_a_run_cut_off_at_close_still_releases_its_lock_and_ends(
     async with asyncio.timeout(1):
         await subagents.close()
 
-    assert [s.state for s in ended] == ["cancelled"]
+    assert [s.state for s in ended] == ["interrupted"]
     assert workspace.released == [subagent.cwd] and not workspace.locks
 
 
@@ -726,3 +729,37 @@ async def test_close_does_not_wait_forever_on_a_cancelled_run_whose_describe_han
 
     async with asyncio.timeout(1):
         await subagents.close()
+
+
+async def test_a_restored_subagent_releases_by_the_holder_saved_not_one_worked_out_again(
+    clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = FakeWorkspace()
+
+    def new() -> Subagents:
+        return Subagents(
+            setup=SubagentSetup(session=subagent_spec, workspace=workspace),
+            backend=FakeBackend(clock),
+            clock=clock,
+            on_end=lambda s: None,
+            on_over_time=lambda s: None,
+            on_turn=lambda subagent, spec, end, ms: None,
+            limit=idle_limit(clock),
+        )
+
+    first = new()
+    args = {"repo": "pumpkit", "title": "T", "brief": "b", "model": "haiku", "effort": "low", "writes": True}
+    subagent = await first.prepare("T1", args, [])
+    assert isinstance(subagent, Subagent)
+    saved = json.loads(json.dumps(first.dump({"T1"}, lambda t: t)))
+
+    def newer_format(subagent_id: str, task_id: str, title: str) -> str:
+        return "a holder in a newer format"
+
+    monkeypatch.setattr("jarvis_hub.subagents.lock_holder", newer_format)
+
+    second = new()
+    [cut_off] = second.restore(Subagents.load(saved, lambda t: t))
+    await second.free_interrupted(cut_off)
+
+    assert workspace.released == [subagent.cwd] and not workspace.locks

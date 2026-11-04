@@ -131,6 +131,7 @@ class VoiceMode:
         self._voice = Voice()
         self._idle = asyncio.Event()
         self._idle.set()
+        self._woke: Callable[[], None] = lambda: None
         self._events: asyncio.Queue[Event] = asyncio.Queue()
         self._lines: asyncio.Queue[Line] = asyncio.Queue()
         self._speech = Speech(
@@ -150,8 +151,12 @@ class VoiceMode:
     def end_conversation(self) -> None:
         self._events.put_nowait(EndConversation(self._clock.now()))
 
-    async def lines(self, interrupt: Callable[[], Awaitable[Any]]) -> AsyncIterator[Line]:
-        """The User's spoken turns, for as long as this is iterated."""
+    async def lines(
+        self, interrupt: Callable[[], Awaitable[Any]], woke: Callable[[], None] = lambda: None
+    ) -> AsyncIterator[Line]:
+        """The User's spoken turns, for as long as this is iterated. `woke` hears of each Wake word that opens
+        listening, before the turn that follows it."""
+        self._woke = woke
         tasks = [asyncio.create_task(self._listen()), asyncio.create_task(self._drive(interrupt))]
         try:
             while True:
@@ -179,7 +184,10 @@ class VoiceMode:
         """
         if self._voice.state != "idle":
             return False
-        self._step(AnnouncementBegins(self._clock.now()))
+        for action in self._step(AnnouncementBegins(self._clock.now())):
+            if isinstance(action, Chime):
+                # Queued now, so it plays ahead of the news turn's first sentence.
+                self._speech.say("chime", "en")
         return True
 
     async def close(self) -> None:
@@ -208,11 +216,13 @@ class VoiceMode:
                 await self._act(action, interrupt)
 
     def _step(self, event: Event) -> list[Action]:
-        before = self._voice.state
+        before, woke_at = self._voice.state, self._voice.woke_at
         self._voice, actions = step(self._voice, event, self._timing)
         after = self._voice.state
         if after != before:
             self._transition(before, after, event)
+        if self._voice.woke_at != woke_at:
+            self._woke()
         return actions
 
     async def _next_event(self) -> Event:

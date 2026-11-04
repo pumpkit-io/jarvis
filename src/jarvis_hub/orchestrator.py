@@ -37,6 +37,10 @@ def orchestrator_spec(settings: Settings) -> SessionSpec:
     )
 
 
+# Only the recovery message after a restart is on several Tasks at once; any other turn is on its own Task.
+RESTART_TASK = {**STRING, "description": "Only after a restart: the Task this is for."}
+
+
 def orchestrator_tools(
     *,
     report: ToolHandler,
@@ -76,6 +80,7 @@ def orchestrator_tools(
                     "effort": {**STRING, "enum": ["low", "medium", "high", "xhigh", "max"]},
                     "writes": {"type": "boolean", "description": "True when it changes the repo."},
                     "branch_kind": {**STRING, "enum": ["feat", "fix", "chore"], "description": "With writes."},
+                    "task_id": RESTART_TASK,
                 },
                 ("repo", "title", "brief", "model", "effort", "writes"),
             ),
@@ -102,6 +107,7 @@ def orchestrator_tools(
                 {
                     "kind": {**STRING, "enum": list(WATCH_KINDS)},
                     "target": {**STRING, "description": "An Org repo and a number, such as pumpkit#42."},
+                    "task_id": RESTART_TASK,
                 },
                 ("kind", "target"),
             ),
@@ -117,6 +123,7 @@ def orchestrator_tools(
                     "after_seconds": {"type": "integer", "minimum": 60},
                     "note": {**STRING, "description": "What to look at when it comes due."},
                     "max_repeats": {"type": "integer", "minimum": 1, "maximum": MAX_REPEATS},
+                    "task_id": RESTART_TASK,
                 },
                 ("after_seconds", "note"),
             ),

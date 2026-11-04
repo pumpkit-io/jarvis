@@ -79,7 +79,8 @@ class EndConversation:
 
 @dataclass(frozen=True)
 class AnnouncementBegins:
-    """The Hub is starting news on the Talker, which it does only while idle: a Wake word from now on interrupts it."""
+    """The Hub is starting news on the Talker, which it does only while idle: a chime, then the news, which a Wake
+    word from now on interrupts."""
 
     at: float
 
@@ -241,7 +242,7 @@ def step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Action
             return voice, []
         case AnnouncementBegins():
             if voice.state == "idle":
-                return replace(voice, state="announce", deadline=None), []
+                return replace(voice, state="announce", deadline=None), [Chime()]
             return voice, []
         case Tick(at):
             if voice.deadline is not None and at >= voice.deadline:
