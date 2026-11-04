@@ -330,7 +330,7 @@ def _step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Actio
 
 def _decide(voice: Voice, at: float, timing: Timing, *, final: bool) -> tuple[Voice, list[Action]]:
     assert voice.barge is not None
-    match decide(voice.barge.partials, wake=False, final=final):
+    match decide(voice.barge.partials, final=final):
         case "wait":
             return voice, []
         case "resume":

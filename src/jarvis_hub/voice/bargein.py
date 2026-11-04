@@ -13,19 +13,22 @@ Decision = Literal["wait", "resume", "stop"]
 
 # A gap in VAD this short is between words; longer, the User has stopped.
 TALKING_GAP_S = 0.2
-# Speech still going this long is a bid for the floor, whatever STT has made of it so far.
-LONG_SPEECH_S = 0.7
+# Speech still going this long is a bid for the floor, whatever STT has made of it so far: 700 ms, less the VAD chunk
+# by which speech held throughout reads short at the 700 ms partial.
+LONG_SPEECH_S = 0.65
 # This many words that are not all Backchannel take the floor ("okay but what about…").
 FLOOR_WORDS = 3
 
 LEXICON_DIR = Path(__file__).parent / "lexicons"
 
 _WORDS = re.compile(r"[\w']+")
+# How STT marks sounds that are not words: "[BLANK_AUDIO]", "[Music]", "(coughs)".
+_NON_SPEECH = re.compile(r"\[[^\]]*\]|\([^)]*\)")
 
 
 def words(text: str) -> tuple[str, ...]:
-    """Lowercase words, with hyphens and punctuation gone and curly apostrophes made straight."""
-    return tuple(_WORDS.findall(text.lower().replace("’", "'")))
+    """Lowercase words, with hyphens, punctuation and STT's non-speech marks gone and curly apostrophes made straight."""
+    return tuple(_WORDS.findall(_NON_SPEECH.sub(" ", text).lower().replace("’", "'")))
 
 
 @dataclass(frozen=True)
@@ -52,8 +55,12 @@ class Lexicons:
         return Lexicons(_phrases(folder / "backchannel.txt"), _phrases(folder / "interrupt.txt"))
 
     def interrupts(self, said: Sequence[str]) -> bool:
-        padded = f" {' '.join(said)} "
-        return any(f" {phrase} " in padded for phrase in self.interrupt)
+        """Whether a hard interrupt was said, other than inside a longer Backchannel phrase ("no" in "no problem")."""
+        backchannels = [(start, start + len(phrase)) for phrase, start in _occurrences(said, self.backchannel)]
+        return any(
+            not any(s <= start and start + len(phrase) <= e and e - s > len(phrase) for s, e in backchannels)
+            for phrase, start in _occurrences(said, self.interrupt)
+        )
 
     def only_backchannel(self, said: Sequence[str]) -> bool:
         """Whether `said` is Backchannel phrases end to end."""
@@ -68,6 +75,15 @@ class Lexicons:
         return covered[-1]
 
 
+def _occurrences(said: Sequence[str], phrases: frozenset[str]) -> Iterable[tuple[tuple[str, ...], int]]:
+    """Each phrase found in `said`, as its words and where it starts."""
+    for phrase in phrases:
+        split = tuple(phrase.split())
+        for start in range(len(said) - len(split) + 1):
+            if tuple(said[start : start + len(split)]) == split:
+                yield split, start
+
+
 def _phrases(path: Path) -> frozenset[str]:
     lines: Iterable[str] = path.read_text(encoding="utf-8").splitlines()
     return frozenset(" ".join(w) for line in lines if not line.lstrip().startswith("#") and (w := words(line)))
@@ -76,13 +92,11 @@ def _phrases(path: Path) -> frozenset[str]:
 LEXICONS = Lexicons.load(LEXICON_DIR)
 
 
-def decide(partials: Sequence[Partial], *, wake: bool, final: bool, lexicons: Lexicons = LEXICONS) -> Decision:
+def decide(partials: Sequence[Partial], *, final: bool, lexicons: Lexicons = LEXICONS) -> Decision:
     """Stop, resume, or wait for the next partial; with `final`, at the deadline, never wait.
 
     Only the latest partial counts: each covers everything since the onset.
     """
-    if wake:
-        return "stop"
     if not partials:
         return "resume" if final else "wait"
     latest = partials[-1]
@@ -93,9 +107,5 @@ def decide(partials: Sequence[Partial], *, wake: bool, final: bool, lexicons: Le
     if said and not lexicons.only_backchannel(said):
         floor = len(said) >= FLOOR_WORDS or latest.speech_s >= LONG_SPEECH_S
         return "stop" if floor or not talking or final else "wait"
-    if not talking:
-        return "resume"
-    if final:
-        # A Backchannel still going at the deadline may be the start of a sentence; noise is not.
-        return "stop" if said else "resume"
-    return "wait"
+    # Backchannels or noise still going at the deadline: a slow "sì, certo" more often than the start of a sentence.
+    return "resume" if not talking or final else "wait"

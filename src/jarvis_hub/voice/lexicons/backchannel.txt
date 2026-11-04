@@ -1,5 +1,6 @@
 # Backchannels: said over Jarvis, alone or several together, Jarvis carries on.
 # One phrase per line, English and Italian; case, punctuation and hyphens don't matter.
+# A Backchannel phrase wins over a hard interrupt inside it: "no problem" resumes, "no" alone stops.
 okay
 ok
 mhm
@@ -34,3 +35,15 @@ d'accordo
 bene
 ottimo
 grazie
+no problem
+all right
+alright
+good
+perfect
+exactly
+oh okay
+yes sir
+ho capito
+vabbè
+va benissimo
+ok grazie
