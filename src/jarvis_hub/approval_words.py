@@ -1,5 +1,6 @@
-"""How the Hub reads words for an Approval: a yes from a closed lexicon, the words that hold it back, the action verbs
-and the numbers said, in English and Italian. The lexicons are data files beside this module, read once."""
+"""How the Hub reads words for an Approval: a yes from a closed lexicon, the words that hold it back, the action verbs,
+the words a read-back may hold and the numbers said, in English and Italian. The lexicons are data files beside this
+module, read once."""
 
 import re
 from collections.abc import Iterable, Sequence
@@ -34,6 +35,7 @@ class Lexicons:
     yes: frozenset[Words]
     hold: frozenset[Words]
     filler: frozenset[Words]
+    read_back: frozenset[Words]
     # Each verb's kind, such as "merge" for "unisci".
     verbs: dict[str, str]
 
@@ -45,8 +47,10 @@ class Lexicons:
                 continue
             kind, said = line.split(":", 1)
             verbs |= {verb: kind.strip() for verb in words(said)}
-        yes, hold, filler = (frozenset(_lines(folder / f"{name}.txt")) for name in ("yes", "hold", "filler"))
-        return Lexicons(yes, hold, filler, verbs)
+        yes, hold, filler, read_back = (
+            frozenset(_lines(folder / f"{name}.txt")) for name in ("yes", "hold", "filler", "read_back")
+        )
+        return Lexicons(yes, hold, filler, read_back, verbs)
 
     def holding_back(self, text: str) -> str | None:
         """What in `text` holds a yes back: a question mark, a word ending in n't, or a phrase of the hold lexicon."""
@@ -78,9 +82,28 @@ class Lexicons:
     ) -> str | None:
         """The first word of `said` that is not a yes, a verb of `kinds`, a `target` phrase, one of `target_numbers`
         (after "number" or not), or filler; None when every word is one of those."""
+        return self.outside(said, self.yes | self.filler, target, kinds, target_numbers)
+
+    def outside_read_back(
+        self, said: Words, target: Iterable[Words], kinds: frozenset[str], target_numbers: frozenset[int]
+    ) -> str | None:
+        """The first word of `said` that is not a read-back word, a verb of `kinds`, a `target` phrase or one of
+        `target_numbers`; a word "_" stands for one already read as an Approval's own text."""
+        return self.outside(said, self.read_back | {("_",)}, target, kinds, target_numbers)
+
+    def outside(
+        self,
+        said: Words,
+        known: Iterable[Words],
+        target: Iterable[Words],
+        kinds: frozenset[str],
+        target_numbers: frozenset[int],
+    ) -> str | None:
+        """The first word of `said` that is not inside a `known` or `target` phrase, a verb of `kinds` or one of
+        `target_numbers` (after "number" or not); None when every word is."""
         verbs = {(verb,) for verb, kind in self.verbs.items() if kind in kinds}
         covered = [False] * len(said)
-        for phrase in self.yes | self.filler | verbs | set(target):
+        for phrase in set(known) | verbs | set(target):
             for i in found(said, phrase):
                 covered[i : i + len(phrase)] = [True] * len(phrase)
         for i, n, value in number_spans(said):
@@ -88,7 +111,6 @@ class Lexicons:
                 start = i - 1 if i and said[i - 1] in _NUMBER_LEAD else i
                 covered[start : i + n] = [True] * (i + n - start)
         return next((word for word, ok in zip(said, covered, strict=True) if not ok), None)
-
 
 LEXICONS = Lexicons.load(LEXICON_DIR)
 

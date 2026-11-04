@@ -2326,3 +2326,69 @@ async def test_a_number_any_pending_approval_holds_is_ambiguous_even_when_that_o
     result = await decided(specs, "yes 9", "A1", told=["A1", "A2"])
 
     assert isinstance(result, str) and result.startswith("Not approved"), result
+
+
+MIGRATION_AND_42 = [posthog("run the db migration"), merge_spec(42)]
+
+
+@pytest.mark.parametrize(
+    ("which", "reply"),
+    [
+        ("A2", "Should I skip PR 42 for now?"),
+        ("A2", "Should I drop PR 42?"),
+        ("A2", "Should I revert PR 42?"),
+        ("A2", "Should I abandon PR 42?"),
+        ("A2", "Should I postpone PR 42?"),
+        ("A2", "Should I defer PR 42?"),
+        ("A2", "Should I park PR 42?"),
+        ("A2", "Shall I ignore PR 42?"),
+        ("A2", "Shall I leave PR 42 open?"),
+        ("A2", "Shall I put PR 42 on ice?"),
+        ("A2", "Shall I ping the author of PR 42?"),
+        ("A2", "Want me to rebase PR 42 first?"),
+        ("A2", "Shall I close PR 42 instead?"),
+        ("A1", "Should I postpone: run the db migration?"),
+        ("A1", "Shall I skip the db migration?"),
+        ("A1", "Shall I re-check run the db migration?"),
+        ("A1", "Should I review run the db migration again?"),
+        ("A1", "Merge 42, or run the db migration?"),
+        ("A2", "Merge 42, or run the db migration?"),
+        ("A1", "Shall I merge 42 and run the db migration?"),
+        ("A2", "Shall I merge 42 and run the db migration?"),
+        ("A2", "Devo saltare la 42?"),
+        ("A2", "Should I skip PR 42 for now? Shall I merge PR 42?"),
+        ("A2", "Should I skip it... or merge 42?"),
+        ("A2", "Should I skip it? Or merge 42?"),
+    ],
+)
+async def test_a_question_with_any_word_outside_a_read_back_reads_nothing_back(which: str, reply: str) -> None:
+    result = await decided(MIGRATION_AND_42, "Yes.", which, read_back=reply)
+
+    assert isinstance(result, str) and result.startswith("Not approved"), result
+
+
+@pytest.mark.parametrize(
+    ("specs", "reply"),
+    [
+        ([merge_spec(42), posthog("run the db migration")], "Shall I merge PR 42?"),
+        ([delete_spec("feat/old-idea"), merge_spec(42)], "Should I go ahead and delete feat/old-idea?"),
+        ([x_post(publish_at=FRIDAY_9), merge_spec(42)], "Do you want me to schedule post 812?"),
+        ([posthog("run the db migration on staging"), merge_spec(42)], "Shall I run the db migration on staging?"),
+        ([merge_spec(42), delete_spec("feat/old-idea")], "Procedo con il merge della 42?"),
+        ([merge_spec(42), posthog("run the db migration")], "One moment, sir. Your words were unclear. Merge 42?"),
+    ],
+)
+async def test_a_read_back_made_only_of_the_approvals_names_and_question_words_lets_a_plain_yes_approve_it(
+    specs: list[dict[str, Any]], reply: str
+) -> None:
+    result = await decided(specs, "Yes.", "A1", read_back=reply)
+
+    assert isinstance(result, Approval) and result.id == "A1", result
+
+
+async def test_a_word_naming_another_pending_approval_it_does_not_choose_breaks_a_read_back() -> None:
+    specs = [merge_spec(42), delete_spec("feat/skip"), delete_spec("fix/skip")]
+
+    result = await decided(specs, "Yes.", "A1", read_back="Should I skip PR 42?")
+
+    assert isinstance(result, str) and result.startswith("Not approved"), result

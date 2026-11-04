@@ -276,12 +276,21 @@ def named(text: str, among: list["Approval"], ambiguous: frozenset[int] | None =
     return [a for a in among if (names[a.id] & said) - set().union(*(names[b.id] for b in among if b is not a))]
 
 
+# Where a statement ends: one full stop or exclamation mark after a word, so "it... or merge 42?" is one sentence.
+_STATEMENT_END = re.compile(r"(?<=[\w)\"'’][.!])\s+")
+
+
 def _read_back(reply: str, pending: list["Approval"]) -> list["Approval"]:
-    """The Approvals `reply` asks the User about: none unless it is a question with no hold word ("I won't merge 42
-    then." asks nothing). It names them by their targets or, one in the Orchestrator's words, by its whole text."""
-    if not reply.strip().endswith("?") or LEXICONS.holding_back(reply.replace("?", " ")) is not None:
+    """The Approvals `reply` asks the User about. Its last sentence is its one question, with no hold word in the whole
+    reply ("I won't merge 42 then." asks nothing), made only of read-back words and the names of the Approvals it
+    names, or, for one in the Orchestrator's words, its whole text: any other word asks something else ("Should I
+    skip PR 42?"). An X post's names include the "Pumpkit" and "X" of the Hub's text."""
+    *before, question = _STATEMENT_END.split(reply.strip())
+    if not question.endswith("?") or "?" in question[:-1] or any("?" in s for s in before):
         return []
-    said = list(words(reply))
+    if LEXICONS.holding_back(reply.replace("?", " ")) is not None:
+        return []
+    said = list(words(question))
     read: list[Approval] = []
     for approval in filter(_free_text, pending):
         text = words(approval.text)
@@ -289,7 +298,16 @@ def _read_back(reply: str, pending: list["Approval"]) -> list["Approval"]:
             read += [approval] if approval not in read else []
             # Its words are its text, not names of the others: "merge" in it never reads back a merge.
             said[i : i + len(text)] = ["_"] * len(text)
-    return named(" ".join(said), pending, _held(pending)) + read
+    asked = named(" ".join(said), pending, _held(pending))
+    names = [_Names.of(a) for a in asked]
+    phrases = {p for n in names for p in n.phrases}
+    phrases |= {("pumpkit",), ("x",)} if any(a.post_action for a in asked) else set()
+    kinds = frozenset[str]().union(*(n.kinds for n in names))
+    own = frozenset[int]().union(*(n.numbers | n.held for n in names))
+    # Only the names of those it asks about: a word naming another pending Approval asks something else too.
+    if LEXICONS.outside_read_back(tuple(said), phrases, kinds, own) is not None:
+        return []
+    return asked + read
 
 
 def _held(among: Iterable["Approval"]) -> frozenset[int]:
