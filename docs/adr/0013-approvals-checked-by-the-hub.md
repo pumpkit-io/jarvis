@@ -41,3 +41,7 @@ On a yes to a `subagent_action`, the Orchestrator is told and starts a Subagent 
 - Accept a yes found anywhere in the words unless a deny-list of hold words appears. Rejected: no deny-list is complete, and "Sure, abort.", "Ok, scratch that." and "Merge it next week." approved. The closed set refuses any word it does not know, at the cost of some false refusals.
 - Let the Talker pass the User's words to `approve`. Rejected: the model could write words the User never said.
 - Keep a Subagent's widened tools open until it ends. Rejected: one X post approved would allow several.
+
+## Consequences
+
+- An `x_post` Approval pins the post id, not its text: an edit in the web app between the yes and the call goes out as edited.

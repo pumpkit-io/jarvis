@@ -1980,6 +1980,31 @@ async def test_words_that_name_a_branch_choose_its_delete(said: str) -> None:
     assert isinstance(result, Approval) and (result.id, result.state) == ("A2", "approved")
 
 
+@pytest.mark.parametrize(
+    ("branch", "said", "which"),
+    [
+        ("fix/42", "yes 42", "A1"),
+        ("fix/42", "yes 42", "A2"),
+        ("fix/42", "yes forty two", "A2"),
+        ("42", "yes 42", "A2"),
+        ("go-ahead-42", "go ahead, 42", "A2"),
+    ],
+)
+async def test_a_number_in_a_branch_never_names_it_and_makes_the_pr_number_ambiguous(
+    branch: str, said: str, which: str
+) -> None:
+    result = await decided([merge_spec(42), delete_spec(branch)], said, which)
+
+    assert isinstance(result, str) and result.startswith("Not approved")
+
+
+@pytest.mark.parametrize(("said", "which"), [("yes, delete fix/42", "A2"), ("yes, merge 42", "A1")])
+async def test_a_verb_still_names_the_action_when_a_branch_holds_the_pr_number(said: str, which: str) -> None:
+    result = await decided([merge_spec(42), delete_spec("fix/42")], said, which)
+
+    assert isinstance(result, Approval) and result.id == which
+
+
 @pytest.mark.parametrize("said", ["yes ²", "yes, merge ٤٢"])
 async def test_digits_other_than_ascii_are_not_a_number_and_refuse_the_yes(said: str) -> None:
     result = await decided([merge_spec()], said, "A1")
@@ -2136,3 +2161,25 @@ async def test_a_saved_x_post_whose_time_or_place_was_changed_is_dropped_on_rest
 
     assert kept == []
     assert dropped == ["Dropped Approval A1 from the state file: it does not match the action it names."]
+
+
+async def test_rules_printed_before_the_no_rulesets_error_still_keep_the_branch(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh
+) -> None:
+    gh.rules_result = (1, f"deletion\ngh: {NO_RULESETS} (HTTP 403)")
+    session = a_session(
+        clock,
+        output,
+        metrics,
+        gh,
+        [[Text("Right away, sir."), delegate()], [Text("Not that one, sir.")]],
+        [[ask_delete(), report("T1", "I may not delete it.")]],
+    )
+
+    await session.start()
+    await session.say("Delete the branch")
+    await session.replied("Not that one, sir.")
+    await session.end()
+
+    refused, _ = results(session.backend, "orchestrator", "report")
+    assert str(refused.result).startswith("Not asked: feat/old-idea is a protected branch of pumpkit-io/pumpkit")

@@ -10,7 +10,7 @@ from html import escape
 from typing import Any, Literal, Protocol, cast, get_args
 
 from jarvis_hub.agents.backend import McpGuard, Refused
-from jarvis_hub.approval_words import LEXICONS, Words, found, numbers, words
+from jarvis_hub.approval_words import LEXICONS, Words, found, number_spans, numbers, words
 from jarvis_hub.read_only import Argv
 from jarvis_hub.state import Fields, TimeShift, numbered, one_of
 from jarvis_hub.subagent_rules import PUMPKIT_SERVERS
@@ -181,14 +181,17 @@ class _Names:
     numbers: frozenset[int]
     phrases: frozenset[Words]
     kinds: frozenset[str]
+    # Numbers in the repo or branch: said alongside the action they are part of a plain yes, but they name nothing.
+    held: frozenset[int] = frozenset()
 
     @staticmethod
     def of(approval: "Approval") -> "_Names":
         phrases = _naming_phrases(approval)
+        held = numbers(words(approval.repo or "") + words(str(approval.branch or "")))
         if approval.action == "merge_pr":
-            return _Names(frozenset({int(approval.number or 0)}), phrases, frozenset({"merge"}))
+            return _Names(frozenset({int(approval.number or 0)}), phrases, frozenset({"merge"}), held)
         if approval.action == "delete_branch":
-            return _Names(numbers(words(str(approval.branch))), phrases, frozenset({"delete"}))
+            return _Names(frozenset(), phrases, frozenset({"delete"}), held)
         said = words(approval.text)
         if approval.post_action:
             # The Hub wrote the text: its date and time name nothing, and "post" may stand for the post itself.
@@ -204,28 +207,40 @@ class _Names:
 _NOW: frozenset[Words] = frozenset({("now",), ("ora",), ("adesso",)})
 
 
+def _without_numbers(phrase: Words) -> list[Words]:
+    """The runs of `phrase` between its numbers: a number names an Approval only as a PR number, never in a branch
+    or repo name ("fix/42" is named by "fix")."""
+    runs: list[Words] = []
+    start = 0
+    for i, n, _ in number_spans(phrase) + [(len(phrase), 0, 0)]:
+        if i > start:
+            runs.append(phrase[start:i])
+        start = i + n
+    return runs
+
+
 def _naming_phrases(approval: "Approval") -> frozenset[Words]:
     """The phrases that name `approval`: its repo, alone or with "repo"; "PR" for a merge; the branch, its last part
-    and "branch" for a delete. A phrase made only of yes, filler, verbs or "now" names nothing: a word can't be both
-    ("Yes, Jarvis." never names feat/jarvis)."""
+    and "branch" for a delete, without their numbers. A phrase made only of yes, filler, verbs or "now" names
+    nothing: a word can't be both ("Yes, Jarvis." never names feat/jarvis)."""
     phrases: set[Words] = set()
-    if approval.repo:
-        name = words(approval.repo.split("/", 1)[-1])
+    for name in _without_numbers(words(approval.repo.split("/", 1)[-1])) if approval.repo else []:
         phrases |= {name} | {form for repo in ("repo", "repository") for form in (name + (repo,), (repo,) + name)}
     if approval.action == "merge_pr":
         phrases |= {("pr",), ("pull", "request")}
     if approval.action == "delete_branch":
         branch = str(approval.branch)
-        phrases |= {words(branch), words(branch.rsplit("/", 1)[-1]), ("branch",)}
+        phrases |= {run for part in (branch, branch.rsplit("/", 1)[-1]) for run in _without_numbers(words(part))}
+        phrases.add(("branch",))
     return frozenset(p for p in phrases if not LEXICONS.plain(tuple(w for w in p if (w,) not in _NOW)))
 
 
-def _said(said: Words, phrases: Iterable[Words]) -> set[_Feature]:
-    """The features in `said`: its numbers, verbs, and those of `phrases` not inside a longer one said ("pumpkit" in
-    "pumpkit ops")."""
+def _said(said: Words, phrases: Iterable[Words], ambiguous: frozenset[int] = frozenset()) -> set[_Feature]:
+    """The features in `said`: its numbers but `ambiguous` ones, verbs, and those of `phrases` not inside a longer
+    one said ("pumpkit" in "pumpkit ops")."""
     spans = [(i, len(p), p) for p in set(phrases) for i in found(said, p)]
     hits = {p for i, n, p in spans if not any(j <= i and i + n <= j + m and m > n for j, m, _ in spans)}
-    out: set[_Feature] = {("n", n) for n in numbers(said)}
+    out: set[_Feature] = {("n", n) for n in numbers(said) - ambiguous}
     return out | {("k", k) for k in LEXICONS.kinds(said)} | {("p", p) for p in hits}
 
 
@@ -245,8 +260,13 @@ def _spoken(feature: _Feature) -> str:
 def named(text: str, among: list["Approval"]) -> list["Approval"]:
     """The Approvals `text` names by something no other of `among` shares: "merge" only when one is a merge."""
     names = {a.id: _Names.of(a).features() for a in among}
-    said = _said(words(text), (p for a in among for p in _Names.of(a).phrases))
+    said = _said(words(text), (p for a in among for p in _Names.of(a).phrases), _held(among))
     return [a for a in among if (names[a.id] & said) - set().union(*(names[b.id] for b in among if b is not a))]
+
+
+def _held(among: Iterable["Approval"]) -> frozenset[int]:
+    """The numbers some of `among` hold in a repo or branch: said alone they could mean that or a PR number."""
+    return frozenset[int]().union(*(_Names.of(a).held for a in among))
 
 
 def _x_post(task_id: str, spec: dict[str, Any], grants: list[str], repo: str, now: float) -> Approval | Refused:
@@ -509,12 +529,13 @@ class Approvals:
                 other = next(a for a in chosen if a is not approval)
                 return f"Not approved: the User's words name {other.id} ({other.text}), not {approval.id}. {listing}"
         stray = _said(said, (p for a in pending for p in _Names.of(a).phrases)) - own.features()
+        stray -= {("n", n) for n in own.held}
         if stray:
             others = [a for a in named(heard, pending) if a is not approval]
             what = f"{others[0].id} ({others[0].text})" if others else _spoken(min(stray, key=str))
             return f"Not approved: the User's words name {what}, which is not {approval.id} ({approval.text}). {nothing}"
         now = _NOW if "schedule" not in own.kinds else frozenset[Words]()
-        outside = LEXICONS.outside_plain_yes(said, own.phrases | now, own.kinds, own.numbers)
+        outside = LEXICONS.outside_plain_yes(said, own.phrases | now, own.kinds, own.numbers | own.held)
         if outside is not None:
             return (
                 f'Not approved: the User\'s words hold "{outside}", which is not part of a plain yes. {nothing} To '
@@ -602,7 +623,7 @@ class Approvals:
         code, printed = await self._runner(rules_argv(approval.repo, str(approval.branch)))
         if code != 0 and _NO_RULESETS not in printed:
             return _Target(f"the Hub could not read the rules of {what}: {printed.strip() or f'gh exited {code}'}")
-        if rule != "unprotected" or (code == 0 and KEEPING_RULES & set(printed.split())):
+        if rule != "unprotected" or KEEPING_RULES & set(printed.split()):
             return _Target(f"{approval.branch} is a protected branch of {approval.repo}, {never}", forbidden=True)
         if second.lower() != sha:
             return _Target(f"{what} now points at {second[:12]}, not {sha[:12]}")
