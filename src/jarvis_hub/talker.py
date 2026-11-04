@@ -25,6 +25,7 @@ def talker_tools(
     show: ToolHandler,
     end_conversation: ToolHandler,
     quiet_mode: ToolHandler,
+    approve: ToolHandler,
 ) -> tuple[HubTool, ...]:
     return (
         HubTool(
@@ -73,5 +74,13 @@ def talker_tools(
             "news that needs the User still comes through.",
             object_schema({"on": {"type": "boolean"}}, ("on",)),
             quiet_mode,
+        ),
+        HubTool(
+            "approve",
+            "Record the User's yes to the Approval you just asked them about, by its id. The Hub decides from its "
+            "own record of the conversation whether the yes counts; when it does not, the result lists the pending "
+            "Approvals to name to the User.",
+            object_schema({"approval_id": {**STRING, "description": "Such as A1."}}, ("approval_id",)),
+            approve,
         ),
     )

@@ -28,11 +28,13 @@ from jarvis_hub.agents.backend import (
     ToolCall,
     TurnEnd,
 )
+from jarvis_hub.approvals import HUB_ACTIONS, Approval, Approvals, approval_event
 from jarvis_hub.config import DEFAULT_TALKER_RESTART_AT
 from jarvis_hub.limits import SavedLimit, UsageLimit, reset_sentence, update_sentence
 from jarvis_hub.news import Leaf, News, fresh
 from jarvis_hub.orchestrator import orchestrator_tools
 from jarvis_hub.state import Fields, StateFile, UnreadableState
+from jarvis_hub.subagent_rules import connector_check
 from jarvis_hub.subagents import Subagent, SubagentSetup, Subagents, ended_event, kept_line, over_time_event
 from jarvis_hub.talker import talker_tools
 from jarvis_hub.tasks import Task, Tasks, no_task
@@ -167,10 +169,27 @@ def interrupted_message(spoken: str) -> str:
     return f'<interrupted spoken="{attribute}"/>'
 
 
-def event_message(source: str, text: str, task: str, *, needs_user: bool = False, details: bool = False) -> str:
+def event_message(
+    source: str, text: str, task: str, *, needs_user: bool = False, details: bool = False, approval: str | None = None
+) -> str:
     on_screen = ' details="on screen"' if details else ""
     flag = "true" if needs_user else "false"
-    return f'<event source="{source}" task="{task}" needs_user="{flag}"{on_screen}>{escape(text, quote=False)}</event>'
+    asks = f' approval="{approval}"' if approval else ""
+    return (
+        f'<event source="{source}" task="{task}" needs_user="{flag}"{asks}{on_screen}>'
+        f"{escape(text, quote=False)}</event>"
+    )
+
+
+def approval_brief(approval: Approval) -> str:
+    """What a Subagent's brief carries of the Approval it acts on; the User's words are the Hub's record of them."""
+    tools = f" It lets you call {', '.join(approval.tools)}, once." if approval.tools else ""
+    return (
+        f'\n\n<approval id="{approval.id}">\n'
+        f"The User approved exactly this, once: {escape(approval.text, quote=False)}.{tools}\n"
+        f"Their words: {escape(str(approval.words), quote=False)}\n"
+        "</approval>"
+    )
 
 
 def restart_message(open_tasks: str, exchanges: "deque[tuple[str, str]]") -> str:
@@ -315,6 +334,7 @@ class Hub:
             show=self._show,
             end_conversation=self._end_conversation,
             quiet_mode=self._quiet_mode_tool,
+            approve=self._approve,
         )
         self._talker_spec = replace(talker, tools=tools)
         self._orchestrator_spec = replace(
@@ -406,8 +426,19 @@ class Hub:
         self._limit_news_pending = False
         # The User's own text in the Talker turn under way, for the Tasks it delegates.
         self._user_text: str | None = None
+        self._approvals = Approvals(
+            org=waits.org, runner=waits.runner, clock=clock, on_change=self._persist, log=self._write
+        )
+        # The Approval ids the last thing Jarvis said asked the User about; and those a refused approve listed in the
+        # turn under way, which the Talker names to the User.
+        self._last_said: tuple[str, ...] = ()
+        self._offered: tuple[str, ...] = ()
+        # Whether the turn under way already recorded a yes: one yes approves one action.
+        self._approved_in_turn = False
+        self._carrying_out: set[asyncio.Task[None]] = set()
+        self._session_for = subagents.session
         self._subagents = Subagents(
-            setup=subagents,
+            setup=replace(subagents, session=self._subagent_session),
             backend=backend,
             clock=clock,
             on_end=self._subagent_ended,
@@ -459,8 +490,10 @@ class Hub:
         await self._waits.close()
         await self._subagents.close()
         await self._limit.close()
-        for announcing in self._announcing:
+        for announcing in [*self._announcing, *self._carrying_out]:
             announcing.cancel()
+        if self._carrying_out:
+            await asyncio.wait(self._carrying_out)
         self._save()
         for loop in self._loops:
             loop.cancel()
@@ -498,9 +531,18 @@ class Hub:
         self._post(self._orchestrator_inbox, item)
 
     def _post_news(
-        self, source: str, text: str, task: str, *, needs_user: bool = False, details: str | None = None
+        self,
+        source: str,
+        text: str,
+        task: str,
+        *,
+        needs_user: bool = False,
+        details: str | None = None,
+        approval: str | None = None,
     ) -> None:
-        message = event_message(source, text, task, needs_user=needs_user, details=details is not None)
+        message = event_message(
+            source, text, task, needs_user=needs_user, details=details is not None, approval=approval
+        )
         urgent = False
         if self._floor is not None:
             key = _needs_user_key(text)
@@ -509,7 +551,9 @@ class Hub:
                 self._needs_user[task] = key
             else:
                 self._needs_user.pop(task, None)
-        self._queue_news(Leaf(message, self._clock.now(), f"{task}: {text}", details, urgent=urgent))
+        self._queue_news(
+            Leaf(message, self._clock.now(), f"{task}: {text}", details, urgent=urgent, approval=approval)
+        )
 
     def _queue_news(self, leaf: Leaf) -> None:
         """News for the Talker: in voice mode an Announcement once Jarvis is quiet, or held while Quiet mode is on."""
@@ -619,6 +663,7 @@ class Hub:
             "needs_user": self._needs_user,
             "usage_limit": self._limit.dump(),
             "parked": [news.dump(to_wall) for news in self._parked_news],
+            "approvals": self._approvals.dump(ids, to_wall),
         }
         try:
             self._state.save(data)
@@ -696,6 +741,7 @@ class Hub:
             needs_user = {str(task): str(key) for task, key in dict(data["needs_user"]).items()}
             limit = UsageLimit.load(data["usage_limit"])
             parked = [News.load(r, from_wall) for r in data["parked"]]
+            approvals = Approvals.load(data["approvals"], from_wall)
         except (KeyError, TypeError, ValueError, IndexError, AttributeError) as e:
             self._output.notice(self._state.set_aside(f"could not be read whole ({type(e).__name__}: {e})"))
             return None
@@ -704,7 +750,10 @@ class Hub:
             self._restore_held(held, quiet_mode, needs_user)
             return None
         self._tasks.restore(tasks)
+        unfinished = self._approvals.restore(approvals)
         cut_off = self._subagents.restore(subagents)
+        for subagent in cut_off:
+            self._approvals.subagent_ended(subagent.id)
         queued = self._subagents.queued()
         self._waits.restore(waits)
         self._unanswered = unanswered
@@ -713,9 +762,9 @@ class Hub:
         # After the rest, since releasing held news saves the state file.
         self._restore_held(held, quiet_mode, needs_user)
         # A restored Watcher or queued Subagent ends on its own, and the recovery message is news still to come.
-        self._pending += 1 + sum(isinstance(w, Watcher) for w in waits) + len(queued)
+        self._pending += 1 + sum(isinstance(w, Watcher) for w in waits) + len(queued) + len(unfinished)
         self._settled.clear()
-        return self._recover(tasks, cut_off, interrupted + cut_off, queued, problems)
+        return self._recover(tasks, cut_off, interrupted + cut_off, queued, problems, unfinished)
 
     async def _recover(
         self,
@@ -724,6 +773,7 @@ class Hub:
         interrupted: list[Subagent],
         queued: list[Subagent],
         problems: list[str],
+        unfinished: list[Approval],
     ) -> None:
         """Frees the worktrees of Subagents a crash cut off, tells the Orchestrator what was pending, and only then
         starts the restored waits and queued Subagents, so neither reaches it before the recovery message."""
@@ -742,6 +792,9 @@ class Hub:
             # Each still waits for the usage limit, when the restored one holds.
             for subagent in queued:
                 self._subagents.start(subagent)
+            # Already counted as pending.
+            for approval in unfinished:
+                self._carry_out(approval)
             self._handled()
 
     async def _talk(self) -> None:
@@ -773,10 +826,12 @@ class Hub:
                     self._output.show(item.details)
                 self._user_text = item.heard if item.kind == "user" else None
                 self._telling = item.news.away_leaves() if item.news else ()
+                self._offered, self._approved_in_turn = (), False
                 if item.kind == "user" and self._limit.blocks("talker"):
                     end = self._limited_reply(item)
                 else:
                     end = await self._turn(item.message, kind=item.kind, arrived=item.arrived, spoken=item.spoken)
+                self._last_said = self._asked(item, end)
                 if end.outcome == "limited":
                     # The news was not told, so the Talker gets it again after the reset.
                     parked = self._park(item)
@@ -788,6 +843,16 @@ class Hub:
                 if parked:
                     self._persist()
             upcoming = await self._restart_if_full(end.context)
+
+    def _asked(self, item: _TalkerInput, end: TurnEnd) -> tuple[str, ...]:
+        """The Approvals a finished turn asked the User about: those its news requested, or those the Talker named
+        after a refused approve. A turn cut short may not have been heard, so it asked about none."""
+        if end.outcome != "completed":
+            return ()
+        if self._offered:
+            return self._offered
+        leaves = item.news.leaves() if item.news else ()
+        return tuple(leaf.approval for leaf in leaves if leaf.approval)
 
     async def _next_input(self) -> _TalkerInput:
         """The User's next line first; in voice mode, news only once Jarvis is quiet (the announcement policy), or
@@ -1342,7 +1407,7 @@ class Hub:
     def _task_lines(self, task_id: str) -> list[str]:
         deferred = any(task_id == d.task_id or task_id in d.restart for d in self._deferred)
         held = ["waiting for the usage limit to reset"] if deferred else []
-        return held + self._subagents.lines(task_id) + self._waits.lines(task_id)
+        return held + self._approvals.lines(task_id) + self._subagents.lines(task_id) + self._waits.lines(task_id)
 
     def _has_pending(self, task_id: str) -> bool:
         return bool(self._subagents.live(task_id) or self._waits.live(task_id))
@@ -1358,6 +1423,7 @@ class Hub:
         for subagent in self._subagents.live(task.id):
             self._subagents.cancel(subagent.id)
         self._waits.cancel_task(task.id)
+        self._approvals.withdraw(task.id)
         self._persist()
         turn = self._orchestrator_gate.turn
         # The recovery turn is on every open Task, so cancelling one of them leaves it running.
@@ -1407,9 +1473,68 @@ class Hub:
             return "spoken is required."
         details = str(args.get("details_markdown") or "").strip() or None
         needs_user = args.get("needs_user") in (True, "true")
+        approval: Approval | None = None
+        if args.get("approval"):
+            requested = await self._approvals.request(task.id, args["approval"])
+            if isinstance(requested, Refused):
+                return requested.reason
+            approval, needs_user = requested, True
+            # The screen names the exact action in the Hub's words, whatever the sentence says.
+            exact = f"**Approval {approval.id}:** {approval.text}"
+            details = f"{exact}\n\n{details}" if details else exact
         task.report(spoken, needs_user=needs_user, live=self._has_pending(task.id))
-        self._post_news("orchestrator", spoken, task.id, needs_user=needs_user, details=details)
+        self._post_news(
+            "orchestrator", spoken, task.id, needs_user=needs_user, details=details, approval=approval and approval.id
+        )
+        if approval is not None:
+            return f"Reported to the User, asking for Approval {approval.id}: {approval.text}."
         return "Reported to the User."
+
+    async def _approve(self, args: dict[str, Any]) -> str:
+        if self._approved_in_turn:
+            return "Not approved: one yes approves one action. Ask about the next one in its own question."
+        decided = self._approvals.decide(args.get("approval_id"), words=self._user_text, last_said=self._last_said)
+        if isinstance(decided, str):
+            self._offered = tuple(a.id for a in self._approvals.pending())
+            return decided
+        self._approved_in_turn = True
+        if decided.action in HUB_ACTIONS:
+            self._pending += 1
+            self._settled.clear()
+            self._carry_out(decided)
+            return (
+                f"Approved {decided.id} with the User's words. The Hub is carrying it out now ({decided.text}), and "
+                "the result comes as news: say so in a few words."
+            )
+        text = (
+            f"The User approved {decided.id} ({decided.text}) in these words: {decided.words!r}. Start the Subagent "
+            f"that carries it out with approval_id {decided.id}; its brief then carries the Approval."
+        )
+        self._wake(decided.task_id, approval_event(decided, "approved", text))
+        return f"Approved {decided.id} with the User's words; the Orchestrator starts the work. Say so in a few words."
+
+    def _carry_out(self, approval: Approval) -> None:
+        """Runs an approved merge or branch delete in the background; counted as pending by the caller."""
+
+        async def run() -> None:
+            try:
+                self._wake(approval.task_id, await self._approvals.carry_out(approval))
+            except Exception as e:
+                self._output.notice(f"The Hub could not carry out {approval.id}: {type(e).__name__}: {e}")
+            finally:
+                self._handled()
+
+        carrying = asyncio.create_task(run())
+        self._carrying_out.add(carrying)
+        carrying.add_done_callback(self._carrying_out.discard)
+
+    def _subagent_session(self, subagent: Subagent) -> SessionSpec:
+        """A Subagent's session, its connector check widened by the Approval it holds, if any (ADR 0013)."""
+        spec = self._session_for(subagent)
+        if subagent.approval is None:
+            return spec
+        guard = self._approvals.guard(subagent.approval, subagent.id, spec.mcp_guard or connector_check)
+        return replace(spec, mcp_guard=guard)
 
     def _turn_task(self, tool: str, args: dict[str, Any]) -> Task | str:
         """The Task a tool call is for: the turn's own, or in the recovery turn the one its task_id names."""
@@ -1428,15 +1553,26 @@ class Hub:
         task = self._turn_task("spawn_subagent", args)
         if isinstance(task, str):
             return task
+        approval: Approval | None = None
+        if args.get("approval_id"):
+            granted = self._approvals.grant(args["approval_id"], task.id)
+            if isinstance(granted, str):
+                return granted
+            approval = granted
         prepared = await self._subagents.prepare(task.id, args, task.words)
         if isinstance(prepared, Refused):
             return prepared.reason
+        if approval is not None and approval.state == "approved":
+            prepared.approval = approval.id
+            prepared.brief += approval_brief(approval)
+            self._approvals.hand_to(approval, prepared.id)
         self._spawned.add(task.id)
         # A running Subagent keeps the Hub from settling, so text mode waits for its report.
         self._pending += 1
         self._settled.clear()
         state = self._subagents.start(prepared)
-        if task.cancelled:
+        # The Approval may have lapsed while the worktree was made: a Subagent started for it must not run without it.
+        if task.cancelled or (approval is not None and prepared.approval is None):
             self._subagents.cancel(prepared.id)
         self._persist()
         return json.dumps(
@@ -1458,6 +1594,7 @@ class Hub:
         return self._subagents.cancel(args.get("subagent_id"))
 
     def _subagent_ended(self, subagent: Subagent) -> None:
+        self._approvals.subagent_ended(subagent.id)
         try:
             task = self._tasks.get(subagent.task_id)
             if task is None:

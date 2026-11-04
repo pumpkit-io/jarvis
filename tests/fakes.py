@@ -521,6 +521,56 @@ class StubRunner:
         self._ends[self.started[index]].set_result((code, output))
 
 
+class StubGh(StubRunner):
+    """Also stands in for gh in the Hub's Approvals: answers its reads of a PR head or a branch tip from `prs` and
+    `branches`, and records the merges and deletes it runs, which change those records and nothing real."""
+
+    def __init__(
+        self, prs: dict[str, tuple[str, str]] | None = None, branches: dict[str, str] | None = None
+    ) -> None:
+        super().__init__()
+        # "pumpkit-io/pumpkit#42": (state, head commit).
+        self.prs = dict(prs or {})
+        # "pumpkit-io/pumpkit:feat/old-idea": tip commit.
+        self.branches = dict(branches or {})
+        self.reads: list[tuple[str, ...]] = []
+        self.actions: list[tuple[str, ...]] = []
+        self.action_result: tuple[int, str] = (0, "")
+        # When set by a test, an action waits on it, as a slow merge would.
+        self.action_gate: asyncio.Event | None = None
+
+    async def __call__(self, argv: tuple[str, ...]) -> tuple[int, str]:
+        fields = dict(argv[i + 1].split("=", 1) for i, word in enumerate(argv[:-1]) if word == "-f")
+        if argv[1:3] == ("pr", "view") and "--jq" in argv:
+            self.reads.append(argv)
+            key = f"{argv[argv.index('-R') + 1]}#{argv[3]}"
+            if key not in self.prs:
+                return 1, f"GraphQL: Could not resolve to a PullRequest with the number of {argv[3]}."
+            state, head = self.prs[key]
+            return 0, f"{state} {head}"
+        if argv[1:3] == ("api", "graphql") and not fields["query"].startswith("mutation"):
+            self.reads.append(argv)
+            branch = fields["ref"].removeprefix("refs/heads/")
+            return 0, f"R_kgDOpumpkit {self.branches.get(f'{fields['owner']}/{fields['name']}:{branch}', 'none')}"
+        if argv[1:3] in (("pr", "merge"), ("api", "graphql")):
+            self.actions.append(argv)
+            if self.action_gate is not None:
+                await self.action_gate.wait()
+            if self.action_result[0] == 0:
+                self._done(argv, fields)
+            return self.action_result
+        return await super().__call__(argv)
+
+    def _done(self, argv: tuple[str, ...], fields: dict[str, str]) -> None:
+        if argv[2] == "merge":
+            key = f"{argv[argv.index('-R') + 1]}#{argv[3]}"
+            self.prs[key] = ("MERGED", self.prs[key][1])
+            return
+        branch = fields["name"].removeprefix("refs/heads/")
+        for key in [k for k in self.branches if k.endswith(f":{branch}")]:
+            del self.branches[key]
+
+
 class Typist:
     """Lines typed one at a time while the Hub runs; `end()` closes the input."""
 

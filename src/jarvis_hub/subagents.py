@@ -104,6 +104,8 @@ class Subagent:
     started: float | None = None
     ended: float | None = None
     report: str = ""
+    # The Approval this Subagent acts on, which widens its connector tools (ADR 0013).
+    approval: str | None = None
     stop: asyncio.Event = field(default_factory=asyncio.Event)
 
     @property

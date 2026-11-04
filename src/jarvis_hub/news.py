@@ -32,6 +32,8 @@ class Leaf:
     urgent: bool = False
     # The news that the usage limit reset, which a new hit makes untrue before it is told.
     reset: bool = False
+    # The Approval this news asks the User for, by id.
+    approval: str | None = None
 
     def dump(self, to_wall: TimeShift) -> dict[str, Any]:
         return _LEAF.dump(self, to_wall)
@@ -42,7 +44,7 @@ class Leaf:
         return Leaf(**_LEAF.load(saved, from_wall))
 
 
-_LEAF = Fields(("message", "arrived", "summary", "details", "urgent", "reset"), times=frozenset({"arrived"}))
+_LEAF = Fields(("message", "arrived", "summary", "details", "urgent", "reset", "approval"), times=frozenset({"arrived"}))
 
 
 def fresh(leaves: Iterable[Leaf]) -> list[Leaf]:
