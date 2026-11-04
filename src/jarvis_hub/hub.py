@@ -218,6 +218,8 @@ class _TalkerInput:
     # News that the usage limit reset, which a new hit makes untrue before it is told.
     reset: bool = False
     parts: tuple["_TalkerInput", ...] = ()
+    # News merged into one turn: the items it was made of, so the news that went stale can be told apart.
+    members: tuple["_TalkerInput", ...] = ()
 
 
 def _merged(items: "list[_TalkerInput]") -> _TalkerInput:
@@ -229,6 +231,7 @@ def _merged(items: "list[_TalkerInput]") -> _TalkerInput:
         details=details or None,
         count=sum(item.count for item in items),
         parts=tuple(part for item in items for part in item.parts),
+        members=tuple(member for item in items for member in (item.members or (item,))),
     )
 
 
@@ -572,6 +575,13 @@ class Hub:
             else:
                 news.append(item)
         self._news = news
+        parked: list[_TalkerInput] = []
+        for item in self._parked_news:
+            kept = self._without_reset(item)
+            dropped += item.count - (kept.count if kept else 0)
+            if kept:
+                parked.append(kept)
+        self._parked_news = parked
         if not dropped:
             return
         self._pending -= dropped
@@ -1296,10 +1306,32 @@ class Hub:
         )
         self._persist()
 
+    @staticmethod
+    def _without_reset(item: _TalkerInput) -> _TalkerInput | None:
+        """`item` less the news that the limit reset, which is told once or never; None when nothing else is left."""
+        if item.reset:
+            return None
+        if item.away:
+            kept = [kept for part in item.parts if (kept := Hub._without_reset(part))]
+            if len(kept) == len(item.parts):
+                return item
+            return Hub._away_item(kept, item.arrived) if kept else None
+        if item.members:
+            kept = [kept for member in item.members if (kept := Hub._without_reset(member))]
+            if len(kept) == len(item.members):
+                return item
+            return _merged(kept) if kept else None
+        return item
+
     def _park(self, item: _TalkerInput) -> int:
         """Keeps the news in `item` that the limited Talker could not tell, for after the reset; returns how many
-        posted items that is. A User line keeps only the held news it opened with."""
-        untold = item if item.kind == "event" else _merged(list(item.parts)) if item.parts else None
+        posted items that is. A User line keeps only the held news it opened with. News of the reset is not kept:
+        it was true when posted, and by the time the hold clears the next completed turn announces it afresh."""
+        if item.kind == "event":
+            untold = self._without_reset(item)
+        else:
+            kept = [kept for part in item.parts if (kept := self._without_reset(part))]
+            untold = _merged(kept) if kept else None
         if untold is None:
             return 0
         self._parked_news.append(untold)

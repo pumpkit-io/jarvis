@@ -1069,3 +1069,35 @@ async def test_an_episode_that_expired_ends_silently_when_another_role_completes
     limit.observe("subagent", TurnEnd("limited"))
     assert limit.tell_news() == Notice(None, update=False)
     await limit.close()
+
+
+async def test_a_reset_the_talker_was_telling_when_it_hit_the_limit_again_is_not_told_twice(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    backend = FakeBackend(
+        clock,
+        [
+            [Text("Right away, sir."), delegate("Check the CI")],
+            [Text("CI green, sir.")],
+            [Limited(600)],  # the turn that tells the reset hits the limit
+            [Text("Told again, sir.")],
+            [Text("More, sir.")],
+        ],
+        orchestrator=[[Limited(1800)], [report("T1", "The CI is green.")]],
+    )
+    hub = make_hub(backend, output, metrics)
+    typist = Typist(clock)
+    run = await running(hub, typist)
+
+    typist.type("Check the CI")
+    await until(lambda: any(LINE in r for r in output.replies))
+    await asyncio.sleep(0.05)
+    clock.advance(1800)
+    await asyncio.sleep(0.2)
+    clock.advance(600)
+    await asyncio.sleep(0.2)
+    typist.end()
+    await asyncio.wait_for(run, 2)
+
+    assert sum('reason="usage_reset"' in m for m in talker_received(backend)) == 1
+    await hub.close()
