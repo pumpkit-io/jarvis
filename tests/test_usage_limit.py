@@ -528,14 +528,14 @@ async def test_a_subagent_queued_for_the_limit_survives_a_restart_and_starts_aft
     await second.close()
 
 
-async def test_a_reset_time_already_past_waits_a_minute_then_backs_off_and_is_announced_once(
+async def test_a_reset_time_already_past_waits_a_minute_then_backs_off_and_each_hit_after_a_reset_is_told(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
 ) -> None:
     backend = FakeBackend(
         clock,
         [
             [Text("Right away, sir."), delegate("Check the CI")],
-            [Text("The limit has reset, sir.")],
+            *[[Text("The limit has reset, sir.")]] * 3,
             [Text("The CI is green, sir.")],
         ],
         orchestrator=[[Limited(-30)], [Limited(-30)], [Limited(-30)], [report("T1", "The CI is green.")]],
@@ -556,8 +556,8 @@ async def test_a_reset_time_already_past_waits_a_minute_then_backs_off_and_is_an
     assert [await calls_after(s) for s in (59, 1, 119, 1, 239, 1)] == [1, 2, 2, 3, 3, 4]
     await run
 
-    assert sum(LINE in r for r in output.replies) == 1
-    assert sum('reason="usage_reset"' in m for m in talker_received(backend)) == 1
+    assert sum(LINE in r for r in output.replies) == 3
+    assert sum('reason="usage_reset"' in m for m in talker_received(backend)) == 3
     assert output.replies[-1] == "The CI is green, sir."
     await hub.close()
 
@@ -621,7 +621,7 @@ async def test_a_talker_limit_already_past_still_holds_for_a_minute(
     await hub.close()
 
 
-async def test_a_limit_episode_survives_a_restart_so_a_second_hit_after_it_is_not_announced_again(
+async def test_a_hit_after_a_reset_announced_across_a_restart_is_told_again(
     clock: FakeClock, metrics: RecordingMetrics, tmp_path: Path
 ) -> None:
     state = tmp_path / ".jarvis" / "state.json"
@@ -639,7 +639,7 @@ async def test_a_limit_episode_survives_a_restart_so_a_second_hit_after_it_is_no
     output = RecordingOutput()
     backend = FakeBackend(
         clock,
-        [[Text("The limit has reset, sir.")], [Text("The CI is green, sir.")]],
+        [[Text("The limit has reset, sir.")], [Text("The limit has reset, sir.")], [Text("The CI is green, sir.")]],
         orchestrator=[[Limited(-30)], [report("T1", "The CI is green.")]],
     )
     second = make_hub(backend, output, metrics, state_path=state)
@@ -652,8 +652,8 @@ async def test_a_limit_episode_survives_a_restart_so_a_second_hit_after_it_is_no
     clock.advance(120)
     await run
 
-    assert not any(LINE in r for r in output.replies)
-    assert output.replies == ["The limit has reset, sir.", "The CI is green, sir."]
+    assert sum(LINE in r for r in output.replies) == 1
+    assert output.replies[-1] == "The CI is green, sir."
     await second.close()
 
 
@@ -701,7 +701,7 @@ async def test_a_limit_a_day_after_the_last_one_cleared_is_a_new_episode_even_if
     limit = UsageLimit(clock, clock.now, lambda role, news: hits.append((role, news)), lambda _, a: clears.append(a))
 
     limit.observe("subagent", TurnEnd("limited", resets_at=clock.now() + 600))
-    limit.news()
+    limit.tell_news()
     clock.advance(600)
     await until(lambda: clears == [True])
     limit.observe("orchestrator", TurnEnd("completed"))
@@ -710,7 +710,7 @@ async def test_a_limit_a_day_after_the_last_one_cleared_is_a_new_episode_even_if
 
     assert hits == [("subagent", True), ("subagent", True)]
     assert limit.resets_at("subagent") == clock.now() + 60
-    limit.news()
+    limit.tell_news()
     clock.advance(60)
     await until(lambda: len(clears) == 2)
     assert clears == [True, True]
@@ -951,14 +951,63 @@ async def test_the_notice_names_the_latest_reset_among_the_held_roles_and_drops_
 
     limit.observe("subagent", TurnEnd("limited", resets_at=clock.now() + 600))
     limit.observe("orchestrator", TurnEnd("limited", resets_at=clock.now() + 1800))
-    assert limit.news() == Notice(clock.now() + 1800, update=False)
-    assert limit.news() is None
+    assert limit.tell_news() == Notice(clock.now() + 1800, update=False)
+    assert limit.tell_news() is None
 
     limit.observe("talker", TurnEnd("limited"))
     assert hits == [("subagent", True), ("orchestrator", True), ("talker", True)]
-    assert limit.news() == Notice(None, update=True)
+    assert limit.tell_news() == Notice(None, update=True)
 
     clock.advance(1800)
     await until(lambda: not limit.active)
-    assert limit.news() is None
+    assert limit.tell_news() is None
     await limit.close()
+
+
+async def test_a_hit_after_an_announced_reset_is_news_again_and_the_next_reset_is_announced(
+    clock: FakeClock,
+) -> None:
+    hits: list[tuple[str, bool]] = []
+    clears: list[bool] = []
+    limit = UsageLimit(clock, clock.now, lambda role, news: hits.append((role, news)), lambda _, a: clears.append(a))
+
+    limit.observe("orchestrator", TurnEnd("limited"))
+    assert limit.tell_news() == Notice(None, update=False)
+    clock.advance(900)
+    await until(lambda: clears == [True])
+
+    limit.observe("orchestrator", TurnEnd("limited"))
+    assert hits == [("orchestrator", True), ("orchestrator", True)]
+    assert limit.tell_news() == Notice(None, update=False)
+    assert limit.tell_news() is None
+    clock.advance(900)
+    await until(lambda: clears == [True, True])
+    await limit.close()
+
+
+async def test_a_limit_still_on_after_the_reset_was_announced_is_told_again(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    backend = FakeBackend(
+        clock,
+        [
+            [Text("Right away, sir."), delegate("Check the CI")],
+            [Text("The limit has reset, sir.")],
+            [Text("The limit has reset, sir.")],
+            [Text("The CI is green, sir.")],
+        ],
+        orchestrator=[[Limited()], [Limited()], [report("T1", "The CI is green.")]],
+    )
+    hub = make_hub(backend, output, metrics)
+    typist = Typist(clock)
+    run = await running(hub, typist)
+    typist.type("Is the CI green?")
+    await until(lambda: any(LINE in r for r in output.replies))
+    typist.end()
+    clock.advance(900)
+    await until(lambda: sum(LINE in r for r in output.replies) == 2)
+    clock.advance(900)
+    await run
+
+    assert sum('reason="usage_reset"' in m for m in talker_received(backend)) == 2
+    await hub.close()

@@ -88,7 +88,6 @@ class SavedLimit:
     guessed: frozenset[str] = frozenset()
     strikes: dict[str, int] = field(default_factory=lambda: {})
     cleared: dict[str, float] = field(default_factory=lambda: {})
-    reset_told: bool = False
     told: bool = False
     told_reset: float | None = None
 
@@ -96,9 +95,9 @@ class SavedLimit:
 class UsageLimit:
     """Roles the limit has stopped, each until its own reset, and what the User heard of it. The User hears of the
     limit, not of a role: once that it was reached, again when a hit pushes the reset past what they heard, and that
-    it reset when the last hold clears, if they heard it was reached. An episode, which a role leaves on a completed
-    turn or STRIKE_TTL after its hold cleared, has one reset: hits after it are retries, not news. `on_hit` hears
-    each hit and whether it brings news, `on_clear` the roles back and whether to announce the reset."""
+    it reset when the last hold clears, if they heard it was reached. A hit after an announced reset is news again,
+    since the User believes the limit is over. `on_hit` hears each hit and whether it brings news, `on_clear` the
+    roles back and whether to announce the reset."""
 
     def __init__(
         self,
@@ -119,7 +118,6 @@ class UsageLimit:
         self._strikes: dict[str, int] = {}
         # Struck role, no longer stopped, to the Unix time its hold cleared.
         self._cleared_at: dict[str, float] = {}
-        self._reset_told = False
         # Whether the User heard the limit is on, and the reset they heard, since the last reset they heard.
         self._told = False
         self._told_reset: float | None = None
@@ -144,7 +142,7 @@ class UsageLimit:
         return None if None in resets else max(r for r in resets if r is not None)
 
     def _news(self) -> bool:
-        if not self._until or self._reset_told:
+        if not self._until:
             return False
         if not self._told:
             return True
@@ -156,7 +154,7 @@ class UsageLimit:
         self._told, self._told_reset = True, self._latest()
         return self._told_reset
 
-    def news(self) -> Notice | None:
+    def tell_news(self) -> Notice | None:
         """What the User has yet to hear of the limit, now told; None when nothing holds or they heard it all."""
         if not self._news():
             return None
@@ -174,8 +172,6 @@ class UsageLimit:
         for role in roles:
             self._strikes.pop(role, None)
             self._cleared_at.pop(role, None)
-        if not self._strikes:
-            self._reset_told = False
 
     def _hit(self, role: str, resets_at: float | None) -> None:
         """Stops `role` until its reset, but never less than a wait that doubles with each hit in the episode: a
@@ -204,7 +200,6 @@ class UsageLimit:
             "guessed": sorted(self._guessed),
             "strikes": dict(self._strikes),
             "cleared": dict(self._cleared_at),
-            "reset_told": self._reset_told,
             "told": self._told,
             "told_reset": self._told_reset,
         }
@@ -219,18 +214,16 @@ class UsageLimit:
             raise ValueError(f"guessed roles {sorted(guessed - until.keys())} have no reset time")
         strikes = {str(role): int(n) for role, n in dict(saved["strikes"]).items()}
         cleared = {str(role): float(t) for role, t in dict(saved.get("cleared", {})).items()}
-        if not isinstance(saved["reset_told"], bool):
-            raise TypeError(f"reset_told is {saved['reset_told']!r}, not a bool")
         told, told_reset = saved.get("told", False), saved.get("told_reset")
         if not isinstance(told, bool):
             raise TypeError(f"told is {told!r}, not a bool")
         told_reset = None if told_reset is None else float(told_reset)
-        return SavedLimit(until, guessed, strikes, cleared, saved["reset_told"], told, told_reset)
+        return SavedLimit(until, guessed, strikes, cleared, told, told_reset)
 
     def restore(self, saved: SavedLimit) -> None:
         """Stops the roles again until their saved reset, without `on_hit`: what the User has yet to hear is in
         `news`. A reset already past clears on the next loop turn, through `on_clear`."""
-        self._strikes, self._cleared_at, self._reset_told = dict(saved.strikes), dict(saved.cleared), saved.reset_told
+        self._strikes, self._cleared_at = dict(saved.strikes), dict(saved.cleared)
         self._told, self._told_reset = saved.told, saved.told_reset
         if not saved.until:
             return
@@ -275,7 +268,6 @@ class UsageLimit:
                 if not self._until:
                     self._cleared.set()
                     announce, self._told = self._told, False
-                    self._reset_told = self._reset_told or announce
                 self._on_clear(back, announce)
         finally:
             if self._timer is asyncio.current_task():

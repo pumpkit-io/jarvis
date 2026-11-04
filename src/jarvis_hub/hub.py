@@ -1231,7 +1231,7 @@ class Hub:
     def _tell_limit_news(self) -> None:
         """Tells what the User has yet to hear of the limit as it stands now, which may be nothing by the time."""
         self._limit_news_pending = False
-        notice = self._limit.news()
+        notice = self._limit.tell_news()
         if notice is None:
             return
         speech = self._speech if self._floor is None or not self._input_ended.is_set() else _Silent()
