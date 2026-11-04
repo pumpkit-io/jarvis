@@ -17,6 +17,7 @@ from tests.fakes import (
     FakeBackend,
     FakeClock,
     FakeTts,
+    Gate,
     Limited,
     RecordingMetrics,
     RecordingOutput,
@@ -648,3 +649,39 @@ async def test_a_limit_episode_survives_a_restart_so_a_second_hit_after_it_is_no
     assert not any(LINE in r for r in output.replies)
     assert output.replies == ["The limit has reset, sir.", "The CI is green, sir."]
     await second.close()
+
+
+@pytest.mark.parametrize("speak", [False, True], ids=["text", "spoken"])
+async def test_a_limit_reached_during_a_reply_is_told_after_it(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, speak: bool
+) -> None:
+    player = RecordingPlayer()
+    speech = Speech(FakeTts(), player, clock, metrics=metrics, notice=output.notice) if speak else None
+    if speech is not None:
+        speech.start()
+    hit = asyncio.Event()
+    backend = FakeBackend(
+        clock,
+        [[Text("Right away, sir."), delegate("Check the CI"), Gate(hit), Text("I'll let you know.")]],
+        orchestrator=[[Limited(600)]],
+    )
+    hub = make_hub(backend, output, metrics, speech=speech)
+    typist = Typist(clock)
+    run = await running(hub, typist)
+
+    typist.type("Is the CI green?")
+    await until(lambda: any(r.get("kind") == "usage_limit" for r in metrics.records))
+    await asyncio.sleep(0.05)
+    hit.set()
+    await until(lambda: len(output.replies) == 2)
+
+    assert output.replies == ["Right away, sir. I'll let you know.", f"{LINE} It resets at 12:26 AM."]
+    if speech is not None:
+        await speech.idle()
+        assert player.texts == ["Right away, sir.", "I'll let you know.", LINE, "It resets at 12:26 AM."]
+    typist.end()
+    clock.advance(600)
+    await run
+    await hub.close()
+    if speech is not None:
+        await speech.close()

@@ -401,6 +401,9 @@ class Hub:
         self._deferred: list[_OrchestratorInput] = []
         self._parked_news: list[_TalkerInput] = []
         self._announcing: set[asyncio.Task[None]] = set()
+        # Whether a Talker reply is on screen or being said, and the roles whose limit is told once it ends.
+        self._replying = False
+        self._after_reply: list[str] = []
         # The User's own text in the Talker turn under way, for the Tasks it delegates.
         self._user_text: str | None = None
         self._subagents = Subagents(
@@ -918,6 +921,7 @@ class Hub:
         self._turn_answers_user = self._turn_spoken and kind == "user"
         speech = self._speech if self._turn_spoken else _Silent()
         speech.begin(self._lang, turn=turn, heard_at=arrived if kind == "user" else None)
+        self._replying = show
         try:
             async for event in self._guarded(session.send(message)):
                 match event:
@@ -952,13 +956,16 @@ class Hub:
                             shown += self._limit_notice(speech, self._limit.resets_at("talker"))
         finally:
             self._talker_gate.turn = None
-            self._turn_spoken = self._turn_answers_user = False
+            self._turn_spoken = self._turn_answers_user = self._replying = False
             if self._interrupted_turn != turn:
                 speech.end()
         if end.outcome == "interrupted" and self._interrupted_turn != turn:
             end = TurnEnd("failed", end.usage, "the turn stopped without the Hub interrupting it")
         if show:
             self._output.reply_end()
+        for role in self._after_reply:
+            self._tell_limit(role)
+        self._after_reply.clear()
         # A failed restart has its own notice.
         if end.outcome == "failed" and kind != "restart":
             self._output.notice(f"The Talker failed: {end.error}")
@@ -1199,6 +1206,12 @@ class Hub:
                 await self._quiet()
                 if self._floor.announce():
                     break
+        if self._replying:
+            self._after_reply.append(role)
+        else:
+            self._tell_limit(role)
+
+    def _tell_limit(self, role: str) -> None:
         speech = self._speech if self._floor is None or not self._input_ended.is_set() else _Silent()
         self._turn_count += 1
         speech.begin(self._lang, turn=self._turn_count, heard_at=None)
