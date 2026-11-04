@@ -1476,8 +1476,11 @@ class Hub:
             exact = f"**Approval {approval.id}:** {approval.text}"
             details = f"{exact}\n\n{details}" if details else exact
         task.report(spoken, needs_user=needs_user, live=self._has_pending(task.id))
+        news = spoken
+        if approval is not None:
+            news += f" Ask exactly one Approval question, in the User's language: {approval.question()} Italian: {approval.question('it')}"
         self._post_news(
-            "orchestrator", spoken, task.id, needs_user=needs_user, details=details, approval=approval and approval.id
+            "orchestrator", news, task.id, needs_user=needs_user, details=details, approval=approval and approval.id
         )
         if approval is not None:
             return f"Reported to the User, asking for Approval {approval.id}: {approval.text}."

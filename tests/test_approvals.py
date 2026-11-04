@@ -175,7 +175,10 @@ async def test_a_report_asking_for_an_approval_names_the_exact_action_and_the_co
     [asked] = results(session.backend, "orchestrator", "report")
     assert asked.result == f"Reported to the User, asking for Approval A1: merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}."
     assert received(session.backend, "talker")[2] == (
-        f'<event source="orchestrator" task="T1" needs_user="true" approval="A1" details="on screen">{ASK}</event>'
+        f'<event source="orchestrator" task="T1" needs_user="true" approval="A1" details="on screen">{ASK}'
+        f" Ask exactly one Approval question, in the User's language: Do you approve this action: "
+        f"merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}? Italian: Vuole approvare questa azione: "
+        f"merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}?</event>"
     )
     assert output.shown == [f"**Approval A1:** merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}"]
     [status] = results(session.backend, "talker", "status")
@@ -316,8 +319,9 @@ async def test_approve_in_a_turn_that_answers_news_and_not_the_user_is_refused(
     [refused] = results(session.backend, "talker", "approve")
     assert refused.result == (
         "Not approved: approve works only in your reply to the User's own message. Pending Approvals: A1: merge "
-        f"pumpkit-io/pumpkit#42 at commit {HEAD[:12]} (on T1, asked 0 s ago). Name each to the User and ask which "
-        "one they mean, in one question."
+        f"pumpkit-io/pumpkit#42 at commit {HEAD[:12]} (on T1, asked 0 s ago). Ask one exact question, in the User's language: "
+        f"A1: Do you approve this action: merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}? "
+        f"Italian: Vuole approvare questa azione: merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}?"
     )
     assert gh.actions == []
 
@@ -385,8 +389,11 @@ async def test_with_two_pending_a_bare_yes_is_refused_and_naming_the_one_meant_a
     assert bare.result == (
         "Not approved: with more than one Approval in play, a bare yes does not say which. Pending Approvals: "
         f"A1: merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]} (on T1, asked 0 s ago); A2: delete branch "
-        f"feat/old-idea of pumpkit-io/pumpkit at commit {TIP[:12]} (on T2, asked 0 s ago). Name each to the User "
-        "and ask which one they mean, in one question."
+        f"feat/old-idea of pumpkit-io/pumpkit at commit {TIP[:12]} (on T2, asked 0 s ago). "
+        f"Ask one exact question, in the User's language: A1: Do you approve this action: merge pumpkit-io/pumpkit#42 "
+        f"at commit {HEAD[:12]}? Italian: Vuole approvare questa azione: merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}? "
+        f"A2: Do you approve this action: delete branch feat/old-idea of pumpkit-io/pumpkit at commit {TIP[:12]}? "
+        f"Italian: Vuole approvare questa azione: delete branch feat/old-idea of pumpkit-io/pumpkit at commit {TIP[:12]}?"
     )
     assert str(named.result).startswith("Approved A1")
     assert gh.actions == [merge_argv()]
@@ -501,7 +508,10 @@ async def test_a_push_after_the_yes_lapses_the_approval_and_brings_a_fresh_reque
         "request that says what changed.</event>"
     )
     assert received(session.backend, "talker")[-1] == (
-        f'<event source="orchestrator" task="T1" needs_user="true" approval="A2" details="on screen">{fresh}</event>'
+        f'<event source="orchestrator" task="T1" needs_user="true" approval="A2" details="on screen">{fresh}'
+        f" Ask exactly one Approval question, in the User's language: Do you approve this action: "
+        f"merge pumpkit-io/pumpkit#42 at commit {PUSHED[:12]}? Italian: Vuole approvare questa azione: "
+        f"merge pumpkit-io/pumpkit#42 at commit {PUSHED[:12]}?</event>"
     )
 
 
@@ -940,7 +950,10 @@ async def test_an_approval_request_gets_through_quiet_mode_and_the_same_request_
     await session.end()
 
     assert told == [
-        f'<event source="orchestrator" task="T1" needs_user="true" approval="A1" details="on screen">{ASK}</event>'
+        f'<event source="orchestrator" task="T1" needs_user="true" approval="A1" details="on screen">{ASK}'
+        f" Ask exactly one Approval question, in the User's language: Do you approve this action: "
+        f"merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}? Italian: Vuole approvare questa azione: "
+        f"merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}?</event>"
     ]
 
 
@@ -2442,3 +2455,19 @@ async def test_target_words_cannot_supply_the_action_of_a_read_back(
 ) -> None:
     result = await decided(specs, "Yes.", which, read_back=reply)
     assert isinstance(result, str) and result.startswith("Not approved:"), result
+
+
+@pytest.mark.parametrize("reply", [
+    "Should I merge or review PR 42?",
+    "Should I merge PR 42 or review it?",
+])
+async def test_an_alternative_action_from_a_repo_name_does_not_ask_for_approval(reply: str) -> None:
+    result = await decided([merge_spec(repo="review"), merge_spec(43)], "Yes.", "A1", read_back=reply)
+    assert isinstance(result, str) and result.startswith("Not approved:"), result
+
+
+@pytest.mark.parametrize("prefix", ["Do you approve this action", "Vuole approvare questa azione"])
+async def test_the_hubs_canonical_question_names_the_entire_pinned_action(prefix: str) -> None:
+    question = f"{prefix}: merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}?"
+    result = await decided([merge_spec(), merge_spec(43)], "Yes.", "A1", read_back=question)
+    assert isinstance(result, Approval) and result.id == "A1", result

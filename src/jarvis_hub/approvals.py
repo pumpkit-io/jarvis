@@ -108,6 +108,10 @@ class Approval:
     subagent: str | None = None
     outcome: str = ""
 
+    def question(self, language: str = "en") -> str:
+        prefix = "Vuole approvare questa azione" if language == "it" else "Do you approve this action"
+        return f"{prefix}: {self.text}?"
+
     @property
     def tools(self) -> tuple[str, ...]:
         return tuple(
@@ -280,36 +284,69 @@ def named(text: str, among: list["Approval"], ambiguous: frozenset[int] | None =
 _STATEMENT_END = re.compile(r"(?<=[\w)\"'’][.!])\s+")
 
 
+_QUESTION_PREFIXES = tuple(words(p) for p in (
+    "", "shall I", "should I", "should I go ahead and", "do you want me to", "you mean",
+    "devo", "vuole che io", "procedo con il", "do you approve this action", "vuole approvare questa azione",
+))
+
+
+def _question_bodies(approval: "Approval") -> set[Words]:
+    """Finite action templates: target names fill complete slots, never question vocabulary."""
+    bodies = {words(approval.text)}
+    if _free_text(approval):
+        return bodies
+    if approval.action == "merge_pr":
+        number = str(approval.number)
+        repo = approval.repo.split("/", 1)[-1]
+        targets = {"it", number, f"PR {number}", f"pull request {number}", f"della {number}",
+                   f"{repo} {number}", f"{approval.repo} {number}"}
+        kind = "merge"
+    elif approval.action == "delete_branch":
+        branch = str(approval.branch)
+        short = branch.rsplit("/", 1)[-1]
+        targets = {"it", "branch", "the branch", branch, short, f"branch {branch}", f"branch {short}"}
+        kind = "delete"
+    else:
+        targets = {"it", f"post {approval.post}", f"Pumpkit post {approval.post} on X now"}
+        kind = _POST_KINDS[str(approval.post_action)]
+        if approval.post_action == "post_now":
+            targets.add("it now")
+    return bodies | {words(f"{verb} {target}") for verb, k in LEXICONS.verbs.items() if k == kind for target in targets}
+
+
 def _read_back(reply: str, pending: list["Approval"]) -> list["Approval"]:
-    """Only a closed-world question naming the action can read an Approval back (ADR 0013)."""
+    """Only complete action templates can establish a question about an Approval (ADR 0013)."""
     *before, question = _STATEMENT_END.split(reply.strip())
     if not question.endswith("?") or "?" in question[:-1] or any("?" in s for s in before):
         return []
     if LEXICONS.holding_back(reply.replace("?", " ")) is not None:
         return []
-    said = list(words(question))
-    read: list[Approval] = []
-    for approval in filter(_free_text, pending):
-        text = words(approval.text)
-        for i in found(said, text):
-            read += [approval] if approval not in read else []
-            # Its words are its text, not names of the others: "merge" in it never reads back a merge.
-            said[i : i + len(text)] = ["_"] * len(text)
-    start = next((i for i, word in enumerate(said) if word == "_" or word in LEXICONS.verbs), len(said))
-    if start == len(said) or LEXICONS.outside_read_back(tuple(said[:start]), (), frozenset(), frozenset()):
-        return []
-    asked = named(" ".join(said), pending, _held(pending))
-    names = [_Names.of(a) for a in asked]
-    if any(not (n.kinds & LEXICONS.kinds(said)) for n in names):
-        return []
-    phrases = {p for n in names for p in n.phrases}
-    phrases |= {("pumpkit",), ("x",)} if any(a.post_action for a in asked) else set()
-    kinds = frozenset[str]().union(*(n.kinds for n in names))
-    own = frozenset[int]().union(*(n.numbers | n.held for n in names))
-    # Only the names of those it asks about: a word naming another pending Approval asks something else too.
-    if LEXICONS.outside_read_back(tuple(said), phrases, kinds, own) is not None:
-        return []
-    return asked + read
+    said = words(question)
+    if said and said[-1] in ("sir", "signore"):
+        said = said[:-1]
+    bodies = {a.id: _question_bodies(a) for a in pending}
+    for prefix in sorted(_QUESTION_PREFIXES, key=len, reverse=True):
+        if said[:len(prefix)] != prefix:
+            continue
+        remaining = said[len(prefix):]
+        clauses: list[Words] = []
+        start = 0
+        for i, word in enumerate(remaining):
+            if word in ("or", "o"):
+                clauses.append(remaining[start:i])
+                start = i + 1
+        clauses.append(remaining[start:])
+        matched: list[Approval] = []
+        for clause in clauses:
+            matches = [a for a in pending if clause in bodies[a.id]]
+            free = [a for a in matches if _free_text(a)]
+            selected = free or named(" ".join(clause), matches, _held(pending))
+            if len(selected) != 1 or (free and len(matches) != 1):
+                break
+            matched.extend(a for a in selected if a not in matched)
+        else:
+            return matched
+    return []
 
 
 def _held(among: Iterable["Approval"]) -> frozenset[int]:
@@ -514,7 +551,8 @@ class Approvals:
             return "No Approval is pending."
         now = self._clock.now()
         named = "; ".join(f"{a.id}: {a.text} (on {a.task_id}, asked {ago(now - a.created)} ago)" for a in pending)
-        return f"Pending Approvals: {named}. Name each to the User and ask which one they mean, in one question."
+        questions = " ".join(f"{a.id}: {a.question()} Italian: {a.question('it')}" for a in pending)
+        return f"Pending Approvals: {named}. Ask one exact question, in the User's language: {questions}"
 
     def turn_began(self, heard: str | None) -> None:
         """A Talker turn starts; `heard` is the User's message it answers, None when it answers none."""
