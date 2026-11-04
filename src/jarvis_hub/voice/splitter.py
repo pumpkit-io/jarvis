@@ -4,13 +4,10 @@ import re
 
 # Closing quotes, brackets and markdown emphasis may follow the mark: "**Done.** Next".
 _SENTENCE_END = re.compile(r"[.?!…]+[\"'”’)\]*_]*(?=\s)")
-_SENTENCE_END_AT_END = re.compile(r"[.?!…]+[\"'”’)\]*_]*$")
 _CLAUSE_END = re.compile(r"[,;:](?=\s)")
 _LAST_WORD = re.compile(r"(\S+)$")
 # Such as "a.m.", "U.S.": a sentence end only when the next word starts with a capital.
 _DOTTED = re.compile(r"(?:[a-z]\.)+[a-z]")
-# A word holding one of these before its final dot may be a URL, address or path the next delta continues.
-_LINKISH = re.compile(r"[/@:_\\=?#&~.]")
 
 # Compared without the final dot and in lower case; a single letter counts too, as an initial.
 # Left out: words that also end English sentences, such as "on." and "art."
@@ -43,19 +40,6 @@ class SentenceSplitter:
         while (cut := self._next_cut()) is not None:
             out += self._take(cut)
         return out
-
-    def at_sentence_end(self) -> bool:
-        """Whether the text so far ends on what reads as a sentence end, though no space has followed yet.
-
-        Neither a digit before the dot ("3." then "5") nor a word with a link's marks ("github.com/x." then "y") does.
-        """
-        match = _SENTENCE_END_AT_END.search(self._buffer)
-        if match is None or not self._ends_sentence(match.start(), match.end()):
-            return False
-        if self._buffer[match.start()] != ".":
-            return True
-        word = _LAST_WORD.search(self._buffer[: match.start()])
-        return word is not None and not word.group(1)[-1].isdigit() and not _LINKISH.search(word.group(1))
 
     def end_block(self) -> list[str]:
         """The rest of the text, at the end of a text block or of the reply.

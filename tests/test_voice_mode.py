@@ -1310,7 +1310,7 @@ async def test_two_restarts_keep_the_exact_count_of_the_updates_held(rig_for: Ma
     assert [e.split('"')[3] for e in events if 'source="orchestrator"' in e] == ["T1", "T2"]
 
 
-STORY = [Text("First sentence, sir. "), Text("Second sentence follows. "), Text("The third one ends it.")]
+STORY = [Text("First sentence, sir. "), Text("Second sentence follows. "), Text("The third one ends it. ")]
 
 
 async def speaking(rig: Rig) -> None:
@@ -1323,7 +1323,7 @@ async def speaking(rig: Rig) -> None:
     rig.player.hold = True
     rig.audio.say("Tell me a story")
     await until(lambda: rig.state == "speaking" and len(rig.player.clips) >= 3)
-    # The last sentence goes once the Talker's text has settled.
+    # The final sentence's trailing space closes it even if the model is still running.
     await rig.advance(0.5)
     assert len(rig.player.clips) == 4
 
