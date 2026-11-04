@@ -138,16 +138,32 @@ async def test_two_worktrees_asked_at_once_get_different_branches(clone: Path) -
     assert holders == {"jarvis S1 (T1): Fix typo", "jarvis S2 (T1): Fix typo"}
 
 
-@needs_script
-async def test_a_worktree_that_cannot_be_locked_is_removed_with_its_new_branch(clone: Path, tmp_path: Path) -> None:
-    assert SCRIPT is not None
-    failing = tmp_path / "worktree.sh"
-    failing.write_text(f'[ "$1" = lock ] && {{ echo "no lock today" >&2; exit 1; }}\nexec bash {SCRIPT} "$@"\n')
-    workspace = GitWorkspace("pumpkit-io", clone.parent, failing)
-    with pytest.raises(Refusal, match="no lock today.*both empty, are removed"):
+async def test_a_failed_worktree_lock_keeps_the_branch_and_reports_the_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    clone = tmp_path / "pumpkit"
+    path = clone / ".claude" / "worktrees" / "typo"
+
+    async def commands(*args: str, cwd: Path) -> tuple[int, str, str]:
+        calls.append(args)
+        if args[0] == "git" and "show-ref" in args:
+            return 1, "", ""
+        if args[0] == "bash" and args[2] == "create":
+            return 0, str(path), ""
+        if args[0] == "bash" and args[2] == "lock":
+            return 1, "", "no lock today"
+        return 0, "", ""
+
+    monkeypatch.setattr(workspace_module, "_run", commands)
+    workspace = GitWorkspace("pumpkit-io", tmp_path, tmp_path / "worktree.sh")
+    with pytest.raises(Refusal) as caught:
         await workspace.worktree(clone, "fix/typo", "jarvis S1 (T1): Fix typo")
-    assert git(clone, "branch", "--list", "fix/typo") == ""
-    assert not (clone / ".claude" / "worktrees" / "typo").exists()
+
+    assert "no lock today" in str(caught.value)
+    assert str(path) in str(caught.value) and "fix/typo" in str(caught.value)
+    assert "kept" in str(caught.value)
+    assert not any("remove" in call or "-D" in call or "-d" in call for call in calls)
 
 
 @needs_script
@@ -273,3 +289,26 @@ async def test_a_title_with_line_breaks_still_locks_and_releases_the_worktree(cl
 
     assert "held by" not in subagent.report and "not unlocked" not in subagent.report
     assert not (subagent.cwd / ".sdlc" / "lock").exists() if writes else not subagent.cwd.exists()
+
+
+async def test_a_failed_scratch_lock_keeps_the_worktree_instead_of_forcing_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    clone = tmp_path / "pumpkit"
+    path = clone / ".claude" / "worktrees" / "read-status"
+
+    async def commands(*args: str, cwd: Path) -> tuple[int, str, str]:
+        calls.append(args)
+        if args[0] == "bash" and args[2] == "lock":
+            return 1, "", "another session holds this worktree"
+        return 0, "", ""
+
+    monkeypatch.setattr(workspace_module, "_run", commands)
+    workspace = GitWorkspace("pumpkit-io", tmp_path, tmp_path / "worktree.sh")
+    with pytest.raises(Refusal) as caught:
+        await workspace.scratch(clone, "read-status", "jarvis S1 (T1): Status")
+
+    assert "another session" in str(caught.value)
+    assert str(path) in str(caught.value) and "kept" in str(caught.value)
+    assert not any("remove" in call for call in calls)

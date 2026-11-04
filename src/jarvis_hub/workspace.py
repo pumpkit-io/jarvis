@@ -101,22 +101,12 @@ class GitWorkspace:
                     continue
                 code, _, err = await _run("bash", str(self._script), "lock", str(path), holder, cwd=clone)
                 if code != 0:
-                    raise Refusal(f"Could not lock {path}: {err} {await self._undo(clone, path, candidate)}")
+                    raise Refusal(
+                        f"Could not lock {path}: {err} The worktree {path} and branch {candidate} are kept; "
+                        "no Subagent started."
+                    )
                 return path, candidate
         raise Refusal(f"Every name from {branch} to {branch}-{TRIES} is taken.")
-
-    async def _undo(self, clone: Path, path: Path, branch: str) -> str:
-        """Removes a worktree and branch made a moment ago, or says exactly what is left."""
-        _, unpushed, _ = await _git(clone, "rev-list", branch, "--not", "--remotes")
-        if unpushed:
-            return f"The worktree {path} and branch {branch} are kept: the branch has commits found on no remote."
-        code, _, err = await _git(clone, "worktree", "remove", str(path))
-        if code != 0:
-            return f"The worktree {path} and branch {branch} are kept: {err}"
-        code, _, err = await _git(clone, "branch", "-D", branch)
-        if code != 0:
-            return f"The worktree {path} is removed; the branch {branch} is kept: {err}"
-        return f"The worktree {path} and branch {branch}, both empty, are removed."
 
     async def scratch(self, clone: Path, name: str, holder: str) -> Path:
         if self._script is None:
@@ -135,8 +125,7 @@ class GitWorkspace:
                 raise Refusal(f"Could not add a read-only worktree at {path}: {err}")
             code, _, err = await _run("bash", str(self._script), "lock", str(path), holder, cwd=clone)
             if code != 0:
-                await _git(clone, "worktree", "remove", "--force", str(path))
-                raise Refusal(f"Could not lock {path}, so it is removed again: {err}")
+                raise Refusal(f"Could not lock {path}: {err} The detached worktree is kept; no Subagent started.")
             return path
 
     async def release(self, worktree: Path, holder: str) -> str | None:

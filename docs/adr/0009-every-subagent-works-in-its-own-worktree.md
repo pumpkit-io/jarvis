@@ -16,3 +16,7 @@ A kept read-only worktree is left unlocked, and that is safe from the sdlc `swee
 - Starting a reading Subagent costs a `git fetch` and a `git worktree add`, a second or two.
 - A repo whose `.gitignore` misses `.claude/worktrees/` shows the folder as untracked in the User's clone while a reading Subagent runs. Writing worktrees already add that entry through the sdlc bootstrap.
 - `worktree.sh list` shows a reading Subagent's worktree as `(detached)` with its lock, and `sweep` leaves it alone while the lock is held.
+
+- If a writing worktree is created but cannot be locked, the Hub starts no Subagent and reports the preserved worktree path and branch. Cleanup never deletes that branch: even an empty branch requires the User's Approval under the Boundary.
+
+- A detached reading worktree whose lock fails is kept too. The Hub does not own that lock, so it cannot safely force-remove the folder. The refusal names the path for inspection.
