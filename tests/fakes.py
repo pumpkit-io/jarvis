@@ -557,6 +557,8 @@ class StubGh(StubRunner):
         self.rulesets: dict[str, list[dict[str, Any]]] = {}
         # When set by a test, the rules read answers this instead.
         self.rules_result: tuple[int, str] | None = None
+        # GitHub's page size for the rules; without --paginate gh reads the first page only.
+        self.rules_per_page = 30
         self.reads: list[tuple[str, ...]] = []
         self.actions: list[tuple[str, ...]] = []
         self.action_result: tuple[int, str] = (0, "")
@@ -572,13 +574,17 @@ class StubGh(StubRunner):
                 return 1, f"GraphQL: Could not resolve to a PullRequest with the number of {argv[3]}."
             state, head = self.prs[key]
             return 0, f"{state} {head}"
-        if argv[1] == "api" and "/rules/branches/" in argv[2]:
+        path = next((word for word in argv[2:] if "/rules/branches/" in word), None)
+        if argv[1] == "api" and path is not None:
             self.reads.append(argv)
             if self.rules_result is not None:
                 return self.rules_result
-            repo, branch = argv[2].removeprefix("repos/").split("/rules/branches/", 1)
-            types = sorted({rule["type"] for rule in self.rulesets.get(f"{repo}:{branch}", [])})
-            return 0, " ".join(types)
+            repo, branch = path.removeprefix("repos/").split("/rules/branches/", 1)
+            rules = self.rulesets.get(f"{repo}:{branch}", [])
+            pages = [rules[i : i + self.rules_per_page] for i in range(0, len(rules), self.rules_per_page)] or [[]]
+            # gh applies --jq to each page and prints one line per page.
+            read = pages if "--paginate" in argv else pages[:1]
+            return 0, "\n".join(" ".join(sorted({rule["type"] for rule in page})) for page in read)
         if argv[1:3] == ("api", "graphql") and not fields["query"].startswith("mutation"):
             self.reads.append(argv)
             key = f"{fields['owner']}/{fields['name']}:{fields['ref'].removeprefix('refs/heads/')}"

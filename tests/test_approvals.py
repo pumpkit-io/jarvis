@@ -584,7 +584,7 @@ async def test_an_approved_branch_delete_runs_only_while_the_branch_still_points
     read, rules = gh.reads[-2:]
     assert read[:3] == ("gh", "api", "graphql")
     assert ("-f", "ref=refs/heads/feat/old-idea") == read[9:11]
-    assert rules[:3] == ("gh", "api", "repos/pumpkit-io/pumpkit/rules/branches/feat/old-idea")
+    assert rules[:4] == ("gh", "api", "--paginate", "repos/pumpkit-io/pumpkit/rules/branches/feat/old-idea")
     [deleted] = gh.actions
     assert deleted[:3] == ("gh", "api", "graphql")
     assert deleted[3:5] == ("-f", deleted[4]) and deleted[4].startswith("query=mutation(")
@@ -1033,7 +1033,7 @@ class ReadsOnly:
     """The real confined gh for reads; any other command fails the test before it runs."""
 
     async def __call__(self, argv: tuple[str, ...]) -> tuple[int, str]:
-        rules = argv[:2] == ("gh", "api") and "/rules/branches/" in argv[2] and "-X" not in argv
+        rules = argv[:3] == ("gh", "api", "--paginate") and "/rules/branches/" in argv[3] and "-X" not in argv
         assert argv[:3] == ("gh", "pr", "view") or "query=query(" in " ".join(argv) or rules, argv
         return await run_confined(argv)
 
@@ -1986,3 +1986,26 @@ async def test_digits_other_than_ascii_are_not_a_number_and_refuse_the_yes(said:
     result = await decided([merge_spec()], said, "A1")
 
     assert isinstance(result, str) and "which is not part of a plain yes" in result
+
+
+async def test_a_ruleset_rule_that_keeps_a_branch_counts_on_any_page_of_the_rules(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh
+) -> None:
+    gh.rulesets["pumpkit-io/pumpkit:feat/old-idea"] = [ruleset_rule("pull_request"), ruleset_rule("deletion")]
+    gh.rules_per_page = 1
+    session = a_session(
+        clock,
+        output,
+        metrics,
+        gh,
+        [[Text("Right away, sir."), delegate()], [Text("Not that one, sir.")]],
+        [[ask_delete(), report("T1", "I may not delete it.")]],
+    )
+
+    await session.start()
+    await session.say("Delete the branch")
+    await session.replied("Not that one, sir.")
+    await session.end()
+
+    refused, _ = results(session.backend, "orchestrator", "report")
+    assert str(refused.result).startswith("Not asked: feat/old-idea is a protected branch of pumpkit-io/pumpkit")

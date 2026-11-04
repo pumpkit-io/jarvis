@@ -59,8 +59,11 @@ _NO_RULESETS = "Upgrade to GitHub Pro or make this repository public"
 
 
 def rules_argv(repo: str, branch: str) -> Argv:
-    """The read-only gh command that lists the types of the active ruleset rules on `branch` of `owner/name`."""
-    return ("gh", "api", f"repos/{repo}/rules/branches/{branch}", "--jq", '[.[].type] | unique | join(" ")')
+    """The read-only gh command that lists the types of the active ruleset rules on `branch` of `owner/name`, one
+    line per page of rules."""
+    return (
+        "gh", "api", "--paginate", f"repos/{repo}/rules/branches/{branch}", "--jq", '[.[].type] | unique | join(" ")'
+    )
 
 
 # GitHub deletes the ref only while it still points at beforeOid, so the tip the User approved is enforced server side.
