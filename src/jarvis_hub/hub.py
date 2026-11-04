@@ -162,7 +162,9 @@ def user_message(text: str, lang: Lang, *, typed: bool = True) -> str:
 
 
 def interrupted_message(spoken: str) -> str:
-    return f'<interrupted spoken="{escape(spoken)}"/>'
+    # In a double-quoted attribute only `"` and markup need escaping; apostrophes stay as spoken.
+    attribute = escape(spoken, quote=False).replace('"', "&quot;")
+    return f'<interrupted spoken="{attribute}"/>'
 
 
 def event_message(source: str, text: str, task: str, *, needs_user: bool = False, details: bool = False) -> str:

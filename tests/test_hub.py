@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 import pytest
 
 from jarvis_hub.agents.backend import Usage
-from jarvis_hub.hub import Line
+from jarvis_hub.hub import Line, interrupted_message
 from tests.fakes import (
     Abort,
     AwaitInterrupt,
@@ -364,3 +364,10 @@ async def test_interrupt_lands_on_the_turn_running_when_it_was_called(
     assert output.replies == ["One, two, ", "Yes, sir?"]
     assert output.notices == []
     assert [r["outcome"] for r in metrics.records if r["kind"] == "user"] == ["completed", "completed"]
+
+
+def test_what_was_heard_before_an_interruption_keeps_apostrophes_and_escapes_quotes_and_markup() -> None:
+    spoken = """I've opened "the PR" & <the issue>, sir."""
+    assert interrupted_message(spoken) == (
+        """<interrupted spoken="I've opened &quot;the PR&quot; &amp; &lt;the issue&gt;, sir."/>"""
+    )
