@@ -48,7 +48,7 @@ For each model and request, record whether the brief preserves scope, model/effo
 
 ## Remaining decisions and limitations
 
-- The sentence splitter's 100 ms quiet settle can split a bare domain across chunks. The Talker prompt forbids URLs; acceptance of this recorded limit still awaits the User.
+- The #9 follow-up removes the 100 ms quiet settle. Sentence boundaries require punctuation followed by whitespace, a text-block end, or a reply end, so delayed domain suffixes stay whole. Recheck physical latency with this behavior; the earlier timer-based numbers do not measure it.
 - `github-stats` is absent from the Repo catalog; its purpose needs clarification before adding it.
 - The branch-delete mutation has schema/stub coverage only. The User declined real branch deletions; do not perform one for verification.
 - An X-post Approval pins a post ID and arguments, not mutable post text. No real post is part of this verification.

@@ -33,9 +33,6 @@ LINES: dict[ClipName, dict[Lang, str]] = {
 # Later than the Talker's first sentence at p90, 1.32 s (docs/notes/phase-0-spikes.md), so it covers only the slow tail.
 HOLDING_LINE_AFTER = 1.5
 
-# A delta ending on "sir." may wait half a second for the next one; this long without one, the sentence goes.
-SETTLE = 0.1
-
 # With queued audio this long unplayed, as from a paused player or a device that stopped pulling, `idle` gives up.
 STALLED = 2.0
 
@@ -160,7 +157,6 @@ class Speech:
         self._generation = 0
         self._synthesising = False
         self._holding_line: asyncio.Task[None] | None = None
-        self._settle: asyncio.Task[None] | None = None
         self._worker: asyncio.Task[None] | None = None
         self._loading: asyncio.Future[None] | None = None
 
@@ -187,13 +183,9 @@ class Speech:
         reply = self._reply
         if reply is None:
             return
-        self._cancel_settle()
         self._say(reply.splitter.feed(text))
-        if reply.splitter.at_sentence_end():
-            self._settle = asyncio.create_task(self._cut_when_settled(reply))
 
     def block_end(self) -> None:
-        self._cancel_settle()
         if self._reply is not None:
             self._say(self._reply.splitter.end_block())
 
@@ -201,7 +193,6 @@ class Speech:
         reply = self._reply
         if reply is None:
             return
-        self._cancel_settle()
         self._say(reply.splitter.end_block())
         self._cancel_holding_line()
         self._queue.put_nowait(_End(reply))
@@ -211,7 +202,6 @@ class Speech:
         """Drop the reply and everything queued or playing."""
         self._generation += 1
         self._cancel_holding_line()
-        self._cancel_settle()
         self._reply = None
         while not self._queue.empty():
             self._queue.get_nowait()
@@ -237,7 +227,6 @@ class Speech:
 
     async def close(self) -> None:
         self._cancel_holding_line()
-        self._cancel_settle()
         if self._worker is not None:
             self._worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -328,16 +317,6 @@ class Speech:
         if self._reply is reply and reply.first_chunk is None and quiet:
             reply.holding_line = True
             self._queue.put_nowait(_Cached("holding_line", reply.lang, reply))
-
-    async def _cut_when_settled(self, reply: _Reply) -> None:
-        await self._clock.sleep(SETTLE)
-        if self._reply is reply:
-            self._say(reply.splitter.end_block())
-
-    def _cancel_settle(self) -> None:
-        if self._settle is not None:
-            self._settle.cancel()
-            self._settle = None
 
     def _cancel_holding_line(self) -> None:
         if self._holding_line is not None:
