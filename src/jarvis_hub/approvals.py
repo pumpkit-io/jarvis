@@ -565,8 +565,9 @@ class Approvals:
         if completed and (self._read_back_open or told):
             read = _read_back(said, self.pending())
             allowed = {a.id for a in read} if self._read_back_open else set(told)
-            self._last_said = tuple(a.id for a in read if a.id in allowed)
-            self._read_back = self._read_back_open and bool(self._last_said)
+            if all(a.id in allowed for a in read):
+                self._last_said = tuple(a.id for a in read)
+                self._read_back = self._read_back_open and bool(self._last_said)
         self._heard, self._read_back_open = None, False
 
     def decide(self, approval_id: object) -> Approval | str:

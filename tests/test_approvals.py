@@ -2471,3 +2471,26 @@ async def test_the_hubs_canonical_question_names_the_entire_pinned_action(prefix
     question = f"{prefix}: merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}?"
     result = await decided([merge_spec(), merge_spec(43)], "Yes.", "A1", read_back=question)
     assert isinstance(result, Approval) and result.id == "A1", result
+
+
+@pytest.mark.parametrize("read_back", [False, True])
+async def test_a_question_about_two_actions_cannot_be_reduced_to_the_one_in_news(read_back: bool) -> None:
+    gh = StubGh(prs={"pumpkit-io/pumpkit#42": ("OPEN", HEAD)})
+    approvals = Approvals(org="pumpkit-io", runner=gh, clock=FakeClock(), on_change=lambda: None, log=lambda e: None)
+    migration = await approvals.request("T1", posthog("run the database migration"))
+    merge = await approvals.request("T2", merge_spec())
+    assert isinstance(migration, Approval) and isinstance(merge, Approval)
+    approvals.turn_began(None)
+    if read_back:
+        approvals.turn_ended(completed=True, told=[], said="Nothing asked yet.")
+        approvals.turn_began("Yes.")
+        assert isinstance(approvals.decide(migration.id), str)
+    approvals.turn_ended(
+        completed=True, told=[migration.id], said="Shall I run the database migration or merge PR 42?"
+    )
+    approvals.turn_began("Yes.")
+
+    result = approvals.decide(migration.id)
+
+    assert isinstance(result, str) and result.startswith("Not approved:"), result
+    assert migration.state == merge.state == "pending"
