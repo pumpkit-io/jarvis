@@ -183,7 +183,8 @@ def event_message(
 
 def approval_brief(approval: Approval) -> str:
     """What a Subagent's brief carries of the Approval it acts on; the User's words are the Hub's record of them."""
-    tools = f" It lets you call {', '.join(approval.tools)}, once." if approval.tools else ""
+    post = f" for Pumpkit post {approval.post}" if approval.post else ""
+    tools = f" It lets you call {', '.join(approval.tools)}{post}, once." if approval.tools else ""
     return (
         f'\n\n<approval id="{approval.id}">\n'
         f"The User approved exactly this, once: {escape(approval.text, quote=False)}.{tools}\n"
@@ -429,12 +430,8 @@ class Hub:
         self._approvals = Approvals(
             org=waits.org, runner=waits.runner, clock=clock, on_change=self._persist, log=self._write
         )
-        # The Approval ids the last thing Jarvis said asked the User about; and those a refused approve listed in the
-        # turn under way, which the Talker names to the User.
-        self._last_said: tuple[str, ...] = ()
-        self._offered: tuple[str, ...] = ()
-        # Whether the turn under way already recorded a yes: one yes approves one action.
-        self._approved_in_turn = False
+        # What the Talker turn under way has shown so far, for the Approvals it names.
+        self._shown = ""
         self._carrying_out: set[asyncio.Task[None]] = set()
         self._session_for = subagents.session
         self._subagents = Subagents(
@@ -750,7 +747,9 @@ class Hub:
             self._restore_held(held, quiet_mode, needs_user)
             return None
         self._tasks.restore(tasks)
-        unfinished = self._approvals.restore(approvals)
+        unfinished, dropped = self._approvals.restore(approvals)
+        for notice in dropped:
+            self._output.notice(notice)
         cut_off = self._subagents.restore(subagents)
         for subagent in cut_off:
             self._approvals.subagent_ended(subagent.id)
@@ -826,12 +825,14 @@ class Hub:
                     self._output.show(item.details)
                 self._user_text = item.heard if item.kind == "user" else None
                 self._telling = item.news.away_leaves() if item.news else ()
-                self._offered, self._approved_in_turn = (), False
+                self._approvals.turn_began(self._user_text)
+                self._shown = ""
                 if item.kind == "user" and self._limit.blocks("talker"):
                     end = self._limited_reply(item)
                 else:
                     end = await self._turn(item.message, kind=item.kind, arrived=item.arrived, spoken=item.spoken)
-                self._last_said = self._asked(item, end)
+                told = [leaf.approval for leaf in (item.news.leaves() if item.news else ()) if leaf.approval]
+                self._approvals.turn_ended(completed=end.outcome == "completed", told=told, said=self._shown)
                 if end.outcome == "limited":
                     # The news was not told, so the Talker gets it again after the reset.
                     parked = self._park(item)
@@ -843,16 +844,6 @@ class Hub:
                 if parked:
                     self._persist()
             upcoming = await self._restart_if_full(end.context)
-
-    def _asked(self, item: _TalkerInput, end: TurnEnd) -> tuple[str, ...]:
-        """The Approvals a finished turn asked the User about: those its news requested, or those the Talker named
-        after a refused approve. A turn cut short may not have been heard, so it asked about none."""
-        if end.outcome != "completed":
-            return ()
-        if self._offered:
-            return self._offered
-        leaves = item.news.leaves() if item.news else ()
-        return tuple(leaf.approval for leaf in leaves if leaf.approval)
 
     async def _next_input(self) -> _TalkerInput:
         """The User's next line first; in voice mode, news only once Jarvis is quiet (the announcement policy), or
@@ -1063,6 +1054,7 @@ class Hub:
             self._output.notice(f"The Talker failed: {end.error}")
         if show and (shown.strip() or end.outcome != "failed"):
             self._exchanges.append((message, shown))
+        self._shown = shown
 
         def ms(t: float | None) -> int | None:
             return None if t is None else round((t - arrived) * 1000)
@@ -1491,13 +1483,9 @@ class Hub:
         return "Reported to the User."
 
     async def _approve(self, args: dict[str, Any]) -> str:
-        if self._approved_in_turn:
-            return "Not approved: one yes approves one action. Ask about the next one in its own question."
-        decided = self._approvals.decide(args.get("approval_id"), words=self._user_text, last_said=self._last_said)
+        decided = self._approvals.decide(args.get("approval_id"))
         if isinstance(decided, str):
-            self._offered = tuple(a.id for a in self._approvals.pending())
             return decided
-        self._approved_in_turn = True
         if decided.action in HUB_ACTIONS:
             self._pending += 1
             self._settled.clear()

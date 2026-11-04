@@ -62,6 +62,10 @@ APPROVAL = {
             "items": {**STRING, "enum": list(GRANTS)},
             "description": "subagent_action: the connector tools it needs, by group; leave out when none.",
         },
+        "post": {
+            **STRING,
+            "description": "With the x_post grant: the Pumpkit post id it publishes. The post tools take only this id.",
+        },
     },
     "required": ["action"],
 }

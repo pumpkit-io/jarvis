@@ -78,8 +78,8 @@ def talker_tools(
         HubTool(
             "approve",
             "Record the User's yes to the Approval you just asked them about, by its id. The Hub decides from its "
-            "own record of the conversation whether the yes counts; when it does not, the result lists the pending "
-            "Approvals to name to the User.",
+            "own record of the User's words whether they say yes, and to which Approval; when they do not, the "
+            "result says why, and lists the pending Approvals when the User has to say which.",
             object_schema({"approval_id": {**STRING, "description": "Such as A1."}}, ("approval_id",)),
             approve,
         ),

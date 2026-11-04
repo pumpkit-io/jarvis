@@ -526,13 +526,18 @@ class StubGh(StubRunner):
     `branches`, and records the merges and deletes it runs, which change those records and nothing real."""
 
     def __init__(
-        self, prs: dict[str, tuple[str, str]] | None = None, branches: dict[str, str] | None = None
+        self,
+        prs: dict[str, tuple[str, str]] | None = None,
+        branches: dict[str, str] | None = None,
+        protected: set[str] | None = None,
     ) -> None:
         super().__init__()
         # "pumpkit-io/pumpkit#42": (state, head commit).
         self.prs = dict(prs or {})
         # "pumpkit-io/pumpkit:feat/old-idea": tip commit.
         self.branches = dict(branches or {})
+        # Branches under a protection rule, keyed like `branches`; every repo's default branch is main.
+        self.protected = set(protected or ())
         self.reads: list[tuple[str, ...]] = []
         self.actions: list[tuple[str, ...]] = []
         self.action_result: tuple[int, str] = (0, "")
@@ -550,8 +555,9 @@ class StubGh(StubRunner):
             return 0, f"{state} {head}"
         if argv[1:3] == ("api", "graphql") and not fields["query"].startswith("mutation"):
             self.reads.append(argv)
-            branch = fields["ref"].removeprefix("refs/heads/")
-            return 0, f"R_kgDOpumpkit {self.branches.get(f'{fields['owner']}/{fields['name']}:{branch}', 'none')}"
+            key = f"{fields['owner']}/{fields['name']}:{fields['ref'].removeprefix('refs/heads/')}"
+            rule = "protected" if key in self.protected else "unprotected"
+            return 0, f"R_kgDOpumpkit {self.branches.get(key, 'none')} main {rule}"
         if argv[1:3] in (("pr", "merge"), ("api", "graphql")):
             self.actions.append(argv)
             if self.action_gate is not None:

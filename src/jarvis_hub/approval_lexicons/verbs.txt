@@ -1,0 +1,7 @@
+# The action verbs, by kind: `kind: word word ...`. Saying the verb of the action asked about is a yes; saying
+# the verb of another kind refuses. Case and hyphens don't matter.
+merge: merge merging mergia mergiala mergialo unisci unire
+delete: delete deleting remove removing cancella cancellala elimina eliminala rimuovi
+post: post posting publish tweet pubblica pubblicalo posta postalo
+deploy: deploy deploying rilascia
+release: release releasing

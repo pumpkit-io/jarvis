@@ -1,0 +1,46 @@
+# A yes: the User's words approve only when they hold one of these and nothing in hold.txt.
+# One phrase per line, English and Italian; case, punctuation and hyphens don't matter.
+# The action's own verbs in verbs.txt also say yes ("merge it", "Merge forty-two").
+yes
+yeah
+yep
+yup
+yea
+sure
+ok
+okay
+okey
+alright
+all right
+fine
+go
+go ahead
+go for it
+do it
+please do
+approve
+approved
+confirm
+confirmed
+absolutely
+definitely
+certainly
+affirmative
+proceed
+sounds good
+ship it
+sì
+si
+certo
+certamente
+vai
+vai pure
+procedi
+fallo
+falla
+confermo
+approvo
+va bene
+d'accordo
+daccordo
+assolutamente

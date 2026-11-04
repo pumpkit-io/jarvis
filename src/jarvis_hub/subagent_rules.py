@@ -2,7 +2,8 @@
 
 import re
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from jarvis_hub.agents.backend import Refused
 from jarvis_hub.config import EFFORTS, Effort, is_effort
@@ -148,7 +149,7 @@ def slug(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", folded.lower()).strip("-")[:40].strip("-") or "work"
 
 
-def connector_check(tool_name: str) -> Refused | None:
+def connector_check(tool_name: str, tool_input: Mapping[str, Any] | None = None) -> Refused | None:
     if tool_name in READ_CONNECTOR_TOOLS:
         return None
     return Refused(
