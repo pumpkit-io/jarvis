@@ -1149,3 +1149,162 @@ async def test_news_told_in_one_announcement_with_the_reset_is_still_told_when_t
     assert len(told) == 2
     assert 'reason="usage_reset"' in told[0]
     assert 'reason="usage_reset"' not in told[1]
+
+
+LIMIT_LINE = "I've reached the usage limit, sir."
+DOCS_REPORT = "The docs are merged."
+
+
+def red_then_docs(arrival: asyncio.Event) -> list[Step]:
+    """One Orchestrator turn reporting news that needs the User, then ordinary news, once `arrival` is set."""
+    return [
+        Gate(arrival),
+        Tool("report", {"task_id": "T1", "spoken": RED, "needs_user": True}),
+        Tool("report", {"task_id": "T1", "spoken": DOCS_REPORT, "needs_user": False}),
+    ]
+
+
+async def watch_the_ci(rig: Rig, arrival: asyncio.Event) -> None:
+    """The User delegates; once Jarvis is idle both reports arrive and go out as one Announcement."""
+    rig.audio.wake()
+    rig.audio.say("Watch the CI")
+    await until(lambda: rig.state == "follow_up")
+    await rig.advance(6)
+    arrival.set()
+    await until(lambda: reports(rig) == 2)
+
+
+def away_turn(message: str) -> tuple[int, list[str]]:
+    """The count an away opener says, and the events it lists after it."""
+    first, *rest = message.splitlines()
+    assert first.startswith('<event source="hub" away="')
+    return int(first.split('"')[3]), [line for line in rest if line.startswith("<event")]
+
+
+async def test_quiet_mode_lets_through_only_the_urgent_news_of_a_turn_that_waited_for_the_reset(
+    rig_for: MakeRig,
+) -> None:
+    arrival = asyncio.Event()
+    delegating = [Text("Right away, sir."), Tool("delegate", {"request": "Watch the CI", "context": ""})]
+    rig: Rig = await rig_for(
+        delegating,
+        [Limited(600)],
+        QUIET,
+        [Text("CI is red, sir.")],
+        [Text(AWAY)],
+        orchestrator=[red_then_docs(arrival)],
+    )
+    await watch_the_ci(rig, arrival)
+    await until(lambda: LIMIT_LINE in rig.player.texts)
+    limited_at = rig.clock.t
+
+    # The User takes the floor just before the hold clears, so the parked turn waits for them.
+    await rig.advance(limited_at + 597 - rig.clock.t)
+    rig.audio.wake()
+    await until(lambda: rig.state == "listening")
+    await rig.advance(4)
+    await until(lambda: any(r["kind"] == "usage_reset" for r in rig.metrics.records))
+    rig.audio.say("Quiet mode, please")
+    await until(lambda: rig.state == "follow_up")
+    await rig.advance(6)
+    await until(lambda: "CI is red, sir." in rig.player.texts)
+
+    told = talker_received(rig)[-1]
+    assert RED in told and DOCS_REPORT not in told
+
+    await until(lambda: rig.state == "follow_up")
+    await rig.advance(4)
+    rig.audio.wake()
+    await rig.advance(6)
+    await until(lambda: AWAY in rig.player.texts)
+    count, events = away_turn(talker_received(rig)[-1])
+    assert count == len(events)
+    assert any(DOCS_REPORT in e for e in events) and not any(RED in e for e in events)
+
+
+async def test_a_parked_turn_restored_in_quiet_mode_lets_through_only_its_urgent_news(
+    rig_for: MakeRig, tmp_path: Path
+) -> None:
+    state = tmp_path / ".jarvis" / "state.json"
+    arrival = asyncio.Event()
+    delegating = [Text("Right away, sir."), Tool("delegate", {"request": "Watch the CI", "context": ""})]
+    # The Talker turns Quiet mode on in the Announcement and then hits the limit: the whole turn is parked.
+    quiet_then_limited: list[Step] = [Tool("quiet_mode", {"on": True}), Limited(600)]
+    first: Rig = await rig_for(
+        delegating, quiet_then_limited, orchestrator=[red_then_docs(arrival)], state_path=state
+    )
+    await watch_the_ci(first, arrival)
+    await until(lambda: LIMIT_LINE in first.player.texts)
+    await first.settle()
+
+    second = await rig_for([Text("CI is red, sir.")], [Text(AWAY)], state_path=crash(state, tmp_path))
+    await until(lambda: talker_received(second) != [])
+    await second.advance(700)
+    await until(lambda: "CI is red, sir." in second.player.texts)
+
+    told = talker_received(second)[-1]
+    assert RED in told and DOCS_REPORT not in told
+
+    await until(lambda: second.state == "follow_up")
+    await second.advance(4)
+    second.audio.wake()
+    await second.advance(6)
+    await until(lambda: AWAY in second.player.texts)
+    count, events = away_turn(talker_received(second)[-1])
+    assert count == len(events)
+    assert any(DOCS_REPORT in e for e in events) and not any(RED in e for e in events)
+
+
+async def parked_away(rig_for: MakeRig, tmp_path: Path) -> Path:
+    """A Hub whose "while you were away" Announcement of two held items hit the limit after turning Quiet mode back
+    on; returns the state file a crash left."""
+    state = tmp_path / ".jarvis" / "state.json"
+    quiet_then_limited: list[Step] = [Tool("quiet_mode", {"on": True}), Limited(600)]
+    first, arrivals = await news_rig(rig_for, QUIET, quiet_then_limited, items=2, state_path=state)
+    first.audio.wake()
+    first.audio.say("Quiet mode, please")
+    await until(lambda: first.state == "follow_up")
+    await first.advance(6)
+    for arrival in arrivals:
+        await arrive(first, arrival)
+    first.audio.wake()
+    await first.advance(6)
+    await until(lambda: LIMIT_LINE in first.player.texts)
+    await first.settle()
+    return crash(state, tmp_path)
+
+
+async def test_a_parked_away_announcement_restored_in_quiet_mode_lists_each_item_it_held(
+    rig_for: MakeRig, tmp_path: Path
+) -> None:
+    second = await rig_for([Text(AWAY)], state_path=await parked_away(rig_for, tmp_path))
+    await until(lambda: talker_received(second) != [])
+    await second.advance(700)
+
+    second.audio.wake()
+    await second.advance(6)
+    await until(lambda: AWAY in second.player.texts)
+    count, events = away_turn(talker_received(second)[-1])
+    assert count == len(events) == 2
+    assert [e.split('"')[3] for e in events] == ["T1", "T2"]
+    shown = second.output.shown[-1]
+    assert "- T1: The typo fix is up.\n- T2: The docs are merged." in shown
+    assert "None" not in shown
+
+
+async def test_two_restarts_keep_the_exact_count_of_the_updates_held(rig_for: MakeRig, tmp_path: Path) -> None:
+    restored = await parked_away(rig_for, tmp_path)
+    second = await rig_for(state_path=restored)
+    await until(lambda: talker_received(second) != [])
+    await second.advance(700)
+    await second.settle()
+
+    (tmp_path / "again").mkdir()
+    third = await rig_for([Text(AWAY)], [Text("Noted, sir.")], state_path=crash(restored, tmp_path / "again"))
+    await until(lambda: talker_received(third) != [])
+    third.audio.wake()
+    await third.advance(6)
+    await until(lambda: AWAY in third.player.texts)
+    count, events = away_turn(talker_received(third)[-1])
+    assert count == len(events)
+    assert [e.split('"')[3] for e in events if 'source="orchestrator"' in e] == ["T1", "T2"]
