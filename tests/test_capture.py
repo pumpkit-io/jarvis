@@ -2,12 +2,15 @@
 
 import asyncio
 import threading
+from pathlib import Path
 
 import numpy as np
 
+from jarvis_hub.voice.clips import ClipSettings, ClipStore
 from jarvis_hub.voice.engines import ReferenceBuffer
 from jarvis_hub.voice.input import Capture, Engines, Listening, Push
 from jarvis_hub.voice.player import Samples
+from jarvis_hub.voice.state import Heard
 from tests.fakes import until
 from tests.test_input_pipeline import Everyone, LoudVad, MarkerWake, ScriptedStt, ScriptedTurn
 
@@ -92,6 +95,36 @@ async def test_closing_while_the_engines_load_leaves_the_microphone_closed() -> 
     await asyncio.sleep(0.05)
 
     assert not source.opened
+
+
+async def test_failed_clip_retention_disables_recording_and_keeps_listening(tmp_path: Path) -> None:
+    class UnprunableClips(ClipStore):
+        def prune(self) -> None:
+            raise PermissionError("clip cannot be removed")
+
+    notices, source = list[str](), Source()
+    folder = tmp_path / "clips"
+    clips = UnprunableClips(folder, ClipSettings(enabled=True))
+    capture = Capture(
+        lambda: engines(CountingEcho()), Listening(), lambda row: None, notices.append,
+        source=source, backlog_s=10, clips=clips,
+    )
+    capture.start()
+    try:
+        await until(capture.ready.is_set)
+        capture.capture(True)
+        source.frames(80, value=1000)
+        source.frames(200, start=0.8)
+        async with asyncio.timeout(1):
+            async for event in capture.events():
+                if isinstance(event, Heard):
+                    assert event.text == "Open a PR"
+                    break
+        assert "Audio clips are off for this run: retention failed: PermissionError: clip cannot be removed" in notices
+        assert not folder.exists()
+    finally:
+        capture.close()
+    assert source.closed
 
 
 async def test_a_microphone_that_gives_only_silence_is_reported_once() -> None:

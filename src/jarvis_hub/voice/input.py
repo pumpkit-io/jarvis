@@ -492,6 +492,14 @@ class Capture:
         began = time.perf_counter()
         try:
             engines = self._load()
+            if self._clips is not None:
+                try:
+                    self._clips.prune()
+                except OSError as e:
+                    self._clips = None
+                    self._on_loop(
+                        self._notice, f"Audio clips are off for this run: retention failed: {type(e).__name__}: {e}"
+                    )
             with self._source_lock:
                 if self._closed:
                     return
@@ -500,8 +508,6 @@ class Capture:
         except Exception as e:
             self._on_loop(self._notice, f"Listening is off: {type(e).__name__}: {e}")
             return
-        if self._clips is not None:
-            self._clips.prune()
         pipeline = InputPipeline(
             engines, self._settings, lambda row: self._on_loop(self._record, row), clips=self._clips
         )
