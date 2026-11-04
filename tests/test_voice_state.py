@@ -2,17 +2,21 @@
 
 import pytest
 
+from jarvis_hub.voice.bargein import Partial
 from jarvis_hub.voice.language import Lang
 from jarvis_hub.voice.state import (
     AnnouncementBegins,
+    BargeIn,
     Chime,
     ChimeStarted,
     EndConversation,
     Event,
     Heard,
     Interrupt,
+    Pause,
     ReplyAudio,
     ReplyDone,
+    Resume,
     Say,
     SendTurn,
     SpeechStarted,
@@ -220,7 +224,8 @@ def test_the_wake_word_is_suppressed_during_the_hubs_own_chime() -> None:
     assert actions == [Chime(), SendTurn("Hi", "en", 11.0), Interrupt(), Chime()]
     assert voice.state == "listening"
     _, actions = run(Heard("Again", "en", 13.0), ReplyAudio(13.2, 13.0), WakeWord(13.3), start=voice)
-    assert actions == [SendTurn("Again", "en", 13.0), Interrupt(), Chime()]
+    # The first Wake word cut Jarvis off, so the turn after it is told so.
+    assert actions == [SendTurn("Again", "en", 13.0, interrupted=True), Interrupt(), Chime()]
 
 
 def test_audio_that_starts_while_the_user_has_the_floor_keeps_listening() -> None:
@@ -349,3 +354,111 @@ def test_an_announcement_begins_only_from_idle(state: VoiceState) -> None:
 def test_reply_audio_outside_a_spoken_turn_or_announcement_changes_nothing(state: VoiceState) -> None:
     voice = Voice(state=state, deadline=20.0 if state == "follow_up" else None)
     assert step(voice, ReplyAudio(10.0), TIMING) == (voice, [])
+
+
+# Jarvis speaking since 11.5, the answer to a turn heard at 11.0.
+SPEAKING = [WakeWord(10.0), Heard("Tell me a story", "en", 11.0), ReplyAudio(11.5, 11.0)]
+
+
+def said(text: str, at: float, speech_s: float, silent_s: float) -> Partial:
+    return Partial(text, at, speech_s, silent_s)
+
+
+def test_speech_held_over_jarvis_pauses_it_and_a_backchannel_resumes_it() -> None:
+    voice, actions = run(*SPEAKING, BargeIn(20.0, 20.2))
+    assert (voice.state, actions[-1]) == ("speaking", Pause())
+
+    voice, actions = run(said("okay", 20.4, 0.35, 0.05), start=voice)
+    assert actions == []
+    voice, actions = run(said("okay", 20.7, 0.35, 0.35), start=voice)
+    assert (voice.state, actions) == ("speaking", [Resume()])
+
+
+def test_a_hard_interrupt_stops_jarvis_and_listens_without_a_chime() -> None:
+    voice, actions = run(*SPEAKING, BargeIn(20.0, 20.2), said("Wait", 20.4, 0.35, 0.0))
+    assert voice.state == "listening"
+    assert actions[-2:] == [Pause(), Interrupt()]
+
+
+def test_the_turn_after_an_interruption_is_sent_marked_as_one() -> None:
+    voice, _ = run(*SPEAKING, BargeIn(20.0, 20.2), said("Actually, open an", 20.7, 0.68, 0.02))
+    voice, actions = run(SpeechStarted(20.75), Heard("Actually, open an issue instead", "en", 22.0), start=voice)
+    assert actions == [SendTurn("Actually, open an issue instead", "en", 22.0, interrupted=True)]
+    voice, actions = run(ReplyAudio(22.5, 22.0), ReplyDone(23.0, 22.0), Heard("Thanks", "en", 24.0), start=voice)
+    assert actions[-1] == SendTurn("Thanks", "en", 24.0)
+
+
+def test_an_interruption_with_nothing_said_after_it_is_forgotten_once_idle() -> None:
+    voice, _ = run(*SPEAKING, BargeIn(20.0, 20.2), said("Stop", 20.4, 0.3, 0.1), Tick(26.4))
+    assert voice.state == "idle"
+    _, actions = run(WakeWord(30.0), Heard("Hello", "en", 31.0), start=voice)
+    assert actions[-1] == SendTurn("Hello", "en", 31.0)
+
+
+def test_undecided_at_the_deadline_still_talking_stops_and_quiet_resumes() -> None:
+    paused, _ = run(*SPEAKING, BargeIn(20.0, 20.2), said("The build", 20.4, 0.38, 0.02))
+    assert paused.deadline == pytest.approx(21.0)  # pyright: ignore[reportUnknownMemberType]
+    voice, actions = run(Tick(20.99), start=paused)
+    assert (voice.state, actions) == ("speaking", [])
+    voice, actions = run(Tick(21.0), start=paused)
+    assert (voice.state, actions) == ("listening", [Interrupt()])
+
+    noise, _ = run(*SPEAKING, BargeIn(20.0, 20.2), said("", 20.4, 0.38, 0.02))
+    voice, actions = run(Tick(21.0), start=noise)
+    assert (voice.state, actions) == ("speaking", [Resume()])
+
+
+def test_the_wake_word_during_a_barge_in_stops_jarvis() -> None:
+    voice, actions = run(*SPEAKING, BargeIn(20.0, 20.2), said("okay", 20.4, 0.3, 0.1), WakeWord(20.5))
+    assert voice.state == "listening"
+    assert actions[-3:] == [Pause(), Interrupt(), Chime()]
+    _, actions = run(Heard("What is running?", "en", 22.0), start=voice)
+    assert actions == [SendTurn("What is running?", "en", 22.0, interrupted=True)]
+
+
+def test_barge_in_is_off_for_the_first_quarter_second_of_each_reply_and_after_each_resume() -> None:
+    voice, actions = run(*SPEAKING, BargeIn(11.5, 11.74))
+    assert actions[-1] != Pause()
+    voice, actions = run(BargeIn(11.6, 11.75), start=voice)
+    assert actions == [Pause()]
+    voice, actions = run(said("mhm", 12.2, 0.3, 0.3), BargeIn(12.3, 12.44), start=voice)
+    assert actions == [Resume()]
+    voice, actions = run(BargeIn(12.3, 12.45), start=voice)
+    assert actions == [Pause()]
+
+
+def test_a_second_backchannel_pauses_and_resumes_again() -> None:
+    voice, actions = run(
+        *SPEAKING,
+        BargeIn(20.0, 20.2),
+        said("mhm", 20.7, 0.3, 0.4),
+        BargeIn(22.0, 22.2),
+        said("Mhm.", 22.7, 0.3, 0.4),
+    )
+    assert voice.state == "speaking"
+    assert actions[-4:] == [Pause(), Resume(), Pause(), Resume()]
+
+
+@pytest.mark.parametrize("state", ["idle", "listening", "thinking", "follow_up"])
+def test_speech_while_jarvis_is_not_speaking_is_no_barge_in(state: VoiceState) -> None:
+    voice, actions = run(BargeIn(20.0, 20.2), said("Wait", 20.4, 0.3, 0.0), Tick(21.5), start=Voice(state=state))
+    assert (voice.state, actions) == (state, [])
+
+
+def test_partials_after_the_decision_change_nothing() -> None:
+    voice, _ = run(*SPEAKING, BargeIn(20.0, 20.2), said("okay", 20.7, 0.3, 0.4))
+    voice, actions = run(said("okay wait", 21.0, 0.6, 0.0), start=voice)
+    assert (voice.state, actions) == ("speaking", [])
+
+
+def test_an_announcement_is_paused_and_stopped_like_a_reply() -> None:
+    voice, actions = run(AnnouncementBegins(10.0), ReplyAudio(10.5), BargeIn(11.0, 11.2), said("No", 11.4, 0.2, 0.2))
+    assert voice.state == "listening"
+    assert actions == [Chime(), Pause(), Interrupt()]
+
+
+def test_a_reply_that_ends_while_paused_unpauses_the_player() -> None:
+    voice, actions = run(*SPEAKING, BargeIn(20.0, 20.2), ReplyDone(20.3, 11.0))
+    assert voice.state == "follow_up"
+    assert actions[-1] == Resume()
+    assert voice.deadline == pytest.approx(26.3)  # pyright: ignore[reportUnknownMemberType]

@@ -15,6 +15,7 @@ from jarvis_hub.voice.player import Player
 from jarvis_hub.voice.speech import ClipName, Metrics, Speech, SpeechClock
 from jarvis_hub.voice.state import (
     CAPTURING,
+    VOICED,
     Action,
     AnnouncementBegins,
     Chime,
@@ -23,8 +24,10 @@ from jarvis_hub.voice.state import (
     Event,
     InputEvent,
     Interrupt,
+    Pause,
     ReplyAudio,
     ReplyDone,
+    Resume,
     Say,
     SendTurn,
     Tick,
@@ -35,6 +38,9 @@ from jarvis_hub.voice.state import (
 )
 from jarvis_hub.voice.tts import Synthesizer
 
+# How far back Jarvis picks up after a Backchannel, so the word the User spoke over is heard again.
+REWIND_MS = 300
+
 
 class AudioInput(Protocol):
     """What the input pipeline reports (`jarvis_hub.voice.input.Capture`), or a test's script."""
@@ -43,6 +49,11 @@ class AudioInput(Protocol):
 
     def capture(self, on: bool) -> None:
         """Whether speech becomes turns. The Wake word is listened for either way."""
+        ...
+
+    def barge_in(self, on: bool) -> None:
+        """Whether speech held over Jarvis's voice is reported as a Barge-in, with partial transcripts.
+        Each call forgets the Barge-in under way, so the next one needs speech held anew."""
         ...
 
 
@@ -123,12 +134,15 @@ class VoiceMode:
         debug: bool = False,
     ) -> None:
         self._audio = audio
+        self._player = player
         self._clock = clock
         self._timing = timing
         self._metrics = metrics
         self._notice = notice
         self._debug = debug
         self._voice = Voice()
+        # What the User heard of the voice they last cut off, for their next turn.
+        self._heard_before_cut = ""
         self._idle = asyncio.Event()
         self._idle.set()
         self._woke: Callable[[], None] = lambda: None
@@ -252,6 +266,10 @@ class VoiceMode:
         capturing = after in CAPTURING
         if capturing != (before in CAPTURING):
             self._audio.capture(capturing)
+        # After capture: a turn that starts now keeps the speech of the Barge-in that stopped Jarvis.
+        voiced = after in VOICED
+        if voiced != (before in VOICED):
+            self._audio.barge_in(voiced)
         try:
             self._metrics.record({"kind": "voice", "from": before, "to": after, "on": type(event).__name__})
         except Exception as e:
@@ -259,15 +277,29 @@ class VoiceMode:
         if self._debug:
             self._notice(f"voice: {before} -> {after} ({type(event).__name__})")
 
+    def _debug_notice(self, text: str) -> None:
+        if self._debug:
+            self._notice(text)
+
     async def _act(self, action: Action, interrupt: Callable[[], Awaitable[Any]]) -> None:
         match action:
             case Chime():
                 self._speech.say("chime", "en")
             case Say(name, lang):
                 self._speech.say(name, lang)
-            case SendTurn(text, lang, at):
-                self._lines.put_nowait(Line(text, at, lang, typed=False))
+            case SendTurn(text, lang, at, interrupted):
+                heard = self._heard_before_cut if interrupted else None
+                self._lines.put_nowait(Line(text, at, lang, typed=False, interrupted=heard))
+            case Pause():
+                self._player.pause()
+                self._debug_notice("voice: paused for a Barge-in")
+            case Resume():
+                self._player.resume(REWIND_MS)
+                self._audio.barge_in(self._voice.state in VOICED)
+                self._debug_notice("voice: resumed after a Backchannel")
             case Interrupt():
+                if self._voice.cut_off:
+                    self._heard_before_cut = self._speech.played()
                 # Awaited before the chime that follows, so the stop cannot flush the chime.
                 try:
                     await interrupt()

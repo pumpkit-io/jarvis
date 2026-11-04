@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from jarvis_hub.agents.backend import Context
-from jarvis_hub.hub import Hub
+from jarvis_hub.hub import WARM_UP, Hub
 from jarvis_hub.voice.state import Timing
 from jarvis_hub.voice.voice_mode import VoiceMode, merge
 from tests.fakes import (
@@ -1308,3 +1308,156 @@ async def test_two_restarts_keep_the_exact_count_of_the_updates_held(rig_for: Ma
     count, events = away_turn(talker_received(third)[-1])
     assert count == len(events)
     assert [e.split('"')[3] for e in events if 'source="orchestrator"' in e] == ["T1", "T2"]
+
+
+STORY = [Text("First sentence, sir. "), Text("Second sentence follows. "), Text("The third one ends it.")]
+
+
+async def speaking(rig: Rig) -> None:
+    """Jarvis is half a second into its reply, past the Barge-in guard, with its clips queued and none played out.
+
+    The recording player plays nothing on its own, and a reply that makes no progress for 2 s counts as done.
+    """
+    rig.audio.wake()
+    await until(lambda: rig.player.voices[-1:] == ["chime"])
+    rig.player.hold = True
+    rig.audio.say("Tell me a story")
+    await until(lambda: rig.state == "speaking" and len(rig.player.clips) >= 3)
+    # The last sentence goes once the Talker's text has settled.
+    await rig.advance(0.5)
+    assert len(rig.player.clips) == 4
+
+
+def talker_got(rig: Rig) -> list[str]:
+    return [m for m in rig.backend.session("talker").received if m != WARM_UP]
+
+
+async def test_okay_over_jarvis_pauses_it_and_it_resumes_a_little_back_within_a_second(rig_for: MakeRig) -> None:
+    rig = await rig_for(STORY)
+    await speaking(rig)
+
+    rig.audio.barge()
+    await until(lambda: rig.player.events[-1] == "pause")
+    await rig.advance(0.2)
+    rig.audio.partial("Okay")
+    await rig.advance(0.3)
+    assert rig.player.events[-1] == "pause"
+    rig.audio.partial("Okay.", silent=0.35)
+    await until(lambda: rig.player.events[-1] == "resume 300")
+
+    # 0.7 s from the onset of "okay", and the Backchannel is no turn.
+    assert rig.state == "speaking"
+    rig.player.finish()
+    await rig.advance(0.1)
+    assert rig.state == "follow_up"
+    assert talker_got(rig) == ['<user lang="en">Tell me a story</user>']
+
+
+async def test_mhm_twice_resumes_twice(rig_for: MakeRig) -> None:
+    rig = await rig_for(STORY)
+    await speaking(rig)
+
+    for _ in range(2):
+        rig.audio.barge()
+        await rig.advance(0.5)
+        rig.audio.partial("Mhm.", silent=0.3)
+        await rig.settle()
+        rig.player.finish(1)
+        await rig.advance(1.0)
+
+    assert [e for e in rig.player.events if not e.startswith("play")] == ["pause", "resume 300"] * 2
+    assert rig.state == "speaking"
+    assert rig.audio.watching[-1] is True
+
+
+async def test_a_cough_pauses_jarvis_only_briefly(rig_for: MakeRig) -> None:
+    rig = await rig_for(STORY)
+    await speaking(rig)
+
+    rig.audio.barge(held=0.25)
+    await rig.advance(0.15)
+    rig.audio.partial("", silent=0.25)
+    await until(lambda: rig.player.events[-1] == "resume 300")
+
+    assert rig.state == "speaking"
+    assert "stop" not in rig.player.events
+
+
+async def test_wait_stop_stops_jarvis_and_listens_and_the_turn_says_what_was_heard(rig_for: MakeRig) -> None:
+    rig = await rig_for([*STORY, AwaitInterrupt()], [Text("Of course, sir.")])
+    await speaking(rig)
+    rig.player.finish(1)
+
+    rig.audio.barge()
+    await rig.advance(0.2)
+    rig.audio.partial("Wait, stop")
+    await until(lambda: rig.state == "listening")
+
+    assert rig.player.events[-2:] == ["pause", "stop"]
+    assert rig.player.voices[-1] != "chime"
+    talker = rig.backend.session("talker")
+    await until(lambda: not talker._sending)  # pyright: ignore[reportPrivateUsage]
+    assert rig.audio.capturing[-1] is True and rig.audio.watching[-1] is False
+
+    rig.audio.say("Wait, stop.")
+    await until(lambda: len(talker_got(rig)) == 2)
+    assert talker_got(rig)[1] == '<interrupted spoken="First sentence, sir."/>\n<user lang="en">Wait, stop.</user>'
+
+
+async def test_a_new_request_over_jarvis_stops_it_and_is_answered_with_what_was_heard(rig_for: MakeRig) -> None:
+    rig = await rig_for([*STORY, AwaitInterrupt()], [Text("Right away, sir.")])
+    await speaking(rig)
+    rig.player.finish(1)
+
+    rig.audio.barge()
+    await rig.advance(0.2)
+    rig.audio.partial("Actually, open")
+    await until(lambda: rig.state == "listening")
+    rig.audio.say("Actually, open an issue instead")
+    await until(lambda: rig.state == "speaking" and rig.player.texts[-1] == "Right away, sir.")
+
+    assert talker_got(rig)[1] == (
+        '<interrupted spoken="First sentence, sir."/>\n<user lang="en">Actually, open an issue instead</user>'
+    )
+    assert "Second sentence follows." not in rig.player.texts[rig.player.texts.index("Right away, sir.") :]
+
+
+async def test_jarvis_said_over_a_reply_always_stops_it(rig_for: MakeRig) -> None:
+    rig = await rig_for([*STORY, AwaitInterrupt()], [Text("Two Subagents, sir.")])
+    await speaking(rig)
+
+    rig.audio.barge()
+    await rig.advance(0.1)
+    rig.audio.wake()
+    await until(lambda: rig.state == "listening" and rig.player.voices[-1] == "chime")
+    rig.audio.say("What is running?")
+    await until(lambda: len(talker_got(rig)) == 2)
+
+    assert "stop" in rig.player.events
+    assert talker_got(rig)[1] == '<interrupted spoken=""/>\n<user lang="en">What is running?</user>'
+
+
+async def test_speech_as_jarvis_starts_speaking_is_not_a_barge_in(rig_for: MakeRig) -> None:
+    rig = await rig_for(STORY)
+    rig.audio.wake()
+    await until(lambda: rig.player.voices[-1:] == ["chime"])
+    rig.player.hold = True
+    rig.audio.say("Tell me a story")
+    await until(lambda: rig.state == "speaking")
+
+    rig.audio.barge()
+    await rig.advance(0.1)
+    rig.audio.partial("Stop")
+    await rig.advance(1.0)
+
+    assert "pause" not in rig.player.events and "stop" not in rig.player.events
+
+
+async def test_barge_in_is_watched_only_while_jarvis_speaks(rig_for: MakeRig) -> None:
+    rig = await rig_for([Text("Hi, sir.")])
+
+    rig.audio.wake()
+    rig.audio.say("Hello")
+    await until(lambda: rig.state == "follow_up")
+
+    assert rig.audio.watching == [True, False]

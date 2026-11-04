@@ -130,6 +130,8 @@ class Line:
     # Left out, the Hub detects it from the text.
     lang: Lang | None = None
     typed: bool = True
+    # What the User heard of Jarvis's voice before cutting it off to say this; None when they did not cut it off.
+    interrupted: str | None = None
 
 
 # Sent once at launch, in the background, so the first real turn finds the prompt cached (ADR 0006); never shown.
@@ -157,6 +159,10 @@ def user_message(text: str, lang: Lang, *, typed: bool = True) -> str:
     # Escaped so the User's text can never close the tag or forge another one.
     marker = ' typed="true"' if typed else ""
     return f'<user lang="{lang}"{marker}>{escape(text, quote=False)}</user>'
+
+
+def interrupted_message(spoken: str) -> str:
+    return f'<interrupted spoken="{escape(spoken)}"/>'
 
 
 def event_message(source: str, text: str, task: str, *, needs_user: bool = False, details: bool = False) -> str:
@@ -471,6 +477,8 @@ class Hub:
             if text := line.text.strip():
                 self._read_lang = lang = line.lang or detect_language(text, self._read_lang)
                 message = user_message(text, lang, typed=line.typed)
+                if line.interrupted is not None:
+                    message = f"{interrupted_message(line.interrupted)}\n{message}"
                 spoken = not line.typed or self._speak_typed
                 item = _TalkerInput("user", line.arrived, message, heard=text, lang=lang, typed=line.typed, spoken=spoken)
                 self._post(self._talker_inbox, item)

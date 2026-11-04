@@ -1,5 +1,6 @@
 """Audio input: 16 kHz mono in 10 ms frames, through echo cancellation, a pre-roll ring buffer, the Wake word, VAD,
-end-of-turn detection, the speaker gate and STT, reported as the voice state machine's input events.
+end-of-turn detection, the speaker gate and STT, reported as the voice state machine's input events. While Jarvis
+speaks, speech held over it is a Barge-in, with partial transcripts for its decision.
 
 `InputPipeline` is the frame-by-frame logic with every engine injected; `Capture` runs it on a thread of its own,
 fed by the `Microphone` or another `FrameSource`.
@@ -12,13 +13,14 @@ import time
 from collections import deque
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
 
+from jarvis_hub.voice.bargein import Partial
 from jarvis_hub.voice.player import Samples
-from jarvis_hub.voice.state import Heard, InputEvent, SpeechStarted, WakeWord
+from jarvis_hub.voice.state import BargeIn, Heard, InputEvent, SpeechStarted, WakeWord
 
 SAMPLE_RATE = 16_000
 FRAME = SAMPLE_RATE // 100
@@ -99,6 +101,12 @@ class Listening:
     wake_refractory_s: float = 2.0
     # VAD fires a little after the true onset, so a turn keeps this much from before it.
     onset_pad_s: float = 0.2
+    # Unbroken speech over Jarvis this long is a Barge-in; shorter is a cough or a click.
+    bargein_min_speech_s: float = 0.2
+    # From a Barge-in's onset, when its speech is transcribed for the decision.
+    bargein_partials_s: tuple[float, ...] = (0.4, 0.7)
+    # Partials start this long before the onset, which VAD finds late, so the first word is whole.
+    bargein_lead_s: float = 0.3
 
 
 @dataclass
@@ -140,11 +148,24 @@ class InputPipeline:
         self._last_speech = 0.0
         self._capturing = False
         self._turn: _Turn | None = None
+        # The start of the current unbroken speech, and whether it has already made a Barge-in.
+        self._run: float | None = None
+        self._run_spent = False
+        self._watching = False
+        # The onset of the Barge-in under way, and when its partials are due.
+        self._barge: float | None = None
+        self._partials_due: list[float] = []
 
     def capture(self, on: bool) -> None:
         self._capturing = on
         if not on:
             self._turn = None
+
+    def barge_in(self, on: bool) -> None:
+        """Watch for Barge-ins, or stop. Either way the one under way is forgotten, and its speech raises no other."""
+        self._watching = on
+        self._barge = None
+        self._partials_due = []
 
     def push(self, frame: Pcm, at: float) -> list[InputEvent]:
         frame = self._e.echo.process(frame)
@@ -166,7 +187,12 @@ class InputPipeline:
             if self._e.vad.probability(chunk) >= self._s.vad_threshold:
                 if self._onset is None:
                     self._onset = ends - len(chunk) / SAMPLE_RATE
+                if self._run is None:
+                    self._run = ends - len(chunk) / SAMPLE_RATE
                 self._last_speech = ends
+            else:
+                self._run, self._run_spent = None, False
+        events += self._barge_events(at)
         if self._onset is not None and self._turn is None and at - self._last_speech >= self._s.end_silence_s:
             self._onset = None
         if self._capturing and self._turn is None and self._onset is not None:
@@ -175,6 +201,27 @@ class InputPipeline:
         if self._turn is not None and (heard := self._end_of_turn(self._turn, at)) is not None:
             events.append(heard)
         return events
+
+    def _barge_events(self, at: float) -> list[InputEvent]:
+        events: list[InputEvent] = []
+        run = self._run
+        held = run is not None and self._last_speech - run >= self._s.bargein_min_speech_s
+        if self._watching and self._barge is None and run is not None and held and not self._run_spent:
+            self._barge, self._run_spent = run, True
+            self._partials_due = [run + offset for offset in self._s.bargein_partials_s]
+            events.append(BargeIn(run, at))
+        if self._barge is not None and self._partials_due and at >= self._partials_due[0] - 0.005:
+            while self._partials_due and at >= self._partials_due[0] - 0.005:
+                self._partials_due.pop(0)
+            events.append(self._partial(self._barge, at))
+        return events
+
+    def _partial(self, onset: float, at: float) -> Partial:
+        start = onset - self._s.bargein_lead_s
+        frames = [f for f, t in self._ring if t - 0.01 >= start - 0.005]
+        audio = np.concatenate(frames).astype(np.float32) / 32768.0
+        text = self._e.stt.transcribe(audio).strip()
+        return Partial(text, at, max(0.0, self._last_speech - onset), at - self._last_speech)
 
     def _begin_turn(self, onset: float) -> _Turn:
         start = onset - self._s.onset_pad_s
@@ -266,6 +313,12 @@ class Microphone:
             self._stream.close()
 
 
+@dataclass(frozen=True)
+class _Switch:
+    name: Literal["capture", "barge_in"]
+    on: bool
+
+
 # A real microphone never gives exact digital silence for this long; macOS gives it when access is denied.
 SILENT_MIC_S = 3.0
 
@@ -292,8 +345,8 @@ class Capture:
         self._record = record
         self._notice = notice
         self._source: FrameSource = source if source is not None else Microphone()
-        # Frames and capture switches in the order they happened; None stops the thread.
-        self._frames: queue.SimpleQueue[tuple[Pcm, float] | bool | None] = queue.SimpleQueue()
+        # Frames and switches in the order they happened; None stops the thread.
+        self._frames: queue.SimpleQueue[tuple[Pcm, float] | _Switch | None] = queue.SimpleQueue()
         self._max_backlog = round(backlog_s * 100)
         self._backlog = 0
         self._behind = False
@@ -312,7 +365,10 @@ class Capture:
         threading.Thread(target=self._run, name="capture", daemon=True).start()
 
     def capture(self, on: bool) -> None:
-        self._frames.put(on)
+        self._frames.put(_Switch("capture", on))
+
+    def barge_in(self, on: bool) -> None:
+        self._frames.put(_Switch("barge_in", on))
 
     def reference(self, samples: Samples, rate: int) -> None:
         if (echo := self._echo) is not None:
@@ -362,8 +418,11 @@ class Capture:
         self._on_loop(self._notice, 'Listening for "Hey Jarvis".')
         silent = 0
         while (item := self._frames.get()) is not None:
-            if isinstance(item, bool):
-                pipeline.capture(item)
+            if isinstance(item, _Switch):
+                if item.name == "capture":
+                    pipeline.capture(item.on)
+                else:
+                    pipeline.barge_in(item.on)
                 continue
             with self._backlog_lock:
                 self._backlog -= 1

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from jarvis_hub.config import RoleModel, Settings, VoiceSettings
-from jarvis_hub.main import Ears, voice_mode
+from jarvis_hub.main import Ears, timing, voice_mode
 from jarvis_hub.voice.engines import EngineChoice
 from jarvis_hub.voice.input import Listening
 from jarvis_hub.voice.player import Samples
@@ -71,7 +71,7 @@ async def test_voice_mode_wakes_hears_answers_aloud_and_idles(tmp_path: Path) ->
         return player
 
     stdin, stdout, stderr = HeldStdin(), io.StringIO(), io.StringIO()
-    config = settings(tmp_path, VoiceSettings(follow_up_s=3.0, end_silence_ms=400, max_turn_s=20.0, onset_pad_ms=300))
+    config = settings(tmp_path, VoiceSettings(follow_up_s=3.0, end_silence_ms=400, max_turn_s=20.0, onset_pad_ms=300, bargein_min_speech_ms=150))
     running = asyncio.create_task(
         voice_mode(
             settings=config,
@@ -100,6 +100,13 @@ async def test_voice_mode_wakes_hears_answers_aloud_and_idles(tmp_path: Path) ->
     [(choice, listening)] = chosen
     assert choice.aec == "off"
     assert (listening.end_silence_s, listening.max_turn_s, listening.onset_pad_s) == (0.4, 20.0, 0.3)
+    assert listening.bargein_min_speech_s == 0.15
     assert microphone.closed and player.closed
     rows = [json.loads(line) for line in (config.runtime_dir / "metrics.jsonl").read_text().splitlines()]
     assert [r["to"] for r in rows if r["kind"] == "voice"] == ["listening", "thinking", "speaking", "follow_up", "idle"]
+
+
+def test_the_barge_in_windows_reach_the_voice_state_machine() -> None:
+    voice = timing(VoiceSettings(bargein_decide_ms=600, bargein_guard_ms=400))
+
+    assert (voice.decide_s, voice.guard_s) == (0.6, 0.4)

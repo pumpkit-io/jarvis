@@ -26,7 +26,8 @@ from jarvis_hub.voice.language import Lang
 from jarvis_hub.subagents import Refusal, Subagent, SubagentSetup
 from jarvis_hub.waits import WaitSetup
 from jarvis_hub.voice.player import Clip, Samples
-from jarvis_hub.voice.state import Heard, SpeechStarted, WakeWord
+from jarvis_hub.voice.bargein import Partial
+from jarvis_hub.voice.state import BargeIn, Heard, InputEvent, SpeechStarted, WakeWord
 
 
 class FakeClock:
@@ -590,9 +591,11 @@ class RecordingPlayer:
         else:
             self._heard.append(clip.text)
 
-    def finish(self) -> None:
-        self._heard += [c.text for c in self._queued]
-        self._queued.clear()
+    def finish(self, clips: int | None = None) -> None:
+        """Plays out the queue, or only its first `clips`."""
+        done = self._queued[:clips]
+        self._heard += [c.text for c in done]
+        del self._queued[: len(done)]
 
     def pause(self) -> None:
         self.events.append("pause")
@@ -623,12 +626,15 @@ class RecordingPlayer:
 
 
 class ScriptedAudio:
-    """Audio input as the pipeline reports it: Wake word hits, speech onsets and transcribed turns, sent by the test."""
+    """Audio input as the pipeline reports it: Wake word hits, speech onsets, transcribed turns, and Barge-ins with
+    their partial transcripts, sent by the test."""
 
     def __init__(self, clock: FakeClock) -> None:
         self._clock = clock
-        self._queue: asyncio.Queue[WakeWord | SpeechStarted | Heard] = asyncio.Queue()
+        self._queue: asyncio.Queue[InputEvent] = asyncio.Queue()
         self.capturing: list[bool] = []
+        self.watching: list[bool] = []
+        self._onset = 0.0
 
     def wake(self) -> None:
         self._queue.put_nowait(WakeWord(self._clock.now()))
@@ -641,9 +647,22 @@ class ScriptedAudio:
         self.speech()
         self._queue.put_nowait(Heard(text, lang, self._clock.now()))
 
+    def barge(self, held: float = 0.2) -> None:
+        """Speech over Jarvis that began `held` seconds ago and has held since."""
+        self._onset = self._clock.now() - held
+        self._queue.put_nowait(BargeIn(self._onset, self._clock.now()))
+
+    def partial(self, text: str, *, silent: float = 0.0) -> None:
+        """What STT makes of the Barge-in's speech so far, which went quiet `silent` seconds ago."""
+        now = self._clock.now()
+        self._queue.put_nowait(Partial(text, now, now - silent - self._onset, silent))
+
     def capture(self, on: bool) -> None:
         self.capturing.append(on)
 
-    async def events(self) -> AsyncIterator[WakeWord | SpeechStarted | Heard]:
+    def barge_in(self, on: bool) -> None:
+        self.watching.append(on)
+
+    async def events(self) -> AsyncIterator[InputEvent]:
         while True:
             yield await self._queue.get()

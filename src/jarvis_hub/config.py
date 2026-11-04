@@ -52,6 +52,9 @@ class VoiceSettings:
     chime_guard_ms: int = 500
     wake_refractory_ms: int = 2000
     onset_pad_ms: int = 200
+    bargein_min_speech_ms: int = 200
+    bargein_decide_ms: int = 800
+    bargein_guard_ms: int = 250
 
 
 @dataclass(frozen=True)
@@ -169,6 +172,9 @@ def load_settings(
             chime_guard_ms=round(number("JARVIS_CHIME_GUARD_MS", 500, 0, 5000)),
             wake_refractory_ms=round(number("JARVIS_WAKE_REFRACTORY_MS", 2000, 0, 10000)),
             onset_pad_ms=round(number("JARVIS_ONSET_PAD_MS", 200, 0, 1000)),
+            bargein_min_speech_ms=round(number("JARVIS_BARGEIN_MIN_SPEECH_MS", 200, 0, 2000, low_open=True)),
+            bargein_decide_ms=round(number("JARVIS_BARGEIN_DECIDE_MS", 800, 0, 5000, low_open=True)),
+            bargein_guard_ms=round(number("JARVIS_BARGEIN_GUARD_MS", 250, 0, 5000)),
         )
 
     if ignore_voice is None:

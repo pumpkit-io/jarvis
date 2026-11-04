@@ -166,6 +166,7 @@ def test_voice_settings_default_to_the_ticket_and_phase_0(checkout: Path) -> Non
     assert (voice.vad_threshold, voice.end_silence_ms, voice.end_extend_ms) == (0.5, 500, 1500)
     assert (voice.smart_turn_threshold, voice.preroll_ms) == (0.5, 1500)
     assert (voice.max_turn_s, voice.chime_guard_ms, voice.wake_refractory_ms, voice.onset_pad_ms) == (30.0, 500, 2000, 200)
+    assert (voice.bargein_min_speech_ms, voice.bargein_decide_ms, voice.bargein_guard_ms) == (200, 800, 250)
 
 
 def test_voice_settings_come_from_dotenv(checkout: Path) -> None:
@@ -174,12 +175,14 @@ def test_voice_settings_come_from_dotenv(checkout: Path) -> None:
         "JARVIS_END_EXTEND_MS=1000\nJARVIS_SMART_TURN_THRESHOLD=0.6\nJARVIS_VAD_THRESHOLD=0.4\n"
         "JARVIS_PREROLL_MS=1200\nJARVIS_LISTEN_SECONDS=5\nJARVIS_ANNOUNCE_FOLLOWUP_SECONDS=3\n"
         "JARVIS_MAX_TURN_SECONDS=20\nJARVIS_CHIME_GUARD_MS=700\nJARVIS_WAKE_REFRACTORY_MS=1500\nJARVIS_ONSET_PAD_MS=300\n"
+        "JARVIS_BARGEIN_MIN_SPEECH_MS=150\nJARVIS_BARGEIN_DECIDE_MS=600\nJARVIS_BARGEIN_GUARD_MS=400\n"
     )
     voice = load_settings(checkout, environ={}).voice
     assert (voice.follow_up_s, voice.announce_follow_up_s, voice.listen_s) == (8.0, 3.0, 5.0)
     assert (voice.wake_threshold, voice.aec, voice.vad_threshold) == (0.3, "off", 0.4)
     assert (voice.end_silence_ms, voice.end_extend_ms, voice.smart_turn_threshold, voice.preroll_ms) == (400, 1000, 0.6, 1200)
     assert (voice.max_turn_s, voice.chime_guard_ms, voice.wake_refractory_ms, voice.onset_pad_ms) == (20.0, 700, 1500, 300)
+    assert (voice.bargein_min_speech_ms, voice.bargein_decide_ms, voice.bargein_guard_ms) == (150, 600, 400)
 
 
 @pytest.mark.parametrize(

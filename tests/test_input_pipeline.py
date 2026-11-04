@@ -3,13 +3,15 @@
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 import pytest
 
+from jarvis_hub.voice.bargein import Partial
 from jarvis_hub.voice.input import Engines, InputPipeline, Listening
 from jarvis_hub.voice.player import Samples
-from jarvis_hub.voice.state import Heard, SpeechStarted, WakeWord
+from jarvis_hub.voice.state import BargeIn, Heard, SpeechStarted, WakeWord
 
 RATE = 16_000
 FRAME = 160
@@ -93,8 +95,13 @@ class Rig:
         return [e for e in self.events if isinstance(e, Heard)]
 
 
-def rig(verdicts: list[float] | None = None, clock: Callable[[], float] = time.perf_counter, **settings: float) -> Rig:
-    turn, stt, echo = ScriptedTurn(list(verdicts or [])), ScriptedStt(), PassThrough()
+def rig(
+    verdicts: list[float] | None = None,
+    clock: Callable[[], float] = time.perf_counter,
+    echo: PassThrough | None = None,
+    **settings: Any,
+) -> Rig:
+    turn, stt, echo = ScriptedTurn(list(verdicts or [])), ScriptedStt(), echo or PassThrough()
     engines = Engines(echo=echo, wake=MarkerWake(), vad=LoudVad(), turn=turn, stt=stt, gate=Everyone())
     records: list[dict[str, object]] = []
     pipeline = InputPipeline(engines, Listening(**settings), record=records.append, clock=clock)
@@ -317,3 +324,117 @@ def test_smart_turn_and_stt_are_timed_on_the_given_clock() -> None:
 
     [row] = r.records
     assert (row["smart_turn_ms"], row["stt_ms"]) == (7.0, 7.0)
+
+
+def barge_ins(r: Rig) -> list[BargeIn]:
+    return [e for e in r.events if isinstance(e, BargeIn)]
+
+
+def partials(r: Rig) -> list[Partial]:
+    return [e for e in r.events if isinstance(e, Partial)]
+
+
+def test_speech_held_over_jarvis_for_the_minimum_is_a_barge_in_from_its_onset() -> None:
+    r = rig()
+    r.pipeline.barge_in(True)
+    r.feed("silence", 0.3)
+    r.feed("speech", 0.18)
+    assert barge_ins(r) == []
+    r.feed("speech", 0.1)
+
+    [barge] = barge_ins(r)
+    assert barge.onset - T0 == pytest.approx(0.3, abs=0.04)  # pyright: ignore[reportUnknownMemberType]
+    assert barge.at - barge.onset == pytest.approx(0.2, abs=0.04)  # pyright: ignore[reportUnknownMemberType]
+    assert [type(e) for e in r.events] == [BargeIn]
+
+
+def test_a_barge_in_is_transcribed_at_about_400_and_700_ms_from_a_little_before_its_onset() -> None:
+    r = rig()
+    r.stt.text = "okay"
+    r.pipeline.barge_in(True)
+    r.feed("silence", 1.0)
+    r.feed("speech", 0.35)
+    r.feed("silence", 1.0)
+
+    early, late = partials(r)
+    onset = barge_ins(r)[0].onset
+    assert (early.text, late.text) == ("okay", "okay")
+    assert early.at - onset == pytest.approx(0.4, abs=0.02)  # pyright: ignore[reportUnknownMemberType]
+    assert late.at - onset == pytest.approx(0.7, abs=0.02)  # pyright: ignore[reportUnknownMemberType]
+    assert late.speech_s == pytest.approx(0.35, abs=0.04)  # pyright: ignore[reportUnknownMemberType]
+    assert late.silent_s == pytest.approx(0.35, abs=0.04)  # pyright: ignore[reportUnknownMemberType]
+    # From 300 ms before the onset to the moment of each partial.
+    assert len(r.stt.heard[1]) / RATE == pytest.approx(0.3 + 0.7, abs=0.04)  # pyright: ignore[reportUnknownMemberType]
+
+
+def test_a_cough_shorter_than_the_minimum_is_no_barge_in() -> None:
+    r = rig()
+    r.pipeline.barge_in(True)
+    r.feed("speech", 0.12)
+    r.feed("silence", 0.1)
+    r.feed("speech", 0.12)
+    r.feed("silence", 1.0)
+
+    assert r.events == []
+    assert r.stt.heard == []
+
+
+def test_the_minimum_speech_is_a_setting() -> None:
+    r = rig(bargein_min_speech_s=0.4)
+    r.pipeline.barge_in(True)
+    r.feed("speech", 0.3)
+    assert barge_ins(r) == []
+    r.feed("speech", 0.15)
+    assert len(barge_ins(r)) == 1
+
+
+def test_without_barge_in_watching_speech_is_nothing() -> None:
+    r = rig()
+    r.feed("speech", 1.0)
+    r.pipeline.barge_in(True)
+    r.pipeline.barge_in(False)
+    r.feed("silence", 1.0)
+    r.feed("speech", 1.0)
+
+    assert r.events == []
+
+
+def test_jarvis_cancelled_out_of_the_input_is_never_a_barge_in() -> None:
+    class CancelsAll(PassThrough):
+        def process(self, frame: np.ndarray) -> np.ndarray:
+            return np.zeros_like(frame)
+
+    r = rig(echo=CancelsAll())
+    r.pipeline.barge_in(True)
+    r.feed("speech", 2.0)
+
+    assert r.events == []
+
+
+def test_watching_again_forgets_the_barge_in_and_needs_speech_held_anew() -> None:
+    r = rig()
+    r.pipeline.barge_in(True)
+    r.feed("speech", 0.5)
+    r.pipeline.barge_in(True)
+    r.feed("speech", 1.0)
+    assert len(barge_ins(r)) == 1
+    assert len(partials(r)) == 1
+
+    r.feed("silence", 0.2)
+    r.feed("speech", 0.25)
+    assert len(barge_ins(r)) == 2
+
+
+def test_a_turn_after_a_barge_in_keeps_the_users_audio_from_its_onset() -> None:
+    r = rig()
+    r.pipeline.barge_in(True)
+    r.feed("silence", 1.0)
+    r.feed("speech", 0.5)
+    r.pipeline.capture(True)
+    r.pipeline.barge_in(False)
+    r.feed("speech", 1.0)
+    r.feed("silence", 0.6)
+
+    assert [type(e) for e in r.events] == [BargeIn, Partial, SpeechStarted, Heard]
+    # From the pad before the onset, through 1.5 s of speech, to half a second of silence.
+    assert len(r.stt.heard[-1]) / RATE == pytest.approx(0.2 + 1.5 + 0.5, abs=0.06)  # pyright: ignore[reportUnknownMemberType]

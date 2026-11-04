@@ -9,12 +9,15 @@ from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from typing import Literal
 
+from jarvis_hub.voice.bargein import Partial, decide
 from jarvis_hub.voice.language import Lang
 
 VoiceState = Literal["idle", "listening", "thinking", "speaking", "follow_up", "announce"]
 
 # The states in which the User's speech becomes a turn.
 CAPTURING: frozenset[VoiceState] = frozenset({"listening", "follow_up"})
+# The states in which Jarvis's voice is heard, so the User's speech over it is a Barge-in.
+VOICED: frozenset[VoiceState] = frozenset({"speaking", "announce"})
 
 
 @dataclass(frozen=True)
@@ -26,6 +29,10 @@ class Timing:
     listen_s: float
     # Wake word hits this soon after the chime starts are the chime's own echo or the same phrase, and are ignored.
     chime_s: float
+    # From the pause, how long a Barge-in has to be told apart as a Backchannel or an Interruption.
+    decide_s: float = 0.8
+    # From when Jarvis's voice starts or resumes, how long echo cancellation gets to settle before a Barge-in counts.
+    guard_s: float = 0.25
 
 
 @dataclass(frozen=True)
@@ -42,6 +49,14 @@ class ChimeStarted:
 
 @dataclass(frozen=True)
 class SpeechStarted:
+    at: float
+
+
+@dataclass(frozen=True)
+class BargeIn:
+    """The User's speech over Jarvis has held long enough to pause it: it began at `onset`."""
+
+    onset: float
     at: float
 
 
@@ -91,12 +106,14 @@ class Tick:
 
 
 # What the audio input reports.
-InputEvent = WakeWord | SpeechStarted | Heard
+InputEvent = WakeWord | SpeechStarted | Heard | BargeIn | Partial
 Event = (
     WakeWord
     | ChimeStarted
     | SpeechStarted
     | Heard
+    | BargeIn
+    | Partial
     | ReplyAudio
     | ReplyDone
     | EndConversation
@@ -125,6 +142,8 @@ class SendTurn:
     text: str
     lang: Lang | None
     at: float
+    # The User cut Jarvis off before this turn: the Talker is told what they heard of it.
+    interrupted: bool = False
 
 
 @dataclass(frozen=True)
@@ -132,7 +151,25 @@ class Interrupt:
     """Stop the reply in progress, both the Talker's turn and its audio."""
 
 
-Action = Chime | Say | SendTurn | Interrupt
+@dataclass(frozen=True)
+class Pause:
+    """Hold Jarvis's voice where it is while a Barge-in is decided."""
+
+
+@dataclass(frozen=True)
+class Resume:
+    """Go on with Jarvis's voice from a little before the pause."""
+
+
+Action = Chime | Say | SendTurn | Interrupt | Pause | Resume
+
+
+@dataclass(frozen=True)
+class Barge:
+    """A Barge-in being decided: Jarvis is paused, and each partial transcript may settle it."""
+
+    onset: float
+    partials: tuple[Partial, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -151,6 +188,11 @@ class Voice:
     awaiting: float | None = None
     # When the Wake word last opened listening: a spoken turn heard before it is one the User has moved on from.
     woke_at: float | None = None
+    # When Jarvis's voice last started or resumed, while it is heard; None otherwise.
+    voiced_at: float | None = None
+    barge: Barge | None = None
+    # The User cut Jarvis off and their next turn has not been sent yet.
+    cut_off: bool = False
 
 
 # Said on their own, after punctuation and the wake phrase are gone. Anything longer goes to the Talker.
@@ -209,6 +251,15 @@ def stop_phrase(text: str) -> Lang | None:
 
 
 def step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Action]]:
+    after, actions = _step(voice, event, timing)
+    if after.state not in VOICED:
+        after = replace(after, voiced_at=None, barge=None)
+    if after.state == "idle":
+        after = replace(after, cut_off=False)
+    return after, actions
+
+
+def _step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Action]]:
     match event:
         case WakeWord(at):
             return _wake(voice, at, timing)
@@ -221,21 +272,37 @@ def step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Action
             return voice, []
         case Heard(text, lang, at):
             return _heard(voice, text, lang, at, timing)
-        case ReplyAudio(_, answers):
+        case ReplyAudio(at, answers):
             # Only a spoken turn's reply moves on here: news has already claimed the voice with AnnouncementBegins.
             if voice.state == "thinking" and answers == voice.awaiting:
-                return replace(voice, state="speaking", deadline=None), []
+                return replace(voice, state="speaking", deadline=None, voiced_at=at), []
+            if voice.state == "announce" and voice.barge is None:
+                return replace(voice, voiced_at=at), []
             return voice, []
         case ReplyDone(at, answers):
             if voice.state not in ("thinking", "speaking", "announce"):
                 return voice, []
             if voice.state == "thinking" and answers != voice.awaiting:
                 return voice, []
+            # Nothing is left to resume, but the player must not stay paused for the next reply.
+            unpause: list[Action] = [Resume()] if voice.barge is not None else []
             voice = replace(voice, awaiting=None)
             if voice.ending:
-                return replace(voice, state="idle", deadline=None, ending=False), []
+                return replace(voice, state="idle", deadline=None, ending=False), unpause
             window = timing.announce_follow_up_s if voice.state == "announce" else timing.follow_up_s
-            return replace(voice, state="follow_up", deadline=at + window), []
+            return replace(voice, state="follow_up", deadline=at + window), unpause
+        case BargeIn(onset, at):
+            heard_since = voice.voiced_at
+            if voice.state not in VOICED or voice.barge is not None or heard_since is None:
+                return voice, []
+            if at < heard_since + timing.guard_s:
+                return voice, []
+            return replace(voice, barge=Barge(onset), deadline=at + timing.decide_s), [Pause()]
+        case Partial(_, at):
+            if voice.barge is None:
+                return voice, []
+            barge = replace(voice.barge, partials=(*voice.barge.partials, event))
+            return _decide(replace(voice, barge=barge), at, timing, final=False)
         case EndConversation():
             if voice.state in ("thinking", "speaking", "announce"):
                 return replace(voice, ending=True), []
@@ -245,9 +312,27 @@ def step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Action
                 return replace(voice, state="announce", deadline=None), [Chime()]
             return voice, []
         case Tick(at):
+            if voice.barge is not None:
+                if voice.deadline is not None and at >= voice.deadline:
+                    return _decide(voice, at, timing, final=True)
+                return voice, []
             if voice.deadline is not None and at >= voice.deadline:
                 return replace(voice, state="idle", deadline=None), []
             return voice, []
+
+
+def _decide(voice: Voice, at: float, timing: Timing, *, final: bool) -> tuple[Voice, list[Action]]:
+    assert voice.barge is not None
+    match decide(voice.barge.partials, wake=False, final=final):
+        case "wait":
+            return voice, []
+        case "resume":
+            return replace(voice, barge=None, deadline=None, voiced_at=at), [Resume()]
+        case "stop":
+            listening = replace(
+                voice, state="listening", deadline=at + timing.listen_s, ending=False, awaiting=None, cut_off=True
+            )
+            return listening, [Interrupt()]
 
 
 def _wake(voice: Voice, at: float, timing: Timing) -> tuple[Voice, list[Action]]:
@@ -255,7 +340,13 @@ def _wake(voice: Voice, at: float, timing: Timing) -> tuple[Voice, list[Action]]
     if at < voice.chime_until or voice.in_turn:
         return voice, []
     listening = replace(
-        voice, state="listening", deadline=at + timing.listen_s, ending=False, awaiting=None, woke_at=at
+        voice,
+        state="listening",
+        deadline=at + timing.listen_s,
+        ending=False,
+        awaiting=None,
+        woke_at=at,
+        cut_off=voice.cut_off or voice.state in VOICED,
     )
     if voice.state == "listening":
         return listening, []
@@ -278,4 +369,5 @@ def _heard(voice: Voice, text: str, lang: Lang | None, at: float, timing: Timing
         return replace(heard, state="listening", deadline=at + timing.listen_s), []
     if (stop_lang := stop_phrase(turn)) is not None:
         return replace(heard, state="idle", deadline=None, ending=False), [Say("very_good", stop_lang)]
-    return replace(heard, state="thinking", deadline=None, ending=False, awaiting=at), [SendTurn(turn, lang, at)]
+    sent = SendTurn(turn, lang, at, interrupted=voice.cut_off)
+    return replace(heard, state="thinking", deadline=None, ending=False, awaiting=at, cut_off=False), [sent]
