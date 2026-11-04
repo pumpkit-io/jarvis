@@ -883,7 +883,7 @@ async def test_a_newer_request_on_the_same_task_replaces_the_one_pending(
             [Text("Right away, sir."), delegate()],
             [Text(ASKED)],
             [Text("Noted, sir."), delegate_to("Check 42 again", "T1")],
-            [Text("Same question, sir: merge 42?")],
+            [Text("Shall I merge 42, sir?")],
             [Text("Merging, sir."), approve("A2")],
         ],
         [[ask_merge()], [ask_merge(spoken="Still green. Merge pumpkit#42?")], [report("T1", "Merged.")]],
@@ -891,7 +891,7 @@ async def test_a_newer_request_on_the_same_task_replaces_the_one_pending(
 
     await asked_to_merge(session)
     await session.say("Check 42 again")
-    await session.replied("Same question, sir: merge 42?")
+    await session.replied("Shall I merge 42, sir?")
     await session.say("Yes.")
     await until(lambda: gh.actions)
     await session.end()
@@ -1867,14 +1867,14 @@ async def test_an_x_post_approval_opens_only_the_post_tool_of_its_action(
         output,
         metrics,
         gh,
-        [[Text("Right away, sir."), delegate("Post the launch thread")], [Text("Ready, sir?")], [approve()]],
+        [[Text("Right away, sir."), delegate("Post the launch thread")], [Text("Shall I " + ("schedule" if asking.input["approval"]["post_action"] == "schedule_post" else "post") + " it, sir?")], [approve()]],
         [[asking], [spawn]],
     )
     session.backend.subagent_close_gate = asyncio.Event()
 
     await session.start()
     await session.say("Post the launch thread")
-    await session.replied("Ready, sir?")
+    await session.replied("Shall I " + ("schedule" if asking.input["approval"]["post_action"] == "schedule_post" else "post") + " it, sir?")
     await session.say(words)
     await until(lambda: session.backend.all_sessions("subagent"))
     guard = session.backend.session("subagent").spec.mcp_guard
@@ -1899,13 +1899,13 @@ async def test_a_yes_that_changes_when_a_post_goes_out_is_refused(
         output,
         metrics,
         gh,
-        [[Text("Right away, sir."), delegate("Post the launch thread")], [Text("Ready, sir?")], [approve()]],
+        [[Text("Right away, sir."), delegate("Post the launch thread")], [Text("Shall I " + ("schedule" if asking.input["approval"]["post_action"] == "schedule_post" else "post") + " it, sir?")], [approve()]],
         [[asking]],
     )
 
     await session.start()
     await session.say("Post the launch thread")
-    await session.replied("Ready, sir?")
+    await session.replied("Shall I " + ("schedule" if asking.input["approval"]["post_action"] == "schedule_post" else "post") + " it, sir?")
     await session.say(words)
     await session.end()
 
@@ -1948,7 +1948,22 @@ async def decided(
     approvals = Approvals(org="pumpkit-io", runner=gh, clock=FakeClock(), on_change=lambda: None, log=lambda e: None)
     asked = [await approvals.request(f"T{i}", spec) for i, spec in enumerate(specs, 1)]
     approvals.turn_began(None)
-    approvals.turn_ended(completed=True, told=told or [getattr(a, "id", "") for a in asked], said="")
+    told = told or [getattr(a, "id", "") for a in asked]
+    questions: list[str] = []
+    for approval in asked:
+        assert isinstance(approval, Approval)
+        if approval.id not in told:
+            continue
+        if approval.action == "merge_pr":
+            questions.append(f"merge PR {approval.number}")
+        elif approval.action == "delete_branch":
+            questions.append(f"delete branch {approval.branch}")
+        elif approval.post_action:
+            verb = "schedule" if approval.post_action == "schedule_post" else "post"
+            questions.append(f"{verb} post {approval.post}")
+        else:
+            questions.append(approval.text)
+    approvals.turn_ended(completed=True, told=told, said="Shall I " + " or ".join(questions) + "?")
     if read_back is not None:
         approvals.turn_began("Yes.")
         assert isinstance(approvals.decide(approval_id), str)
@@ -2052,7 +2067,7 @@ async def x_post_guard(spec: dict[str, Any]) -> McpGuard:
     asked = await approvals.request("T1", spec)
     assert isinstance(asked, Approval), asked
     approvals.turn_began(None)
-    approvals.turn_ended(completed=True, told=["A1"], said="")
+    approvals.turn_ended(completed=True, told=["A1"], said="Shall I " + ("schedule" if spec["post_action"] == "schedule_post" else "post") + " post 812?")
     approvals.turn_began("Yes.")
     approved = approvals.decide("A1")
     assert isinstance(approved, Approval), approved
@@ -2392,3 +2407,38 @@ async def test_a_word_naming_another_pending_approval_it_does_not_choose_breaks_
     result = await decided(specs, "Yes.", "A1", read_back="Should I skip PR 42?")
 
     assert isinstance(result, str) and result.startswith("Not approved"), result
+
+
+@pytest.mark.parametrize("reply", [
+    "Would you like a status update, sir?",
+    "Shall I merge PR 42? Would you like a status update, sir?",
+    "The merge is ready, sir.",
+])
+async def test_approval_news_requires_the_talkers_actual_last_question_to_ask_about_the_action(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh, reply: str
+) -> None:
+    session = a_session(
+        clock, output, metrics, gh,
+        [[Text("Right away, sir."), delegate()], [Text(reply)], [approve(), Text("Nothing done, sir.")],
+         [Text("Finished, sir.")]],
+        [[ask_merge()], [report("T1", "Merged.")]],
+    )
+    await session.start()
+    await session.say(MERGE_42)
+    await session.replied(reply)
+    await session.say("Yes.")
+    await session.end()
+    assert gh.actions == []
+    assert str(results(session.backend, "talker", "approve")[0].result).startswith("Not approved:")
+
+
+@pytest.mark.parametrize(("specs", "which", "reply"), [
+    ([merge_spec(), delete_spec("fix/review")], "A2", "Should I review the branch?"),
+    ([merge_spec(repo="review"), merge_spec(43)], "A1", "Should I review PR 42?"),
+    ([merge_spec(repo="review"), merge_spec(43)], "A1", "Should I review and merge PR 42?"),
+])
+async def test_target_words_cannot_supply_the_action_of_a_read_back(
+    specs: list[dict[str, Any]], which: str, reply: str
+) -> None:
+    result = await decided(specs, "Yes.", which, read_back=reply)
+    assert isinstance(result, str) and result.startswith("Not approved:"), result

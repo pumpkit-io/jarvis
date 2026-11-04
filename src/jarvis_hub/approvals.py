@@ -281,10 +281,7 @@ _STATEMENT_END = re.compile(r"(?<=[\w)\"'’][.!])\s+")
 
 
 def _read_back(reply: str, pending: list["Approval"]) -> list["Approval"]:
-    """The Approvals `reply` asks the User about. Its last sentence is its one question, with no hold word in the whole
-    reply ("I won't merge 42 then." asks nothing), made only of read-back words and the names of the Approvals it
-    names, or, for one in the Orchestrator's words, its whole text: any other word asks something else ("Should I
-    skip PR 42?"). An X post's names include the "Pumpkit" and "X" of the Hub's text."""
+    """Only a closed-world question naming the action can read an Approval back (ADR 0013)."""
     *before, question = _STATEMENT_END.split(reply.strip())
     if not question.endswith("?") or "?" in question[:-1] or any("?" in s for s in before):
         return []
@@ -298,8 +295,13 @@ def _read_back(reply: str, pending: list["Approval"]) -> list["Approval"]:
             read += [approval] if approval not in read else []
             # Its words are its text, not names of the others: "merge" in it never reads back a merge.
             said[i : i + len(text)] = ["_"] * len(text)
+    start = next((i for i, word in enumerate(said) if word == "_" or word in LEXICONS.verbs), len(said))
+    if start == len(said) or LEXICONS.outside_read_back(tuple(said[:start]), (), frozenset(), frozenset()):
+        return []
     asked = named(" ".join(said), pending, _held(pending))
     names = [_Names.of(a) for a in asked]
+    if any(not (n.kinds & LEXICONS.kinds(said)) for n in names):
+        return []
     phrases = {p for n in names for p in n.phrases}
     phrases |= {("pumpkit",), ("x",)} if any(a.post_action for a in asked) else set()
     kinds = frozenset[str]().union(*(n.kinds for n in names))
@@ -519,15 +521,14 @@ class Approvals:
         self._heard, self._approved_in_turn, self._read_back_open = heard, False, False
 
     def turn_ended(self, *, completed: bool, told: Iterable[str], said: str) -> None:
-        """What the finished turn asked the User about: the Approvals whose requests its news `told`, or, after a
-        refused approve, those the Talker's reply `said` names. A turn cut short may not have been heard."""
-        self._read_back = False
-        if not completed:
-            self._last_said = ()
-        elif self._read_back_open and (read := _read_back(said, self.pending())):
-            self._last_said, self._read_back = tuple(a.id for a in read), True
-        else:
-            self._last_said = tuple(told)
+        """Only the completed reply's validated question establishes what the User was asked."""
+        told = tuple(told)
+        self._last_said, self._read_back = (), False
+        if completed and (self._read_back_open or told):
+            read = _read_back(said, self.pending())
+            allowed = {a.id for a in read} if self._read_back_open else set(told)
+            self._last_said = tuple(a.id for a in read if a.id in allowed)
+            self._read_back = self._read_back_open and bool(self._last_said)
         self._heard, self._read_back_open = None, False
 
     def decide(self, approval_id: object) -> Approval | str:
