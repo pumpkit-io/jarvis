@@ -42,6 +42,7 @@ class VoiceSettings:
     wake_engine: Literal["openwakeword"] = "openwakeword"
     wake_threshold: float = 0.5
     stt_engine: Literal["parakeet"] = "parakeet"
+    tts_engine: Literal["kokoro"] = "kokoro"
     aec: Literal["webrtc", "off"] = "webrtc"
     vad_threshold: float = 0.5
     end_silence_ms: int = 500
@@ -167,6 +168,7 @@ def load_settings(
             wake_engine=choice("JARVIS_WAKE_ENGINE", "openwakeword", ("openwakeword",)),
             wake_threshold=number("JARVIS_WAKE_THRESHOLD", 0.5, 0, 1, low_open=True),
             stt_engine=choice("JARVIS_STT_ENGINE", "parakeet", ("parakeet",)),
+            tts_engine=choice("JARVIS_TTS_ENGINE", "kokoro", ("kokoro",)),
             aec=choice("JARVIS_AEC", "webrtc", ("webrtc", "off")),
             vad_threshold=number("JARVIS_VAD_THRESHOLD", 0.5, 0, 1, low_open=True),
             end_silence_ms=round(number("JARVIS_END_SILENCE_MS", 500, 0, 5000, low_open=True)),

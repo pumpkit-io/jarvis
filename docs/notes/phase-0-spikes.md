@@ -535,3 +535,9 @@ Manual launch check, pending the recording session:
 4. While voice mode is idle, type a question. Expect a terminal reply, no spoken reply and no Wake word chime. Check `--headphones`, `--debug` and launch from the optional symlink.
 
 No physical readiness time or microphone result was collected for this ticket. The recording session and the Listening and Barge-in checklists remain required before calling voice verification complete.
+
+## Documentation and final verification (#21)
+
+The README now covers setup, run modes, every setting group, troubleshooting and the pretrained wake model's license. `.env.example` includes the Spec's `JARVIS_TTS_ENGINE`; `kokoro` is the only supported choice and unsupported values are refused. The Repo catalog describes the Python Hub. openWakeWord's upstream README license section was checked on 2026-11-04: its code is Apache 2.0 and included pretrained models are CC BY-NC-SA 4.0.
+
+[voice-hub-verification.md](voice-hub-verification.md) is the reproducible checklist for the remaining acceptance work, including the existing recording scripts, a ten-request Haiku/Sonnet comparison, sample selection, timing definitions and reporting requirements. No new microphone recordings, real-model comparison or physical measurements were performed for this ticket. All final latency percentiles, the live baseline comparison, 30-minute idle behavior, real wake recall/false wakes, speaker/headphone Barge-in, two real Subagents reporting, whole-Hub idle CPU and peak memory, and per-role subscription verification remain pending. Existing synthetic/component measurements stay in their original sections and are not presented as final verification.

@@ -194,6 +194,7 @@ def test_voice_settings_come_from_dotenv(checkout: Path) -> None:
         "JARVIS_END_SILENCE_MS=0",
         "JARVIS_AEC=maybe",
         "JARVIS_STT_ENGINE=whisper",
+        "JARVIS_TTS_ENGINE=cloud",
         "JARVIS_WAKE_ENGINE=porcupine",
         "JARVIS_MAX_TURN_SECONDS=0",
     ],
