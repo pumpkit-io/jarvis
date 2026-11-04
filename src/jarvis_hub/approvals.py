@@ -24,9 +24,13 @@ HUB_ACTIONS = ("merge_pr", "delete_branch")
 
 EXPIRES_AFTER = 24 * 3600.0
 
+PostAction = Literal["post_now", "schedule_post"]
+# The verb kind (verbs.txt) that says yes to each post action.
+_POST_KINDS: dict[str, str] = {"post_now": "post", "schedule_post": "schedule"}
 # The connector tools an Approval for a Subagent action may open, by grant: the only widening of ADR 0008's list.
+# x_post opens only the one of these its Approval's post_action names.
 GRANTS: dict[str, tuple[str, ...]] = {
-    "x_post": tuple(f"mcp__{server}__{tool}" for server in PUMPKIT_SERVERS for tool in ("post_now", "schedule_post")),
+    "x_post": tuple(f"mcp__{server}__{tool}" for server in PUMPKIT_SERVERS for tool in get_args(PostAction)),
     "posthog_config": ("mcp__posthog__exec",),
 }
 
@@ -84,6 +88,8 @@ class Approval:
     grants: list[str] = field(default_factory=lambda: [])
     # The Pumpkit post an `x_post` grant may publish: the post tools refuse any other post_id.
     post: str | None = None
+    # Whether an `x_post` grant posts now or schedules.
+    post_action: PostAction | None = None
     state: ApprovalState = "pending"
     # The User's message that approved it, verbatim from the Hub's own record of the turn.
     words: str | None = None
@@ -93,7 +99,12 @@ class Approval:
 
     @property
     def tools(self) -> tuple[str, ...]:
-        return tuple(tool for grant in self.grants for tool in GRANTS.get(grant, ()))
+        return tuple(
+            tool
+            for grant in self.grants
+            for tool in GRANTS.get(grant, ())
+            if grant != "x_post" or tool.endswith(f"__{self.post_action}")
+        )
 
     def line(self, now: float) -> str:
         return f"{self.id} {self.state}, asked {ago(now - self.created)} ago: {self.text}"
@@ -112,6 +123,7 @@ _SAVED = Fields(
         "sha",
         "grants",
         "post",
+        "post_action",
         "state",
         "words",
         "approved",
@@ -156,7 +168,10 @@ class _Names:
             return _Names(numbers(words(branch)), frozenset(phrases), frozenset({"delete"}))
         said = words(approval.text)
         post = {int(approval.post)} if approval.post and approval.post.isdigit() else set[int]()
-        return _Names(numbers(said) | post, frozenset(phrases), LEXICONS.kinds(said))
+        kinds = LEXICONS.kinds(said)
+        if approval.post_action:
+            kinds |= {_POST_KINDS[approval.post_action]}
+        return _Names(numbers(said) | post, frozenset(phrases), kinds)
 
     def features(self) -> set[_Feature]:
         out: set[_Feature] = {("n", n) for n in self.numbers}
@@ -166,7 +181,7 @@ class _Names:
 def _repo_phrases(name: str) -> set[Words]:
     """How words name a repo: its name, alone or with "repo". "Jarvis" alone is the User addressing Jarvis."""
     said = words(name)
-    qualified = {said + (repo,) for repo in ("repo", "repository")} | {(repo,) + said for repo in ("repo", "repository")}
+    qualified = {form for repo in ("repo", "repository") for form in (said + (repo,), (repo,) + said)}
     return qualified if said == ("jarvis",) else qualified | {said}
 
 
@@ -286,7 +301,13 @@ class Approvals:
                     "approval.post is the Pumpkit post id the X post publishes, such as 812: x_post opens the post "
                     "tools for that post only."
                 )
-            return Approval("", task_id, action, repo, now, description, grants=grants, post=post)
+            post_action = str(spec.get("post_action") or "") if "x_post" in grants else None
+            if post_action is not None and post_action not in get_args(PostAction):
+                return Refused(
+                    "approval.post_action is post_now or schedule_post: x_post opens only the post tool it names."
+                )
+            kind = cast(PostAction | None, post_action)
+            return Approval("", task_id, action, repo, now, description, grants=grants, post=post, post_action=kind)
         repo = self._repo(spec.get("repo"))
         if isinstance(repo, Refused):
             return repo
@@ -603,11 +624,12 @@ class Approvals:
             "description": approval.text,
             "grants": cast(object, approval.grants),
             "post": approval.post,
+            "post_action": approval.post_action,
         }
         shaped = self._shaped(approval.task_id, approval.action, spec)
         if isinstance(shaped, Refused):
             return shaped.reason
-        fields = ("repo", "text", "number", "branch", "sha", "grants", "post")
+        fields = ("repo", "text", "number", "branch", "sha", "grants", "post", "post_action")
         if any(getattr(shaped, f) != getattr(approval, f) for f in fields):
             return "it does not match the action it names."
         return None

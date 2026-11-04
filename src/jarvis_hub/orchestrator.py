@@ -66,6 +66,11 @@ APPROVAL = {
             **STRING,
             "description": "With the x_post grant: the Pumpkit post id it publishes. The post tools take only this id.",
         },
+        "post_action": {
+            **STRING,
+            "enum": ["post_now", "schedule_post"],
+            "description": "With the x_post grant: whether it posts now or schedules; only that post tool opens.",
+        },
     },
     "required": ["action"],
 }

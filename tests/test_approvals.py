@@ -38,7 +38,7 @@ TIP = "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00"
 ASK = "CI on pumpkit#42 is green. Shall I merge it?"
 ASKED = "CI on 42 is green, sir. Shall I merge it?"
 POST_NOW = "mcp__claude_ai_Pumpkit__post_now"
-# What gh prints for the rules of a private repo on GitHub Free, where rulesets are not enforced (pumpkit-ops, 2026-11-04).
+# What gh prints for the rules of a private repo on GitHub Free, where no ruleset is enforced (pumpkit-ops, 2026-11-04).
 NO_RULESETS = "Upgrade to GitHub Pro or make this repository public to enable this feature."
 
 
@@ -67,6 +67,7 @@ def ask_post(task_id: str = "T1") -> Tool:
         "description": "post Pumpkit post 812 on X now, as the thread you read",
         "grants": ["x_post"],
         "post": "812",
+        "post_action": "post_now",
     }
     spoken = "The launch thread is ready. Shall I post it now?"
     return Tool("report", {"task_id": task_id, "spoken": spoken, "needs_user": True, "approval": approval})
@@ -720,8 +721,8 @@ async def test_an_approved_x_post_goes_to_a_subagent_whose_brief_carries_it_and_
     assert subagent.received[0] == (
         'Post Pumpkit post 812 on X now.\n\n<approval id="A1">\n'
         "The User approved exactly this, once: post Pumpkit post 812 on X now, as the thread you read. It lets you "
-        "call mcp__claude_ai_Pumpkit__post_now, mcp__claude_ai_Pumpkit__schedule_post, mcp__pumpkit__post_now, "
-        "mcp__pumpkit__schedule_post for Pumpkit post 812, once.\nTheir words: Yes, post it.\n</approval>"
+        "call mcp__claude_ai_Pumpkit__post_now, mcp__pumpkit__post_now for Pumpkit post 812, once.\nTheir words: "
+        "Yes, post it.\n</approval>"
     )
     allowed, other, again = verdicts
     assert allowed is None
@@ -1546,7 +1547,12 @@ async def test_an_x_post_approval_opens_the_post_tools_for_its_own_post_only(
 async def test_an_x_post_request_must_name_the_post(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh
 ) -> None:
-    approval = {"action": "subagent_action", "description": "post the launch thread on X", "grants": ["x_post"]}
+    approval = {
+        "action": "subagent_action",
+        "description": "post the launch thread on X",
+        "grants": ["x_post"],
+        "post_action": "post_now",
+    }
     asking = Tool("report", {"task_id": "T1", "spoken": "Post it?", "needs_user": True, "approval": approval})
     session = a_session(
         clock, output, metrics, gh, [[Text("Right away, sir."), delegate()]], [[asking, report("T1", "No.")]]
@@ -1822,3 +1828,106 @@ async def test_a_branch_in_a_repo_whose_plan_has_no_rulesets_can_be_deleted(
     await session.end()
 
     assert gh.branches == {}
+
+
+def ask_schedule() -> Tool:
+    approval = {
+        "action": "subagent_action",
+        "description": "schedule Pumpkit post 812 for Friday at 9:00",
+        "grants": ["x_post"],
+        "post": "812",
+        "post_action": "schedule_post",
+    }
+    spoken = "The launch thread is ready. Shall I schedule it for Friday at nine?"
+    return Tool("report", {"task_id": "T1", "spoken": spoken, "needs_user": True, "approval": approval})
+
+
+@pytest.mark.parametrize(
+    ("asking", "words", "opened", "closed"),
+    [
+        (ask_post(), "Yes, post it now.", POST_NOW, "mcp__claude_ai_Pumpkit__schedule_post"),
+        (ask_schedule(), "Yes, schedule it.", "mcp__pumpkit__schedule_post", "mcp__pumpkit__post_now"),
+    ],
+)
+async def test_an_x_post_approval_opens_only_the_post_tool_of_its_action(
+    clock: FakeClock,
+    output: RecordingOutput,
+    metrics: RecordingMetrics,
+    gh: StubGh,
+    asking: Tool,
+    words: str,
+    opened: str,
+    closed: str,
+) -> None:
+    spawn = Tool(
+        "spawn_subagent",
+        {"repo": "pumpkit", "title": "Post", "brief": "Do it.", "model": "haiku", "effort": "low", "approval_id": "A1"},
+    )
+    session = a_session(
+        clock,
+        output,
+        metrics,
+        gh,
+        [[Text("Right away, sir."), delegate("Post the launch thread")], [Text("Ready, sir?")], [approve()]],
+        [[asking], [spawn]],
+    )
+    session.backend.subagent_close_gate = asyncio.Event()
+
+    await session.start()
+    await session.say("Post the launch thread")
+    await session.replied("Ready, sir?")
+    await session.say(words)
+    await until(lambda: session.backend.all_sessions("subagent"))
+    guard = session.backend.session("subagent").spec.mcp_guard
+    assert guard is not None
+    other = guard(closed, {"post_id": "812"})
+    own = guard(opened, {"post_id": "812"})
+    session.backend.subagent_close_gate.set()
+    await session.end()
+
+    assert other == connector_check(closed, {})
+    assert own is None
+
+
+@pytest.mark.parametrize(
+    ("asking", "words"), [(ask_post(), "Post it on Friday."), (ask_schedule(), "Yes, post it now.")]
+)
+async def test_a_yes_that_changes_when_a_post_goes_out_is_refused(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh, asking: Tool, words: str
+) -> None:
+    session = a_session(
+        clock,
+        output,
+        metrics,
+        gh,
+        [[Text("Right away, sir."), delegate("Post the launch thread")], [Text("Ready, sir?")], [approve()]],
+        [[asking]],
+    )
+
+    await session.start()
+    await session.say("Post the launch thread")
+    await session.replied("Ready, sir?")
+    await session.say(words)
+    await session.end()
+
+    [refused] = results(session.backend, "talker", "approve")
+    assert "which is not part of a plain yes" in str(refused.result)
+
+
+async def test_an_x_post_request_must_say_whether_it_posts_now_or_schedules(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh
+) -> None:
+    approval = {"action": "subagent_action", "description": "post 812", "grants": ["x_post"], "post": "812"}
+    asking = Tool("report", {"task_id": "T1", "spoken": "Post it?", "needs_user": True, "approval": approval})
+    session = a_session(
+        clock, output, metrics, gh, [[Text("Right away, sir."), delegate()]], [[asking, report("T1", "No.")]]
+    )
+
+    await session.start()
+    await session.say("Post the launch thread")
+    await session.replied("Very good, sir.")
+    await session.end()
+
+    assert str(results(session.backend, "orchestrator", "report")[0].result).startswith(
+        "approval.post_action is post_now or schedule_post"
+    )
