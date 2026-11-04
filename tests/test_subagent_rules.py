@@ -236,7 +236,7 @@ def test_branch_name(kind: str, title: str, expected: str) -> None:
     ids=lambda v: str(v),
 )
 def test_connector_check(tool: str, allowed: bool) -> None:
-    verdict = connector_check(tool)
+    verdict = connector_check(tool, {})
     assert (verdict is None) == allowed
     if not allowed:
         assert isinstance(verdict, Refused) and "Approval" in verdict.reason

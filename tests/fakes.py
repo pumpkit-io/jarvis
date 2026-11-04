@@ -521,18 +521,44 @@ class StubRunner:
         self._ends[self.started[index]].set_result((code, output))
 
 
+def ruleset_rule(kind: str) -> dict[str, Any]:
+    """One rule as the rules API returns it; pumpkit's main had deletion, non_fast_forward, pull_request and
+    required_status_checks from repository ruleset 24429983, while the GraphQL ref read showed no rule at all."""
+    rule: dict[str, Any] = {
+        "type": kind,
+        "ruleset_source_type": "Repository",
+        "ruleset_source": "pumpkit-io/pumpkit",
+        "ruleset_id": 24429983,
+    }
+    if kind == "pull_request":
+        rule["parameters"] = {"required_approving_review_count": 0, "allowed_merge_methods": ["merge", "squash"]}
+    return rule
+
+
 class StubGh(StubRunner):
     """Also stands in for gh in the Hub's Approvals: answers its reads of a PR head or a branch tip from `prs` and
     `branches`, and records the merges and deletes it runs, which change those records and nothing real."""
 
     def __init__(
-        self, prs: dict[str, tuple[str, str]] | None = None, branches: dict[str, str] | None = None
+        self,
+        prs: dict[str, tuple[str, str]] | None = None,
+        branches: dict[str, str] | None = None,
+        protected: set[str] | None = None,
     ) -> None:
         super().__init__()
         # "pumpkit-io/pumpkit#42": (state, head commit).
         self.prs = dict(prs or {})
         # "pumpkit-io/pumpkit:feat/old-idea": tip commit.
         self.branches = dict(branches or {})
+        # Branches under a protection rule, keyed like `branches`; every repo's default branch is main.
+        self.protected = set(protected or ())
+        # The rulesets' rules on a branch, keyed like `branches`, in the shape `gh api repos/{owner}/{repo}/rules/
+        # branches/{branch}` returns them, as read from pumpkit's main on 2026-11-04 (ruleset_rule).
+        self.rulesets: dict[str, list[dict[str, Any]]] = {}
+        # When set by a test, the rules read answers this instead.
+        self.rules_result: tuple[int, str] | None = None
+        # GitHub's page size for the rules; without --paginate gh reads the first page only.
+        self.rules_per_page = 30
         self.reads: list[tuple[str, ...]] = []
         self.actions: list[tuple[str, ...]] = []
         self.action_result: tuple[int, str] = (0, "")
@@ -548,10 +574,22 @@ class StubGh(StubRunner):
                 return 1, f"GraphQL: Could not resolve to a PullRequest with the number of {argv[3]}."
             state, head = self.prs[key]
             return 0, f"{state} {head}"
+        path = next((word for word in argv[2:] if "/rules/branches/" in word), None)
+        if argv[1] == "api" and path is not None:
+            self.reads.append(argv)
+            if self.rules_result is not None:
+                return self.rules_result
+            repo, branch = path.removeprefix("repos/").split("/rules/branches/", 1)
+            rules = self.rulesets.get(f"{repo}:{branch}", [])
+            pages = [rules[i : i + self.rules_per_page] for i in range(0, len(rules), self.rules_per_page)] or [[]]
+            # gh applies --jq to each page and prints one line per page.
+            read = pages if "--paginate" in argv else pages[:1]
+            return 0, "\n".join(" ".join(sorted({rule["type"] for rule in page})) for page in read)
         if argv[1:3] == ("api", "graphql") and not fields["query"].startswith("mutation"):
             self.reads.append(argv)
-            branch = fields["ref"].removeprefix("refs/heads/")
-            return 0, f"R_kgDOpumpkit {self.branches.get(f'{fields['owner']}/{fields['name']}:{branch}', 'none')}"
+            key = f"{fields['owner']}/{fields['name']}:{fields['ref'].removeprefix('refs/heads/')}"
+            rule = "protected" if key in self.protected else "unprotected"
+            return 0, f"R_kgDOpumpkit {self.branches.get(key, 'none')} main {rule}"
         if argv[1:3] in (("pr", "merge"), ("api", "graphql")):
             self.actions.append(argv)
             if self.action_gate is not None:

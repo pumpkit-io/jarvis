@@ -1,6 +1,6 @@
 """The seam between the Hub and its agent sessions: each turn streams as AgentEvents ending in exactly one TurnEnd."""
 
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -17,8 +17,8 @@ class Refused:
 
 # Parses a Bash command into the words to run, or refuses it; the backend runs those words and nothing else.
 BashGuard = Callable[[str], Sequence[str] | Refused]
-# Decides each MCP tool call by the tool's full name: None lets it run.
-McpGuard = Callable[[str], Refused | None]
+# Decides each MCP tool call by the tool's full name and its input: None lets it run.
+McpGuard = Callable[[str, Mapping[str, Any]], Refused | None]
 
 
 @dataclass(frozen=True)

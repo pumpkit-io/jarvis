@@ -3,6 +3,7 @@
 import os
 import shutil
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -252,7 +253,7 @@ async def test_a_subagent_skips_permissions_without_voice_tools_and_its_mcp_guar
     # A harmless read stands in for a write: the guard refuses it the way connector_check refuses post_now.
     tool = "mcp__claude_ai_Claude_Docs__guide"
 
-    def guard(name: str) -> Refused | None:
+    def guard(name: str, tool_input: Mapping[str, Any]) -> Refused | None:
         return Refused("needs an Approval") if name == tool else None
 
     spec = replace(subagent_session(settings, subagent), mcp_guard=guard)

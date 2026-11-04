@@ -88,7 +88,7 @@ def _bash_hook(guard: BashGuard) -> HookCallback:
 
 def _mcp_hook(guard: McpGuard) -> HookCallback:
     async def hook(hook_input: HookInput, tool_use_id: str | None, context: HookContext) -> HookJSONOutput:
-        verdict = guard(str(hook_input.get("tool_name", "")))
+        verdict = guard(str(hook_input.get("tool_name", "")), dict(hook_input.get("tool_input") or {}))
         if verdict is None:
             return {}
         return {

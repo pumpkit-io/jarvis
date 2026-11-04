@@ -55,12 +55,35 @@ APPROVAL = {
             "description": "merge_pr: the PR head commit; delete_branch: the branch tip. The full 40 characters, "
             "as you read it now.",
         },
-        "description": {**STRING, "description": "subagent_action: the one exact action, such as 'post the X "
-        "thread from Pumpkit post 812 now'."},
+        "description": {**STRING, "description": "subagent_action without x_post: the one exact action, such as "
+        "'set the PostHog insight 42 to weekly'. Left out with x_post: the Hub says that action itself."},
         "grants": {
             "type": "array",
             "items": {**STRING, "enum": list(GRANTS)},
-            "description": "subagent_action: the connector tools it needs, by group; leave out when none.",
+            "description": "subagent_action: the connector tools it needs, by group; leave out when none. x_post "
+            "goes alone.",
+        },
+        "post": {
+            **STRING,
+            "description": "With the x_post grant: the Pumpkit post id it publishes. The post tools take only this id.",
+        },
+        "post_action": {
+            **STRING,
+            "enum": ["post_now", "schedule_post"],
+            "description": "With the x_post grant: whether it posts now or schedules; only that post tool opens.",
+        },
+        "publish_at": {
+            **STRING,
+            "description": "With schedule_post: when it publishes, ISO 8601 on a whole minute with its UTC offset, "
+            "such as 2026-11-06T09:00:00+01:00. The post tool takes only this time.",
+        },
+        "community": {
+            **STRING,
+            "description": "With the x_post grant: the X community's URL or id; leave out for the profile.",
+        },
+        "share_with_followers": {
+            "type": "boolean",
+            "description": "With a community: also show the post to the User's followers.",
         },
     },
     "required": ["action"],

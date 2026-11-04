@@ -1,0 +1,47 @@
+# Words that hold a yes back: any of these anywhere in the User's message refuses it, as does a question mark
+# or a word ending in n't. One phrase per line, English and Italian; case, punctuation and hyphens don't matter.
+no
+nope
+nah
+not
+don't
+dont
+never
+wait
+stop
+hold
+hang on
+cancel
+later
+maybe
+perhaps
+but
+if
+unless
+first
+after
+tomorrow
+tonight
+instead
+wrong
+non
+né
+mai
+aspetta
+aspetti
+aspettiamo
+ferma
+fermo
+fermati
+annulla
+forse
+dopo
+più tardi
+domani
+stasera
+ma
+però
+se
+prima
+invece
+sbagliato
