@@ -134,12 +134,13 @@ class _Names:
 
     @staticmethod
     def of(approval: "Approval") -> "_Names":
-        phrases = {words(approval.repo.split("/", 1)[-1])} if approval.repo else set[Words]()
+        phrases = _repo_phrases(approval.repo.split("/", 1)[-1]) if approval.repo else set[Words]()
         if approval.action == "merge_pr":
+            phrases |= {("pr",), ("pull", "request")}
             return _Names(frozenset({int(approval.number or 0)}), frozenset(phrases), frozenset({"merge"}))
         if approval.action == "delete_branch":
             branch = str(approval.branch)
-            phrases |= {words(branch), words(branch.rsplit("/", 1)[-1])}
+            phrases |= {words(branch), words(branch.rsplit("/", 1)[-1]), ("branch",)}
             return _Names(numbers(words(branch)), frozenset(phrases), frozenset({"delete"}))
         said = words(approval.text)
         post = {int(approval.post)} if approval.post and approval.post.isdigit() else set[int]()
@@ -150,6 +151,13 @@ class _Names:
         return out | {("p", p) for p in self.phrases} | {("k", k) for k in self.kinds}
 
 
+def _repo_phrases(name: str) -> set[Words]:
+    """How words name a repo: its name, alone or with "repo". "Jarvis" alone is the User addressing Jarvis."""
+    said = words(name)
+    qualified = {said + (repo,) for repo in ("repo", "repository")} | {(repo,) + said for repo in ("repo", "repository")}
+    return qualified if said == ("jarvis",) else qualified | {said}
+
+
 def _said(said: Words, phrases: Iterable[Words]) -> set[_Feature]:
     """The features in `said`: its numbers, verbs, and those of `phrases` not inside a longer one said ("pumpkit" in
     "pumpkit ops")."""
@@ -157,6 +165,14 @@ def _said(said: Words, phrases: Iterable[Words]) -> set[_Feature]:
     hits = {p for i, n, p in spans if not any(j <= i and i + n <= j + m and m > n for j, m, _ in spans)}
     out: set[_Feature] = {("n", n) for n in numbers(said)}
     return out | {("k", k) for k in LEXICONS.kinds(said)} | {("p", p) for p in hits}
+
+
+def _plain_yes(approval: "Approval") -> str:
+    if approval.action == "merge_pr":
+        return f"yes, merge {approval.number}"
+    if approval.action == "delete_branch":
+        return f"yes, delete {str(approval.branch).rsplit('/', 1)[-1]}"
+    return "yes, go ahead"
 
 
 def _spoken(feature: _Feature) -> str:
@@ -370,6 +386,13 @@ class Approvals:
             others = [a for a in named(heard, pending) if a is not approval]
             what = f"{others[0].id} ({others[0].text})" if others else _spoken(min(stray, key=str))
             return f"Not approved: the User's words name {what}, which is not {approval.id} ({approval.text}). {nothing}"
+        now = {("now",), ("ora",), ("adesso",)} if "schedule" not in own.kinds else set[Words]()
+        outside = LEXICONS.outside_plain_yes(said, own.phrases | now, own.kinds, own.numbers)
+        if outside is not None:
+            return (
+                f'Not approved: the User\'s words hold "{outside}", which is not part of a plain yes. {nothing} To '
+                f'approve, they say a plain yes, such as "{_plain_yes(approval)}".'
+            )
         return None
 
     async def carry_out(self, approval: Approval) -> str:

@@ -1,4 +1,5 @@
-# A yes: the User's words approve only when they hold one of these and nothing in hold.txt.
+# A yes: the User's words approve only when they hold one of these, nothing in hold.txt, and no word outside a
+# plain yes (these, the action's verb and target, and filler.txt).
 # One phrase per line, English and Italian; case, punctuation and hyphens don't matter.
 # The action's own verbs in verbs.txt also say yes ("merge it", "Merge forty-two").
 yes

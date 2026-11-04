@@ -3,5 +3,6 @@
 merge: merge merging mergia mergiala mergialo unisci unire
 delete: delete deleting remove removing cancella cancellala elimina eliminala rimuovi
 post: post posting publish tweet pubblica pubblicalo posta postalo
+schedule: schedule scheduling programma programmalo pianifica
 deploy: deploy deploying rilascia
 release: release releasing

@@ -33,6 +33,7 @@ def found(said: Sequence[str], phrase: Sequence[str]) -> list[int]:
 class Lexicons:
     yes: frozenset[Words]
     hold: frozenset[Words]
+    filler: frozenset[Words]
     # Each verb's kind, such as "merge" for "unisci".
     verbs: dict[str, str]
 
@@ -44,7 +45,8 @@ class Lexicons:
                 continue
             kind, said = line.split(":", 1)
             verbs |= {verb: kind.strip() for verb in words(said)}
-        return Lexicons(frozenset(_lines(folder / "yes.txt")), frozenset(_lines(folder / "hold.txt")), verbs)
+        yes, hold, filler = (frozenset(_lines(folder / f"{name}.txt")) for name in ("yes", "hold", "filler"))
+        return Lexicons(yes, hold, filler, verbs)
 
     def holding_back(self, text: str) -> str | None:
         """What in `text` holds a yes back: a question mark, a word ending in n't, or a phrase of the hold lexicon."""
@@ -65,6 +67,22 @@ class Lexicons:
     def kinds(self, said: Iterable[str]) -> frozenset[str]:
         """The kinds of action the verbs in `said` name."""
         return frozenset(self.verbs[w] for w in said if w in self.verbs)
+
+    def outside_plain_yes(
+        self, said: Words, target: Iterable[Words], kinds: frozenset[str], target_numbers: frozenset[int]
+    ) -> str | None:
+        """The first word of `said` that is not a yes, a verb of `kinds`, a `target` phrase, one of `target_numbers`
+        (after "number" or not), or filler; None when every word is one of those."""
+        verbs = {(verb,) for verb, kind in self.verbs.items() if kind in kinds}
+        covered = [False] * len(said)
+        for phrase in self.yes | self.filler | verbs | set(target):
+            for i in found(said, phrase):
+                covered[i : i + len(phrase)] = [True] * len(phrase)
+        for i, n, value in number_spans(said):
+            if value in target_numbers:
+                start = i - 1 if i and said[i - 1] in _NUMBER_LEAD else i
+                covered[start : i + n] = [True] * (i + n - start)
+        return next((word for word, ok in zip(said, covered, strict=True) if not ok), None)
 
 
 LEXICONS = Lexicons.load(LEXICON_DIR)
@@ -120,20 +138,29 @@ _NUMBER_WORDS: dict[Words, int] = {
 _LONGEST = max(len(form) for form in _NUMBER_WORDS)
 
 
-def numbers(said: Words) -> frozenset[int]:
-    """The whole numbers said, in digits or as English or Italian words up to 999, longest reading first."""
-    out: set[int] = set()
+_NUMBER_LEAD = frozenset({"number", "numero", "n"})
+
+
+def number_spans(said: Words) -> list[tuple[int, int, int]]:
+    """Where each whole number is said, as (start, length, value): in digits or as English or Italian words up to
+    999, longest reading first."""
+    out: list[tuple[int, int, int]] = []
     i = 0
     while i < len(said):
         if said[i].isdigit():
-            out.add(int(said[i]))
+            out.append((i, 1, int(said[i])))
             i += 1
             continue
         for n in range(min(_LONGEST, len(said) - i), 0, -1):
             if (value := _NUMBER_WORDS.get(tuple(said[i : i + n]))) is not None:
-                out.add(value)
+                out.append((i, n, value))
                 i += n
                 break
         else:
             i += 1
-    return frozenset(out)
+    return out
+
+
+def numbers(said: Words) -> frozenset[int]:
+    """The whole numbers said."""
+    return frozenset(value for _, _, value in number_spans(said))

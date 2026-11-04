@@ -1,0 +1,30 @@
+# Words a plain yes may hold besides a yes, the action's verb and its target: anything else refuses it.
+# One phrase per line, English and Italian; case, punctuation and hyphens don't matter. "now" is not here: the Hub
+# allows it only for an action that runs at once.
+please
+it
+that
+this
+one
+the
+sir
+jarvis
+ok
+okay
+go
+ahead
+and
+do
+yes
+thanks
+thank you
+sì
+si
+per favore
+grazie
+signore
+pure
+la
+il
+lo
+e

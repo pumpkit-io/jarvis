@@ -1131,6 +1131,11 @@ async def both_asked(session: Session) -> None:
         "Forse dopo.",
         "Annulla.",
         "Ferma.",
+        "Fine, whatever, I'll look later.",
+        "Yes, after the release.",
+        "Ok, but first run CI.",
+        "Go ahead and cancel it.",
+        "Yes. Actually, never mind.",
     ],
 )
 async def test_words_that_hold_the_yes_back_never_approve_and_the_refusal_says_why(
@@ -1532,3 +1537,133 @@ async def test_an_x_post_request_must_name_the_post(
     assert str(results(session.backend, "orchestrator", "report")[0].result).startswith(
         "approval.post is the Pumpkit post id"
     )
+
+
+def merge_asked() -> tuple[list[list[Step]], list[list[Step]]]:
+    return (
+        [[Text("Right away, sir."), delegate()], [Text(ASKED)], [Text("Merging, sir."), approve()]],
+        [[ask_merge()], [report("T1", "Merged.")]],
+    )
+
+
+@pytest.mark.parametrize(
+    "words",
+    [
+        "Sure, abort.",
+        "Yes, abort it.",
+        "Ok, scratch that.",
+        "Ok, let me think about it.",
+        "Yes, in an hour.",
+        "Merge it next week.",
+        "Go away.",
+        "Sounds good, nevermind",
+        "Yes, the jarvis repo.",
+        "Yes, merge number one.",
+        "Sure... actually, scrap that.",
+        "Fine, whatever.",
+        "Yes, eventually.",
+        "Go home.",
+        "Merge the other one.",
+        "Yes, merge both.",
+    ],
+)
+async def test_a_yes_with_any_word_outside_a_plain_yes_is_refused(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh, words: str
+) -> None:
+    session = a_session(clock, output, metrics, gh, *merge_asked())
+
+    await asked_to_merge(session)
+    await session.say(words)
+    await session.end()
+
+    [refused] = results(session.backend, "talker", "approve")
+    assert str(refused.result).startswith("Not approved: ")
+    assert "plain yes" in str(refused.result)
+    assert gh.actions == []
+
+
+@pytest.mark.parametrize(
+    "words",
+    [
+        "yes",
+        "yes please",
+        "yes, merge it",
+        "go ahead",
+        "do it",
+        "merge forty-two",
+        "yes Jarvis, merge 42",
+        "Merge PR 42 now, please.",
+        "Yes, merge the pull request.",
+        "Yes, number 42.",
+        "Yes, merge pumpkit 42.",
+        "sì",
+        "sì, procedi",
+        "vai pure",
+        "fallo",
+        "ok, unisci la 42",
+    ],
+)
+async def test_a_plain_yes_made_only_of_yes_words_the_verb_the_target_and_filler_approves(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh, words: str
+) -> None:
+    session = a_session(clock, output, metrics, gh, *merge_asked())
+
+    await asked_to_merge(session)
+    await session.say(words)
+    await until(lambda: gh.actions)
+    await session.end()
+
+    assert gh.actions == [merge_argv()]
+
+
+def jarvis_and_pumpkit_pending(talker_after: list[list[Step]]) -> tuple[list[list[Step]], list[list[Step]]]:
+    """A1 merges jarvis#7 and A2 deletes pumpkit's feat/old-idea, both pending, A2 asked last."""
+    talker: list[list[Step]] = [
+        [Text("Right away, sir."), delegate("Merge jarvis#7")],
+        [Text("Shall I merge 7, sir?")],
+        [Text("Right away, sir."), delegate("Clean up merged branches in pumpkit")],
+        [Text("Shall I delete feat/old-idea, sir?")],
+    ]
+    merge_7 = Tool(
+        "report",
+        {
+            "task_id": "T1",
+            "spoken": "Shall I merge jarvis#7?",
+            "needs_user": True,
+            "approval": {"action": "merge_pr", "repo": "jarvis", "pr": 7, "sha": HEAD},
+        },
+    )
+    return talker + talker_after, [[merge_7], [ask_delete("T2")]]
+
+
+@pytest.mark.parametrize(("words", "chosen"), [("Yes, Jarvis.", None), ("Yes, the jarvis repo.", "A1")])
+async def test_jarvis_as_address_never_names_the_jarvis_repo_but_the_jarvis_repo_does(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, words: str, chosen: str | None
+) -> None:
+    gh = StubGh(prs={"pumpkit-io/jarvis#7": ("OPEN", HEAD)}, branches={"pumpkit-io/pumpkit:feat/old-idea": TIP})
+    talker, orchestrator = jarvis_and_pumpkit_pending(
+        [
+            [Text("One moment, sir."), approve("A2"), Text(" Merge 7, or delete old-idea?")],
+            [Text("Very well, sir."), approve("A1")],
+        ]
+    )
+    session = a_session(clock, output, metrics, gh, talker, orchestrator)
+
+    await session.start()
+    await session.say("Merge jarvis#7")
+    await session.replied("Shall I merge 7, sir?")
+    await session.say("Clean up merged branches in pumpkit")
+    await session.replied("Shall I delete feat/old-idea, sir?")
+    await session.say("Yes.")
+    await session.say(words)
+    if chosen:
+        await until(lambda: gh.actions)
+    await session.end()
+
+    _, decided = results(session.backend, "talker", "approve")
+    if chosen:
+        assert str(decided.result).startswith("Approved A1")
+        assert gh.prs["pumpkit-io/jarvis#7"] == ("MERGED", HEAD)
+    else:
+        assert str(decided.result).startswith("Not approved: with more than one Approval in play, a bare yes")
+        assert gh.actions == []
