@@ -418,9 +418,9 @@ class Subagents:
             started = self._clock.now()
             end, final = await self._turn(session, message, log)
             self._on_turn(subagent, spec, end, round((self._clock.now() - started) * 1000))
+            self._limit.observe("subagent", end)
             if end.outcome != "limited":
                 return end, final
-            self._limit.hit("subagent", end.resets_at)
             await self._limit.wait_clear(subagent.stop)
             if subagent.stop.is_set():
                 return TurnEnd("interrupted"), ""

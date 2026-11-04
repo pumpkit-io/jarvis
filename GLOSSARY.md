@@ -67,7 +67,7 @@ The User's preferences for how agents behave while doing work. The Orchestrator 
 _Avoid_: orchestrator preferences, rules
 
 **Usage limit**:
-The Max subscription's cap on model use, which stops a session until its window resets. Jarvis says so with the reset time, holds the Orchestrator's Task and any new Subagent until then, and makes one Announcement when it resets.
+The Max subscription's cap on model use, which stops a session until its window resets. Jarvis says so with the reset time, holds the Orchestrator's Task and any new Subagent until then (at least a minute, doubling each time a reset turns out early), and makes one Announcement when it resets. Until a limited session has a successful turn again it is the same limit, told of once.
 _Avoid_: rate limit, quota, billing limit
 
 ### Conversation

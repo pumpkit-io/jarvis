@@ -3,13 +3,18 @@
 import asyncio
 import contextlib
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
 
+from jarvis_hub.agents.backend import TurnEnd
 from jarvis_hub.voice.language import Lang
 
 # How long a limit whose reset time is unknown holds before the Hub tries again.
 UNKNOWN_RESET_WAIT = 15 * 60.0
+# The least a limit holds, doubled for each further hit of the same role in an episode, up to MAX_WAIT.
+MIN_WAIT = 60.0
+MAX_WAIT = 15 * 60.0
 # A reset further off than this is a weekly window, so the spoken time names its day.
 SAME_DAY = 18 * 3600.0
 
@@ -41,9 +46,25 @@ def reset_sentence(resets_at: float | None, lang: Lang, now: float) -> str:
     return f"It resets {f'on {day} ' if day else ''}at {clock}."
 
 
+@dataclass(frozen=True)
+class SavedLimit:
+    """What the state file keeps of the limit: each stopped role's reset as Unix seconds, the roles whose reset is a
+    guess, each role's hits since its last successful turn, and whether this episode's reset was announced."""
+
+    until: dict[str, float] = field(default_factory=lambda: {})
+    guessed: frozenset[str] = frozenset()
+    strikes: dict[str, int] = field(default_factory=lambda: {})
+    reset_told: bool = False
+
+
 class UsageLimit:
-    """Roles the limit has stopped, each until its own reset. `on_hit` hears of every hit with whether it opened a
-    new limit; `on_clear` of every set of roles that comes back, with whether no role is stopped any more."""
+    """Roles the limit has stopped, each until its own reset.
+
+    An episode runs from the first hit until every role it stopped has had a successful turn, so a reset that turns
+    out early (the next call is limited again) is not news. `on_hit` hears of every hit, with whether it is the
+    episode's first, which is the one the User is told of; `on_clear` of every set of roles that comes back, with
+    whether to announce the reset: once per episode, when no role is stopped any more.
+    """
 
     def __init__(
         self,
@@ -60,6 +81,9 @@ class UsageLimit:
         self._until: dict[str, float] = {}
         # Roles whose reset time is a guess.
         self._guessed: set[str] = set()
+        # Role to its hits since its last successful turn: the episode is open while any role has one.
+        self._strikes: dict[str, int] = {}
+        self._reset_told = False
         self._cleared = asyncio.Event()
         self._cleared.set()
         self._timer: asyncio.Task[None] | None = None
@@ -75,40 +99,60 @@ class UsageLimit:
         """When the role comes back, or None when it is not stopped or the reset time was never known."""
         return None if role in self._guessed else self._until.get(role)
 
-    def hit(self, role: str, resets_at: float | None) -> None:
-        """The limit stopped `role`. A reset time not given is guessed, and said to be unknown."""
-        opened = not self._until
+    def observe(self, role: str, end: TurnEnd) -> None:
+        """A turn of `role` ended: a limited one stops the role, a completed one ends its part in the episode."""
+        if end.outcome == "limited":
+            self._hit(role, end.resets_at)
+        elif end.outcome == "completed" and self._strikes.pop(role, None) is not None and not self._strikes:
+            self._reset_told = False
+
+    def _hit(self, role: str, resets_at: float | None) -> None:
+        """Stops `role` until its reset, but never less than a wait that doubles with each hit in the episode: a
+        reset time already past would otherwise retry at once, forever. A reset time not given is guessed."""
+        first = not self._strikes
+        strikes = self._strikes[role] = self._strikes.get(role, 0) + 1
+        now = self._wall()
+        floor = now + min(MIN_WAIT * 2 ** (strikes - 1), MAX_WAIT)
         self._guessed.discard(role)
         if resets_at is None:
             self._guessed.add(role)
-        self._until[role] = resets_at if resets_at is not None else self._wall() + UNKNOWN_RESET_WAIT
+            resets_at = now + UNKNOWN_RESET_WAIT
+        self._until[role] = max(resets_at, floor)
         self._cleared.clear()
         # Restarted so a role that comes back sooner than the one it is sleeping for is not kept waiting.
         if self._timer is not None:
             self._timer.cancel()
         self._timer = asyncio.create_task(self._run())
-        self._on_hit(role, opened)
+        self._on_hit(role, first)
 
     def dump(self) -> dict[str, Any]:
-        """For the state file: each stopped role's reset as Unix seconds, and the roles whose reset is a guess."""
-        return {"until": dict(self._until), "guessed": sorted(self._guessed)}
+        return {
+            "until": dict(self._until),
+            "guessed": sorted(self._guessed),
+            "strikes": dict(self._strikes),
+            "reset_told": self._reset_told,
+        }
 
     @staticmethod
-    def load(saved: dict[str, Any]) -> tuple[dict[str, float], set[str]]:
-        """What `dump` saved, checked; ValueError or TypeError when it is not."""
-        until = {str(role): float(t) for role, t in dict(saved.get("until") or {}).items()}
-        roles: list[Any] = list(saved.get("guessed") or [])
-        guessed = {str(role) for role in roles}
+    def load(saved: dict[str, Any]) -> SavedLimit:
+        """What `dump` saved, checked; KeyError, ValueError or TypeError when it is not."""
+        until = {str(role): float(t) for role, t in dict(saved["until"]).items()}
+        roles: list[Any] = list(saved["guessed"])
+        guessed = frozenset(str(role) for role in roles)
         if not guessed <= until.keys():
             raise ValueError(f"guessed roles {sorted(guessed - until.keys())} have no reset time")
-        return until, guessed
+        strikes = {str(role): int(n) for role, n in dict(saved["strikes"]).items()}
+        if not isinstance(saved["reset_told"], bool):
+            raise TypeError(f"reset_told is {saved['reset_told']!r}, not a bool")
+        return SavedLimit(until, guessed, strikes, saved["reset_told"])
 
-    def restore(self, until: dict[str, float], guessed: set[str]) -> None:
+    def restore(self, saved: SavedLimit) -> None:
         """Stops the roles again until their saved reset, without `on_hit`: the User heard of it before. A reset
         already past clears on the next loop turn, through `on_clear`."""
-        if not until:
+        self._strikes, self._reset_told = dict(saved.strikes), saved.reset_told
+        if not saved.until:
             return
-        self._until, self._guessed = dict(until), set(guessed)
+        self._until, self._guessed = dict(saved.until), set(saved.guessed)
         self._cleared.clear()
         self._timer = asyncio.create_task(self._run())
 
@@ -142,10 +186,11 @@ class UsageLimit:
                 for role in back:
                     del self._until[role]
                     self._guessed.discard(role)
-                everyone = not self._until
-                if everyone:
+                announce = False
+                if not self._until:
                     self._cleared.set()
-                self._on_clear(back, everyone)
+                    announce, self._reset_told = not self._reset_told, True
+                self._on_clear(back, announce)
         finally:
             if self._timer is asyncio.current_task():
                 self._timer = None

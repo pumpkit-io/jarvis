@@ -29,7 +29,7 @@ from jarvis_hub.agents.backend import (
     TurnEnd,
 )
 from jarvis_hub.config import DEFAULT_TALKER_RESTART_AT
-from jarvis_hub.limits import UsageLimit, reset_sentence
+from jarvis_hub.limits import SavedLimit, UsageLimit, reset_sentence
 from jarvis_hub.orchestrator import orchestrator_tools
 from jarvis_hub.state import Fields, StateFile, UnreadableState
 from jarvis_hub.subagents import Subagent, SubagentSetup, Subagents, ended_event, kept_line, over_time_event
@@ -624,14 +624,14 @@ class Hub:
         else:
             self._release_held()
 
-    def _restore_limit(self, limit: "tuple[dict[str, float], set[str]]", parked: list[_TalkerInput]) -> None:
+    def _restore_limit(self, limit: SavedLimit, parked: list[_TalkerInput]) -> None:
         """Brings back the usage limit, without telling the User again, and the news the limited Talker kept. A
         limit that reset while the Hub was down clears at once, with its one Announcement."""
         self._parked_news = parked
         self._pending += sum(item.count for item in parked)
         if parked:
             self._settled.clear()
-        self._limit.restore(*limit)
+        self._limit.restore(limit)
 
     def _restore_held(self, held: list[_TalkerInput], quiet_mode: bool, needs_user: dict[str, str]) -> None:
         """Quiet mode and its news, then the parked news if the Talker is no longer limited, under its rules."""
@@ -664,9 +664,8 @@ class Hub:
             held = [_TalkerInput(kind="event", **_HELD.load(r, from_wall)) for r in data["held"]]
             quiet_mode = data["quiet_mode"] is True
             needs_user = {str(task): str(key) for task, key in dict(data["needs_user"]).items()}
-            # Absent from a file saved before the usage limit was kept.
-            limit = UsageLimit.load(data.get("usage_limit") or {})
-            parked = [_TalkerInput(kind="event", **_PARKED.load(r, from_wall)) for r in data.get("parked", [])]
+            limit = UsageLimit.load(data["usage_limit"])
+            parked = [_TalkerInput(kind="event", **_PARKED.load(r, from_wall)) for r in data["parked"]]
         except (KeyError, TypeError, ValueError, IndexError, AttributeError) as e:
             self._output.notice(self._state.set_aside(f"could not be read whole ({type(e).__name__}: {e})"))
             return None
@@ -948,10 +947,9 @@ class Hub:
                         tools.append(name)
                     case TurnEnd():
                         end = event
-                        if event.outcome == "limited":
-                            self._limit.hit("talker", event.resets_at)
-                            if show:
-                                shown += self._limit_notice(speech, event.resets_at)
+                        self._limit.observe("talker", event)
+                        if event.outcome == "limited" and show:
+                            shown += self._limit_notice(speech, self._limit.resets_at("talker"))
         finally:
             self._talker_gate.turn = None
             self._turn_spoken = self._turn_answers_user = False
@@ -1050,9 +1048,9 @@ class Hub:
                 self._orchestrator = None
                 with contextlib.suppress(Exception):
                     await session.close()
+        self._limit.observe("orchestrator", end)
         if end.outcome == "limited":
             # The turn was not answered, so the same message is sent again once the limit resets.
-            self._limit.hit("orchestrator", end.resets_at)
             if not all(task.cancelled for task in tasks):
                 if not item.restart:
                     tasks[0].queue_message()
@@ -1184,11 +1182,11 @@ class Hub:
         self._output.reply(text)
         return text
 
-    def _limit_hit(self, role: str, opened: bool) -> None:
+    def _limit_hit(self, role: str, first: bool) -> None:
         self._write({"kind": "usage_limit", "role": role, "resets_at": self._limit.resets_at(role)})
         self._persist()
         # A limited Talker tells the User itself, in the reply that hit it.
-        if opened and role != "talker":
+        if first and role != "talker":
             announcing = asyncio.create_task(self._announce_limit(role))
             self._announcing.add(announcing)
             announcing.add_done_callback(self._announcing.discard)
@@ -1208,7 +1206,7 @@ class Hub:
         speech.end()
         self._output.reply_end()
 
-    def _limit_cleared(self, roles: frozenset[str], everyone: bool) -> None:
+    def _limit_cleared(self, roles: frozenset[str], announce: bool) -> None:
         self._write({"kind": "usage_reset", "roles": sorted(roles)})
         if "orchestrator" in roles:
             for deferred in self._deferred:
@@ -1216,7 +1214,7 @@ class Hub:
             self._deferred.clear()
         if "talker" in roles:
             self._unpark()
-        if everyone:
+        if announce:
             text = (
                 "The usage limit has reset. Queued Subagents are starting and any waiting Task carries on. "
                 "Say so in one sentence."
