@@ -183,6 +183,9 @@ class _Names:
     kinds: frozenset[str]
     # Numbers in the repo or branch: said alongside the action they are part of a plain yes, but they name nothing.
     held: frozenset[int] = frozenset()
+    # Numbers in the spoken text beyond the one that names it, such as a post's time: they are no part of a plain
+    # yes either, but another Approval's number equal to one is ambiguous.
+    spoken: frozenset[int] = frozenset()
 
     @staticmethod
     def of(approval: "Approval") -> "_Names":
@@ -196,7 +199,8 @@ class _Names:
         if approval.post_action:
             # The Hub wrote the text: its date and time name nothing, and "post" may stand for the post itself.
             post = {int(approval.post)} if approval.post and approval.post.isdigit() else set[int]()
-            return _Names(frozenset(post), phrases, LEXICONS.kinds(said) | {_POST_KINDS[approval.post_action]})
+            kinds = LEXICONS.kinds(said) | {_POST_KINDS[approval.post_action]}
+            return _Names(frozenset(post), phrases, kinds, held, numbers(said) - post)
         return _Names(numbers(said), phrases, LEXICONS.kinds(said))
 
     def features(self) -> set[_Feature]:
@@ -265,8 +269,9 @@ def named(text: str, among: list["Approval"]) -> list["Approval"]:
 
 
 def _held(among: Iterable["Approval"]) -> frozenset[int]:
-    """The numbers some of `among` hold in a repo or branch: said alone they could mean that or a PR number."""
-    return frozenset[int]().union(*(_Names.of(a).held for a in among))
+    """The numbers some of `among` hold in a repo, branch or spoken text without naming by them: said alone they
+    could mean that or a PR number."""
+    return frozenset[int]().union(*(_Names.of(a).held | _Names.of(a).spoken for a in among))
 
 
 def _x_post(task_id: str, spec: dict[str, Any], grants: list[str], repo: str, now: float) -> Approval | Refused:

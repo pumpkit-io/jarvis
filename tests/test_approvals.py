@@ -2144,6 +2144,36 @@ async def test_only_the_post_id_names_a_scheduled_x_post_never_the_numbers_of_it
     assert isinstance(result, Approval) == approved, result
 
 
+@pytest.mark.parametrize("pr", [9, 6, 1, 2026])
+@pytest.mark.parametrize("which", ["A1", "A2"])
+@pytest.mark.parametrize("said", ["yes {n}", "yes, the {n}"])
+async def test_a_number_of_a_posts_time_is_ambiguous_with_a_pr_of_that_number(pr: int, which: str, said: str) -> None:
+    result = await decided([x_post(publish_at=FRIDAY_9), merge_spec(pr)], said.format(n=pr), which)
+
+    assert isinstance(result, str) and result.startswith("Not approved"), result
+
+
+@pytest.mark.parametrize("said", ["yes nine", "yes, the nine"])
+@pytest.mark.parametrize("which", ["A1", "A2"])
+async def test_a_number_word_of_a_posts_time_is_as_ambiguous_as_its_digits(said: str, which: str) -> None:
+    result = await decided([x_post(publish_at=FRIDAY_9), merge_spec(9)], said, which)
+
+    assert isinstance(result, str) and result.startswith("Not approved"), result
+
+
+@pytest.mark.parametrize(("said", "which"), [("yes, merge 9", "A2"), ("yes, schedule it", "A1")])
+async def test_a_verb_still_chooses_when_a_posts_time_shares_a_number_with_a_pr(said: str, which: str) -> None:
+    result = await decided([x_post(publish_at=FRIDAY_9), merge_spec(9)], said, which)
+
+    assert isinstance(result, Approval) and result.id == which
+
+
+async def test_a_posts_own_number_still_names_it_beside_a_pr_of_the_same_number_only_by_its_verb() -> None:
+    result = await decided([x_post(publish_at=FRIDAY_9), merge_spec(812)], "yes 812", "A2")
+
+    assert isinstance(result, str) and result.startswith("Not approved"), result
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [("publish_at", "2026-11-07T09:00:00+01:00"), ("community", "999"), ("share_with_followers", True)],
