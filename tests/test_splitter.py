@@ -108,36 +108,3 @@ def test_the_end_of_a_text_block_ends_a_sentence() -> None:
     assert splitter.feed("Right away, sir.") == []
     assert splitter.end_block() == ["Right away, sir."]
     assert splitter.feed("The task") == []
-
-
-@pytest.mark.parametrize(
-    ("text", "ends"),
-    [
-        ("Good evening, sir.", True),
-        ("Really?", True),
-        ("Indeed!", True),
-        ('He said "done."', True),
-        ("Buonasera, signore.", True),
-        ("It costs 3.", False),
-        ("Version 1.", False),
-        ("Ask Mr.", False),
-        ("Chieda al Dott.", False),
-        ("Run `uv sync.", False),
-        ("1.", False),
-        ("It is on github.com/pumpkit.", False),
-        ("Visit www.pumpkit.", False),
-        ("See docs/notes/phase-0-spikes.", False),
-        ("Write to ada@pumpkit.", False),
-        ("We meet at 10 a.m.", False),
-        ("The U.S.", False),
-        ("**Done.**", True),
-        ("Good evening, sir. ", False),
-        ("Good evening", False),
-        ("", False),
-    ],
-)
-def test_knows_when_the_text_so_far_could_end_on_a_sentence(text: str, ends: bool) -> None:
-    splitter = SentenceSplitter()
-    splitter.feed(text)
-
-    assert splitter.at_sentence_end() is ends

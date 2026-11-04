@@ -400,7 +400,47 @@ async def test_a_turn_typed_while_the_voice_loads_is_spoken_once_it_has(
     assert player.texts == ["At your service, sir.", "Evening, sir."]
 
 
-async def test_a_sentence_at_the_end_of_a_delta_is_spoken_once_the_stream_pauses(
+@pytest.mark.parametrize(
+    ("prefix", "suffix", "spoken"),
+    [
+        ("Visit pumpkit.", "io/docs today, sir.", "Visit pumpkit.io/docs today, sir."),
+        ("Vedi pumpkit.", "io/docs, signore.", "Vedi pumpkit.io/docs, signore."),
+        ("Visit https://pumpkit.io/search?", "q=jarvis today.", "Visit https://pumpkit.io/search?q=jarvis today."),
+        ("Visit https://pumpkit.io/path!", "next today.", "Visit https://pumpkit.io/path!next today."),
+        ("It costs 3.", "5 dollars, sir.", "It costs 3.5 dollars, sir."),
+        ("Ask Dr.", " Banner, sir.", "Ask Dr. Banner, sir."),
+        ("Run `uv sync.", " Then test` now.", "Run `uv sync. Then test` now."),
+    ],
+)
+async def test_stream_silence_does_not_cut_an_unfinished_token(
+    clock: FakeClock,
+    output: RecordingOutput,
+    metrics: RecordingMetrics,
+    speech: Speech,
+    player: RecordingPlayer,
+    prefix: str,
+    suffix: str,
+    spoken: str,
+) -> None:
+    release = asyncio.Event()
+    backend = FakeBackend(clock, [[Text(prefix), Wait(0.5), Gate(release), Text(suffix)]])
+    hub = speaking_hub(backend, output, metrics, speech)
+
+    await hub.start()
+    running = asyncio.create_task(hub.run(lines(clock, "Where?")))
+    await until(lambda: clock.now() >= 1000.5)
+    await asyncio.sleep(0.01)
+    try:
+        assert player.texts == []
+    finally:
+        release.set()
+        await running
+        await speech.idle()
+
+    assert player.texts == [spoken]
+
+
+async def test_a_sentence_waits_for_whitespace_after_a_stream_pause(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, speech: Speech, player: RecordingPlayer
 ) -> None:
     release = asyncio.Event()
@@ -409,10 +449,14 @@ async def test_a_sentence_at_the_end_of_a_delta_is_spoken_once_the_stream_pauses
 
     await hub.start()
     running = asyncio.create_task(hub.run(lines(clock, "Hello")))
-    await until(lambda: player.texts == ["Good evening, sir."])
-    release.set()
-    await running
-    await speech.idle()
+    await until(lambda: clock.now() >= 1000.5)
+    await asyncio.sleep(0.01)
+    try:
+        assert player.texts == []
+    finally:
+        release.set()
+        await running
+        await speech.idle()
 
     assert player.texts == ["Good evening, sir.", "All quiet."]
 
