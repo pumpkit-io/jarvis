@@ -521,6 +521,20 @@ class StubRunner:
         self._ends[self.started[index]].set_result((code, output))
 
 
+def ruleset_rule(kind: str) -> dict[str, Any]:
+    """One rule as the rules API returns it; pumpkit's main had deletion, non_fast_forward, pull_request and
+    required_status_checks from repository ruleset 24429983, while the GraphQL ref read showed no rule at all."""
+    rule: dict[str, Any] = {
+        "type": kind,
+        "ruleset_source_type": "Repository",
+        "ruleset_source": "pumpkit-io/pumpkit",
+        "ruleset_id": 24429983,
+    }
+    if kind == "pull_request":
+        rule["parameters"] = {"required_approving_review_count": 0, "allowed_merge_methods": ["merge", "squash"]}
+    return rule
+
+
 class StubGh(StubRunner):
     """Also stands in for gh in the Hub's Approvals: answers its reads of a PR head or a branch tip from `prs` and
     `branches`, and records the merges and deletes it runs, which change those records and nothing real."""
@@ -538,6 +552,11 @@ class StubGh(StubRunner):
         self.branches = dict(branches or {})
         # Branches under a protection rule, keyed like `branches`; every repo's default branch is main.
         self.protected = set(protected or ())
+        # The rulesets' rules on a branch, keyed like `branches`, in the shape `gh api repos/{owner}/{repo}/rules/
+        # branches/{branch}` returns them, as read from pumpkit's main on 2026-11-04 (ruleset_rule).
+        self.rulesets: dict[str, list[dict[str, Any]]] = {}
+        # When set by a test, the rules read answers this instead.
+        self.rules_result: tuple[int, str] | None = None
         self.reads: list[tuple[str, ...]] = []
         self.actions: list[tuple[str, ...]] = []
         self.action_result: tuple[int, str] = (0, "")
@@ -553,6 +572,13 @@ class StubGh(StubRunner):
                 return 1, f"GraphQL: Could not resolve to a PullRequest with the number of {argv[3]}."
             state, head = self.prs[key]
             return 0, f"{state} {head}"
+        if argv[1] == "api" and "/rules/branches/" in argv[2]:
+            self.reads.append(argv)
+            if self.rules_result is not None:
+                return self.rules_result
+            repo, branch = argv[2].removeprefix("repos/").split("/rules/branches/", 1)
+            types = sorted({rule["type"] for rule in self.rulesets.get(f"{repo}:{branch}", [])})
+            return 0, " ".join(types)
         if argv[1:3] == ("api", "graphql") and not fields["query"].startswith("mutation"):
             self.reads.append(argv)
             key = f"{fields['owner']}/{fields['name']}:{fields['ref'].removeprefix('refs/heads/')}"

@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from jarvis_hub.agents.backend import Refused
-from jarvis_hub.approvals import Approvals
+from jarvis_hub.approvals import Approvals, rules_argv
 from jarvis_hub.hub import Hub, Line
 from jarvis_hub.subagent_rules import connector_check
 from jarvis_hub.waits import run_confined
@@ -27,6 +27,7 @@ from tests.fakes import (
     ToolResult,
     Typist,
     make_hub,
+    ruleset_rule,
     until,
 )
 
@@ -37,6 +38,8 @@ TIP = "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00"
 ASK = "CI on pumpkit#42 is green. Shall I merge it?"
 ASKED = "CI on 42 is green, sir. Shall I merge it?"
 POST_NOW = "mcp__claude_ai_Pumpkit__post_now"
+# What gh prints for the rules of a private repo on GitHub Free, where rulesets are not enforced (pumpkit-ops, 2026-11-04).
+NO_RULESETS = "Upgrade to GitHub Pro or make this repository public to enable this feature."
 
 
 def delegate(request: str = MERGE_42) -> Tool:
@@ -577,9 +580,10 @@ async def test_an_approved_branch_delete_runs_only_while_the_branch_still_points
     await until(lambda: len(received(session.backend, "orchestrator")) == 2)
     await session.end()
 
-    [read] = gh.reads[-1:]
+    read, rules = gh.reads[-2:]
     assert read[:3] == ("gh", "api", "graphql")
     assert ("-f", "ref=refs/heads/feat/old-idea") == read[9:11]
+    assert rules[:3] == ("gh", "api", "repos/pumpkit-io/pumpkit/rules/branches/feat/old-idea")
     [deleted] = gh.actions
     assert deleted[:3] == ("gh", "api", "graphql")
     assert deleted[3:5] == ("-f", deleted[4]) and deleted[4].startswith("query=mutation(")
@@ -1028,7 +1032,8 @@ class ReadsOnly:
     """The real confined gh for reads; any other command fails the test before it runs."""
 
     async def __call__(self, argv: tuple[str, ...]) -> tuple[int, str]:
-        assert argv[:3] == ("gh", "pr", "view") or "query=query(" in " ".join(argv), argv
+        rules = argv[:2] == ("gh", "api") and "/rules/branches/" in argv[2] and "-X" not in argv
+        assert argv[:3] == ("gh", "pr", "view") or "query=query(" in " ".join(argv) or rules, argv
         return await run_confined(argv)
 
 
@@ -1054,6 +1059,24 @@ async def test_the_hubs_real_reads_see_a_merged_pr_and_a_branch_tip(clock: FakeC
         "Not asked: main is the default branch of pumpkit-io/jarvis, and the Hub never deletes the default or a "
         "protected branch."
     )
+
+
+@pytest.mark.real_github
+async def test_the_hubs_real_rules_read_sees_the_ruleset_on_pumpkits_main() -> None:
+    async with asyncio.timeout(30):
+        code, printed = await ReadsOnly()(rules_argv("pumpkit-io/pumpkit", "main"))
+
+    assert code == 0
+    assert {"deletion", "non_fast_forward"} <= set(printed.split())
+
+
+@pytest.mark.real_github
+async def test_the_hubs_real_rules_read_of_a_private_repo_without_rulesets_says_so() -> None:
+    async with asyncio.timeout(30):
+        code, printed = await ReadsOnly()(rules_argv("pumpkit-io/pumpkit-ops", "main"))
+
+    assert code == 1
+    assert NO_RULESETS in printed
 
 
 async def test_an_approval_held_by_a_subagent_the_hub_stops_is_spent_and_not_saved(
@@ -1667,3 +1690,135 @@ async def test_jarvis_as_address_never_names_the_jarvis_repo_but_the_jarvis_repo
     else:
         assert str(decided.result).startswith("Not approved: with more than one Approval in play, a bare yes")
         assert gh.actions == []
+
+
+@pytest.mark.parametrize("rule", ["deletion", "non_fast_forward", "update"])
+async def test_a_branch_a_ruleset_keeps_is_never_asked_about(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh, rule: str
+) -> None:
+    gh.rulesets["pumpkit-io/pumpkit:feat/old-idea"] = [ruleset_rule(rule)]
+    session = a_session(
+        clock,
+        output,
+        metrics,
+        gh,
+        [[Text("Right away, sir."), delegate()], [Text("Not that one, sir.")]],
+        [[ask_delete(), report("T1", "I may not delete it.")]],
+    )
+
+    await session.start()
+    await session.say("Delete the branch")
+    await session.replied("Not that one, sir.")
+    await session.end()
+
+    refused, _ = results(session.backend, "orchestrator", "report")
+    assert refused.result == (
+        "Not asked: feat/old-idea is a protected branch of pumpkit-io/pumpkit, and the Hub never deletes the default "
+        "or a protected branch."
+    )
+    assert gh.actions == []
+
+
+async def test_a_ruleset_that_only_asks_for_reviews_does_not_keep_a_branch(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh
+) -> None:
+    gh.rulesets["pumpkit-io/pumpkit:feat/old-idea"] = [ruleset_rule("pull_request")]
+    session = a_session(
+        clock,
+        output,
+        metrics,
+        gh,
+        [
+            [Text("Right away, sir."), delegate("Delete feat/old-idea in pumpkit")],
+            [Text("Delete old-idea, sir?")],
+            [Text("Deleting, sir."), approve()],
+        ],
+        [[ask_delete()], [report("T1", "Deleted.")]],
+    )
+
+    await session.start()
+    await session.say("Delete feat/old-idea in pumpkit")
+    await session.replied("Delete old-idea, sir?")
+    await session.say("Yes.")
+    await until(lambda: gh.actions)
+    await session.end()
+
+    assert gh.branches == {}
+
+
+async def test_a_branch_a_ruleset_keeps_after_the_yes_is_not_deleted(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh
+) -> None:
+    session = a_session(
+        clock,
+        output,
+        metrics,
+        gh,
+        [
+            [Text("Right away, sir."), delegate("Delete feat/old-idea in pumpkit")],
+            [Text("Delete old-idea, sir?")],
+            [Text("Deleting, sir."), approve()],
+        ],
+        [[ask_delete()], [report("T1", "It is protected now.")]],
+    )
+
+    await session.start()
+    await session.say("Delete feat/old-idea in pumpkit")
+    await session.replied("Delete old-idea, sir?")
+    gh.rulesets["pumpkit-io/pumpkit:feat/old-idea"] = [ruleset_rule("deletion")]
+    await session.say("Yes.")
+    await until(lambda: len(received(session.backend, "orchestrator")) == 2)
+    await session.end()
+
+    assert gh.actions == []
+    assert "but feat/old-idea is a protected branch of pumpkit-io/pumpkit" in received(session.backend, "orchestrator")[1]
+
+
+async def test_a_branch_whose_rules_cannot_be_read_is_not_asked_about(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh
+) -> None:
+    gh.rules_result = (1, "HTTP 502: Bad Gateway")
+    session = a_session(
+        clock,
+        output,
+        metrics,
+        gh,
+        [[Text("Right away, sir."), delegate()], [Text("Not now, sir.")]],
+        [[ask_delete(), report("T1", "GitHub did not answer.")]],
+    )
+
+    await session.start()
+    await session.say("Delete the branch")
+    await session.replied("Not now, sir.")
+    await session.end()
+
+    refused, _ = results(session.backend, "orchestrator", "report")
+    assert str(refused.result).startswith("Not asked: the Hub could not read the rules of branch feat/old-idea")
+    assert gh.actions == []
+
+
+async def test_a_branch_in_a_repo_whose_plan_has_no_rulesets_can_be_deleted(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh
+) -> None:
+    gh.rules_result = (1, f'{{"message":"{NO_RULESETS}","status":"403"}}gh: {NO_RULESETS} (HTTP 403)')
+    session = a_session(
+        clock,
+        output,
+        metrics,
+        gh,
+        [
+            [Text("Right away, sir."), delegate("Delete feat/old-idea in pumpkit")],
+            [Text("Delete old-idea, sir?")],
+            [Text("Deleting, sir."), approve()],
+        ],
+        [[ask_delete()], [report("T1", "Deleted.")]],
+    )
+
+    await session.start()
+    await session.say("Delete feat/old-idea in pumpkit")
+    await session.replied("Delete old-idea, sir?")
+    await session.say("Yes.")
+    await until(lambda: gh.actions)
+    await session.end()
+
+    assert gh.branches == {}

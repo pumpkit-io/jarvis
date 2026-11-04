@@ -37,7 +37,7 @@ _REPO = re.compile(r"(?:(?P<owner>[A-Za-z0-9-]+)/)?(?P<name>[A-Za-z0-9._-]+)")
 _BRANCH = re.compile(r"(?!-|/)(?!.*(?:\.\.|//|@\{|\.lock$|/$|\.$))[A-Za-z0-9._/+-]{1,200}")
 
 # One read for a branch: the repository's node id, which the delete needs, the branch tip or "none", the default
-# branch, and whether a protection rule or ruleset covers the branch.
+# branch, and whether a classic protection rule covers it. Both rule fields are null under a ruleset.
 REF_QUERY = (
     "query($owner:String!,$name:String!,$ref:String!)"
     "{repository(owner:$owner,name:$name){id defaultBranchRef{name} ref(qualifiedName:$ref){target{oid} "
@@ -47,6 +47,18 @@ REF_JQ = (
     '.data.repository as $r | $r.id + " " + ($r.ref.target.oid // "none") + " " + ($r.defaultBranchRef.name // "none")'
     ' + " " + (if $r.ref.branchProtectionRule or $r.ref.refUpdateRule then "protected" else "unprotected" end)'
 )
+# The ruleset rules that keep a branch: deletion forbids it outright, and a delete is the last non-fast-forward
+# update. Other rules (reviews, checks, signatures) govern changes to a branch, not whether it exists.
+KEEPING_RULES = frozenset({"deletion", "non_fast_forward", "update"})
+# GitHub's 403 for the rules of a private repo on GitHub Free, where no ruleset is enforced.
+_NO_RULESETS = "Upgrade to GitHub Pro or make this repository public"
+
+
+def rules_argv(repo: str, branch: str) -> Argv:
+    """The read-only gh command that lists the types of the active ruleset rules on `branch` of `owner/name`."""
+    return ("gh", "api", f"repos/{repo}/rules/branches/{branch}", "--jq", '[.[].type] | unique | join(" ")')
+
+
 # GitHub deletes the ref only while it still points at beforeOid, so the tip the User approved is enforced server side.
 DELETE_REF = (
     "mutation($repositoryId:ID!,$name:GitRefname!,$beforeOid:GitObjectID!)"
@@ -469,10 +481,14 @@ class Approvals:
         if second == "none":
             return _Target(f"{what} no longer exists in {approval.repo}")
         default, rule = words[2:]
-        if approval.branch == default or rule != "unprotected":
-            kind = "the default branch" if approval.branch == default else "a protected branch"
-            never = "and the Hub never deletes the default or a protected branch"
-            return _Target(f"{approval.branch} is {kind} of {approval.repo}, {never}", forbidden=True)
+        never = "and the Hub never deletes the default or a protected branch"
+        if approval.branch == default:
+            return _Target(f"{approval.branch} is the default branch of {approval.repo}, {never}", forbidden=True)
+        code, printed = await self._runner(rules_argv(approval.repo, str(approval.branch)))
+        if code != 0 and _NO_RULESETS not in printed:
+            return _Target(f"the Hub could not read the rules of {what}: {printed.strip() or f'gh exited {code}'}")
+        if rule != "unprotected" or (code == 0 and KEEPING_RULES & set(printed.split())):
+            return _Target(f"{approval.branch} is a protected branch of {approval.repo}, {never}", forbidden=True)
         if second.lower() != sha:
             return _Target(f"{what} now points at {second[:12]}, not {sha[:12]}")
         return _Target(None, node=first)
