@@ -455,6 +455,7 @@ async def test_each_role_gets_only_its_own_hub_tools(
         "show",
         "end_conversation",
         "quiet_mode",
+        "approve",
     ]
     assert [t.name for t in backend.session("orchestrator").spec.tools] == [
         "report",

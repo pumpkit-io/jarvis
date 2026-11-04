@@ -1,6 +1,7 @@
 """The Orchestrator's session: read-only tools, its Bash through the Hub's check (ADR 0007)."""
 
 from jarvis_hub.agents.backend import STRING, HubTool, SessionSpec, ToolHandler, object_schema
+from jarvis_hub.approvals import GRANTS
 from jarvis_hub.config import Settings
 from jarvis_hub.prompts import render
 from jarvis_hub.read_only import check, describe_reads
@@ -41,6 +42,31 @@ def orchestrator_spec(settings: Settings) -> SessionSpec:
 RESTART_TASK = {**STRING, "description": "Only after a restart: the Task this is for."}
 
 
+APPROVAL = {
+    "type": "object",
+    "description": "Ask the User to approve one exact Boundary action. spoken is then the question.",
+    "properties": {
+        "action": {**STRING, "enum": ["merge_pr", "delete_branch", "subagent_action"]},
+        "repo": {**STRING, "description": "An Org repo, such as pumpkit."},
+        "pr": {"type": "integer", "description": "merge_pr: the PR number."},
+        "branch": {**STRING, "description": "delete_branch: the branch name."},
+        "sha": {
+            **STRING,
+            "description": "merge_pr: the PR head commit; delete_branch: the branch tip. The full 40 characters, "
+            "as you read it now.",
+        },
+        "description": {**STRING, "description": "subagent_action: the one exact action, such as 'post the X "
+        "thread from Pumpkit post 812 now'."},
+        "grants": {
+            "type": "array",
+            "items": {**STRING, "enum": list(GRANTS)},
+            "description": "subagent_action: the connector tools it needs, by group; leave out when none.",
+        },
+    },
+    "required": ["action"],
+}
+
+
 def orchestrator_tools(
     *,
     report: ToolHandler,
@@ -61,6 +87,7 @@ def orchestrator_tools(
                     "spoken": {**STRING, "description": "One sentence, written to be heard."},
                     "details_markdown": {**STRING, "description": "Details for the screen."},
                     "needs_user": {"type": "boolean", "description": "True when the Task waits on the User."},
+                    "approval": APPROVAL,
                 },
                 ("task_id", "spoken", "needs_user"),
             ),
@@ -80,6 +107,11 @@ def orchestrator_tools(
                     "effort": {**STRING, "enum": ["low", "medium", "high", "xhigh", "max"]},
                     "writes": {"type": "boolean", "description": "True when it changes the repo."},
                     "branch_kind": {**STRING, "enum": ["feat", "fix", "chore"], "description": "With writes."},
+                    "approval_id": {
+                        **STRING,
+                        "description": "An approved subagent_action Approval of this Task, such as A2, which the "
+                        "Subagent's brief then carries.",
+                    },
                     "task_id": RESTART_TASK,
                 },
                 ("repo", "title", "brief", "model", "effort", "writes"),
