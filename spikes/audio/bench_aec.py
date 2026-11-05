@@ -124,6 +124,9 @@ def analyse(run: Path) -> dict:
 def simulate() -> Path:
     """Build a run dir with digital echo: Kokoro speech through a toy room, plus a User clip."""
     from kokoro_mlx import KokoroTTS
+    from common import prepare_tts
+
+    prepare_tts()
 
     from common import resample
     from corpus import JARVIS_LINES

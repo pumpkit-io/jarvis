@@ -176,6 +176,9 @@ def jarvis_reference() -> np.ndarray:
         return sf.read(path, dtype="float32")[0]
     print("  synthesising Jarvis's lines with kokoro-mlx...")
     from kokoro_mlx import KokoroTTS
+    from common import prepare_tts
+
+    prepare_tts()
 
     tts = KokoroTTS.from_pretrained("mlx-community/Kokoro-82M-bf16")
     parts = []
