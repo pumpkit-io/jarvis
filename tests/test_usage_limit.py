@@ -1143,3 +1143,36 @@ async def test_a_reset_the_talker_was_telling_when_it_hit_the_limit_again_is_not
 
     assert sum('reason="usage_reset"' in m for m in talker_received(backend)) == 1
     await hub.close()
+
+
+async def test_showing_a_restored_limit_preserves_saved_work_before_async_recovery(
+    clock: FakeClock, metrics: RecordingMetrics, tmp_path: Path
+) -> None:
+    state = tmp_path / ".jarvis" / "state.json"
+    before = RecordingOutput()
+    first_backend = FakeBackend(
+        clock, [[Text("I'll check the CI, sir."), delegate("Check the CI")]],
+        orchestrator=[[Limited(600)]],
+    )
+    first = make_hub(first_backend, before, metrics, state_path=state)
+    typist = Typist(clock)
+    run = await running(first, typist)
+    typist.type("Check the CI")
+    await until(lambda: any(LINE in n for n in before.notices))
+    await stopped(first, run)
+    saved = json.loads(state.read_text())
+    assert [t["id"] for t in saved["tasks"]] == ["T1"]
+    assert saved["unanswered"]
+
+    output = RecordingOutput()
+    backend = FakeBackend(clock)
+    second = make_hub(backend, output, metrics, state_path=state)
+    try:
+        await second.start()
+        assert backend.sessions == []
+        assert any(LINE in n for n in output.notices)
+        restored = json.loads(state.read_text())
+        for field in ("tasks", "subagents", "approvals", "unanswered", "held", "parked", "waits"):
+            assert restored[field] == saved[field]
+    finally:
+        await second.close()

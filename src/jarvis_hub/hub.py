@@ -696,9 +696,7 @@ class Hub:
             self._release_held()
 
     def _restore_limit(self, limit: SavedLimit, parked: list[News]) -> None:
-        """Brings back the usage limit, without telling the User again, and the news the limited Talker kept. A
-        limit that reset while the Hub was down clears at once, and its reset is announced once a turn of a held role
-        completes."""
+        """Restores holds and parked news without persisting the partially restored Hub."""
         self._parked_news = parked
         self._pending += sum(item.count for item in parked)
         if parked:
@@ -1271,6 +1269,7 @@ class Hub:
         self._turn_count += 1
         speech.begin(self._lang, turn=self._turn_count, heard_at=item.arrived)
         self._limit_notice(self._limit.tell())
+        self._persist()
         speech.end()
         self._output.reply_end()
         return TurnEnd("limited")
@@ -1282,7 +1281,6 @@ class Hub:
         self._output.notice(
             f"Model unavailable: usage limit. {when} Held work retries automatically; try your request again after reset."
         )
-        self._persist()
 
     def _limit_hit(self, role: str, news: bool) -> None:
         self._write({"kind": "usage_limit", "role": role, "resets_at": self._limit.resets_at(role)})
@@ -1297,6 +1295,7 @@ class Hub:
         notice = self._limit.tell_news()
         if notice is not None:
             self._limit_notice(notice.resets_at, update=notice.update)
+            self._persist()
 
     def _limit_cleared(self, roles: frozenset[str]) -> None:
         self._write({"kind": "usage_reset", "roles": sorted(roles)})
