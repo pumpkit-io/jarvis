@@ -1,0 +1,41 @@
+{
+  "source": "recordings",
+  "purpose": "candidate exploration, not independent confirmation",
+  "corpus_sha256": "cfd65004830a24477ea317f75e8030b7e7021cd81206f53e0d6a48c609cd39b0",
+  "negative_files": 13,
+  "realtime_factor": 0.015881644394362134,
+  "process_rss_mb": 268.265625,
+  "per_phrasing": {
+    "Hey Jarvis": {
+      "detected": 14,
+      "takes": 20
+    },
+    "Hi Jarvis": {
+      "detected": 16,
+      "takes": 20
+    },
+    "Ehi Jarvis": {
+      "detected": 8,
+      "takes": 20
+    },
+    "Jarvis": {
+      "detected": 13,
+      "takes": 20
+    }
+  },
+  "false_wakes": 0,
+  "negative_seconds_with_sound": 3900.0,
+  "false_wakes_per_hour": 0.0,
+  "joint_gate_pass": false,
+  "candidate": "sherpa-onnx-gigaspeech-3.3M-fp32-2024-01-01",
+  "version": "2.0.1",
+  "threshold": 0.25,
+  "keywords_score": 1.0,
+  "keyword": "JARVIS",
+  "threads": 1,
+  "model_sha256": {
+    "decoder-epoch-12-avg-2-chunk-16-left-64.onnx": "f61ebd3eed3773a44d088d53dfae92dbb6aec4839f4dcaee2d402414741663a3",
+    "encoder-epoch-12-avg-2-chunk-16-left-64.onnx": "063fbc1aeae8a9b574607a331a00e60371846ef9eaa3c1d9ea48176665dfc693",
+    "joiner-epoch-12-avg-2-chunk-16-left-64.onnx": "0d7a37e749d8055223029318d6ffae82db1dae2d315d0892a68ba5dad17c1d2d"
+  }
+}
