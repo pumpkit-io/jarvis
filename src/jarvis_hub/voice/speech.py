@@ -1,4 +1,4 @@
-"""Speech output: the Talker's streamed text becomes audio sentence by sentence, plus the Hub's cached lines.
+"""Speech output: the Talker's streamed text becomes audio sentence by sentence, plus nonverbal cues.
 
 Synthesis runs on one thread of its own and never waits for playback, so sentence n+1 is synthesised while
 sentence n plays and the player starts each clip the moment the one before it ends.
@@ -20,11 +20,7 @@ from jarvis_hub.voice.player import Clip, Player, Samples
 from jarvis_hub.voice.splitter import SentenceSplitter
 from jarvis_hub.voice.tts import Synthesizer
 
-ClipName = Literal["chime", "ready", "very_good"]
-
-LINES: dict[ClipName, dict[Lang, str]] = {
-    "very_good": {"en": "Very good, sir.", "it": "Molto bene, signore."},
-}
+ClipName = Literal["chime", "ready"]
 
 # With queued audio this long unplayed, as from a paused player or a device that stopped pulling, `idle` gives up.
 STALLED = 2.0
@@ -156,12 +152,12 @@ class Speech:
         self._loading: asyncio.Future[None] | None = None
 
     def start(self) -> None:
-        """Load the voice and synthesise the cached lines in the background; what is said meanwhile waits."""
+        """Load the voice in the background; speech and nonverbal cues wait until it is ready."""
         self._loading = asyncio.get_running_loop().run_in_executor(self._thread, self._load)
         self._worker = asyncio.create_task(self._work(self._loading))
 
     def say(self, name: ClipName, lang: Lang, *, in_reply: bool = False) -> None:
-        """Plays a cached line after what is queued; with `in_reply`, as the start of the reply `begin` opened."""
+        """Queue a nonverbal cue; `in_reply` associates its playback with the reply `begin` opened."""
         self._queue.put_nowait(_Cached(name, lang, self._reply if in_reply else None))
 
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None) -> None:
@@ -246,10 +242,6 @@ class Speech:
 
     def _load(self) -> None:
         self._tts.load()
-        for name, lines in LINES.items():
-            for lang, text in lines.items():
-                voice = voice_for(lang)
-                self._cache[name, lang] = Clip(text, voice, self._tts.synthesize(text, voice), self._tts.sample_rate)
         tone = chime(self._tts.sample_rate)
         for lang in ("en", "it"):
             self._cache["chime", lang] = Clip("", "chime", tone, self._tts.sample_rate)

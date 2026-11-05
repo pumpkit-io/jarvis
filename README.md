@@ -54,7 +54,7 @@ The launcher follows symlinks before entering its checkout. In a git worktree, c
 ./jarvis stats --voice --since 24h
 ```
 
-Say “Hey Jarvis” and your request, in one breath if you wish. “Hi Jarvis”, “Ehi Jarvis” and “Jarvis” are intended wake phrases; recall for the User's voice is still awaiting measurement. After a reply, the Follow-up window lets you continue without the Wake word. A whole stop phrase such as “that's all”, “stand by” or “basta così” plays the cached acknowledgment and returns to idle. A longer utterance containing those words remains a request.
+Say “Hey Jarvis” and your request, in one breath if you wish. “Hi Jarvis”, “Ehi Jarvis” and “Jarvis” are intended wake phrases; recall for the User's voice is still awaiting measurement. After a reply, the Follow-up window lets you continue without the Wake word. A whole end control such as “that's all”, “stand by” or “basta così” returns to idle silently. A longer utterance containing those words remains a request. When a conversational reply is appropriate, Jarvis generates its farewell and finishes speaking before returning idle.
 
 Replies start with generated content about the request; slow generation stays silent without a holding sentence. Background work is acknowledged before it starts.
 

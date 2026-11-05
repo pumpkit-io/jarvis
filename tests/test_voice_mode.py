@@ -205,18 +205,27 @@ async def test_a_noise_only_turn_is_dropped(rig_for: MakeRig) -> None:
     assert rig.state == "listening"
 
 
-async def test_a_stop_phrase_says_very_good_and_idles_without_the_model(rig_for: MakeRig) -> None:
-    rig: Rig = await rig_for([Text("Done, signore.")])
-
+@pytest.mark.parametrize(
+    ("opening", "answer", "ending"),
+    [("Check the CI", "The CI is green, sir.", "That's all."),
+     ("Controlla le PR", "Le PR sono pronte, signore.", "Grazie Jarvis.")],
+)
+async def test_a_whole_utterance_end_control_idles_silently_without_another_model_turn(
+    rig_for: MakeRig, opening: str, answer: str, ending: str
+) -> None:
+    rig: Rig = await rig_for([Text(answer)])
     rig.audio.wake()
-    rig.audio.say("Apri una issue")
+    rig.audio.say(opening)
     await until(lambda: rig.state == "follow_up")
-    rig.audio.say("Grazie Jarvis.")
-    await until(lambda: rig.states()[-1:] == ["idle"])
-    await rig.settle()
+    played = rig.player.texts.copy()
+    turns = len(talker_received(rig))
+    rig.audio.say(ending)
+    await until(lambda: rig.state == "idle")
+    await rig.advance(60)
 
     assert len(rig.user_messages()) == 1
-    assert rig.player.texts[-1] == "Molto bene, signore."
+    assert rig.player.texts == played
+    assert len(talker_received(rig)) == turns
 
 
 async def test_spoken_italian_is_tagged_and_answered_in_italian(rig_for: MakeRig) -> None:
@@ -273,14 +282,30 @@ async def test_the_wake_word_while_jarvis_speaks_stops_it_and_listens(rig_for: M
     await until(lambda: not talker._sending)  # pyright: ignore[reportPrivateUsage]
 
 
-async def test_end_conversation_idles_after_the_reply_with_no_follow_up_window(rig_for: MakeRig) -> None:
-    rig: Rig = await rig_for([Text("Very well, sir."), Tool("end_conversation")])
-
+@pytest.mark.parametrize(
+    ("utterance", "farewell", "voice"),
+    [("We're done for today", "Until tomorrow, sir.", "am_liam"),
+     ("Per oggi abbiamo finito", "A domani, signore.", "im_nicola")],
+)
+async def test_generated_farewell_finishes_before_idle_without_a_follow_up_window(
+    rig_for: MakeRig, utterance: str, farewell: str, voice: str
+) -> None:
+    rig: Rig = await rig_for([Text(farewell), Tool("end_conversation")])
+    rig.player.hold = True
     rig.audio.wake()
-    rig.audio.say("We're done for today")
-    await until(lambda: rig.states()[-1:] == ["idle"])
+    rig.audio.say(utterance)
+    await until(lambda: rig.player.texts[-1:] == [farewell])
+    await until(lambda: any(t.name == "end_conversation" for t in rig.backend.session("talker").tool_results))
+    assert rig.state == "speaking"
+    assert rig.player.voices[-1] == voice
+    rig.player.finish()
+    await rig.advance(0.1)
+    await until(lambda: rig.state == "idle")
+    await rig.advance(60)
 
     assert rig.states() == ["listening", "thinking", "speaking", "idle"]
+    assert rig.player.texts == ["", farewell]
+    assert len(rig.user_messages()) == 1
 
 
 async def test_capture_is_on_only_while_listening_for_a_turn(rig_for: MakeRig) -> None:
@@ -2368,3 +2393,74 @@ async def test_coalesced_uncertainty_keeps_earliest_onset_and_current_played_con
     assert 'The old answer, sir.' in candidate.played_text
     assert any('Open an issue about the worker that drops callbacks' in message
                for message in rig.backend.session('talker').received)
+
+
+@pytest.mark.parametrize("ending", ["That's all.", "Basta così."])
+async def test_a_whole_end_control_after_wake_adds_no_speech_or_model_turn(rig_for: MakeRig, ending: str) -> None:
+    rig = await rig_for()
+    turns = len(talker_received(rig))
+    rig.audio.wake()
+    rig.audio.say(ending)
+    await until(lambda: rig.state == "idle")
+    await rig.advance(60)
+
+    assert rig.user_messages() == []
+    assert rig.player.voices == ["chime"]
+    assert len(talker_received(rig)) == turns
+
+
+@pytest.mark.parametrize(
+    ("utterance", "lang"),
+    [("Thanks Jarvis, check the CI", "en"), ("Grazie Jarvis, controlla le PR", "it")],
+)
+async def test_longer_spoken_requests_keep_their_thanks_and_reach_the_talker(
+    rig_for: MakeRig, utterance: str, lang: str
+) -> None:
+    rig = await rig_for([Text("The checks passed.")])
+    rig.audio.wake()
+    rig.audio.say(utterance)
+    await until(lambda: rig.state == "follow_up")
+
+    assert rig.user_messages() == [f'<user lang="{lang}">{utterance}</user>']
+    assert rig.player.texts == ["", "The checks passed."]
+
+
+@pytest.mark.parametrize("ending", ["That's all.", "Grazie Jarvis."])
+async def test_farewell_words_cannot_take_the_floor_through_a_non_capturing_transcript(
+    rig_for: MakeRig, ending: str
+) -> None:
+    release = asyncio.Event()
+    rig = await rig_for([Text("The checks are running. "), Gate(release), Text("All green.")])
+    rig.audio.wake()
+    rig.audio.say("Check the CI")
+    await until(lambda: rig.state == "speaking" and "The checks are running." in rig.player.texts)
+    turns = len(talker_received(rig))
+    events = rig.player.events.copy()
+    try:
+        rig.audio.say(ending)
+        await rig.settle()
+        assert rig.state == "speaking"
+        assert rig.player.events == events
+        assert len(talker_received(rig)) == turns
+    finally:
+        release.set()
+    await until(lambda: rig.state == "follow_up")
+    assert rig.player.texts == ["", "The checks are running.", "All green."]
+
+
+@pytest.mark.parametrize(
+    ("ending", "response"),
+    [("That's all.", "Until tomorrow, sir."), ("Basta così.", "A domani, signore.")],
+)
+async def test_typed_end_controls_remain_generated_text_without_audio(rig_for: MakeRig, ending: str, response: str) -> None:
+    rig = await rig_for([Text(response), Tool("end_conversation")])
+    rig.typist.type(ending)
+    await until(lambda: rig.output.replies == [response])
+    turns = len(talker_received(rig))
+    await rig.advance(60)
+
+    assert len(rig.user_messages()) == 1
+    assert 'typed="true"' in rig.user_messages()[0]
+    assert rig.player.texts == []
+    assert rig.state == "idle"
+    assert len(talker_received(rig)) == turns
