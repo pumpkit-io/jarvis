@@ -76,6 +76,10 @@ _Avoid_: rate limit, quota, billing limit
 A phrase such as "Hey Jarvis", "Hi Jarvis", "Ehi Jarvis" or "Jarvis" that makes an idle Jarvis start listening. During playback it is evidence that speech addresses Jarvis, interpreted in context rather than treated as an unconditional Interruption.
 _Avoid_: hotword, trigger phrase
 
+**Spoken request**:
+An admitted User request with an identity that survives resumed speech or correction. Each accepted change creates a revision, preserving the opening and added words in order. The current revision owns its Talker generation and reply; replacing or retiring it makes old results stale.
+_Avoid_: treating every transcript fragment as a fresh request
+
 **Follow-up window**:
 The few seconds after Jarvis finishes speaking when the User can go on without the Wake word. When it passes in silence, Jarvis goes idle without a word.
 _Avoid_: grace period, listening timeout

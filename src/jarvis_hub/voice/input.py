@@ -129,6 +129,9 @@ class _Turn:
     judged_silence: float | None = None
     smart_turn_ms: float = 0.0
     assessments: list[dict[str, Any]] = field(default_factory=lambda: [])
+    owner: int | None = None
+    candidate: int = 0
+    onset: float | None = None
 
 
 class InputPipeline:
@@ -159,6 +162,9 @@ class InputPipeline:
         self._onset: float | None = None
         self._last_speech = 0.0
         self._capturing = False
+        self._owner: int | None = None
+        self._candidate_sequence = 0
+        self._limited_run = False
         self._turn: _Turn | None = None
         # The start of the current unbroken speech, whether it has already made a Barge-in, and whether a resume while
         # it went on has let it make one more, which it may only once, so Backchannels cannot pause and resume forever.
@@ -180,9 +186,14 @@ class InputPipeline:
         self._clip: tuple[float, list[Pcm]] | None = None
         self._at = 0.0
 
-    def capture(self, on: bool) -> None:
+    def capture(self, on: bool, *, owner: int | None = None) -> None:
+        if owner is not None and owner != self._owner:
+            if self._turn is not None or not on:
+                self._onset = None
+            self._turn = None
+            self._owner = owner
         self._capturing = on
-        if not on:
+        if not on and owner is None:
             self._turn = None
 
     def barge_in(self, since: float | None) -> None:
@@ -235,13 +246,16 @@ class InputPipeline:
                 self._last_speech = ends
             else:
                 self._run, self._run_spent, self._run_rearmed, self._overheard = None, False, False, None
-        events += self._barge_events(at)
+        if self._turn is None or self._capturing:
+            events += self._barge_events(at)
         if self._onset is not None and self._turn is None and at - self._last_speech >= self._s.end_silence_s:
             self._onset = None
             self._barge = None
-        if self._capturing and self._turn is None and self._onset is not None:
+        if at - self._last_speech >= self._s.end_silence_s:
+            self._limited_run = False
+        if self._capturing and not self._limited_run and self._turn is None and self._onset is not None:
             self._turn = self._begin_turn(self._onset)
-            events.append(SpeechStarted(at))
+            events.append(SpeechStarted(at, self._turn.owner, self._turn.candidate, self._turn.onset))
         if self._turn is not None and (heard := self._end_of_turn(self._turn, at)) is not None:
             events.append(heard)
         return events
@@ -313,7 +327,9 @@ class InputPipeline:
         # A frame's stamp is the time of its last sample, so it starts 10 ms earlier.
         frames = [f for f, t in self._ring if t - 0.01 >= start - STAMP_SLACK_S]
         first = self._ring[-len(frames)][1] - 0.01 if frames else self._ring[-1][1]
-        return _Turn(first, frames, [], wake=self._last_wake if self._last_wake > first else None)
+        self._candidate_sequence += 1
+        return _Turn(first, frames, [], wake=self._last_wake if self._last_wake > first else None,
+                     owner=self._owner, candidate=self._candidate_sequence, onset=onset)
 
     def _end_of_turn(self, turn: _Turn, at: float) -> Heard | None:
         silence = at - self._last_speech
@@ -365,6 +381,9 @@ class InputPipeline:
                 "time_basis": "perf_counter",
                 "request_at": self._last_speech,
                 "capture_start_at": turn.start,
+                "speech_started_at": turn.onset,
+                "capture_epoch": turn.owner,
+                "candidate": turn.candidate,
                 "endpoint_at": at,
                 "endpoint_reason": "max_turn" if at - turn.start >= self._s.max_turn_s else "complete",
                 "stt_started_at": stt_started,
@@ -383,7 +402,9 @@ class InputPipeline:
             lang = detect_language(text, "en") if text else None
             meta = {"start": round(turn.start, 3), "speech_s": round(self._last_speech - turn.start, 3)}
             self._save("turn", self._pcm(turn), {**meta, "lang": lang, "admitted": admitted})
-        return Heard(text, None, self._last_speech)
+        limited = at - turn.start >= self._s.max_turn_s
+        self._limited_run = limited
+        return Heard(text, None, self._last_speech, turn.owner, turn.candidate, turn.onset, limited=limited)
 
 
 Push = Callable[[Pcm, float], None]
@@ -423,6 +444,7 @@ class Microphone:
 @dataclass(frozen=True)
 class _Capture:
     on: bool
+    owner: int | None = None
 
 
 @dataclass(frozen=True)
@@ -486,8 +508,8 @@ class Capture:
         self._loop = asyncio.get_running_loop()
         threading.Thread(target=self._run, name="capture", daemon=True).start()
 
-    def capture(self, on: bool) -> None:
-        self._frames.put(_Capture(on))
+    def capture(self, on: bool, *, owner: int | None = None) -> None:
+        self._frames.put(_Capture(on, owner))
 
     def barge_in(self, since: float | None) -> None:
         self._frames.put(_BargeIn(since))
@@ -574,7 +596,7 @@ class Capture:
         silent = 0
         while (item := self._frames.get()) is not None:
             if isinstance(item, _Capture):
-                pipeline.capture(item.on)
+                pipeline.capture(item.on, owner=item.owner)
                 continue
             if isinstance(item, _BargeIn):
                 pipeline.barge_in(item.since)

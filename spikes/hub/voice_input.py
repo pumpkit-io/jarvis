@@ -195,8 +195,8 @@ class TimedInput:
         self._capture = capture
         self.wakes: list[float] = []
 
-    def capture(self, on: bool) -> None:
-        self._capture.capture(on)
+    def capture(self, on: bool, *, owner: int | None = None) -> None:
+        self._capture.capture(on, owner=owner)
 
     def barge_in(self, since: float | None) -> None:
         self._capture.barge_in(since)

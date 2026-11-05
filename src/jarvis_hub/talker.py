@@ -33,12 +33,14 @@ def talker_tools(
             "Start your background work involving the Org as a Task, after a short request-specific spoken response. "
             "Returns at once with the Task id, and "
             "the result arrives later as an event, so there is nothing to add after calling it. "
-            "Pass task_id to continue a Task, such as answering its question.",
+            "Pass task_id to continue a Task, such as answering its question. When revising a spoken request "
+            "with existing Tasks, choose its task_id or explicitly set new_task=true for additional work.",
             object_schema(
                 {
                     "request": {**STRING, "description": "What the User wants, in their words."},
                     "context": {**STRING, "description": "Anything from the conversation the request depends on."},
                     "task_id": {**STRING, "description": "The Task this continues, such as T3."},
+                    "new_task": {"type": "boolean", "description": "Explicitly start additional work while revising a spoken request."},
                 },
                 ("request",),
             ),

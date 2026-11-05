@@ -25,10 +25,19 @@ class Task:
     waiting: int = 0
     # What the User typed or said in the turns that started or continued this Task, never a model's rewording.
     words: list[str] = field(default_factory=lambda: [])
+    revision: int = 0
 
     @property
     def cancelled(self) -> bool:
         return self.state == "cancelled"
+
+    def revise(self, text: str) -> None:
+        self.revision += 1
+        self.request = text
+        self.words.append(text)
+
+    def discard_message(self) -> None:
+        self.waiting = max(0, self.waiting - 1)
 
     def queue_message(self) -> None:
         """A message for this Task joins the Orchestrator's queue; a Task being worked on stays working."""
@@ -80,7 +89,7 @@ class Task:
         return self.state not in FINISHED or (bool(self.waiting) and not self.cancelled)
 
 
-_SAVED = Fields(("id", "request", "created", "state", "last_report", "reports", "words"), times=frozenset({"created"}))
+_SAVED = Fields(("id", "request", "created", "state", "last_report", "reports", "words", "revision"), times=frozenset({"created"}))
 
 
 class Tasks:
@@ -104,7 +113,7 @@ class Tasks:
         message, so a queued one is working on it."""
         tasks: list[Task] = []
         for r in records:
-            task = Task(**_SAVED.load(r, from_wall))
+            task = Task(**_SAVED.load({"revision": 0, **r}, from_wall))
             numbered(task.id, "T")
             if one_of(task.state, get_args(TaskState)) == "queued":
                 task.state = "working"

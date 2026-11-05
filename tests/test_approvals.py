@@ -916,6 +916,12 @@ class AlwaysQuiet:
     async def quiet(self) -> None:
         return None
 
+    def owns(self, owner: tuple[str, int]) -> bool:
+        return True
+
+    def typed_input(self) -> None:
+        pass
+
     def announce(self) -> bool:
         return True
 

@@ -724,17 +724,24 @@ class ScriptedAudio:
         # Each `barge_in` call's `since`.
         self.watching: list[float | None] = []
         self._onset = 0.0
+        self.owner: int | None = None
+        self.candidate = 0
+
+    def emit(self, event: InputEvent) -> None:
+        self._queue.put_nowait(event)
 
     def wake(self) -> None:
         self._queue.put_nowait(WakeWord(self._clock.now()))
 
     def speech(self) -> None:
-        self._queue.put_nowait(SpeechStarted(self._clock.now()))
+        self._onset = self._clock.now()
+        self.candidate += 1
+        self._queue.put_nowait(SpeechStarted(self._onset, None, self.candidate))
 
-    def say(self, text: str, lang: Lang | None = None) -> None:
+    def say(self, text: str, lang: Lang | None = None, *, limited: bool = False) -> None:
         """Speech onset, then the turn's transcript at its end."""
         self.speech()
-        self._queue.put_nowait(Heard(text, lang, self._clock.now()))
+        self._queue.put_nowait(Heard(text, lang, self._clock.now(), None, self.candidate, self._onset, limited))
 
     def barge(self, held: float = 0.2) -> None:
         """Speech over Jarvis that began `held` seconds ago and has held since: a Barge-in once 200 ms of it fall
@@ -754,7 +761,8 @@ class ScriptedAudio:
         """What STT made of the rest of a run that has made all the Barge-ins it may."""
         self._queue.put_nowait(Overheard(text, self._clock.now()))
 
-    def capture(self, on: bool) -> None:
+    def capture(self, on: bool, *, owner: int | None = None) -> None:
+        self.owner = owner
         self.capturing.append(on)
 
     def barge_in(self, since: float | None) -> None:

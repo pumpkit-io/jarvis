@@ -327,6 +327,7 @@ def test_a_turn_ends_at_the_longest_turn_setting_whatever_vad_says() -> None:
     assert r.heard() == []
     r.feed("speech", 0.2)
     assert len(r.heard()) == 1
+    assert r.heard()[0].limited
 
 
 def test_the_pad_before_the_onset_and_the_wake_refractory_time_are_settings() -> None:
@@ -759,3 +760,59 @@ def test_trace_distinguishes_premature_endpoint_from_a_later_continuation() -> N
     assert before["endpoint_reason"] == "complete"
     assert before["time_basis"] == "perf_counter"
     assert "text" not in before
+
+
+def test_a_turn_owned_while_thinking_survives_capture_off_for_first_reply_audio() -> None:
+    r = rig()
+    r.pipeline.capture(True, owner=7)
+    r.feed('speech', 0.4)
+    r.pipeline.capture(False, owner=7)
+    r.feed('speech', 0.3)
+    r.feed('silence', 0.6)
+    [heard] = r.heard()
+    [onset] = [event for event in r.events if isinstance(event, SpeechStarted)]
+    assert heard.owner == onset.owner == 7
+    assert heard.candidate == onset.candidate
+    assert heard.started_at is not None
+    assert 0 <= onset.at - heard.started_at <= 0.04 + 1e-9
+
+
+def test_a_replacement_epoch_discards_an_in_progress_old_transcription() -> None:
+    r = rig()
+    r.pipeline.capture(True, owner=7)
+    r.feed('speech', 0.4)
+    r.pipeline.capture(True, owner=8)
+    r.feed('silence', 0.6)
+    assert r.heard() == []
+    r.feed('speech', 0.4)
+    r.feed('silence', 0.6)
+    [heard] = r.heard()
+    assert heard.owner == 8
+
+
+def test_duration_limit_suppresses_contiguous_tail_until_silence() -> None:
+    r = rig(max_turn_s=1.0)
+    r.pipeline.capture(True, owner=7)
+    r.feed('speech', 3.0)
+    assert len(r.heard()) == 1
+    r.feed('silence', 0.6)
+    r.feed('speech', 0.3)
+    r.feed('silence', 0.6)
+    assert len(r.heard()) == 2
+
+
+def test_captured_onset_is_separate_from_retained_pre_roll() -> None:
+    r = rig(onset_pad_s=0.3)
+    r.pipeline.capture(True, owner=7)
+    r.feed('silence', 0.5)
+    r.feed('speech', 0.4)
+    r.feed('silence', 0.6)
+    [heard] = r.heard()
+    [onset] = [event for event in r.events if isinstance(event, SpeechStarted)]
+    assert heard.started_at == onset.started_at
+    assert heard.started_at is not None
+    assert heard.started_at >= T0 + 0.45
+    [record] = [record for record in r.records if record['kind'] == 'turn']
+    capture_start = record['capture_start_at']
+    assert isinstance(capture_start, float)
+    assert capture_start < T0 + 0.3

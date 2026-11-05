@@ -106,6 +106,7 @@ class Subagent:
     report: str = ""
     # The Approval this Subagent acts on, which widens its connector tools (ADR 0013).
     approval: str | None = None
+    task_revision: int = 0
     stop: asyncio.Event = field(default_factory=asyncio.Event)
 
     @property
@@ -191,7 +192,7 @@ class Subagents:
         self._runs: list[asyncio.Task[None]] = []
         self._closing = False
 
-    async def prepare(self, task_id: str, args: dict[str, Any], user_words: Sequence[str]) -> Subagent | Refused:
+    async def prepare(self, task_id: str, args: dict[str, Any], user_words: Sequence[str], *, task_revision: int = 0) -> Subagent | Refused:
         """Check the request and set up its worktree, with a branch when it writes. Not started yet."""
         repo, title, brief = (str(args.get(k) or "").strip() for k in ("repo", "title", "brief"))
         # worktree.sh keeps only a lock description's first line, so a title is one line of plain spaces.
@@ -222,7 +223,7 @@ class Subagents:
         except Refusal as e:
             return Refused(str(e))
         log = self._setup.log_dir / f"{sid}.jsonl" if self._setup.log_dir else None
-        subagent = Subagent(sid, task_id, name, title, brief, model, effort, cwd, self._clock.now(), branch, log, holder)
+        subagent = Subagent(sid, task_id, name, title, brief, model, effort, cwd, self._clock.now(), branch, log, holder, task_revision=task_revision)
         self._all[sid] = subagent
         return subagent
 
@@ -239,9 +240,10 @@ class Subagents:
     def live(self, task_id: str) -> list[Subagent]:
         return [s for s in self._all.values() if s.task_id == task_id and s.state not in FINISHED]
 
-    def lines(self, task_id: str | None = None) -> list[str]:
+    def lines(self, task_id: str | None = None, *, revision: int | None = None) -> list[str]:
         now = self._clock.now()
-        return [s.line(now) for s in self._all.values() if task_id is None or s.task_id == task_id]
+        return [s.line(now) for s in self._all.values()
+                if (task_id is None or s.task_id == task_id) and (revision is None or s.task_revision == revision)]
 
     def listing(self) -> str:
         if not self._all:
@@ -276,7 +278,7 @@ class Subagents:
         """Saved Subagents, checked whole and not yet restored."""
         subagents: list[Subagent] = []
         for r in records:
-            subagent = Subagent(**_SAVED.load(r, from_wall))
+            subagent = Subagent(**_SAVED.load({"task_revision": 0, **r}, from_wall))
             numbered(subagent.id, "S")
             one_of(subagent.state, get_args(SubagentState))
             if not is_effort(subagent.effort):
