@@ -55,6 +55,14 @@ class SpeechStarted:
 
 
 @dataclass(frozen=True)
+class CaptureAborted:
+    """Captured speech was discarded before a request could be admitted."""
+
+    at: float
+    reason: str
+
+
+@dataclass(frozen=True)
 class BargeIn:
     """The User's speech over Jarvis has held long enough to pause it: it began at `onset`."""
 
@@ -116,11 +124,12 @@ class Tick:
 
 
 # What the audio input reports.
-InputEvent = WakeWord | SpeechStarted | Heard | BargeIn | Partial | Overheard
+InputEvent = WakeWord | SpeechStarted | CaptureAborted | Heard | BargeIn | Partial | Overheard
 Event = (
     WakeWord
     | ChimeStarted
     | SpeechStarted
+    | CaptureAborted
     | Heard
     | BargeIn
     | Partial
@@ -287,6 +296,10 @@ def _step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Actio
             return voice, []
         case Heard(text, lang, at):
             return _heard(voice, text, lang, at, timing)
+        case CaptureAborted(at):
+            if voice.state in CAPTURING and voice.in_turn:
+                return _heard(voice, "", None, at, timing)
+            return voice, []
         case ReplyAudio(at, answers):
             # Only a spoken turn's reply moves on here: news has already claimed the voice with AnnouncementBegins.
             if voice.state == "thinking" and answers == voice.awaiting:
