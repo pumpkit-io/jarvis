@@ -73,7 +73,7 @@ _Avoid_: rate limit, quota, billing limit
 ### Conversation
 
 **Wake word**:
-The phrase ("Hey Jarvis", "Hi Jarvis" and similar) that makes an idle Jarvis start listening, and that stops Jarvis whenever it is speaking.
+A phrase such as "Hey Jarvis", "Hi Jarvis", "Ehi Jarvis" or "Jarvis" that makes an idle Jarvis start listening. During playback it is evidence that speech addresses Jarvis, interpreted in context rather than treated as an unconditional Interruption.
 _Avoid_: hotword, trigger phrase
 
 **Follow-up window**:
@@ -88,12 +88,8 @@ _Avoid_: notification, alert, ping
 A state the User sets in which Announcements wait until the next Wake word, except those that need the User.
 _Avoid_: do not disturb, mute
 
-**Holding line**:
-The short line, "One moment, sir.", that Jarvis says when its reply to the User is slow to start, so the silence does not read as not having heard.
-_Avoid_: filler, stall
-
 **Barge-in**:
-The User speaking while Jarvis is speaking. Jarvis pauses, then either resumes after a Backchannel or stops and listens after an Interruption.
+Speech heard while Jarvis is speaking. It may address Jarvis, acknowledge what it says, or belong to another conversation; hearing it alone does not make Jarvis pause or stop.
 _Avoid_: overlap, talk-over
 
 **Backchannel**:
@@ -101,5 +97,5 @@ A short sound of attention during a Barge-in, such as "okay", "mhm" or "sì", th
 _Avoid_: filler, acknowledgment
 
 **Interruption**:
-A Barge-in that takes the floor, such as "wait", "no, actually…" or any longer speech. Jarvis stops speaking and keeps listening.
+A Barge-in that clearly addresses Jarvis and asks to take the floor. Jarvis stops speaking and listens; speech length or particular words alone do not establish an Interruption.
 _Avoid_: cancel, abort
