@@ -38,8 +38,16 @@ def final_report(execution: str, head: str) -> tuple[str, str]:
     if not isinstance(body, str) or not body.strip() or len(body.encode("utf-8")) > 60_000:
         raise InvalidReview("terminal result must contain a nonempty Markdown report under 60 KB")
     lines = body.strip().splitlines()
-    if lines[0] != f"## sdlc review of {head}":
-        raise InvalidReview("review heading does not match the expected PR head")
+    expected_heading = f"## sdlc review of {head}"
+    if lines[0] != expected_heading:
+        diagnostics = {
+            "expected_heading_elsewhere": expected_heading in lines[1:],
+            "first_line_heading_like": bool(re.match(r"^#{1,6}\s+", lines[0])),
+            "outer_fence": bool(re.match(r"^(?:`{3,}|~{3,})", lines[0])),
+        }
+        summary = " ".join(f"{name}={str(value).lower()}" for name, value in diagnostics.items())
+        axes = sum(section in lines for section in ("## Standards", "## Spec", "## Correctness"))
+        raise InvalidReview(f"review heading does not match the expected PR head; {summary} axes_present={axes}")
     positions: list[int] = []
     for section in ("## Standards", "## Spec", "## Correctness"):
         matches = [index for index, line in enumerate(lines) if line == section]

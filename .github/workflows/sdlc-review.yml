@@ -62,7 +62,21 @@ jobs:
 
             - Fixed point: ${{ github.event.pull_request.base.sha }}. HEAD is the pull request's head commit.
             - Spec: the issues the pull request body or its commit messages reference. Read the body with `gh pr view ${{ github.event.pull_request.number }}`. With no reference, skip the Spec axis.
-            - Do not write or edit files. Return the complete final Markdown report as your final response, under the exact heading `## sdlc review of ${{ github.event.pull_request.head.sha }}`. Include separate nonempty `## Standards`, `## Spec` and `## Correctness` sections in that order, followed by exactly one final line: `Verdict: pass` or `Verdict: blocking (N hard findings)` with a positive integer N. Do not include intermediate tool output or execution events.
+            - Do not write or edit files. Return the complete final Markdown report as your final response. Its first line must be exactly `## sdlc review of ${{ github.event.pull_request.head.sha }}`. Do not add an introduction or wrap the report in a code fence. Include separate nonempty `## Standards`, `## Spec` and `## Correctness` sections in that order, followed by exactly one final line: `Verdict: pass` or `Verdict: blocking (N hard findings)` with a positive integer N. Do not include intermediate tool output or execution events.
+
+            Final response structure (replace each placeholder with the review, and choose exactly one valid verdict):
+            ## sdlc review of ${{ github.event.pull_request.head.sha }}
+
+            ## Standards
+            <Standards findings or explicit no-findings statement>
+
+            ## Spec
+            <Spec findings or reason this axis is skipped>
+
+            ## Correctness
+            <Correctness findings or explicit no-findings statement>
+
+            <Verdict: pass OR Verdict: blocking (N hard findings)>
           claude_args: |
             --model sonnet
             --disallowedTools "Write,Edit,NotebookEdit"
