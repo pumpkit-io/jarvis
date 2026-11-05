@@ -20,18 +20,14 @@ from jarvis_hub.voice.player import Clip, Player, Samples
 from jarvis_hub.voice.splitter import SentenceSplitter
 from jarvis_hub.voice.tts import Synthesizer
 
-ClipName = Literal["chime", "holding_line", "startup", "very_good", "usage_limit"]
+ClipName = Literal["chime", "startup", "very_good", "usage_limit"]
 
 LINES: dict[ClipName, dict[Lang, str]] = {
     "startup": {"en": "At your service, sir.", "it": "Ai suoi ordini, signore."},
-    "holding_line": {"en": "One moment, sir.", "it": "Un momento, signore."},
     "very_good": {"en": "Very good, sir.", "it": "Molto bene, signore."},
     # The reset time is not known at startup; the Hub says it after this line.
     "usage_limit": {"en": "I've reached the usage limit, sir.", "it": "Ho raggiunto il limite di utilizzo, signore."},
 }
-
-# Later than the Talker's first sentence at p90, 1.32 s (docs/notes/phase-0-spikes.md), so it covers only the slow tail.
-HOLDING_LINE_AFTER = 1.5
 
 # With queued audio this long unplayed, as from a paused player or a device that stopped pulling, `idle` gives up.
 STALLED = 2.0
@@ -100,7 +96,6 @@ class _Reply:
     first_chunk: float | None = None
     first_chunk_audio: float | None = None
     first_audio: float | None = None
-    holding_line: bool = False
     gaps: int = 0
     audio_s: float = 0.0
     generation_done: bool = False
@@ -138,7 +133,6 @@ class Speech:
         *,
         metrics: Metrics,
         notice: Callable[[str], None],
-        holding_line_after: float = HOLDING_LINE_AFTER,
         on_reply_audio: Callable[[float | None], None] | None = None,
         on_chime: Callable[[float], None] | None = None,
     ) -> None:
@@ -147,7 +141,6 @@ class Speech:
         self._clock = clock
         self._metrics = metrics
         self._notice = notice
-        self._holding_line_after = holding_line_after
         # Called with the reply's `heard_at` when its first audio starts.
         self._on_reply_audio = on_reply_audio
         # Called with the time the chime starts playing, behind whatever is queued ahead of it.
@@ -159,8 +152,6 @@ class Speech:
         self._reply: _Reply | None = None
         self._replies: dict[int, _Reply] = {}
         self._generation = 0
-        self._synthesising = False
-        self._holding_line: asyncio.Task[None] | None = None
         self._worker: asyncio.Task[None] | None = None
         self._loading: asyncio.Future[None] | None = None
 
@@ -174,16 +165,10 @@ class Speech:
         self._queue.put_nowait(_Cached(name, lang, self._reply if in_reply else None))
 
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None) -> None:
-        """A new reply in `lang`. With `heard_at`, when the User's turn ended, the holding line covers a slow start.
-
-        The holding line counts from now, so a line that waited behind a busy Talker is not answered with it at once.
-        """
-        self._cancel_holding_line()
+        """`heard_at` retains the User's speech-end timestamp for latency and reply ownership."""
         self._reply = _Reply(turn, lang, self._clock.now(), heard_at)
         self._prune_replies()
         self._replies[turn] = self._reply
-        if heard_at is not None:
-            self._holding_line = asyncio.create_task(self._hold_the_line(self._reply))
 
     def feed(self, text: str) -> None:
         reply = self._reply
@@ -200,7 +185,6 @@ class Speech:
         if reply is None:
             return
         self._say(reply.splitter.end_block())
-        self._cancel_holding_line()
         self._queue.put_nowait(_End(reply))
         self._reply = None
 
@@ -218,7 +202,6 @@ class Speech:
             })
         self._replies.clear()
         self._generation += 1
-        self._cancel_holding_line()
         self._reply = None
         while not self._queue.empty():
             self._queue.get_nowait()
@@ -243,7 +226,6 @@ class Speech:
                 return
 
     async def close(self) -> None:
-        self._cancel_holding_line()
         if self._worker is not None:
             self._worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -257,7 +239,6 @@ class Speech:
         for chunk in chunks:
             if reply.first_chunk is None:
                 reply.first_chunk = self._clock.now()
-                self._cancel_holding_line()
             reply.chunks += 1
             self._queue.put_nowait(_Say(reply, chunk))
 
@@ -305,13 +286,9 @@ class Speech:
             case _Say(reply, text):
                 generation = self._generation
                 voice = voice_for(reply.lang)
-                self._synthesising = True
-                try:
-                    samples = await asyncio.get_running_loop().run_in_executor(
-                        self._thread, self._tts.synthesize, text, voice
-                    )
-                finally:
-                    self._synthesising = False
+                samples = await asyncio.get_running_loop().run_in_executor(
+                    self._thread, self._tts.synthesize, text, voice
+                )
                 if generation == self._generation:
                     self._play(Clip(text, voice, samples, self._tts.sample_rate), reply, sentence=True)
             case _Cached(name, lang, reply):
@@ -343,18 +320,6 @@ class Speech:
             self._on_reply_audio(reply.heard_at)
         return starts
 
-    async def _hold_the_line(self, reply: _Reply) -> None:
-        await self._clock.sleep(self._holding_line_after)
-        quiet = self._queue.empty() and not self._synthesising and self._player.pending() == 0
-        if self._reply is reply and reply.first_chunk is None and quiet:
-            reply.holding_line = True
-            self._queue.put_nowait(_Cached("holding_line", reply.lang, reply))
-
-    def _cancel_holding_line(self) -> None:
-        if self._holding_line is not None:
-            self._holding_line.cancel()
-            self._holding_line = None
-
     def _record_reply(self, reply: _Reply) -> None:
         start = reply.heard_at if reply.heard_at is not None else reply.began
 
@@ -375,7 +340,6 @@ class Speech:
             "meaningful_audio_basis": "queue_estimate",
             "voice": voice_for(reply.lang),
             "chunks": reply.chunks,
-            "holding_line": reply.holding_line,
             "first_chunk_ms": ms(reply.first_chunk),
             "first_audio_ms": ms(reply.first_audio),
             "chunk_to_audio_ms": chunk_to_audio,
