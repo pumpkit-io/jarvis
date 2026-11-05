@@ -10,7 +10,8 @@ from typing import Any
 
 import pytest
 
-from jarvis_hub.agents.backend import Context
+from jarvis_hub.agents.backend import Context, SessionSpec
+from jarvis_hub.subagents import Subagent
 from jarvis_hub.hub import WARM_UP, Hub
 from jarvis_hub.voice.assessment import Verdict
 from jarvis_hub.voice.state import Heard, SpeechStarted, Timing
@@ -33,6 +34,7 @@ from tests.fakes import (
     Tool,
     Typist,
     make_hub,
+    subagent_spec,
     until,
 )
 
@@ -83,7 +85,7 @@ MakeRig = Callable[..., Awaitable[Rig]]
 async def rig_for() -> AsyncIterator[MakeRig]:
     rigs: list[tuple[Rig, asyncio.Task[None]]] = []
 
-    async def make(*scripts: list[Step], state_path: Path | None = None, recognition: Any = None, workspace: FakeWorkspace | None = None, **backend_options: Any) -> Rig:
+    async def make(*scripts: list[Step], state_path: Path | None = None, recognition: Any = None, workspace: FakeWorkspace | None = None, subagent_session: Callable[[Subagent], SessionSpec] = subagent_spec, **backend_options: Any) -> Rig:
         clock = FakeClock()
         backend = FakeBackend(clock, list(scripts), **backend_options)
         audio, player, output, metrics = ScriptedAudio(clock), RecordingPlayer(), RecordingOutput(), RecordingMetrics()
@@ -96,6 +98,7 @@ async def rig_for() -> AsyncIterator[MakeRig]:
             output,
             metrics,
             workspace=workspace,
+            session=subagent_session,
             speech=voice.speech,
             speak_typed=False,
             on_end_conversation=voice.end_conversation,

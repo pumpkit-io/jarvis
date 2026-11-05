@@ -309,30 +309,31 @@ async def test_missing_or_late_resolution_never_releases_old_approval_or_cancel_
     assert json.loads(path.read_text())['spoken_scopes'][0]['pending'] is True
 
 
-async def test_an_inherited_lease_cannot_bypass_a_scope_change_while_it_awaits(rig_for: MakeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_an_inherited_lease_cannot_bypass_a_scope_change_while_it_awaits(rig_for: MakeRig) -> None:
     from dataclasses import replace
     entered, release, finish = asyncio.Event(), asyncio.Event(), asyncio.Event()
     spawn = {'repo': 'pumpkit', 'title': 'Build check', 'brief': 'Check build',
              'model': 'sonnet', 'effort': 'low', 'writes': False}
-    rig = await rig_for(
-        [Tool('delegate', {'request': 'Check build'}), AwaitInterrupt()],
-        [ResolveScope('revise_tasks', ('T1',)), Text('Updated, sir.')],
-        orchestrator=[[Tool('spawn_subagent', spawn)]], subagents={'Check build': [Gate(finish), Text('Done')]},
-        recognition=LocalRelation('directed'),
-    )
-    rig.audio.wake()
-    rig.audio.say('Check build')
-    await until(lambda: bool(rig.backend.all_sessions('subagent')))
-    original = getattr(rig.hub, '_session_for')
+    from jarvis_hub.agents.backend import SessionSpec
+    from jarvis_hub.subagents import Subagent
+    from tests.fakes import subagent_spec
     async def inherited(name: str, inputs: Any) -> Refused | None:
         entered.set()
         await release.wait()
         return None
-    def with_inherited(subagent: Any) -> Any:
-        return replace(original(subagent), before_tool=inherited)
-    monkeypatch.setattr(rig.hub, '_session_for', with_inherited)
-    subagent = getattr(rig.hub, '_subagents').get('S1')
-    spec = getattr(rig.hub, '_subagent_session')(subagent)
+    def with_inherited(subagent: Subagent) -> SessionSpec:
+        return replace(subagent_spec(subagent), before_tool=inherited)
+    rig = await rig_for(
+        [Tool('delegate', {'request': 'Check build'}), AwaitInterrupt()],
+        [ResolveScope('revise_tasks', ('T1',)), Text('Updated, sir.')],
+        orchestrator=[[Tool('spawn_subagent', spawn)]], subagents={'Check build': [Gate(finish), Text('Done')]},
+        recognition=LocalRelation('directed'), subagent_session=with_inherited,
+    )
+    rig.audio.wake()
+    rig.audio.say('Check build')
+    await until(lambda: bool(rig.backend.all_sessions('subagent')))
+    spec = rig.backend.session('subagent').spec
+    assert spec.before_tool is not None
     pending = asyncio.ensure_future(spec.before_tool('mcp__inspect', {}))
     await entered.wait()
     rig.audio.say('including tests')
@@ -417,3 +418,184 @@ async def test_recent_scope_history_is_bounded_without_dropping_pending_authorit
         assert scopes.get('request-69') is not None
     finally:
         await scopes.close()
+
+
+async def test_rejected_scope_restore_installs_neither_holds_nor_expiry_timers() -> None:
+    from jarvis_hub.spoken import SpokenScopes
+    from tests.fakes import FakeClock
+    clock = FakeClock()
+    notices: list[str] = []
+    source = SpokenScopes(clock, change=lambda: None, notice=notices.append)
+    source.admit('pending', 0, ('Check build',), 0)
+    source.bind('pending', 'T1')
+    source.admit('pending', 1, ('Check build', 'including tests'), 1)
+    [valid] = source.dump(lambda value: value)
+    await source.close()
+    scopes = SpokenScopes(clock, change=lambda: None, notice=notices.append)
+    try:
+        with pytest.raises(ValueError):
+            scopes.restore([valid, {**valid, 'id': 'invalid', 'semantic_start': 999}], lambda value: value)
+        assert not scopes.held('T1')
+        assert scopes.pending() == ()
+        clock.advance(31)
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert notices == []
+    finally:
+        await scopes.close()
+
+
+@pytest.mark.parametrize('malformed', ['later_scope', 'scope_news'])
+async def test_rejected_hub_state_cannot_attach_old_scope_to_a_fresh_task(
+    rig_for: MakeRig, tmp_path: Path, malformed: str,
+) -> None:
+    from tests.fakes import FakeBackend, FakeClock, RecordingMetrics, RecordingOutput, lines, make_hub
+    source_path = tmp_path / 'source.json'
+    release = asyncio.Event()
+    rig = await rig_for(
+        [Tool('delegate', {'request': 'Check old build'}), AwaitInterrupt()],
+        [Gate(release)], orchestrator=[[AwaitInterrupt()]],
+        recognition=LocalRelation('directed'), state_path=source_path,
+    )
+    rig.audio.wake()
+    rig.audio.say('Check old build')
+    await until(lambda: bool(rig.backend.all_sessions('orchestrator')))
+    rig.audio.say('including tests')
+    await until(lambda: len(rig.user_messages()) == 2)
+    data = json.loads(source_path.read_text())
+    if malformed == 'later_scope':
+        data['spoken_scopes'].append({**data['spoken_scopes'][0], 'id': 'invalid', 'semantic_start': 999})
+    else:
+        data['scope_news'] = [{}]
+    path = tmp_path / 'rejected.json'
+    path.write_text(json.dumps(data))
+    clock, output, metrics = FakeClock(), RecordingOutput(), RecordingMetrics()
+    backend = FakeBackend(clock, [[Tool('delegate', {'request': 'Check fresh docs'}), Text('Checking, sir.')]],
+                          orchestrator=[[]])
+    hub = make_hub(backend, output, metrics, state_path=path)
+    try:
+        await hub.start()
+        await hub.run(lines(clock, 'Check fresh docs'))
+        [delegated] = [result for result in backend.session('talker').tool_results if result.name == 'delegate']
+        assert delegated.result == '{"task_id": "T1", "queued": true}'
+        assert any('could not be read whole' in notice for notice in output.notices)
+        clock.advance(31)
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert not any('scope clarification' in notice for notice in output.notices)
+    finally:
+        release.set()
+        await hub.close()
+
+
+@pytest.mark.parametrize('pause', ['initial_authorization', 'target_read', 'final_authorization'])
+async def test_approval_expiry_is_checked_after_every_pre_dispatch_wait(pause: str) -> None:
+    from jarvis_hub.approvals import Approval, Approvals, EXPIRES_AFTER
+    from tests.fakes import FakeClock, StubGh
+    clock = FakeClock()
+    head = 'a' * 40
+    gh = StubGh(prs={'pumpkit-io/pumpkit#42': ('OPEN', head)})
+    entered, release = asyncio.Event(), asyncio.Event()
+    armed, calls = False, 0
+    async def run(argv: tuple[str, ...]) -> tuple[int, str]:
+        result = await gh(argv)
+        if armed and pause == 'target_read':
+            entered.set()
+            await release.wait()
+        return result
+    async def authorize() -> Refused | None:
+        nonlocal calls
+        calls += 1
+        if (pause == 'initial_authorization' and calls == 1) or (pause == 'final_authorization' and calls == 2):
+            entered.set()
+            await release.wait()
+        return None
+    approvals = Approvals(org='pumpkit-io', runner=run, clock=clock,
+                          on_change=lambda: None, log=lambda entry: None)
+    asked = await approvals.request('T1', {'action': 'merge_pr', 'repo': 'pumpkit', 'pr': 42, 'sha': head})
+    assert isinstance(asked, Approval)
+    approvals.turn_began(None)
+    approvals.turn_ended(completed=True, told=[asked.id], said=asked.question())
+    approvals.turn_began('Yes.')
+    approved = approvals.decide(asked.id)
+    assert isinstance(approved, Approval)
+    clock.advance(EXPIRES_AFTER - 10)
+    armed = True
+    pending = asyncio.create_task(approvals.carry_out(approved, authorize=authorize))
+    await entered.wait()
+    clock.advance(20)
+    release.set()
+    result = await pending
+    assert approved.state == 'expired'
+    assert 'expired' in result
+    assert gh.actions == []
+
+
+@pytest.mark.parametrize('kind', ['subagent', 'wait'])
+async def test_cross_task_cancellation_waits_for_the_target_scope(rig_for: MakeRig, kind: str) -> None:
+    choose, finish = asyncio.Event(), asyncio.Event()
+    spawn = {'repo': 'pumpkit', 'title': 'Build check', 'brief': 'Check build',
+             'model': 'sonnet', 'effort': 'low', 'writes': False}
+    target = Tool('spawn_subagent', spawn) if kind == 'subagent' else Tool(
+        'schedule_check', {'after_seconds': 600, 'note': 'Check build', 'max_repeats': 1})
+    cancel = Tool('cancel_subagent', {'subagent_id': 'S1'}) if kind == 'subagent' else Tool('cancel_wait', {'wait_id': 'C2'})
+    rig = await rig_for(
+        [Tool('delegate', {'request': 'Check docs'}), Text('Checking docs, sir.')],
+        [Tool('delegate', {'request': 'Check build'}), AwaitInterrupt()],
+        [Gate(choose), ResolveScope('preserve_tasks'), Text('Continuing, sir.')],
+        orchestrator=[
+            [Tool('schedule_check', {'after_seconds': 1, 'note': 'Check docs', 'max_repeats': 1})],
+            [target], [cancel],
+        ], subagents={'Check build': [Gate(finish), Text('Done')]}, recognition=LocalRelation('directed'),
+    )
+    rig.typist.type('Check docs')
+    await until(lambda: bool(rig.backend.all_sessions('orchestrator')))
+    await until(lambda: any(r.name == 'schedule_check' for r in rig.backend.session('orchestrator').tool_results))
+    rig.audio.wake()
+    rig.audio.say('Check build')
+    await until(lambda: any(r.name == target.name for r in rig.backend.session('orchestrator').tool_results
+                            if r.name != 'schedule_check' or 'C2' in str(r.result)))
+    await rig.advance(59)
+    rig.audio.say('including tests')
+    await until(lambda: len(rig.user_messages()) == 3)
+    await rig.advance(1)
+    premature = any(r.name == cancel.name for r in rig.backend.session('orchestrator').tool_results)
+    choose.set()
+    try:
+        assert not premature
+        await until(lambda: any(r.name == cancel.name for r in rig.backend.session('orchestrator').tool_results))
+        result = next(r.result for r in rig.backend.session('orchestrator').tool_results if r.name == cancel.name)
+        assert result == ('Stopping S1; its report follows as an event.' if kind == 'subagent' else 'There is no Watcher or Check C2 on T1.')
+    finally:
+        finish.set()
+
+
+@pytest.mark.parametrize('kind', ['subagent', 'wait'])
+async def test_cross_task_scope_wait_rechecks_the_callers_own_revision(rig_for: MakeRig, kind: str) -> None:
+    choose, finish = asyncio.Event(), asyncio.Event()
+    spawn = {'repo': 'pumpkit', 'title': 'Build check', 'brief': 'Check build',
+             'model': 'sonnet', 'effort': 'low', 'writes': False}
+    target = Tool('spawn_subagent', spawn) if kind == 'subagent' else Tool(
+        'schedule_check', {'after_seconds': 600, 'note': 'Check build', 'max_repeats': 1})
+    name, arguments = ('cancel_subagent', {'subagent_id': 'S1'}) if kind == 'subagent' else ('cancel_wait', {'wait_id': 'C1'})
+    rig = await rig_for(
+        [Tool('delegate', {'request': 'Check build'}), Tool('delegate', {'request': 'Check docs'}), AwaitInterrupt()],
+        [Gate(choose), ResolveScope('revise_tasks', ('T2',)), Text('Updated docs, sir.')],
+        orchestrator=[[target], [AwaitInterrupt()], []],
+        subagents={'Check build': [Gate(finish), Text('Done')]}, recognition=LocalRelation('directed'),
+    )
+    rig.audio.wake()
+    rig.audio.say('Check build and docs')
+    await until(lambda: bool(rig.backend.all_sessions('orchestrator'))
+                and len(rig.backend.session('orchestrator').received) == 2)
+    rig.audio.say('Actually use the new docs')
+    await until(lambda: len(rig.user_messages()) == 2)
+    handler = next(tool.handler for tool in rig.backend.session('orchestrator').spec.tools if tool.name == name)
+    pending = asyncio.ensure_future(handler(arguments))
+    await rig.settle()
+    blocked = not pending.done()
+    choose.set()
+    result = await pending
+    finish.set()
+    assert blocked
+    assert result == 'Refused: this Task revision was superseded.'

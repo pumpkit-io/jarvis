@@ -681,6 +681,9 @@ class Approvals:
                     "it. Look at what changed, then ask the User again in a fresh request that says what changed."
                 )
                 return approval_event(approval, "lapsed", text)
+            if self._expired(approval):
+                approval.state, approval.outcome = "expired", "It expired before it ran."
+                return approval_event(approval, "expired", f"{approval.text}: {approval.outcome} Ask again.")
             argv = self._action_argv(approval, target.node)
             code, printed = await self._runner(argv)
             approval.state = "used"

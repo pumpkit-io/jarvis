@@ -3,7 +3,7 @@
 import asyncio
 import re
 import threading
-from collections.abc import AsyncIterator, Iterable, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import CoroutineType
@@ -491,11 +491,12 @@ def make_hub(
     time_limit: float = 3600.0,
     runner: "StubRunner | None" = None,
     watch_limit: float = 6 * 3600.0,
+    session: Callable[[Subagent], SessionSpec] = subagent_spec,
     **options: Any,
 ) -> Hub:
     options.setdefault("wall", backend.wall)
     setup = SubagentSetup(
-        session=subagent_spec,
+        session=session,
         workspace=workspace or FakeWorkspace(),
         log_dir=log_dir,
         max_effort=max_effort,

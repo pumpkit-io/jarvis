@@ -845,11 +845,13 @@ class Hub:
             limit = UsageLimit.load(data["usage_limit"])
             parked = [News.load(r, from_wall) for r in data["parked"]]
             approvals = Approvals.load(data["approvals"], from_wall)
-            self._scopes.restore(data.get("spoken_scopes", []), from_wall)
-            self._scope_news = [Leaf.load(record, from_wall) for record in data.get("scope_news", [])]
+            loaded_scopes = SpokenScopes.load(data.get("spoken_scopes", []), from_wall)
+            scope_news = [Leaf.load(record, from_wall) for record in data.get("scope_news", [])]
         except (KeyError, TypeError, ValueError, IndexError, AttributeError) as e:
             self._output.notice(self._state.set_aside(f"could not be read whole ({type(e).__name__}: {e})"))
             return None
+        self._scopes.install(loaded_scopes)
+        self._scope_news = scope_news
         self._restore_limit(limit, parked)
         if not tasks and not self._scopes.pending():
             self._restore_held(held, quiet_mode, needs_user)
@@ -1603,9 +1605,7 @@ class Hub:
                 self._settled.clear()
                 self._carry_out(approval)
         for task_id in prior_task_ids:
-            task = self._tasks.get(task_id)
-            active = task_id in self._turn_tasks and self._task_current(task_id)
-            if task is not None and task.state in ("working", "queued") and task_id not in task_ids and not self._scopes.held(task_id) and not active and not task.waiting and not self._has_pending(task_id):
+            if task_id not in task_ids:
                 self._resume_scope_task(task_id, choice.scope.task_context.get(task_id, ""))
         turn = self._orchestrator_gate.turn
         if self._turn_tasks and set(self._turn_tasks).issubset(task_ids) and turn is not None and self._orchestrator is not None:
@@ -1667,9 +1667,7 @@ class Hub:
         for scope in self._scopes.pending():
             released.difference_update(scope.task_ids)
         for task_id in released:
-            task = self._tasks.get(task_id)
-            if task is not None and task.state in ("working", "queued") and not task.waiting and not self._has_pending(task_id):
-                self._resume_scope_task(task_id)
+            self._resume_scope_task(task_id)
         self._persist()
 
     def _task_current(self, task_id: str) -> bool:
@@ -1687,10 +1685,17 @@ class Hub:
                 target = wait.task_id if wait is not None else None
             if target is None and len(self._turn_tasks) == 1:
                 target = self._turn_tasks[0]
-            if isinstance(target, str) and target in self._turn_tasks:
+            if isinstance(target, str):
+                source_revisions = {target: self._turn_task_revisions.get(target)} if target in self._turn_tasks else dict(self._turn_task_revisions)
+                task = self._tasks.get(target)
+                target_revision = task.revision if task is not None else None
                 if not await self._scopes.wait(target):
                     return "Refused: Task scope remains unresolved."
-                if not self._task_current(target):
+                task = self._tasks.get(target)
+                if (task is not None and task.revision != target_revision) or any(
+                    (source := self._tasks.get(task_id)) is None or source.revision != revision
+                    for task_id, revision in source_revisions.items()
+                ):
                     return "Refused: this Task revision was superseded."
             return await handler(args)
         return guarded

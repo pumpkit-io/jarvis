@@ -246,7 +246,9 @@ class SpokenScopes:
                      task_context=scope.task_context, typed_context=scope.typed_context)
                 for scope in self._records.values()]
 
-    def restore(self, records: Iterable[dict[str, Any]], from_wall: TimeShift) -> None:
+    @staticmethod
+    def load(records: Iterable[dict[str, Any]], from_wall: TimeShift) -> list[SpokenScope]:
+        loaded: list[SpokenScope] = []
         for record in records:
             values = dict(record)
             values.setdefault('typed_context', ())
@@ -256,9 +258,17 @@ class SpokenScopes:
             scope = SpokenScope(**values)
             if not scope.segments or len(' '.join(scope.segments)) > 6000 or not 0 <= scope.semantic_start < len(scope.all_segments):
                 raise ValueError('Invalid retained spoken scope.')
+            loaded.append(scope)
+        return loaded
+
+    def install(self, scopes: Iterable[SpokenScope]) -> None:
+        for scope in scopes:
             self._records[scope.id] = scope
             if scope.pending:
                 self._arm(scope)
+
+    def restore(self, records: Iterable[dict[str, Any]], from_wall: TimeShift) -> None:
+        self.install(self.load(records, from_wall))
 
     async def close(self) -> None:
         self._closed = True
