@@ -1,0 +1,218 @@
+[
+  {
+    "id": "h01",
+    "category": "addressed-stop",
+    "lang": "en",
+    "speech": "Jarvis, enough, stop your reply please.",
+    "user": "Summarize the release notes.",
+    "played": "The release includes five changes.",
+    "expected": "directed"
+  },
+  {
+    "id": "h02",
+    "category": "addressed-stop",
+    "lang": "it",
+    "speech": "Jarvis, basta così, smetti di parlare.",
+    "user": "Riassumi le modifiche.",
+    "played": "La versione include cinque novità.",
+    "expected": "directed"
+  },
+  {
+    "id": "h03",
+    "category": "correction",
+    "lang": "en",
+    "speech": "Wait, those numbers should be for October.",
+    "user": "Show September usage.",
+    "played": "September had forty requests.",
+    "expected": "directed"
+  },
+  {
+    "id": "h04",
+    "category": "correction",
+    "lang": "it",
+    "speech": "Aspetta, volevo i dati di ottobre.",
+    "user": "Mostrami i dati di settembre.",
+    "played": "Settembre ha quaranta richieste.",
+    "expected": "directed"
+  },
+  {
+    "id": "h05",
+    "category": "backchannel-then-correction",
+    "lang": "en",
+    "speech": "Right, but explain only the failed test.",
+    "user": "Explain all test results.",
+    "played": "Nine tests succeeded and one failed.",
+    "expected": "directed"
+  },
+  {
+    "id": "h06",
+    "category": "correction",
+    "lang": "it",
+    "speech": "No, lascia perdere la prima modifica e spiegami la seconda.",
+    "user": "Spiegami queste due modifiche.",
+    "played": "La prima modifica riguarda la memoria.",
+    "expected": "directed"
+  },
+  {
+    "id": "h07",
+    "category": "follow-up",
+    "lang": "en",
+    "speech": "How long did that deployment take?",
+    "user": "Tell me about the deployment.",
+    "played": "The deployment finished successfully.",
+    "expected": "directed"
+  },
+  {
+    "id": "h08",
+    "category": "follow-up",
+    "lang": "it",
+    "speech": "Quale controllo richiede più tempo?",
+    "user": "Confronta i controlli.",
+    "played": "Uno impiega dieci secondi e l’altro venti.",
+    "expected": "directed"
+  },
+  {
+    "id": "h09",
+    "category": "backchannel",
+    "lang": "en",
+    "speech": "Uh huh.",
+    "user": "Summarize the release notes.",
+    "played": "The release includes five changes.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "h10",
+    "category": "backchannel",
+    "lang": "it",
+    "speech": "Certo, mhm.",
+    "user": "Riassumi le modifiche.",
+    "played": "La versione include cinque novità.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "h11",
+    "category": "other-addressee",
+    "lang": "en",
+    "speech": "David, wait for me by the door.",
+    "user": "Summarize the release notes.",
+    "played": "The release includes five changes.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "h12",
+    "category": "other-addressee",
+    "lang": "it",
+    "speech": "Elena, ferma il video un momento.",
+    "user": "Riassumi le modifiche.",
+    "played": "La versione include cinque novità.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "h13",
+    "category": "other-addressee-correction",
+    "lang": "en",
+    "speech": "Peter, no, I asked you about October.",
+    "user": "Show September usage.",
+    "played": "September had forty requests.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "h14",
+    "category": "other-addressee-correction",
+    "lang": "it",
+    "speech": "Anna, intendevo quello blu, non quello rosso.",
+    "user": "Spiega il codice.",
+    "played": "Questo modulo controlla le sessioni.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "h15",
+    "category": "quoted-wake",
+    "lang": "en",
+    "speech": "Our demo script contains the words Hi Jarvis stop.",
+    "user": "Summarize the release notes.",
+    "played": "The release includes five changes.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "h16",
+    "category": "quoted-wake",
+    "lang": "it",
+    "speech": "La frase da citare è Jarvis smetti di parlare.",
+    "user": "Riassumi le modifiche.",
+    "played": "La versione include cinque novità.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "h17",
+    "category": "nearby-dialogue",
+    "lang": "en",
+    "speech": "Where did you park? Across the road near the bakery.",
+    "user": "Explain the test report.",
+    "played": "Nine tests succeeded.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "h18",
+    "category": "nearby-dialogue",
+    "lang": "it",
+    "speech": "Quanto costa il biglietto? Dieci euro a persona.",
+    "user": "Spiegami il test.",
+    "played": "Nove controlli sono riusciti.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "h19",
+    "category": "interrupt-vocabulary",
+    "lang": "en",
+    "speech": "The stop button on that washing machine is broken.",
+    "user": "Explain the test report.",
+    "played": "Nine tests succeeded.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "h20",
+    "category": "interrupt-vocabulary",
+    "lang": "it",
+    "speech": "Il cartello dice aspetta il tuo turno.",
+    "user": "Spiegami il test.",
+    "played": "Nove controlli sono riusciti.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "h21",
+    "category": "ambiguous-addressee",
+    "lang": "en",
+    "speech": "Hold on a second.",
+    "user": "",
+    "played": "",
+    "expected": "uncertain"
+  },
+  {
+    "id": "h22",
+    "category": "ambiguous-addressee",
+    "lang": "it",
+    "speech": "Un momento, no.",
+    "user": "",
+    "played": "",
+    "expected": "uncertain"
+  },
+  {
+    "id": "h23",
+    "category": "ambiguous-addressee",
+    "lang": "en",
+    "speech": "Change the date.",
+    "user": "",
+    "played": "",
+    "expected": "uncertain"
+  },
+  {
+    "id": "h24",
+    "category": "ambiguous-addressee",
+    "lang": "it",
+    "speech": "Fai quell’altra cosa.",
+    "user": "",
+    "played": "",
+    "expected": "uncertain"
+  }
+]
