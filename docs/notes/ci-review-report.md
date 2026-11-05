@@ -1,0 +1,14 @@
+# CI review report handoff
+
+The review action returns the final Markdown response. A deterministic adapter writes the public report only after validating the expected PR head, all three review axes and one final verdict. The agent no longer needs to write a checkout file. A valid blocking report is published before the verdict step fails. Missing, failed or malformed results stop before publication; intermediate assistant/tool events cannot substitute for the final result.
+
+The action's `execution_file` output is a JSON array, not JSONL. This was verified against `anthropics/claude-code-action@v1`, whose annotated tag object `f9fffe565bf81a7fcadb308a9d688a74e3b029f7` resolves to commit `c0949c50a78c1ec8ce2647db36629b870e715d0c`:
+
+- [action.yml](https://github.com/anthropics/claude-code-action/blob/c0949c50a78c1ec8ce2647db36629b870e715d0c/action.yml) exposes `execution_file`.
+- [execution-file.ts](https://github.com/anthropics/claude-code-action/blob/c0949c50a78c1ec8ce2647db36629b870e715d0c/base-action/src/execution-file.ts) writes `JSON.stringify(messages, null, 2)`.
+- [run-claude-sdk.ts](https://github.com/anthropics/claude-code-action/blob/c0949c50a78c1ec8ce2647db36629b870e715d0c/base-action/src/run-claude-sdk.ts) collects SDK messages through the terminal result and treats only subtype `success` with `is_error: false` as successful.
+- [format-turns.ts](https://github.com/anthropics/claude-code-action/blob/c0949c50a78c1ec8ce2647db36629b870e715d0c/src/entrypoints/format-turns.ts) reads the terminal `result` string as the final response.
+
+The converter consumes only that terminal string. It does not publish the execution JSON, log its contents, recover arbitrary assistant text or synthesize a verdict. The report lives in the runner's temporary directory, so a tracked or stale `.sdlc-review.md` cannot supply a result. Full-output logs and the action's automatic step report are disabled. Protocol validation cannot establish the truth of a model-authored review.
+
+PR #58's two failed review attempts showed a missing report file after the action completed successfully. No execution artifact was retained from those attempts, so why the agent omitted that file remains unknown. Synthetic CLI tests reproduce the missing-file handoff and cover successful, blocking, failed, malformed, missing and wrong-head outputs without model calls. The repaired workflow still needs its own PR run; local tests do not substitute for that CI result.
