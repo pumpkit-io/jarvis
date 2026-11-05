@@ -56,7 +56,7 @@ async def test_typed_lines_get_streamed_replies_on_the_terminal(tmp_path: Path) 
     stdout, stderr = await converse(backend, io.StringIO("Good evening\n\nAll well?\n"), config=settings(tmp_path))
 
     assert stdout == "› Good evening\nGood evening, sir.\n› All well?\nIndeed, sir.\n"
-    assert stderr == ""
+    assert stderr == "[hub] Model loading.\n[hub] Model ready.\n"
     assert backend.sessions[0].received[1:] == [
         '<user lang="en" typed="true">Good evening</user>',
         '<user lang="en" typed="true">All well?</user>',
@@ -130,7 +130,7 @@ async def test_no_warning_on_the_subscription(tmp_path: Path) -> None:
     _, stderr = await converse(
         FakeBackend(FakeClock()), io.StringIO("Hello\n"), config=settings(tmp_path), environ={"PATH": "/bin"}
     )
-    assert stderr == ""
+    assert stderr == "[hub] Model loading.\n[hub] Model ready.\n"
 
 
 async def test_every_turn_appends_a_metrics_row(tmp_path: Path) -> None:
@@ -234,7 +234,7 @@ async def test_details_are_rendered_on_screen_and_kept_in_the_show_log(tmp_path:
     log = (config.runtime_dir / "show.log").read_text()
     assert details in log and "# Plan\n\n1. Merge #41" in log
     assert log.index(details) < log.index("# Plan")
-    assert stderr == ""
+    assert stderr == "[hub] Model loading.\n[hub] Model ready.\n"
 
 
 async def test_a_show_log_that_cannot_be_written_does_not_stop_the_screen(tmp_path: Path) -> None:
@@ -246,7 +246,7 @@ async def test_a_show_log_that_cannot_be_written_does_not_stop_the_screen(tmp_pa
     stdout, stderr = await converse(backend, io.StringIO("Show me the plan\nThanks\n"), config=config)
 
     assert "Plan" in stdout and stdout.endswith("Indeed.\n")
-    assert stderr.startswith("[hub] Could not write the show log:")
+    assert "[hub] Could not write the show log:" in stderr
 
 
 class ClosedPipe(io.StringIO):
@@ -273,7 +273,7 @@ def test_a_notice_for_a_terminal_that_is_gone_does_not_stop_the_hub(tmp_path: Pa
     assert "# Plan" in (tmp_path / "show.log").read_text()
 
 
-async def test_speak_says_the_startup_line_then_every_reply_and_ends_once_they_have_played(tmp_path: Path) -> None:
+async def test_speak_signals_readiness_without_a_greeting_then_says_generated_replies(tmp_path: Path) -> None:
     backend = FakeBackend(FakeClock(), [[Text("Good evening, sir. All quiet.")], [Text("Bene, signore.")]])
     player = RecordingPlayer()
     config = settings(tmp_path)
@@ -283,9 +283,10 @@ async def test_speak_says_the_startup_line_then_every_reply_and_ends_once_they_h
     )
 
     assert stdout == "› Good evening\nGood evening, sir. All quiet.\n› Tutto bene?\nBene, signore.\n"
-    assert stderr == ""
+    assert "[hub] Model loading." in stderr and "[hub] Model ready." in stderr
+    assert "[hub] Speech loading." in stderr and "[hub] Speech ready." in stderr
     assert list(zip(player.texts, player.voices)) == [
-        ("At your service, sir.", "am_liam"),
+        ("", "ready"),
         ("Good evening, sir.", "am_liam"),
         ("All quiet.", "am_liam"),
         ("Bene, signore.", "im_nicola"),
@@ -308,5 +309,37 @@ async def test_speak_with_no_audio_output_goes_on_in_text(tmp_path: Path) -> Non
     )
 
     assert stdout == "› Good evening\nGood evening, sir.\n"
-    assert stderr == "[hub] Speech is off: no audio output: OSError: no output device\n"
+    assert "[hub] Speech is off: no audio output: OSError: no output device" in stderr
+    assert "[hub] Model ready." in stderr
 
+
+
+async def test_model_loading_is_distinct_from_ready_until_warm_up_finishes(tmp_path: Path) -> None:
+    from tests.fakes import Gate, until
+
+    release = asyncio.Event()
+    backend = FakeBackend(FakeClock(), [[Text("Hello, sir.")]], warm_up=[Gate(release), Text("Ready.")])
+    stdout, stderr = io.StringIO(), io.StringIO()
+    running = asyncio.create_task(text_mode(
+        settings=settings(tmp_path), environ={}, backend=backend, clock=backend.clock,
+        stdin=io.StringIO("Hello\n"), stdout=stdout, stderr=stderr,
+    ))
+    try:
+        await until(lambda: bool(backend.all_sessions("talker") and backend.session("talker").received))
+        assert "Model loading." in stderr.getvalue()
+        assert "Model ready." not in stderr.getvalue()
+        assert stdout.getvalue() == ""
+    finally:
+        release.set()
+        await running
+    assert stderr.getvalue().count("Model ready.") == 1
+    assert "Hello, sir." in stdout.getvalue()
+
+
+async def test_startup_failure_shows_cause_and_recovery_step_without_ready_or_speech(tmp_path: Path) -> None:
+    backend = FakeBackend(FakeClock(), open_error=RuntimeError("authentication failed"))
+    stdout, stderr = await converse(backend, io.StringIO(""), config=settings(tmp_path))
+
+    assert "Model unavailable" in stderr and "authentication failed" in stderr
+    assert "restart Jarvis" in stderr and "Model ready." not in stderr
+    assert stdout == ""

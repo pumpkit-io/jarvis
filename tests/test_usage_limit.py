@@ -30,7 +30,27 @@ from tests.fakes import (
     until,
 )
 
-LINE = "I've reached the usage limit, sir."
+LINE = "Model unavailable: usage limit."
+NEXT = "Held work retries automatically; try your request again after reset."
+
+
+def status(reset: str = "Reset time unavailable.") -> str:
+    return f"{LINE} {reset} {NEXT}"
+
+
+def screen_lines(output: RecordingOutput) -> list[str]:
+    out: list[str] = []
+    current = ""
+    for kind, text in output.log:
+        if kind == "reply":
+            current += text
+        elif kind == "end" or (kind == "notice" and text.startswith(LINE)):
+            if current:
+                out.append(current)
+                current = ""
+            if kind == "notice":
+                out.append(text)
+    return out
 
 
 @pytest.fixture(autouse=True)
@@ -93,9 +113,9 @@ async def test_a_limited_talker_says_the_cached_line_and_the_reset_time_and_is_n
 
     typist.type("Hello")
     typist.type("Anyone there?")
-    await until(lambda: len(output.replies) == 2)
+    await until(lambda: len(screen_lines(output)) == 2)
 
-    assert output.replies == [f"{LINE} It resets at 1:16 AM."] * 2
+    assert screen_lines(output) == [status("It resets at 1:16 AM.")] * 2
     assert len(talker_received(backend)) == 2  # the warm-up and "Hello": the second line cost no call
     assert not [n for n in output.notices if "failed" in n]
 
@@ -105,7 +125,7 @@ async def test_a_limited_talker_says_the_cached_line_and_the_reset_time_and_is_n
     await hub.close()
 
 
-async def test_a_limited_talker_plays_the_cached_clip_then_the_reset_time(
+async def test_a_limited_talker_shows_status_without_cached_or_generated_failure_speech(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
 ) -> None:
     player = RecordingPlayer()
@@ -117,10 +137,12 @@ async def test_a_limited_talker_plays_the_cached_clip_then_the_reset_time(
     run = await running(hub, typist)
 
     typist.type("Hello")
-    await until(lambda: output.replies)
+    await until(lambda: any("Model unavailable: usage limit" in n for n in output.notices))
     await speech.idle()
 
-    assert player.texts == [LINE, "It resets at 1:16 AM."]
+    assert player.texts == []
+    assert not any("usage limit" in r for r in output.replies)
+    assert any("It resets at 1:16 AM." in n and "try your request again" in n for n in output.notices)
     typist.end()
     clock.advance(3600)
     await run
@@ -137,9 +159,9 @@ async def test_an_unknown_reset_time_leaves_the_line_without_one(
     run = await running(hub, typist)
 
     typist.type("Hello")
-    await until(lambda: output.replies)
+    await until(lambda: screen_lines(output))
 
-    assert output.replies == [LINE]
+    assert screen_lines(output) == [status()]
     typist.end()
     clock.advance(15 * 60)
     await run
@@ -154,16 +176,17 @@ async def test_the_reset_is_announced_once_a_held_talker_completes_a_turn_not_wh
     typist = Typist(clock)
     run = await running(hub, typist)
     typist.type("Hello")
-    await until(lambda: output.replies)
+    await until(lambda: screen_lines(output))
 
     clock.advance(3600)
     await until(lambda: any(r["kind"] == "usage_reset" for r in metrics.records))
     await asyncio.sleep(0.05)
-    assert len(output.replies) == 1  # the hold cleared, but nothing has resumed yet
+    assert len(screen_lines(output)) == 1  # the hold cleared, but nothing has resumed yet
+    assert not any("recovery confirmed" in n for n in output.notices)
     typist.type("Hi")
-    await until(lambda: len(output.replies) == 3)
+    await until(lambda: len(screen_lines(output)) == 3)
 
-    assert output.replies[1:] == ["Hello again, sir.", "The limit has reset, sir."]
+    assert screen_lines(output)[1:] == ["Hello again, sir.", "The limit has reset, sir."]
     resets = [m for m in talker_received(backend) if 'reason="usage_reset"' in m]
     assert len(resets) == 1
     assert [r["kind"] for r in metrics.records if r["kind"].startswith("usage")] == ["usage_limit", "usage_reset"]
@@ -189,7 +212,7 @@ async def test_news_a_limited_talker_could_not_tell_is_told_after_the_reset(
     typist = Typist(clock)
     run = await running(hub, typist)
     typist.type("Is the CI green?")
-    await until(lambda: any(LINE in r for r in output.replies))
+    await until(lambda: any(LINE in r for r in screen_lines(output)))
     typist.end()
     await asyncio.sleep(0.05)
     assert not run.done()
@@ -197,7 +220,7 @@ async def test_news_a_limited_talker_could_not_tell_is_told_after_the_reset(
     clock.advance(600)
     await run
 
-    assert output.replies[-2:] == ["The CI is green, sir.", "The limit has reset, sir."]
+    assert screen_lines(output)[-2:] == ["The CI is green, sir.", "The limit has reset, sir."]
     assert sum("The CI is green." in m for m in talker_received(backend)) == 2
     await hub.close()
 
@@ -219,9 +242,9 @@ async def test_a_limited_orchestrator_is_announced_once_and_its_task_resumes_aft
     run = await running(hub, typist)
 
     typist.type("Is the CI green?")
-    await until(lambda: any(LINE in r for r in output.replies))
+    await until(lambda: any(LINE in r for r in screen_lines(output)))
 
-    assert output.replies[-1] == f"{LINE} It resets at 12:46 AM."
+    assert screen_lines(output)[-1] == status("It resets at 12:46 AM.")
     [session] = backend.all_sessions("orchestrator")
     assert len(session.received) == 1
     typist.end()
@@ -232,8 +255,8 @@ async def test_a_limited_orchestrator_is_announced_once_and_its_task_resumes_aft
     await run
 
     assert len(session.received) == 2 and session.received[0] == session.received[1]
-    assert sum(LINE in r for r in output.replies) == 1
-    assert output.replies[-2:] == ["The limit has reset, sir.", "The CI is green, sir."]
+    assert sum(LINE in r for r in screen_lines(output)) == 1
+    assert screen_lines(output)[-2:] == ["The limit has reset, sir.", "The CI is green, sir."]
     assert not [n for n in output.notices if "failed" in n]
     await hub.close()
 
@@ -250,7 +273,7 @@ async def test_a_task_waiting_for_the_reset_says_so_in_its_status(
     typist = Typist(clock)
     run = await running(hub, typist)
     typist.type("Is the CI green?")
-    await until(lambda: any(LINE in r for r in output.replies))
+    await until(lambda: any(LINE in r for r in screen_lines(output)))
 
     typist.type("Status?")
     await until(lambda: len(backend.session("talker").tool_results) == 2)
@@ -283,7 +306,7 @@ async def test_a_subagent_started_while_limited_queues_and_starts_after_the_rese
     run = await running(hub, typist)
 
     typist.type("Fix the typos")
-    await until(lambda: any(LINE in r for r in output.replies))
+    await until(lambda: any(LINE in r for r in screen_lines(output)))
     typist.type("And another")
     await until(lambda: len([r for s in backend.all_sessions("orchestrator") for r in s.tool_results]) == 2)
 
@@ -299,7 +322,7 @@ async def test_a_subagent_started_while_limited_queues_and_starts_after_the_rese
     started, queued = backend.all_sessions("subagent")
     assert started.received == [first, "The usage limit has reset. Carry on from where you stopped."]
     assert queued.received == [second]
-    assert sum(LINE in r for r in output.replies) == 1
+    assert sum(LINE in r for r in screen_lines(output)) == 1
     assert sum('reason="usage_reset"' in m for m in talker_received(backend)) == 1
     await hub.close()
 
@@ -381,7 +404,7 @@ async def test_a_usage_limit_and_its_reset_time_survive_a_restart(
     typist = Typist(clock)
     run = await running(first, typist)
     typist.type("Hello")
-    await until(lambda: before.replies)
+    await until(lambda: screen_lines(before))
     await stopped(first, run)
     clock.advance(1800)
 
@@ -391,16 +414,16 @@ async def test_a_usage_limit_and_its_reset_time_survive_a_restart(
     typist = Typist(clock)
     run = await running(second, typist)
     typist.type("Hi")
-    await until(lambda: output.replies)
+    await until(lambda: len(screen_lines(output)) == 2)
 
-    assert output.replies == [f"{LINE} It resets at 1:16 AM."]
+    assert screen_lines(output) == [status("It resets at 1:16 AM.")] * 2
     assert len(talker_received(backend)) == 1  # only the warm-up: the limited Talker is not called
 
     clock.advance(1800)
     await until(lambda: any(r["kind"] == "usage_reset" for r in metrics.records))
     typist.type("Hi again")
-    await until(lambda: len(output.replies) == 3)
-    assert output.replies[1:] == ["Hello again, sir.", "The limit has reset, sir."]
+    await until(lambda: len([r for r in output.replies if r]) == 2)
+    assert [r for r in output.replies if r] == ["Hello again, sir.", "The limit has reset, sir."]
     typist.end()
     await run
     await second.close()
@@ -420,7 +443,7 @@ async def test_news_the_limited_talker_could_not_tell_survives_a_restart_and_is_
     typist = Typist(clock)
     run = await running(first, typist)
     typist.type("Is the CI green?")
-    await until(lambda: any(LINE in r for r in before.replies))
+    await until(lambda: any(LINE in r for r in screen_lines(before)))
     await stopped(first, run)
 
     output = RecordingOutput()
@@ -452,17 +475,20 @@ async def test_an_orchestrator_message_held_for_the_limit_survives_a_restart_and
     typist = Typist(clock)
     run = await running(first, typist)
     typist.type("Is the CI green?")
-    await until(lambda: any(LINE in r for r in before.replies))
+    await until(lambda: any(LINE in r for r in screen_lines(before)))
     [task_message] = first_backend.session("orchestrator").received
     await stopped(first, run)
 
     output = RecordingOutput()
+    warm_ready, recovered = asyncio.Event(), asyncio.Event()
+    ready: list[bool] = []
     backend = FakeBackend(
         clock,
         [[Text("The limit has reset, sir.")], [Text("The CI is green, sir.")]],
-        orchestrator=[[report("T1", "The CI is green.")]],
+        warm_up=[Gate(warm_ready), Text("Ready.")],
+        orchestrator=[[Gate(recovered), report("T1", "The CI is green.")]],
     )
-    second = make_hub(backend, output, metrics, state_path=state)
+    second = make_hub(backend, output, metrics, state_path=state, on_model_ready=lambda: ready.append(True))
     typist = Typist(clock)
     run = await running(second, typist)
     typist.end()
@@ -470,7 +496,14 @@ async def test_an_orchestrator_message_held_for_the_limit_survives_a_restart_and
     assert backend.all_sessions("orchestrator") == []
 
     clock.advance(1800)
+    await until(lambda: bool(backend.all_sessions("orchestrator")))
+    warm_ready.set()
+    await until(lambda: sum(r.get("kind") == "warm_up" for r in metrics.records) == 2)
+    assert ready == []
+    assert not any("recovery confirmed" in n for n in output.notices)
+    recovered.set()
     await run
+    assert any("recovery confirmed" in n for n in output.notices)
 
     [recovery] = backend.session("orchestrator").received
     assert recovery.startswith('<event source="hub" reason="restart">')
@@ -498,7 +531,7 @@ async def test_a_subagent_queued_for_the_limit_survives_a_restart_and_starts_aft
     typist = Typist(clock)
     run = await running(first, typist)
     typist.type("Fix the typos")
-    await until(lambda: any(LINE in r for r in before.replies))
+    await until(lambda: any(LINE in r for r in screen_lines(before)))
     typist.type("And another")
     await until(lambda: len(first_backend.session("orchestrator").tool_results) == 2)
     await stopped(first, run)
@@ -546,7 +579,7 @@ async def test_a_retry_that_keeps_being_limited_is_silent_and_the_reset_is_told_
     typist = Typist(clock)
     run = await running(hub, typist)
     typist.type("Is the CI green?")
-    await until(lambda: any(LINE in r for r in output.replies))
+    await until(lambda: any(LINE in r for r in screen_lines(output)))
     [session] = backend.all_sessions("orchestrator")
     typist.end()
 
@@ -558,10 +591,10 @@ async def test_a_retry_that_keeps_being_limited_is_silent_and_the_reset_is_told_
     assert [await calls_after(s) for s in (59, 1, 119, 1, 239, 1)] == [1, 2, 2, 3, 3, 4]
     await run
 
-    assert sum(LINE in r for r in output.replies) == 1
-    assert not any("expected to reset" in r for r in output.replies)
+    assert sum(LINE in r for r in screen_lines(output)) == 1
+    assert not any("expected to reset" in r for r in screen_lines(output))
     assert sum('reason="usage_reset"' in m for m in talker_received(backend)) == 1
-    assert output.replies[-2:] == ["The CI is green, sir.", "The limit has reset, sir."]
+    assert screen_lines(output)[-2:] == ["The CI is green, sir.", "The limit has reset, sir."]
     await hub.close()
 
 
@@ -589,12 +622,12 @@ async def test_a_limit_after_a_successful_turn_is_a_new_one_and_is_announced_aga
     typist = Typist(clock)
     run = await running(hub, typist)
     typist.type("Is the CI green?")
-    await until(lambda: any(LINE in r for r in output.replies))
+    await until(lambda: any(LINE in r for r in screen_lines(output)))
     clock.advance(600)
-    await until(lambda: "The CI is green, sir." in output.replies)
+    await until(lambda: "The CI is green, sir." in screen_lines(output))
 
     typist.type("Any PRs?")
-    await until(lambda: sum(LINE in r for r in output.replies) == 2)
+    await until(lambda: sum(LINE in r for r in screen_lines(output)) == 2)
     clock.advance(600)
     typist.end()
     await run
@@ -612,11 +645,11 @@ async def test_a_talker_limit_already_past_still_holds_for_a_minute(
     run = await running(hub, typist)
 
     typist.type("Hello")
-    await until(lambda: output.replies)
+    await until(lambda: screen_lines(output))
     typist.type("Anyone there?")
-    await until(lambda: len(output.replies) == 2)
+    await until(lambda: len(screen_lines(output)) == 2)
 
-    assert output.replies == [f"{LINE} It resets at 12:17 AM."] * 2
+    assert screen_lines(output) == [status("It resets at 12:17 AM.")] * 2
     assert len(talker_received(backend)) == 2
     typist.end()
     clock.advance(60)
@@ -636,7 +669,7 @@ async def test_a_retry_limited_again_after_a_restart_is_silent_and_the_reset_is_
     typist = Typist(clock)
     run = await running(first, typist)
     typist.type("Is the CI green?")
-    await until(lambda: any(LINE in r for r in before.replies))
+    await until(lambda: any(LINE in r for r in screen_lines(before)))
     await stopped(first, run)
 
     output = RecordingOutput()
@@ -655,13 +688,14 @@ async def test_a_retry_limited_again_after_a_restart_is_silent_and_the_reset_is_
     clock.advance(120)
     await run
 
-    assert not any(LINE in r or "expected to reset" in r for r in output.replies)
+    assert sum(LINE in n for n in output.notices) == 1
+    assert not any("expected to reset" in n for n in output.notices)
     assert output.replies == ["The CI is green, sir.", "The limit has reset, sir."]
     await second.close()
 
 
 @pytest.mark.parametrize("speak", [False, True], ids=["text", "spoken"])
-async def test_a_limit_reached_during_a_reply_is_told_after_it(
+async def test_limit_status_during_a_reply_does_not_inject_speech(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, speak: bool
 ) -> None:
     player = RecordingPlayer()
@@ -682,12 +716,13 @@ async def test_a_limit_reached_during_a_reply_is_told_after_it(
     await until(lambda: any(r.get("kind") == "usage_limit" for r in metrics.records))
     await asyncio.sleep(0.05)
     hit.set()
-    await until(lambda: len(output.replies) == 2)
+    await until(lambda: output.replies == ["Right away, sir. I'll let you know."])
 
-    assert output.replies == ["Right away, sir. I'll let you know.", f"{LINE} It resets at 12:26 AM."]
+    assert output.replies == ["Right away, sir. I'll let you know."]
+    assert status("It resets at 12:26 AM.") in output.notices
     if speech is not None:
         await speech.idle()
-        assert player.texts == ["Right away, sir.", "I'll let you know.", LINE, "It resets at 12:26 AM."]
+        assert player.texts == ["Right away, sir.", "I'll let you know."]
     typist.end()
     clock.advance(600)
     await run
@@ -745,18 +780,18 @@ async def test_a_subagent_cancelled_while_it_waits_for_the_reset_does_not_keep_t
     typist = Typist(clock)
     run = await running(hub, typist)
     typist.type("Fix A")
-    await until(lambda: sum(LINE in r for r in output.replies) == 1)
+    await until(lambda: sum(LINE in r for r in screen_lines(output)) == 1)
     typist.type("Cancel that")
-    await until(lambda: "Stopped, sir." in output.replies)
+    await until(lambda: "Stopped, sir." in screen_lines(output))
     clock.advance(600)
     await until(lambda: any(r["kind"] == "usage_reset" for r in metrics.records))
 
     clock.advance(86400)
     typist.type("Fix B")
-    await until(lambda: sum(LINE in r for r in output.replies) == 2)
+    await until(lambda: sum(LINE in r for r in screen_lines(output)) == 2)
 
     # The minimum wait, not a doubled one: 88,060 s past the epoch.
-    assert output.replies[-1] == f"{LINE} It resets at 12:27 AM."
+    assert screen_lines(output)[-1] == status("It resets at 12:27 AM.")
     typist.end()
     clock.advance(60)
     await run
@@ -780,17 +815,17 @@ async def test_a_task_cancelled_while_its_turn_waits_for_the_reset_does_not_keep
     typist = Typist(clock)
     run = await running(hub, typist)
     typist.type("Is the CI green?")
-    await until(lambda: sum(LINE in r for r in output.replies) == 1)
+    await until(lambda: sum(LINE in r for r in screen_lines(output)) == 1)
     typist.type("Cancel that")
-    await until(lambda: "Cancelling." in output.replies)
+    await until(lambda: "Cancelling." in screen_lines(output))
     clock.advance(600)
     await until(lambda: any(r["kind"] == "usage_reset" for r in metrics.records))
 
     clock.advance(86400)
     typist.type("Any PRs?")
-    await until(lambda: sum(LINE in r for r in output.replies) == 2)
+    await until(lambda: sum(LINE in r for r in screen_lines(output)) == 2)
 
-    assert output.replies[-1] == f"{LINE} It resets at 12:27 AM."
+    assert screen_lines(output)[-1] == status("It resets at 12:27 AM.")
     typist.end()
     clock.advance(60)
     await run
@@ -808,19 +843,19 @@ async def test_a_limit_hit_by_the_warm_up_is_told_at_the_first_user_turn(
     await until(lambda: any(r.get("kind") == "usage_limit" for r in metrics.records))
 
     typist.type("Hello")
-    await until(lambda: output.replies)
+    await until(lambda: screen_lines(output))
 
-    assert output.replies == [f"{LINE} It resets at 1:16 AM."]
+    assert screen_lines(output) == [status("It resets at 1:16 AM.")]
     typist.end()
     clock.advance(3600)
     await run
     await hub.close()
 
 
-async def test_a_warm_up_limit_that_clears_before_the_user_speaks_is_never_mentioned(
+async def test_a_warm_up_limit_shows_status_until_a_user_turn_confirms_recovery(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
 ) -> None:
-    backend = FakeBackend(clock, [[Text("Hello, sir.")]], warm_up=[Limited(-30)])
+    backend = FakeBackend(clock, [[Text("Hello, sir.")], [Text("Recovered, sir.")]], warm_up=[Limited(-30)])
     hub = make_hub(backend, output, metrics)
     typist = Typist(clock)
     run = await running(hub, typist)
@@ -832,8 +867,10 @@ async def test_a_warm_up_limit_that_clears_before_the_user_speaks_is_never_menti
     typist.end()
     await run
 
-    assert output.replies == ["Hello, sir."]
-    assert not any('reason="usage_reset"' in m for m in talker_received(backend))
+    assert output.replies == ["Hello, sir.", "Recovered, sir."]
+    assert sum(LINE in n for n in output.notices) == 1
+    assert any('reason="usage_reset"' in m for m in talker_received(backend))
+    assert any("recovery confirmed" in n for n in output.notices)
     await hub.close()
 
 
@@ -861,9 +898,11 @@ async def test_a_notice_held_past_the_hold_that_started_it_tells_the_hold_still_
     clock.advance(60)
     await until(lambda: any(r.get("kind") == "usage_reset" for r in metrics.records))
     replying.set()
-    await until(lambda: len(output.replies) == 2)
+    await until(lambda: output.replies == ["On it, sir. Working on it."])
 
-    assert output.replies == ["On it, sir. Working on it.", LINE]
+    assert output.replies == ["On it, sir. Working on it."]
+    assert status() in output.notices
+    assert sum(LINE in n for n in output.notices) == 2
 
     clock.advance(840)
     await until(lambda: any('reason="usage_reset"' in m for m in talker_received(backend)))
@@ -884,20 +923,20 @@ async def test_a_later_hit_that_pushes_the_reset_back_tells_the_user_once(
     typist = Typist(clock)
     run = await running(hub, typist)
     typist.type("Fix A")
-    await until(lambda: any(LINE in r for r in output.replies))
+    await until(lambda: any(LINE in r for r in screen_lines(output)))
     orchestrating.set()
-    await until(lambda: len(output.replies) == 3)
+    await until(lambda: len(screen_lines(output)) == 3)
     await asyncio.sleep(0.05)
 
-    assert output.replies == [
+    assert screen_lines(output) == [
         "On it, sir.",
-        f"{LINE} It resets at 12:26 AM.",
-        "It's now expected to reset at 1:16 AM.",
+        status("It resets at 12:26 AM."),
+        status("It's now expected to reset at 1:16 AM."),
     ]
     await stopped(hub, run)
 
 
-async def test_a_limit_the_user_never_heard_of_is_told_after_a_restart_while_it_holds(
+async def test_visible_limit_status_is_restored_once_after_a_restart_while_it_holds(
     clock: FakeClock, metrics: RecordingMetrics, tmp_path: Path
 ) -> None:
     state = tmp_path / ".jarvis" / "state.json"
@@ -912,18 +951,20 @@ async def test_a_limit_the_user_never_heard_of_is_told_after_a_restart_while_it_
     typist.type("Is the CI green?")
     await until(lambda: any(r.get("kind") == "usage_limit" for r in metrics.records))
     await stopped(first, run)
-    assert not any(LINE in r for r in before.replies)
+    assert any(LINE in r for r in screen_lines(before))
 
     output = RecordingOutput()
-    second = make_hub(FakeBackend(clock, [[Text("Reset, sir.")]]), output, metrics, state_path=state)
+    backend = FakeBackend(clock, [[Text("Reset, sir.")]])
+    second = make_hub(backend, output, metrics, state_path=state)
     run = await running(second, Typist(clock))
-    await until(lambda: output.replies)
+    await until(lambda: backend.all_sessions("talker") != [])
+    await asyncio.sleep(0.05)
 
-    assert output.replies == [f"{LINE} It resets at 12:26 AM."]
+    assert sum(LINE in n for n in output.notices) == 1
     await stopped(second, run)
 
 
-async def test_a_limit_the_user_never_heard_of_that_reset_during_a_restart_is_not_announced(
+async def test_a_visible_limit_is_announced_recovered_after_a_successful_restart_turn(
     clock: FakeClock, metrics: RecordingMetrics, tmp_path: Path
 ) -> None:
     state = tmp_path / ".jarvis" / "state.json"
@@ -946,8 +987,9 @@ async def test_a_limit_the_user_never_heard_of_that_reset_during_a_restart_is_no
     await until(lambda: sum(r.get("kind") == "usage_reset" for r in metrics.records) == 1)
     await asyncio.sleep(0.05)
 
-    assert not any(LINE in r for r in output.replies)
-    assert not any('reason="usage_reset"' in m for m in talker_received(backend))
+    assert sum(LINE in n for n in output.notices) == 1
+    assert any('reason="usage_reset"' in m for m in talker_received(backend))
+    assert any("recovery confirmed" in n for n in output.notices)
     await stopped(second, run)
 
 
@@ -1039,16 +1081,16 @@ async def test_a_limit_still_on_after_the_hold_cleared_is_not_told_again_and_the
     typist = Typist(clock)
     run = await running(hub, typist)
     typist.type("Is the CI green?")
-    await until(lambda: any(LINE in r for r in output.replies))
+    await until(lambda: any(LINE in r for r in screen_lines(output)))
     typist.end()
     clock.advance(900)
     await until(lambda: len(backend.session("orchestrator").received) == 2)
     clock.advance(900)
     await run
 
-    assert sum(LINE in r for r in output.replies) == 1
+    assert sum(LINE in r for r in screen_lines(output)) == 1
     assert sum('reason="usage_reset"' in m for m in talker_received(backend)) == 1
-    assert output.replies[-1] == "The limit has reset, sir."
+    assert screen_lines(output)[-1] == "The limit has reset, sir."
     await hub.close()
 
 
@@ -1090,7 +1132,7 @@ async def test_a_reset_the_talker_was_telling_when_it_hit_the_limit_again_is_not
     run = await running(hub, typist)
 
     typist.type("Check the CI")
-    await until(lambda: any(LINE in r for r in output.replies))
+    await until(lambda: any(LINE in r for r in screen_lines(output)))
     await asyncio.sleep(0.05)
     clock.advance(1800)
     await asyncio.sleep(0.2)

@@ -62,6 +62,8 @@ The [voice trace](docs/notes/voice-tracing.md) correlates captured requests, end
 
 Type into the same terminal during voice mode for a text-only reply. Details appear on screen and in `.jarvis/show.log`. Ctrl-D or Ctrl-C stops the Hub. Each launch starts a fresh conversation; saved Tasks and waits survive restart, and interrupted Subagents keep their branches.
 
+Startup shows loading and ready notices for the conversation model, speech and listening. The short readiness tone means speech output is ready; check the model and listening notices before speaking. There is no prerecorded greeting.
+
 The Talker warms in the background at startup, using one hidden subscription turn ([ADR 0006](docs/adr/0006-warm-up-in-the-background.md)). The Orchestrator connects without a prompt. Idle listening and stop phrases use no model call; pending work and Announcements may still need agent turns.
 
 Ask for status or to cancel a Task by name. Quiet mode holds routine Announcements until the next Wake word; news that needs you can still be announced. A Boundary action asks for one recorded Approval. The Hub runs approved merges and branch deletions; other approved actions go to a Subagent. See [ADR 0013](docs/adr/0013-approvals-checked-by-the-hub.md) for the rules and limits.
@@ -88,7 +90,7 @@ Ask for status or to cancel a Task by name. Quiet mode holds routine Announcemen
 - Missed “Ehi Jarvis” or bare “Jarvis”: these are known weak spots in synthetic testing. Record the User's takes before selecting a different engine. Do not treat the unmeasured recall target as achieved.
 - Jarvis pauses or stops on its own speaker: try headphones and record the speaker checklist before tuning thresholds. Echo cancellation and Barge-in still need the real speaker run.
 - A writing Subagent cannot start: check that the sdlc plugin is installed and its worktree script is available, that the clone belongs to the configured Org, and that its worktree is not locked by another session.
-- Usage limit: the Hub reports the reset time when available and queues new Subagents. Stats reports observed limit hits and token usage; these are not API charges. Real limit handling is tested with fakes, not an exhausted account.
+- Usage limit: an on-screen notice shows the reset time, or says it is unavailable, and gives the next step. Held Tasks and new Subagents wait and retry with backoff. Send a new request after reset; no conversational model call phrases the unavailable notice. A timer clearing the hold does not confirm recovery: the recovery notice and any generated Announcement follow a successful turn. Startup, limit and backend failures use no cached spoken sentences. Stats reports observed limit hits and token usage; these are not API charges. Real limit handling is tested with fakes, not an exhausted account.
 - Unexpected restart recovery: inspect `.jarvis/state.json` and terminal notices before changing saved data. `.jarvis/metrics.jsonl`, `.jarvis/show.log` and `.jarvis/subagents/` hold timings, shown details and Subagent progress. They may contain private work; keep them local.
 
 ## Wake-word license

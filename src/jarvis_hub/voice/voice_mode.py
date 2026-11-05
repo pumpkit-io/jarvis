@@ -149,7 +149,7 @@ class VoiceMode:
         self._events: asyncio.Queue[Event] = asyncio.Queue()
         self._lines: asyncio.Queue[Line] = asyncio.Queue()
         self._speech = Speech(
-            tts, player, clock, metrics=metrics, notice=notice, on_reply_audio=self._reply_audio, on_chime=self._chime_started
+            tts, player, clock, metrics=metrics, notice=notice, on_reply_audio=self._reply_audio, on_chime=self._chime_started, on_ready=self._ready
         )
         self.speech = _ObservedSpeech(self._speech, self._reply_done, self._moved_on)
 
@@ -158,9 +158,12 @@ class VoiceMode:
         return self._voice.state
 
     def start(self) -> None:
-        """Loads the voice in the background, then says the startup line."""
+        self._notice("Speech loading.")
         self._speech.start()
-        self._speech.say("startup", "en")
+
+    def _ready(self) -> None:
+        self._notice("Speech ready.")
+        self._speech.say("ready", "en")
 
     def end_conversation(self) -> None:
         self._events.put_nowait(EndConversation(self._clock.now()))
