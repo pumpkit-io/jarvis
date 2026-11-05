@@ -631,3 +631,41 @@ async def test_cached_speech_does_not_claim_a_meaningful_response(
     [row] = speech_rows(metrics)
     assert row["first_audio_ms"] == 0
     assert row["first_meaningful_audio_ms"] == 800
+
+
+async def test_stopping_after_normal_playback_does_not_supersede_the_request(
+    clock: FakeClock, metrics: RecordingMetrics, speech: Speech
+) -> None:
+    speech.begin("en", turn=70, heard_at=clock.now())
+    speech.feed("The build passed.")
+    speech.end()
+    await speech.idle()
+    speech.stop()
+
+    assert not any(r["kind"] == "speech_stop" for r in metrics.records)
+    assert len(speech_rows(metrics)) == 1
+
+
+@pytest.mark.parametrize("drained", [False, True])
+async def test_stop_traces_only_reply_audio_left_ahead_of_a_chime(
+    clock: FakeClock, metrics: RecordingMetrics, tts: FakeTts, output: RecordingOutput, drained: bool
+) -> None:
+    player = RecordingPlayer(hold=True)
+    speech = Speech(tts, player, clock, metrics=metrics, notice=output.notice)
+    speech.start()
+    try:
+        speech.begin("en", turn=71, heard_at=clock.now())
+        speech.feed("The build passed.")
+        speech.end()
+        await until(lambda: len(speech_rows(metrics)) == 1)
+        speech.say("chime", "en")
+        await until(lambda: len(player.clips) == 2)
+        if drained:
+            player.finish(1)
+        speech.stop()
+
+        stops = [r["turn"] for r in metrics.records if r["kind"] == "speech_stop"]
+        assert stops == ([] if drained else [71])
+        assert player.pending() == 0
+    finally:
+        await speech.close()
