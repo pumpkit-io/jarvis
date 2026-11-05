@@ -130,6 +130,8 @@ class _Turn:
     smart_turn_ms: float = 0.0
     assessments: list[dict[str, Any]] = field(default_factory=lambda: [])
     candidate: int = 0
+    owner: int | None = None
+    onset: float | None = None
 
 
 @dataclass(frozen=True)
@@ -173,6 +175,8 @@ class InputPipeline:
         self._onset: float | None = None
         self._last_speech = 0.0
         self._capturing = False
+        self._owner: int | None = None
+        self._limited_run = False
         self._turn: _Turn | None = None
         self._pending: _Endpoint | None = None
         self._defer_endpoints = defer_endpoints
@@ -200,9 +204,15 @@ class InputPipeline:
         self._clip: tuple[float, list[Pcm]] | None = None
         self._at = 0.0
 
-    def capture(self, on: bool) -> None:
+    def capture(self, on: bool, *, owner: int | None = None) -> None:
+        phase_change = owner is not None and owner == self._owner and on != self._capturing
+        replaced_turn = self._turn is not None and owner != self._owner
+        self._owner = owner
+        if phase_change and self._turn is not None:
+            self._capturing = on
+            return
         # Idle speech may contain the Wake word and request together; retain it only on a fresh enable.
-        if not on or self._capturing:
+        if not on or self._capturing or replaced_turn:
             self.discard_endpoint("capture_changed")
             self._ring.clear()
             self._vad_buf = np.zeros(0, np.int16)
@@ -214,7 +224,7 @@ class InputPipeline:
         return None if self._pending is None else self._pending.sequence
 
     def discard_endpoint(self, reason: str, *, block: bool = False) -> CaptureAborted | None:
-        abandoned = self._turn is not None
+        abandoned = self._turn
         pending = self._pending
         if pending is not None:
             self._endpoint_record(pending, "invalidated", reason)
@@ -225,13 +235,14 @@ class InputPipeline:
             self._vad_buf = np.zeros(0, np.int16)
             self._wake_buf = np.zeros(0, np.int16)
             self._run = None
-        return CaptureAborted(self._clock(), reason) if block and abandoned else None
+        return CaptureAborted(self._clock(), reason, abandoned.owner, abandoned.candidate) if block and abandoned else None
 
     def _endpoint_record(self, endpoint: _Endpoint, stage: str, reason: str) -> None:
         if not self._defer_endpoints:
             return
         self._record({"kind": "endpoint", "stage": stage, "reason": reason,
                       "candidate": endpoint.turn.candidate, "endpoint_candidate": endpoint.sequence,
+                      "source_owner": endpoint.turn.owner,
                       "speech_at": endpoint.speech_at, "processed_at": self._clock(),
                       "time_basis": "perf_counter"})
 
@@ -243,7 +254,7 @@ class InputPipeline:
             self.discard_endpoint(reject)
             return None
         self._pending = None
-        if self._turn is not endpoint.turn or not self._capturing:
+        if self._turn is not endpoint.turn:
             self._endpoint_record(endpoint, "invalidated", "replacement")
             return None
         if self._last_speech != endpoint.speech_at:
@@ -316,13 +327,16 @@ class InputPipeline:
                 self._last_speech = ends
             else:
                 self._run, self._run_spent, self._run_rearmed, self._overheard = None, False, False, None
-        events += self._barge_events(at)
+        if self._turn is None or self._capturing:
+            events += self._barge_events(at)
         if self._onset is not None and self._turn is None and at - self._last_speech >= self._s.end_silence_s:
             self._onset = None
             self._barge = None
-        if self._capturing and not self._blocked and self._turn is None and self._onset is not None:
+        if at - self._last_speech >= self._s.end_silence_s:
+            self._limited_run = False
+        if self._capturing and not self._blocked and not self._limited_run and self._turn is None and self._onset is not None:
             self._turn = self._begin_turn(self._onset)
-            events.append(SpeechStarted(at))
+            events.append(SpeechStarted(at, self._turn.owner, self._turn.candidate, self._turn.onset))
         if self._turn is not None and (heard := self._end_of_turn(self._turn, at)) is not None:
             events.append(heard)
         return events
@@ -396,7 +410,7 @@ class InputPipeline:
         first = self._ring[-len(frames)][1] - 0.01 if frames else self._ring[-1][1]
         self._turn_sequence += 1
         return _Turn(first, frames, [], wake=self._last_wake if self._last_wake > first else None,
-                     candidate=self._turn_sequence)
+                     candidate=self._turn_sequence, owner=self._owner, onset=onset)
 
     def _end_of_turn(self, turn: _Turn, at: float) -> Heard | None:
         if self._pending is not None:
@@ -447,6 +461,7 @@ class InputPipeline:
                 "time_basis": "perf_counter",
                 "request_at": self._last_speech,
                 "capture_start_at": turn.start,
+                "source_owner": turn.owner,
                 "endpoint_at": at,
                 "endpoint_reason": "max_turn" if at - turn.start >= self._s.max_turn_s else "complete",
                 "stt_started_at": stt_started,
@@ -459,9 +474,11 @@ class InputPipeline:
                 "stt_ms": round(stt_ms, 1),
                 "words": len(text.split()),
             }
+        limited = at - turn.start >= self._s.max_turn_s
+        self._limited_run = limited
         self._endpoint_sequence += 1
         endpoint = _Endpoint(self._endpoint_sequence, turn, self._last_speech,
-                             Heard(text, None, self._last_speech), metric, admitted)
+                             Heard(text, None, self._last_speech, turn.owner, turn.candidate, turn.onset, limited=limited), metric, admitted)
         metric.update(candidate=turn.candidate, endpoint_candidate=endpoint.sequence)
         self._pending = endpoint
         self._endpoint_record(endpoint, "prepared", "transcribed")
@@ -506,6 +523,7 @@ class Microphone:
 class _Capture:
     on: bool
     epoch: int
+    owner: int | None = None
 
 
 @dataclass(frozen=True)
@@ -574,6 +592,8 @@ class Capture:
         # Frames and switches in the order they happened; None stops the thread.
         self._frames: queue.SimpleQueue[_CapturedFrame | _Capture | _BargeIn | _EndpointFence | _Overflow | None] = queue.SimpleQueue()
         self._capture_epoch = 0
+        self._capture_owner: int | None = None
+        self._capture_on = False
         self._loss_epoch = 0
         self._frame_sequence = 0
         self._fenced_candidate: int | None = None
@@ -594,10 +614,13 @@ class Capture:
         self._loop = asyncio.get_running_loop()
         threading.Thread(target=self._run, name="capture", daemon=True).start()
 
-    def capture(self, on: bool) -> None:
+    def capture(self, on: bool, *, owner: int | None = None) -> None:
         with self._backlog_lock:
-            self._capture_epoch += 1
-            self._frames.put(_Capture(on, self._capture_epoch))
+            phase_change = owner is not None and owner == self._capture_owner and on != self._capture_on
+            if not phase_change:
+                self._capture_epoch += 1
+            self._capture_owner, self._capture_on = owner, on
+            self._frames.put(_Capture(on, self._capture_epoch, owner))
 
     def barge_in(self, since: float | None) -> None:
         self._frames.put(_BargeIn(since))
@@ -719,7 +742,7 @@ class Capture:
                 break
             if isinstance(item, _Capture):
                 epoch = item.epoch
-                pipeline.capture(item.on)
+                pipeline.capture(item.on, owner=item.owner)
                 continue
             if isinstance(item, _Overflow):
                 self._abandon(pipeline, "overflow", epoch)

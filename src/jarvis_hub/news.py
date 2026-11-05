@@ -34,6 +34,8 @@ class Leaf:
     reset: bool = False
     # The Approval this news asks the User for, by id.
     approval: str | None = None
+    task_id: str | None = None
+    revision: int = 0
 
     def dump(self, to_wall: TimeShift) -> dict[str, Any]:
         return _LEAF.dump(self, to_wall)
@@ -41,10 +43,10 @@ class Leaf:
     @staticmethod
     def load(saved: dict[str, Any], from_wall: TimeShift) -> "Leaf":
         """KeyError, TypeError or ValueError when `saved` is not a whole leaf."""
-        return Leaf(**_LEAF.load(saved, from_wall))
+        return Leaf(**_LEAF.load({"task_id": None, "revision": 0, **saved}, from_wall))
 
 
-_LEAF = Fields(("message", "arrived", "summary", "details", "urgent", "reset", "approval"), times=frozenset({"arrived"}))
+_LEAF = Fields(("message", "arrived", "summary", "details", "urgent", "reset", "approval", "task_id", "revision"), times=frozenset({"arrived"}))
 
 
 def fresh(leaves: Iterable[Leaf]) -> list[Leaf]:
@@ -130,6 +132,17 @@ class News:
     def away_leaves(self) -> tuple[Leaf, ...]:
         """The leaves Quiet mode held, which the state file keeps until the User has heard them."""
         return tuple(leaf for group in self.groups if isinstance(group, _Away) for leaf in group.leaves)
+
+    def without_tasks(self, task_ids: set[str]) -> "News | None":
+        groups: list[_Group] = []
+        for group in self.groups:
+            if isinstance(group, _Away):
+                kept = tuple(leaf for leaf in group.leaves if leaf.task_id not in task_ids)
+                if kept:
+                    groups.append(_Away(kept, group.arrived))
+            elif group.task_id not in task_ids:
+                groups.append(group)
+        return News(tuple(groups)) if groups else None
 
     def without_reset(self) -> "News | None":
         """This turn less the news that the limit reset, which is told once or never; None when nothing is left.

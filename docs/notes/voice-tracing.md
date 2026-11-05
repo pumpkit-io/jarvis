@@ -47,8 +47,17 @@ Usage-limit notices include the known reset time or `Reset time unavailable`, pl
 
 The notice is considered delivered when shown, including a limit found during warm-up or while another reply plays. A restart shows an active saved limit once so the new terminal explains why work waits. Explicit requests made while held show its current status again. Role holds, queued work, retry backoff and persisted reset evidence keep the existing Usage limit policy. Clearing a timer produces no recovery claim. Only a successful turn of a held role confirms recovery; its on-screen notice appears once and the existing generated Announcement still follows Quiet mode and quiet-time scheduling. Real-model relevance and physical playback remain opt-in.
 
+## Spoken request revisions
+
+`request_id` and `revision` now join Hub `user`, `speech` and `speech_stop` rows across a resumed thought. `request_at` still measures the latest speech end; it is no longer the sole ownership key. `spoken_relation` rows record request/revision, candidate identity, verdict and reason without adding candidate text to the metric. Candidate context and transcripts remain local.
+
+Input `turn` rows include `capture_epoch`, `candidate` and `speech_started_at` separately from pre-roll `capture_start_at`; Orchestrator `task` rows include the Task producer revisions. Capture epochs retire late input after Wake, typed replacement or shutdown. Candidate sequences prevent duplicate admission within an epoch. A speech onset freezes the logical phase used for assessment; queued reply estimates do not claim physical hearing. Locally admitted fragments retain one generation identity and increment revision. A local routing label cannot discard history or choose Task scope; the admitted Talker resolves the affected Tasks and any new raw semantic boundary. Stale decisions and reply callbacks cannot take the current revision's floor. ADR 0016 describes retention and readiness bounds; fake-adapter coverage establishes the mechanism independently of model quality.
+
+
 ## Silent end controls and generated farewells
 
 A recognized whole-utterance end control in a capturing state returns idle without speech or another model turn. Matching remains whole-utterance: longer requests containing thanks or control words still reach the Talker. Typed input keeps its generated-text route. The Talker's `end_conversation` tool still lets an actual generated reply finish before idle, without a Follow-up window.
 
 The stop-control path adds no new playback fast path and does not admit transcripts outside the current capturing states. Its Hub regressions cover EN/IT endings, longer requests, generated farewell playback, typed controls and silent idling. They do not establish real-model contextual admission or acoustic recognition accuracy; background speech in an open Follow-up window remains subject to the separate semantic-admission work.
+
+Pending spoken scopes and typed clarification are durable Hub state. Scope IDs, generation revisions and resolver attempts fence stale choices. Selected Task producer revisions commit atomically before work; unresolved/expired holds do not release old Approval authority. Restart sends pending, already-admitted context to a text-only Talker turn before held Task recovery. No failed local recognizer is wired; semantic/privacy, real worker and physical acceptance gates remain separate.

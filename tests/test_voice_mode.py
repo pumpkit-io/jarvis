@@ -1,6 +1,7 @@
 """Voice mode through the Hub: scripted audio input in, the Talker's messages and what was played out."""
 
 import asyncio
+import json
 import shutil
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
@@ -9,26 +10,31 @@ from typing import Any
 
 import pytest
 
-from jarvis_hub.agents.backend import Context
+from jarvis_hub.agents.backend import Context, SessionSpec
+from jarvis_hub.subagents import Subagent
 from jarvis_hub.hub import WARM_UP, Hub
-from jarvis_hub.voice.state import Timing
+from jarvis_hub.voice.assessment import Verdict
+from jarvis_hub.voice.state import Heard, SpeechStarted, Timing
 from jarvis_hub.voice.voice_mode import VoiceMode, merge
 from tests.fakes import (
     AwaitInterrupt,
     FakeBackend,
     FakeClock,
     FakeTts,
+    FakeWorkspace,
     Gate,
     Limited,
     RecordingMetrics,
     RecordingOutput,
     RecordingPlayer,
+    ResolveScope,
     ScriptedAudio,
     Step,
     Text,
     Tool,
     Typist,
     make_hub,
+    subagent_spec,
     until,
 )
 
@@ -51,7 +57,8 @@ class Rig:
     running: asyncio.Task[None]
 
     def user_messages(self) -> list[str]:
-        return [m for s in self.backend.all_sessions("talker") for m in s.received if m.startswith("<user")]
+        return [m.split("\n<spoken_scopes>", 1)[0] for s in self.backend.all_sessions("talker")
+                for m in s.received if m.startswith("<user")]
 
     def states(self) -> list[str]:
         return [r["to"] for r in self.metrics.records if r["kind"] == "voice"]
@@ -78,18 +85,20 @@ MakeRig = Callable[..., Awaitable[Rig]]
 async def rig_for() -> AsyncIterator[MakeRig]:
     rigs: list[tuple[Rig, asyncio.Task[None]]] = []
 
-    async def make(*scripts: list[Step], state_path: Path | None = None, **backend_options: Any) -> Rig:
+    async def make(*scripts: list[Step], state_path: Path | None = None, recognition: Any = None, workspace: FakeWorkspace | None = None, subagent_session: Callable[[Subagent], SessionSpec] = subagent_spec, **backend_options: Any) -> Rig:
         clock = FakeClock()
         backend = FakeBackend(clock, list(scripts), **backend_options)
         audio, player, output, metrics = ScriptedAudio(clock), RecordingPlayer(), RecordingOutput(), RecordingMetrics()
         tts = FakeTts()
         voice = VoiceMode(
-            audio=audio, tts=tts, player=player, clock=clock, timing=TIMING, metrics=metrics, notice=output.notice
+            audio=audio, tts=tts, player=player, clock=clock, timing=TIMING, metrics=metrics, notice=output.notice, recognition=recognition
         )
         hub = make_hub(
             backend,
             output,
             metrics,
+            workspace=workspace,
+            session=subagent_session,
             speech=voice.speech,
             speak_typed=False,
             on_end_conversation=voice.end_conversation,
@@ -99,7 +108,7 @@ async def rig_for() -> AsyncIterator[MakeRig]:
         typist = Typist(clock)
         await hub.start()
         voice.start()
-        running = asyncio.create_task(hub.run(merge(typist.lines(), voice.lines(hub.interrupt, hub.woke))))
+        running = asyncio.create_task(hub.run(merge(typist.lines(), voice.lines(hub.interrupt, hub.woke, hub.admit_spoken_revision))))
         rig = Rig(clock, backend, audio, player, output, metrics, typist, voice, hub, tts, running)
         rigs.append((rig, running))
         await until(lambda: player.voices == ["ready"])
@@ -425,9 +434,10 @@ async def test_the_wake_word_does_not_stop_a_typed_reply(rig_for: MakeRig) -> No
     rig.audio.wake()
     await rig.settle()
     typed_done.set()
-    await until(lambda: len(rig.output.replies) == 2)
+    await until(lambda: "Typed answer, sir." in rig.output.replies)
+    await rig.settle()
 
-    assert rig.output.replies[0] == "Typed answer, sir."
+    assert rig.output.replies == ["Typed answer, sir."]
 
 
 async def test_a_reply_stopped_by_the_wake_word_does_not_end_the_next_turn(rig_for: MakeRig) -> None:
@@ -683,10 +693,10 @@ async def test_a_full_talker_restarts_before_waiting_news_and_the_news_goes_to_t
     assert new.received[-1].startswith('<event source="orchestrator" task="T1"')
 
 
-async def test_a_turn_the_user_moved_on_from_is_answered_on_screen_only(rig_for: MakeRig) -> None:
+async def test_a_queued_spoken_turn_superseded_by_wake_is_not_admitted(rig_for: MakeRig) -> None:
     typed_done = asyncio.Event()
     rig: Rig = await rig_for(
-        [Gate(typed_done), Text("Typed answer, sir.")], [Text("Main is red, sir.")], [Text("Green, sir.")]
+        [Gate(typed_done), Text("Typed answer, sir.")], [Text("Green, sir.")]
     )
 
     rig.typist.type("Summarise the logs")
@@ -701,8 +711,8 @@ async def test_a_turn_the_user_moved_on_from_is_answered_on_screen_only(rig_for:
     typed_done.set()
     await until(lambda: "Green, sir." in rig.player.texts and rig.state == "follow_up")
 
-    assert "Main is red, sir." in rig.output.replies
-    assert "Main is red, sir." not in rig.player.texts
+    assert "Is main green?" not in "\n".join(rig.user_messages())
+    assert "Main is red, sir." not in rig.output.replies
 
 
 async def test_news_after_the_input_ends_in_the_follow_up_window_is_shown_and_the_hub_stops(rig_for: MakeRig) -> None:
@@ -1670,6 +1680,730 @@ async def test_a_turn_long_after_the_resume_is_no_repeat(rig_for: MakeRig) -> No
     assert (row["repeated"], row["next"]) == (False, None)
 
 
+class LocalRelation:
+    def __init__(self, verdict: Verdict) -> None:
+        self.verdict: Verdict = verdict
+        self.candidates: list[Any] = []
+
+    async def assess(self, candidate: Any, *, current: Any, timeout_s: float = 2.0) -> Any:
+        from jarvis_hub.voice.assessment import Assessment
+        self.candidates.append(candidate)
+        return Assessment(candidate.candidate_id, candidate.turn_id, self.verdict, 'scripted', 0)
+
+    async def close(self) -> None:
+        pass
+
+
+async def test_resumed_thought_replaces_obsolete_generation_and_delegates_once(rig_for: MakeRig) -> None:
+    relation = LocalRelation('amend')
+    rig = await rig_for(
+        [AwaitInterrupt(), Text('Obsolete reply.'), Tool('delegate', {'request': 'Open an issue'})],
+        [ResolveScope('preserve_tasks'), Text('I will investigate the scheduler, sir.'), Tool('delegate', {'request': 'Open an issue about the scheduler'})],
+        recognition=relation,
+    )
+    rig.audio.wake()
+    rig.audio.say('Open an issue')
+    await until(lambda: rig.state == 'thinking' and len(rig.user_messages()) == 1)
+    rig.audio.say('about the scheduler')
+    await until(lambda: len(rig.backend.all_sessions('orchestrator')) == 1)
+    await rig.settle()
+
+    assert rig.user_messages()[-1] == '<user lang="en">Open an issue about the scheduler</user>', rig.backend.session('talker').received
+    assert len(rig.backend.session('orchestrator').received) == 1
+    assert 'Obsolete reply.' not in rig.player.texts
+    assert relation.candidates[0].admitted_turn == 'Open an issue'
+    assert relation.candidates[0].phase == 'thinking'
+    owners = [(row['request_id'], row['revision']) for row in rig.metrics.records if row['kind'] == 'user']
+    assert owners[0][0] == owners[1][0]
+    assert [revision for _, revision in owners] == [0, 1]
+
+
+@pytest.mark.parametrize('verdict', ['unrelated', 'uncertain'])
+async def test_unadmitted_thinking_speech_preserves_generation_and_audio(rig_for: MakeRig, verdict: Verdict) -> None:
+    finish = asyncio.Event()
+    relation = LocalRelation(verdict)
+    rig = await rig_for([Gate(finish), Text('The original answer, sir.')], recognition=relation)
+    rig.audio.wake()
+    rig.audio.say('Explain the scheduler')
+    await until(lambda: len(rig.user_messages()) == 1)
+    rig.audio.say('Please pass the salt')
+    await until(lambda: len(relation.candidates) == 1)
+    await rig.settle()
+    assert len(rig.user_messages()) == 1
+    assert rig.state == 'thinking'
+    finish.set()
+    await until(lambda: rig.state == 'follow_up')
+    assert 'The original answer, sir.' in rig.player.texts
+
+
+class DelayedRelation(LocalRelation):
+    def __init__(self) -> None:
+        super().__init__('amend')
+        self.release = asyncio.Event()
+
+    async def assess(self, candidate: Any, *, current: Any, timeout_s: float = 2.0) -> Any:
+        result = await super().assess(candidate, current=current, timeout_s=timeout_s)
+        await self.release.wait()
+        return result
+
+
+@pytest.mark.parametrize('replacement', ['wake', 'typed'])
+async def test_a_delayed_relation_cannot_revise_a_replaced_owner(rig_for: MakeRig, replacement: str) -> None:
+    relation = DelayedRelation()
+    rig = await rig_for([AwaitInterrupt()], [Text('Fresh answer, sir.')], recognition=relation)
+    rig.audio.wake()
+    rig.audio.say('Open an issue')
+    await until(lambda: len(rig.user_messages()) == 1)
+    rig.audio.say('about the old scheduler')
+    await until(lambda: len(relation.candidates) == 1)
+    if replacement == 'wake':
+        rig.clock.advance(1)
+        rig.audio.wake()
+        await until(lambda: rig.state == 'listening')
+        rig.audio.say('Check the current build')
+    else:
+        rig.typist.type('Check the current build')
+    await until(lambda: len(rig.user_messages()) == 2)
+    relation.release.set()
+    await rig.settle()
+    assert len(rig.user_messages()) == 2
+    assert 'about the old scheduler' not in '\n'.join(rig.user_messages())
+
+
+async def test_local_new_request_hint_preserves_the_opening_until_explicit_scope_choice(rig_for: MakeRig) -> None:
+    relation = LocalRelation('new_request')
+    rig = await rig_for([AwaitInterrupt()], [Text('Checking, sir.')], recognition=relation)
+    rig.audio.wake()
+    rig.audio.say('Explain the scheduler')
+    await until(lambda: len(rig.user_messages()) == 1)
+    rig.audio.say('Instead check the latest build')
+    await until(lambda: len(rig.user_messages()) == 2)
+    assert rig.user_messages()[-1] == '<user lang="en">Explain the scheduler Instead check the latest build</user>'
+
+
+async def test_a_thinking_candidate_finishing_after_first_audio_revises_the_same_request(rig_for: MakeRig) -> None:
+    relation = DelayedRelation()
+    finish = asyncio.Event()
+    rig = await rig_for([Gate(finish), Text('The old answer, sir. '), AwaitInterrupt()],
+                        [Text('The combined answer, sir.')], recognition=relation)
+    rig.audio.wake()
+    await until(lambda: rig.player.voices[-1:] == ['chime'])
+    rig.player.hold = True
+    rig.audio.say('Explain the scheduler')
+    await until(lambda: len(rig.user_messages()) == 1)
+    rig.audio.say('including its retries')
+    await until(lambda: len(relation.candidates) == 1)
+    finish.set()
+    await until(lambda: rig.state == 'speaking')
+    relation.release.set()
+    await until(lambda: len(rig.user_messages()) == 2)
+    assert 'Explain the scheduler including its retries' in rig.user_messages()[-1]
+    assert relation.candidates[0].phase == 'thinking'
+
+
+async def test_a_revision_reuses_the_already_delegated_task_identity(rig_for: MakeRig) -> None:
+    relation = LocalRelation('amend')
+    rig = await rig_for(
+        [Tool('delegate', {'request': 'Open an issue'}), AwaitInterrupt()],
+        [ResolveScope('revise_tasks', ('T1',)), Tool('delegate', {'request': 'Open an issue about the scheduler', 'task_id': 'T1'}), Text('Updated, sir.')],
+        orchestrator=[[], []], recognition=relation,
+    )
+    rig.audio.wake()
+    rig.audio.say('Open an issue')
+    await until(lambda: len(rig.backend.all_sessions('orchestrator')) == 1)
+    await rig.settle()
+    rig.audio.say('about the scheduler')
+    await until(lambda: len(rig.backend.session('orchestrator').received) == 2)
+    [first, second] = rig.backend.session('orchestrator').received
+    assert '<task id="T1"' in first
+    assert '<task id="T1"' in second
+    assert 'T2' not in second
+
+
+@pytest.mark.parametrize(('opening', 'fragment', 'lang'), [
+    ('Open an issue', 'about the scheduler', 'en'),
+    ('Apri una segnalazione', 'sul pianificatore', 'it'),
+])
+async def test_queued_fragments_are_assessed_together_before_revision_admission(
+    rig_for: MakeRig, opening: str, fragment: str, lang: Any,
+) -> None:
+    relation = DelayedRelation()
+    rig = await rig_for([AwaitInterrupt()], [AwaitInterrupt()], [Text('Done, sir.')], recognition=relation)
+    rig.audio.wake()
+    rig.audio.say(opening, lang)
+    await until(lambda: len(rig.user_messages()) == 1)
+    rig.audio.say(fragment, lang)
+    await until(lambda: len(relation.candidates) == 1)
+    rig.audio.say('today' if lang == 'en' else 'oggi', lang)
+    relation.release.set()
+    await until(lambda: len(relation.candidates) == 2)
+    await until(lambda: len(rig.user_messages()) >= 2)
+    await rig.settle()
+    assert relation.candidates[1].admitted_turn == opening
+    assert relation.candidates[1].transcript == f"{fragment} {'today' if lang == 'en' else 'oggi'}"
+    assert len(rig.user_messages()) == 2
+    assert f'{opening} {fragment}' in rig.user_messages()[-1]
+    assert ('today' if lang == 'en' else 'oggi') in rig.user_messages()[-1]
+
+
+async def test_oversized_continuation_is_reported_without_admission_or_interruption(rig_for: MakeRig) -> None:
+    finish = asyncio.Event()
+    relation = LocalRelation('amend')
+    rig = await rig_for([Gate(finish), Text('The original answer, sir.')], recognition=relation)
+    rig.audio.wake()
+    rig.audio.say('Explain the scheduler')
+    await until(lambda: len(rig.user_messages()) == 1)
+    rig.audio.say('x' * 6000)
+    await rig.settle()
+    assert relation.candidates == []
+    assert len(rig.user_messages()) == 1
+    assert any('retention limit' in str(entry) for entry in rig.output.log)
+    finish.set()
+    await until(lambda: rig.state == 'follow_up')
+
+
+async def test_a_duration_limited_fragment_is_reported_and_not_committed(rig_for: MakeRig) -> None:
+    rig = await rig_for([Text('Must not run, sir.')])
+    rig.audio.wake()
+    rig.audio.say('An unfinished long request', limited=True)
+    await rig.settle()
+    assert rig.user_messages() == []
+    assert any('duration limit' in str(entry) for entry in rig.output.log)
+
+
+async def test_shutdown_discards_an_inflight_local_relation(rig_for: MakeRig) -> None:
+    relation = DelayedRelation()
+    rig = await rig_for([AwaitInterrupt()], recognition=relation)
+    rig.audio.wake()
+    rig.audio.say('Open an issue')
+    await until(lambda: len(rig.user_messages()) == 1)
+    rig.audio.say('about the old scheduler')
+    await until(lambda: len(relation.candidates) == 1)
+    await rig.voice.close()
+    relation.release.set()
+    await rig.settle()
+    assert len(rig.user_messages()) == 1
+
+
+async def test_new_request_selection_preserves_candidates_that_arrived_while_assessing(rig_for: MakeRig) -> None:
+    relation = DelayedRelation()
+    relation.verdict = 'new_request'
+    rig = await rig_for([AwaitInterrupt()], [AwaitInterrupt()], [Text('Done, sir.')], recognition=relation)
+    rig.audio.wake()
+    rig.audio.say('Explain the scheduler')
+    await until(lambda: len(rig.user_messages()) == 1)
+    rig.audio.say('Check the build instead')
+    await until(lambda: len(relation.candidates) == 1)
+    rig.audio.say('Also check the tests')
+    relation.release.set()
+    await until(lambda: len(relation.candidates) == 2)
+    await rig.settle()
+    assert relation.candidates[1].transcript == 'Check the build instead Also check the tests'
+    assert relation.candidates[1].admitted_turn == 'Explain the scheduler'
+
+
+async def test_an_amended_multi_task_request_requires_explicit_task_ownership(rig_for: MakeRig) -> None:
+    relation = LocalRelation('amend')
+    rig = await rig_for(
+        [Tool('delegate', {'request': 'Check build'}), Tool('delegate', {'request': 'Check docs'}), AwaitInterrupt()],
+        [Tool('delegate', {'request': 'Check build and docs today'}), ResolveScope('revise_tasks', ('T1',)),
+         Tool('delegate', {'request': 'Wrong task', 'task_id': 'T999'}),
+         Tool('delegate', {'request': 'Conflicting intent', 'task_id': 'T1', 'new_task': True}),
+         Tool('delegate', {'request': 'Check build today', 'task_id': 'T1'}),
+         Tool('delegate', {'request': 'Also inspect release notes', 'new_task': True}), Text('Updated, sir.')],
+        orchestrator=[[], [], [], []], recognition=relation,
+    )
+    rig.audio.wake()
+    rig.audio.say('Check build and docs')
+    await until(lambda: bool(rig.backend.all_sessions('orchestrator')) and len(rig.backend.session('orchestrator').received) == 2)
+    rig.audio.say('today')
+    await until(lambda: len(rig.backend.session('orchestrator').received) >= 4)
+    await rig.settle()
+    requests = rig.backend.session('orchestrator').received
+    assert len(requests) == 4
+    assert '<task id="T1"' in requests[-2]
+    assert '<task id="T3"' in requests[-1]
+    assert any('Choose task_id' in str(result.result) for result in rig.backend.session('talker').tool_results)
+
+
+async def test_captured_thinking_onset_is_preserved_when_its_delivery_follows_first_audio(rig_for: MakeRig) -> None:
+    relation = LocalRelation('amend')
+    finish = asyncio.Event()
+    rig = await rig_for([Gate(finish), Text('Old answer, sir. '), AwaitInterrupt()],
+                        [Text('Revised answer, sir.')], recognition=relation)
+    rig.audio.wake()
+    await until(lambda: rig.player.voices[-1:] == ['chime'])
+    rig.player.hold = True
+    rig.audio.say('Explain the scheduler')
+    await until(lambda: len(rig.user_messages()) == 1)
+    onset, epoch = rig.clock.now(), rig.audio.owner
+    rig.clock.advance(0.3)
+    finish.set()
+    await until(lambda: rig.state == 'speaking')
+    rig.audio.emit(SpeechStarted(onset, epoch, 2))
+    rig.audio.emit(Heard('including retries', 'en', onset + 0.1, epoch, 2, onset))
+    await until(lambda: len(rig.user_messages()) == 2)
+    assert relation.candidates[0].phase == 'thinking'
+    assert 'Explain the scheduler including retries' in rig.user_messages()[-1]
+
+
+async def test_duration_limit_cannot_admit_its_leftover_tail_as_a_fresh_request(rig_for: MakeRig) -> None:
+    rig = await rig_for([Text('Must not run, sir.')])
+    rig.audio.wake()
+    rig.audio.say('An unfinished long request', limited=True)
+    await rig.settle()
+    rig.audio.say('its leftover tail')
+    await rig.settle()
+    assert rig.user_messages() == []
+
+
+@pytest.mark.parametrize('report_late', [False, True])
+async def test_a_revised_task_cannot_reuse_or_recreate_the_old_pending_approval(rig_for: MakeRig, report_late: bool) -> None:
+    relation = LocalRelation('amend')
+    report_gate = asyncio.Event()
+    if not report_late:
+        report_gate.set()
+    approval: dict[str, Any] = {'action': 'subagent_action', 'description': 'Publish release 42', 'grants': []}
+    rig = await rig_for(
+        [Tool('delegate', {'request': 'Publish release 42'}), AwaitInterrupt()],
+        [ResolveScope('revise_tasks', ('T1',)), Tool('delegate', {'request': 'Publish release 43 instead', 'task_id': 'T1'}), Text('Revised, sir.')],
+        orchestrator=[[Gate(report_gate), Tool('report', {'task_id': 'T1', 'spoken': 'Publish release 42?',
+                                                        'needs_user': True, 'approval': approval})], []],
+        recognition=relation,
+    )
+    rig.audio.wake()
+    rig.audio.say('Publish release 42')
+    await until(lambda: bool(rig.backend.all_sessions('orchestrator')))
+    await rig.settle()
+    if not report_late:
+        assert len(getattr(rig.hub, '_approvals').pending()) == 1
+    rig.audio.say('release 43 instead')
+    await until(lambda: len(rig.user_messages()) == 2)
+    report_gate.set()
+    await rig.settle()
+    assert getattr(rig.hub, '_approvals').pending() == []
+    assert len(rig.backend.session('orchestrator').received) == 2
+
+
+async def test_actual_post_audio_onset_does_not_revise_the_thinking_owner(rig_for: MakeRig) -> None:
+    relation = LocalRelation('amend')
+    rig = await rig_for([Text('The original answer, sir. '), AwaitInterrupt()], recognition=relation)
+    rig.audio.wake()
+    await until(lambda: rig.player.voices[-1:] == ['chime'])
+    rig.player.hold = True
+    rig.audio.say('Explain the scheduler')
+    await until(lambda: rig.state == 'speaking')
+    rig.clock.advance(0.1)
+    onset, epoch = rig.clock.now(), rig.audio.owner
+    rig.audio.emit(SpeechStarted(onset + 0.02, epoch, 2, onset))
+    rig.audio.emit(Heard('A separate overlap', 'en', onset + 0.2, epoch, 2, onset))
+    await rig.settle()
+    assert relation.candidates == []
+    assert len(rig.user_messages()) == 1
+    assert rig.state == 'speaking'
+
+
+async def test_a_stale_producer_usage_limit_still_establishes_the_global_hold(rig_for: MakeRig) -> None:
+    relation = LocalRelation('amend')
+    report_gate = asyncio.Event()
+    rig = await rig_for(
+        [Tool('delegate', {'request': 'Check build'}), AwaitInterrupt()],
+        [ResolveScope('revise_tasks', ('T1',)), Tool('delegate', {'request': 'Check build and tests', 'task_id': 'T1'}), Text('Updated, sir.')],
+        orchestrator=[[Gate(report_gate), Limited(600)], []], recognition=relation,
+    )
+    rig.audio.wake()
+    rig.audio.say('Check build')
+    await until(lambda: bool(rig.backend.all_sessions('orchestrator')))
+    rig.audio.say('and tests')
+    await until(lambda: len(rig.user_messages()) == 2)
+    report_gate.set()
+    await until(lambda: any('Model unavailable: usage limit.' in notice for notice in rig.output.notices))
+    await rig.settle()
+    assert len(rig.backend.session('orchestrator').received) == 1
+
+
+class PreparingWorkspace(FakeWorkspace):
+    def __init__(self) -> None:
+        super().__init__()
+        self.began = asyncio.Event()
+        self.release_prepare = asyncio.Event()
+
+    async def scratch(self, clone: Path, name: str, holder: str) -> Path:
+        self.began.set()
+        await self.release_prepare.wait()
+        return await super().scratch(clone, name, holder)
+
+
+async def test_old_subagent_preparation_cannot_start_after_the_request_revision(rig_for: MakeRig) -> None:
+    relation = LocalRelation('amend')
+    workspace = PreparingWorkspace()
+    spawn = {'repo': 'pumpkit', 'title': 'Old check', 'brief': 'Check the old target',
+             'model': 'sonnet', 'effort': 'low', 'writes': False}
+    rig = await rig_for(
+        [Tool('delegate', {'request': 'Check build'}), AwaitInterrupt()],
+        [ResolveScope('revise_tasks', ('T1',)), Tool('delegate', {'request': 'Check build and tests', 'task_id': 'T1'}), Text('Updated, sir.')],
+        orchestrator=[[Tool('spawn_subagent', spawn)], []], recognition=relation, workspace=workspace,
+    )
+    rig.audio.wake()
+    rig.audio.say('Check build')
+    await workspace.began.wait()
+    rig.audio.say('and tests')
+    await until(lambda: len(rig.user_messages()) == 2)
+    workspace.release_prepare.set()
+    await until(lambda: len(rig.backend.session('orchestrator').received) == 2)
+    await rig.settle()
+    assert rig.backend.all_sessions('subagent') == []
+    assert workspace.locks == {}
+
+
+async def test_accepted_revision_intent_is_durable_before_the_new_talker_delegates(
+    rig_for: MakeRig, tmp_path: Path,
+) -> None:
+    path = tmp_path / 'state.json'
+    handoff = asyncio.Event()
+    rig = await rig_for(
+        [Tool('delegate', {'request': 'Publish release 42'}), AwaitInterrupt()],
+        [Gate(handoff), ResolveScope('revise_tasks', ('T1',)), Tool('delegate', {'request': 'Publish release 43 instead', 'task_id': 'T1'})],
+        orchestrator=[[AwaitInterrupt()]], recognition=LocalRelation('amend'), state_path=path,
+    )
+    rig.audio.wake()
+    rig.audio.say('Publish release 42')
+    await until(lambda: bool(rig.backend.all_sessions('orchestrator')))
+    rig.audio.say('actually release 43')
+    await until(lambda: len(rig.user_messages()) == 2)
+    snapshot = json.loads(path.read_text())
+    [task] = snapshot['tasks']
+    assert task['revision'] == 0
+    assert task['request'] == 'Publish release 42'
+    [scope] = snapshot['spoken_scopes']
+    assert scope['segments'] == ['Publish release 42', 'actually release 43']
+    assert scope['pending'] is True
+    restart_path = tmp_path / 'restart.json'
+    restart_path.write_text(json.dumps(snapshot))
+    restored = await rig_for([ResolveScope('revise_tasks', ('T1',)), Tool('delegate', {'request': 'Publish release 42 actually release 43', 'task_id': 'T1'})], orchestrator=[[AwaitInterrupt()]], state_path=restart_path)
+    await until(lambda: bool(restored.backend.all_sessions('orchestrator')) and bool(restored.backend.session('orchestrator').received))
+    assert 'Publish release 42 actually release 43' in restored.backend.session('orchestrator').received[0]
+    handoff.set()
+
+
+class HeldCleanupWorkspace(PreparingWorkspace):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cleaning = asyncio.Event()
+        self.release_cleanup = asyncio.Event()
+
+    async def discard(self, worktree: Path, holder: str) -> str | None:
+        self.cleaning.set()
+        await self.release_cleanup.wait()
+        return await super().discard(worktree, holder)
+
+
+async def test_restart_cannot_run_an_obsolete_prepared_subagent_during_cleanup(
+    rig_for: MakeRig, tmp_path: Path,
+) -> None:
+    path = tmp_path / 'state.json'
+    workspace = HeldCleanupWorkspace()
+    spawn = {'repo': 'pumpkit', 'title': 'Old check', 'brief': 'Check the old target',
+             'model': 'sonnet', 'effort': 'low', 'writes': False}
+    rig = await rig_for(
+        [Tool('delegate', {'request': 'Check build'}), AwaitInterrupt()],
+        [ResolveScope('revise_tasks', ('T1',)), Tool('delegate', {'request': 'Check build and tests', 'task_id': 'T1'}), Text('Updated, sir.')],
+        orchestrator=[[Tool('spawn_subagent', spawn)], [AwaitInterrupt()]], recognition=LocalRelation('amend'),
+        workspace=workspace, state_path=path,
+    )
+    rig.audio.wake()
+    rig.audio.say('Check build')
+    await workspace.began.wait()
+    rig.audio.say('and tests')
+    await until(lambda: len(rig.user_messages()) == 2)
+    workspace.release_prepare.set()
+    await workspace.cleaning.wait()
+    await rig.settle()
+    snapshot = json.loads(path.read_text())
+    [child] = snapshot['subagents']
+    assert child['task_revision'] == 0
+    assert snapshot['tasks'][0]['revision'] == 1
+    restart_path = tmp_path / 'restart.json'
+    restart_path.write_text(json.dumps(snapshot))
+    workspace.release_cleanup.set()
+    restored = await rig_for(orchestrator=[[AwaitInterrupt()]], state_path=restart_path)
+    await until(lambda: bool(restored.backend.all_sessions('orchestrator')))
+    await restored.settle()
+    assert restored.backend.all_sessions('subagent') == []
+    assert 'Old check' not in restored.backend.session('orchestrator').received[0]
+    workspace.release_cleanup.set()
+
+
+@pytest.mark.parametrize('phase', ['thinking', 'speaking'])
+async def test_local_stop_reply_silences_the_generation_without_admitting_a_new_request(rig_for: MakeRig, phase: str) -> None:
+    relation = DelayedRelation()
+    relation.verdict = 'stop_reply'
+    speaking_gate = asyncio.Event()
+    rig = await rig_for([Gate(speaking_gate), Text('Old answer, sir. '), AwaitInterrupt()], recognition=relation)
+    rig.audio.wake()
+    await until(lambda: rig.player.voices[-1:] == ['chime'])
+    rig.player.hold = True
+    rig.audio.say('Explain the scheduler')
+    await until(lambda: len(rig.user_messages()) == 1)
+    rig.audio.say('Please stop replying')
+    await until(lambda: len(relation.candidates) == 1)
+    if phase == 'speaking':
+        speaking_gate.set()
+        await until(lambda: rig.state == 'speaking')
+    relation.release.set()
+    await until(lambda: rig.state == 'listening')
+    await rig.settle()
+    assert len(rig.user_messages()) == 1
+    assert rig.player.pending() == 0
+    speaking_gate.set()
+
+
+async def test_stop_reply_preserves_the_already_delegated_background_task(rig_for: MakeRig) -> None:
+    finished = asyncio.Event()
+    rig = await rig_for(
+        [Tool('delegate', {'request': 'Check build'}), AwaitInterrupt()],
+        orchestrator=[[Gate(finished), Tool('report', {'task_id': 'T1', 'spoken': 'The build passed.', 'needs_user': False})]],
+        recognition=LocalRelation('stop_reply'),
+    )
+    rig.audio.wake()
+    rig.audio.say('Check build')
+    await until(lambda: bool(rig.backend.all_sessions('orchestrator')))
+    rig.audio.say('Please stop replying')
+    await until(lambda: rig.state == 'listening')
+    finished.set()
+    await until(lambda: bool(rig.backend.session('orchestrator').tool_results))
+    [reported] = rig.backend.session('orchestrator').tool_results
+    assert reported.result == 'Reported to the User.'
+    assert len(rig.user_messages()) == 1
+
+
+async def test_amending_one_task_during_shared_recovery_preserves_the_other_task(
+    rig_for: MakeRig, tmp_path: Path,
+) -> None:
+    path = tmp_path / 'state.json'
+    seed = await rig_for(
+        [Tool('delegate', {'request': 'Check build'}), Tool('delegate', {'request': 'Check docs'}), Text('Checking, sir.')],
+        orchestrator=[[AwaitInterrupt()], []], state_path=path,
+    )
+    seed.audio.wake()
+    seed.audio.say('Check build and docs')
+    await until(lambda: len(seed.backend.session('talker').tool_results) >= 2)
+    restart_path = tmp_path / 'restart.json'
+    restart_path.write_text(path.read_text())
+    report_gate = asyncio.Event()
+    rig = await rig_for(
+        [Tool('delegate', {'request': 'Check build', 'task_id': 'T1'}), AwaitInterrupt()],
+        [ResolveScope('revise_tasks', ('T1',)), Tool('delegate', {'request': 'Check build and tests', 'task_id': 'T1'}), Text('Updated, sir.')],
+        orchestrator=[[
+            Gate(report_gate),
+            Tool('report', {'task_id': 'T1', 'spoken': 'Old build result', 'needs_user': False}),
+            Tool('report', {'task_id': 'T2', 'spoken': 'Docs are checked', 'needs_user': False}),
+        ], []], state_path=restart_path, recognition=LocalRelation('amend'),
+    )
+    await until(lambda: bool(rig.backend.all_sessions('orchestrator')))
+    rig.audio.wake()
+    rig.audio.say('Check build')
+    await until(lambda: len(rig.user_messages()) == 1)
+    rig.audio.say('and tests')
+    await until(lambda: len(rig.user_messages()) == 2)
+    report_gate.set()
+    await until(lambda: len(rig.backend.session('orchestrator').tool_results) >= 2)
+    [old, unrelated] = rig.backend.session('orchestrator').tool_results[:2]
+    assert old.result == 'Refused: this Task revision was superseded.'
+    assert unrelated.result == 'Reported to the User.'
+    status = next(tool.handler for tool in rig.backend.session('talker').spec.tools if tool.name == 'status')
+    assert 'T2 done' in await status({})
+
+
+async def test_no_saved_revision_snapshot_keeps_the_old_live_approval(
+    rig_for: MakeRig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jarvis_hub.state import StateFile
+    snapshots: list[dict[str, Any]] = []
+    save = StateFile.save
+    def capture(file: StateFile, data: dict[str, Any]) -> None:
+        snapshots.append(json.loads(json.dumps(data)))
+        save(file, data)
+    monkeypatch.setattr(StateFile, 'save', capture)
+    handoff = asyncio.Event()
+    approval: dict[str, Any] = {'action': 'subagent_action', 'description': 'Publish release 42', 'grants': []}
+    rig = await rig_for(
+        [Tool('delegate', {'request': 'Publish release 42'}), AwaitInterrupt()],
+        [Gate(handoff), ResolveScope('revise_tasks', ('T1',)), Text('Revised, sir.')],
+        orchestrator=[[Tool('report', {'task_id': 'T1', 'spoken': 'Publish release 42?',
+                                      'needs_user': True, 'approval': approval})]],
+        recognition=LocalRelation('amend'), state_path=tmp_path / 'state.json',
+    )
+    rig.audio.wake()
+    rig.audio.say('Publish release 42')
+    await until(lambda: any(snapshot['approvals'] for snapshot in snapshots))
+    rig.audio.say('actually release 43')
+    await until(lambda: len(rig.user_messages()) == 2)
+    handoff.set()
+    await until(lambda: any(snapshot['tasks'] and snapshot['tasks'][0]['revision'] == 1 for snapshot in snapshots))
+    revised = [snapshot for snapshot in snapshots if snapshot['tasks'] and snapshot['tasks'][0]['revision'] == 1]
+    assert revised
+    assert all('actually release 43' in snapshot['tasks'][0]['request'] for snapshot in revised)
+    assert all(not snapshot['approvals'] for snapshot in revised)
+    handoff.set()
+
+
+async def test_an_amended_turn_can_first_bind_an_explicit_existing_task(rig_for: MakeRig) -> None:
+    finished = asyncio.Event()
+    rig = await rig_for(
+        [Tool('delegate', {'request': 'Check build'}), Text('Checking, sir.')],
+        [AwaitInterrupt()],
+        [ResolveScope('preserve_tasks'), Tool('delegate', {'request': 'Continue the build check including tests', 'task_id': 'T1'}), Text('Updated, sir.')],
+        orchestrator=[[Gate(finished), Tool('report', {'task_id': 'T1', 'spoken': 'Build checked', 'needs_user': False})], []], recognition=LocalRelation('amend'),
+    )
+    rig.typist.type('Check build')
+    await until(lambda: bool(rig.backend.all_sessions('orchestrator')))
+    await rig.settle()
+    rig.audio.wake()
+    rig.audio.say('Continue the build check')
+    await until(lambda: len(rig.user_messages()) == 2)
+    rig.audio.say('including tests')
+    await until(lambda: len(rig.user_messages()) == 3)
+    finished.set()
+    await rig.settle()
+    requests = rig.backend.session('orchestrator').received
+    assert len(requests) == 2
+    assert '<task id="T1"' in requests[-1]
+
+
+class SequenceRelation(LocalRelation):
+    def __init__(self, verdicts: list[Verdict], *, hold_first: bool = False) -> None:
+        super().__init__('uncertain')
+        self.verdicts = iter(verdicts)
+        self.first = asyncio.Event()
+        if not hold_first:
+            self.first.set()
+
+    async def assess(self, candidate: Any, *, current: Any, timeout_s: float = 2.0) -> Any:
+        self.verdict = next(self.verdicts)
+        result = await super().assess(candidate, current=current, timeout_s=timeout_s)
+        if len(self.candidates) == 1:
+            await self.first.wait()
+        return result
+
+
+async def test_uncertain_fragment_is_reassessed_and_admitted_with_its_continuation(rig_for: MakeRig) -> None:
+    relation = SequenceRelation(['uncertain', 'amend'])
+    rig = await rig_for([AwaitInterrupt()], [Text('Updated, sir.')], recognition=relation)
+    rig.audio.wake()
+    rig.audio.say('Open an issue')
+    await until(lambda: len(rig.user_messages()) == 1)
+    rig.audio.say('about the worker')
+    await until(lambda: len(relation.candidates) == 1)
+    await rig.settle()
+    rig.audio.say('that drops callbacks')
+    await until(lambda: len(rig.user_messages()) == 2)
+    assert relation.candidates[-1].transcript == 'about the worker that drops callbacks'
+    assert 'Open an issue about the worker that drops callbacks' in rig.user_messages()[-1]
+
+
+async def test_newer_queued_speech_prevents_admission_of_an_obsolete_partial_candidate(rig_for: MakeRig) -> None:
+    relation = SequenceRelation(['amend', 'amend'], hold_first=True)
+    rig = await rig_for([AwaitInterrupt()], [Text('Updated, sir.')], recognition=relation)
+    rig.audio.wake()
+    rig.audio.say('Open an issue')
+    await until(lambda: len(rig.user_messages()) == 1)
+    rig.audio.say('about the worker')
+    await until(lambda: len(relation.candidates) == 1)
+    rig.audio.say('that drops callbacks')
+    await rig.settle()
+    relation.first.set()
+    await until(lambda: len(relation.candidates) == 2)
+    await until(lambda: len(rig.user_messages()) == 2)
+    await rig.settle()
+    assert relation.candidates[-1].transcript == 'about the worker that drops callbacks'
+    assert len(rig.user_messages()) == 2
+    assert 'Open an issue about the worker that drops callbacks' in rig.user_messages()[-1]
+
+
+async def test_confirmed_unrelated_fragments_do_not_exhaust_continuation_retention(rig_for: MakeRig) -> None:
+    verdicts: list[Verdict] = ['unrelated'] * 6
+    verdicts.append('amend')
+    relation = SequenceRelation(verdicts)
+    rig = await rig_for([AwaitInterrupt()], [Text('Updated, sir.')], recognition=relation)
+    rig.audio.wake()
+    rig.audio.say('Open an issue')
+    await until(lambda: len(rig.user_messages()) == 1)
+    for index in range(6):
+        rig.audio.say(f'Unrelated nearby dialogue {index}')
+        await until(lambda: len(relation.candidates) == index + 1)
+        await rig.settle()
+    rig.audio.say('about the scheduler')
+    await until(lambda: len(rig.user_messages()) == 2)
+    assert relation.candidates[-1].transcript == 'about the scheduler'
+    assert 'Open an issue about the scheduler' in rig.user_messages()[-1]
+
+
+async def test_newer_onset_waits_for_its_transcript_before_reassessing_the_preserved_prefix(rig_for: MakeRig) -> None:
+    relation = SequenceRelation(['amend', 'amend'], hold_first=True)
+    rig = await rig_for([AwaitInterrupt()], [Text('Updated, sir.')], recognition=relation)
+    rig.audio.wake()
+    rig.audio.say('Open an issue')
+    await until(lambda: len(rig.user_messages()) == 1)
+    rig.audio.say('about the worker')
+    await until(lambda: len(relation.candidates) == 1)
+    rig.audio.speech()
+    await rig.settle()
+    relation.first.set()
+    await rig.settle()
+    assert len(relation.candidates) == 1
+    assert len(rig.user_messages()) == 1
+    rig.audio.emit(Heard('that drops callbacks', 'en', rig.clock.now(), None, rig.audio.candidate, rig.clock.now()))
+    await until(lambda: len(rig.user_messages()) == 2)
+    assert relation.candidates[-1].transcript == 'about the worker that drops callbacks'
+    assert 'Open an issue about the worker that drops callbacks' in rig.user_messages()[-1]
+
+
+async def test_retention_limit_counts_the_full_uncertain_prefix_and_new_fragment(rig_for: MakeRig) -> None:
+    finished = asyncio.Event()
+    relation = SequenceRelation(['uncertain'])
+    rig = await rig_for([Gate(finished), Text('The original answer, sir.')], recognition=relation)
+    rig.audio.wake()
+    rig.audio.say('Explain the scheduler')
+    await until(lambda: len(rig.user_messages()) == 1)
+    rig.audio.say('x' * 2900)
+    await until(lambda: len(relation.candidates) == 1)
+    await rig.settle()
+    rig.audio.say('y' * 3200)
+    await rig.settle()
+    assert len(relation.candidates) == 1
+    assert len(rig.user_messages()) == 1
+    assert any('retention limit' in notice for notice in rig.output.notices)
+    finished.set()
+    await until(lambda: rig.state == 'follow_up')
+
+
+async def test_coalesced_uncertainty_keeps_earliest_onset_and_current_played_context(rig_for: MakeRig) -> None:
+    reply = asyncio.Event()
+    relation = SequenceRelation(['uncertain', 'amend'])
+    rig = await rig_for([Gate(reply), Text('The old answer, sir. '), AwaitInterrupt()],
+                        [Text('Updated, sir.')], recognition=relation)
+    rig.audio.wake()
+    rig.audio.say('Open an issue')
+    await until(lambda: len(rig.user_messages()) == 1)
+    rig.audio.say('about the worker')
+    await until(lambda: len(relation.candidates) == 1)
+    await rig.settle()
+    reply.set()
+    await until(lambda: rig.state == 'speaking')
+    rig.clock.advance(0.1)
+    rig.audio.say('that drops callbacks')
+    await until(lambda: len(relation.candidates) == 2)
+    await rig.settle()
+    candidate = relation.candidates[-1]
+    assert candidate.transcript == 'about the worker that drops callbacks'
+    assert candidate.phase == 'thinking'
+    assert candidate.started_before_reply is True
+    assert 'The old answer, sir.' in candidate.played_text
+    assert any('Open an issue about the worker that drops callbacks' in message
+               for message in rig.backend.session('talker').received)
+
+
 @pytest.mark.parametrize("ending", ["That's all.", "Basta così."])
 async def test_a_whole_end_control_after_wake_adds_no_speech_or_model_turn(rig_for: MakeRig, ending: str) -> None:
     rig = await rig_for()
@@ -1739,3 +2473,73 @@ async def test_typed_end_controls_remain_generated_text_without_audio(rig_for: M
     assert rig.player.texts == []
     assert rig.state == "idle"
     assert len(talker_received(rig)) == turns
+
+
+@pytest.mark.parametrize('pending', [True, False])
+async def test_capture_abort_discards_unadmitted_fragments_without_stopping_owned_work(
+    rig_for: MakeRig, pending: bool,
+) -> None:
+    from jarvis_hub.voice.state import CaptureAborted
+    class AbortedRelation(LocalRelation):
+        def __init__(self) -> None:
+            super().__init__('amend' if pending else 'uncertain')
+            self.release = asyncio.Event()
+        async def assess(self, candidate: Any, *, current: Any, timeout_s: float = 2.0) -> Any:
+            result = await super().assess(candidate, current=current, timeout_s=timeout_s)
+            if pending and len(self.candidates) == 1:
+                try:
+                    await self.release.wait()
+                except asyncio.CancelledError:
+                    await self.release.wait()
+            return result
+    relation, finish = AbortedRelation(), asyncio.Event()
+    rig = await rig_for(
+        [Tool('delegate', {'request': 'Check build'}), Gate(finish), Text('The original answer, sir.')],
+        [Text('An obsolete fragment, sir.')], orchestrator=[[AwaitInterrupt()]], recognition=relation,
+    )
+    rig.audio.wake()
+    rig.audio.say('Check build')
+    await until(lambda: bool(rig.backend.all_sessions('orchestrator')))
+    rig.audio.say('about the obsolete fragment')
+    await until(lambda: len(relation.candidates) == 1)
+    await rig.settle()
+    rig.audio.speech()
+    rig.audio.emit(CaptureAborted(rig.clock.now(), 'overflow', rig.audio.owner, rig.audio.candidate))
+    await rig.settle()
+    relation.release.set()
+    await rig.settle()
+    assert len(rig.user_messages()) == 1
+    assert rig.state == 'thinking'
+    status = next(tool.handler for tool in rig.backend.session('talker').spec.tools if tool.name == 'status')
+    assert 'Check build' in await status({})
+    relation.verdict = 'uncertain'
+    rig.audio.say('a fresh fragment')
+    await until(lambda: len(relation.candidates) == 2)
+    assert relation.candidates[-1].transcript == 'a fresh fragment'
+    finish.set()
+    await until(lambda: rig.state == 'follow_up')
+    assert 'The original answer, sir.' in rig.player.texts
+
+
+async def test_an_old_capture_abort_cannot_discard_a_replacement_owners_assessment(rig_for: MakeRig) -> None:
+    from jarvis_hub.voice.state import CaptureAborted
+    relation = DelayedRelation()
+    rig = await rig_for([AwaitInterrupt()], [AwaitInterrupt()],
+                        [ResolveScope('preserve_tasks'), Text('Updated, sir.')], recognition=relation)
+    rig.audio.wake()
+    rig.audio.say('The old request')
+    await until(lambda: len(rig.user_messages()) == 1)
+    old_owner = rig.audio.owner
+    await rig.advance(.6)
+    rig.audio.wake()
+    await until(lambda: rig.state == 'listening')
+    rig.audio.say('The fresh request')
+    await until(lambda: len(rig.user_messages()) == 2)
+    rig.audio.say('with its continuation')
+    await until(lambda: len(relation.candidates) == 1)
+    assert rig.audio.owner != old_owner
+    rig.audio.emit(CaptureAborted(rig.clock.now(), 'overflow', old_owner, rig.audio.candidate))
+    await rig.settle()
+    relation.release.set()
+    await until(lambda: len(rig.user_messages()) == 3)
+    assert 'The fresh request with its continuation' in rig.user_messages()[-1]

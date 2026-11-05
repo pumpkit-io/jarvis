@@ -43,6 +43,7 @@ from jarvis_hub.agents.backend import (
     TextDelta,
     TextEnd,
     ToolCall,
+    ToolLease,
     TurnEnd,
     Usage,
 )
@@ -61,9 +62,11 @@ def _sdk_tool(hub_tool: HubTool) -> SdkMcpTool[Any]:
     return tool(hub_tool.name, hub_tool.description, hub_tool.input_schema)(handler)
 
 
-def _bash_hook(guard: BashGuard) -> HookCallback:
+def _bash_hook(guard: BashGuard, before: ToolLease | None = None) -> HookCallback:
     async def hook(hook_input: HookInput, tool_use_id: str | None, context: HookContext) -> HookJSONOutput:
         tool_input: dict[str, Any] = dict(hook_input.get("tool_input", {}))
+        if before is not None and (refused := await before("Bash", tool_input)) is not None:
+            return _denied(refused)
         verdict = guard(str(tool_input.get("command", "")))
         if isinstance(verdict, Refused):
             return {
@@ -86,9 +89,12 @@ def _bash_hook(guard: BashGuard) -> HookCallback:
     return hook
 
 
-def _mcp_hook(guard: McpGuard) -> HookCallback:
+def _mcp_hook(guard: McpGuard, before: ToolLease | None = None) -> HookCallback:
     async def hook(hook_input: HookInput, tool_use_id: str | None, context: HookContext) -> HookJSONOutput:
-        verdict = guard(str(hook_input.get("tool_name", "")), dict(hook_input.get("tool_input") or {}))
+        name, inputs = str(hook_input.get("tool_name", "")), dict(hook_input.get("tool_input") or {})
+        if before is not None and (refused := await before(name, inputs)) is not None:
+            return _denied(refused)
+        verdict = guard(name, inputs)
         if verdict is None:
             return {}
         return {
@@ -102,11 +108,28 @@ def _mcp_hook(guard: McpGuard) -> HookCallback:
     return hook
 
 
+def _denied(refused: Refused) -> HookJSONOutput:
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                   "permissionDecisionReason": refused.reason}}
+
+
+def _lease_hook(lease: ToolLease, *, skip_mcp: bool = False, skip_bash: bool = False) -> HookCallback:
+    async def hook(hook_input: HookInput, tool_use_id: str | None, context: HookContext) -> HookJSONOutput:
+        name = str(hook_input.get("tool_name", ""))
+        if (skip_mcp and name.startswith("mcp__")) or (skip_bash and name == "Bash"):
+            return {}
+        refused = await lease(name, dict(hook_input.get("tool_input") or {}))
+        return _denied(refused) if refused is not None else {}
+    return hook
+
+
 def _skipping_permissions(spec: SessionSpec, cli_path: str, stderr: Callable[[str], None] | None) -> ClaudeAgentOptions:
     hooks: dict[HookEvent, list[HookMatcher]] = {}
     if spec.mcp_guard:
         # bypassPermissions skips every prompt but not hooks, so this deny holds; a hook that fails blocks the call.
-        hooks["PreToolUse"] = [HookMatcher(matcher="mcp__.*", hooks=[_mcp_hook(spec.mcp_guard)], on_failure="block")]
+        hooks["PreToolUse"] = [HookMatcher(matcher="mcp__.*", hooks=[_mcp_hook(spec.mcp_guard, spec.before_tool)], on_failure="block")]
+    if spec.before_tool is not None:
+        hooks.setdefault("PreToolUse", []).append(HookMatcher(hooks=[_lease_hook(spec.before_tool, skip_mcp=spec.mcp_guard is not None)], on_failure="block"))
     return ClaudeAgentOptions(
         cli_path=cli_path,
         cwd=spec.cwd,
@@ -140,7 +163,9 @@ def options_for(spec: SessionSpec, cli_path: str, stderr: Callable[[str], None] 
     if spec.bash_guard:
         # Bash is left off allowed_tools, so under dontAsk only this hook's allow lets a command run;
         # a hook that fails blocks the call.
-        hooks["PreToolUse"] = [HookMatcher(matcher="Bash", hooks=[_bash_hook(spec.bash_guard)], on_failure="block")]
+        hooks["PreToolUse"] = [HookMatcher(matcher="Bash", hooks=[_bash_hook(spec.bash_guard, spec.before_tool)], on_failure="block")]
+    if spec.before_tool is not None:
+        hooks.setdefault("PreToolUse", []).append(HookMatcher(hooks=[_lease_hook(spec.before_tool, skip_bash=spec.bash_guard is not None)], on_failure="block"))
     return ClaudeAgentOptions(
         # Without cli_path the SDK runs its own bundled CLI, not the one logged in to Max.
         cli_path=cli_path,

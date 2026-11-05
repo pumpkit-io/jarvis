@@ -112,6 +112,7 @@ class Watcher:
     state: WatcherState = "waiting"
     ended: float | None = None
     output: str = ""
+    task_revision: int = 0
 
     def line(self, now: float) -> str:
         what = f"{WATCH_KINDS[self.kind]} {self.command.target}"
@@ -132,6 +133,7 @@ class Check:
     max_repeats: int
     repeats: int = 0
     state: CheckState = "waiting"
+    task_revision: int = 0
 
     def line(self, now: float) -> str:
         if self.state == "waiting":
@@ -141,9 +143,9 @@ class Check:
 
 Wait = Watcher | Check
 
-_WATCHER = Fields(("id", "task_id", "kind", "created"), times=frozenset({"created"}))
+_WATCHER = Fields(("id", "task_id", "kind", "created", "task_revision"), times=frozenset({"created"}))
 _CHECK = Fields(
-    ("id", "task_id", "note", "created", "due", "interval", "max_repeats", "repeats"), times=frozenset({"created", "due"})
+    ("id", "task_id", "note", "created", "due", "interval", "max_repeats", "repeats", "task_revision"), times=frozenset({"created", "due"})
 )
 
 
@@ -261,9 +263,10 @@ class Waits:
     def live(self, task_id: str) -> list[Wait]:
         return [w for w in self._all.values() if w.task_id == task_id and w.state == "waiting"]
 
-    def lines(self, task_id: str) -> list[str]:
+    def lines(self, task_id: str, *, revision: int | None = None) -> list[str]:
         now = self._clock.now()
-        return [w.line(now) for w in self._all.values() if w.task_id == task_id]
+        return [w.line(now) for w in self._all.values()
+                if w.task_id == task_id and (revision is None or w.task_revision == revision)]
 
     async def close(self) -> None:
         """Stops every wait's run and reports none of them: a wait still waiting stays so, kept for the next launch."""
@@ -292,7 +295,7 @@ class Waits:
         problems: list[str] = []
         for r in records:
             if "kind" in r:
-                values = _WATCHER.load(r, from_wall)
+                values = _WATCHER.load({"task_revision": 0, **r}, from_wall)
                 numbered(values["id"], "W")
                 command = watch_command(values["kind"], r["target"], self._setup.org)
                 if isinstance(command, Refused):
@@ -301,7 +304,7 @@ class Waits:
                 values["created"] = min(values["created"], now)
                 waits.append(Watcher(**values, command=command))
             else:
-                check = Check(**_CHECK.load(r, from_wall))
+                check = Check(**_CHECK.load({"task_revision": 0, **r}, from_wall))
                 numbered(check.id, "C")
                 if not all(isinstance(r[k], (int, float)) for k in ("interval", "max_repeats", "repeats")):
                     raise ValueError(f"{check.id} has a count or interval that is not a number")
@@ -318,13 +321,13 @@ class Waits:
             else:
                 self._checks = max(self._checks, numbered(wait.id, "C"))
 
-    def resume(self) -> None:
+    def resume(self, *, only: set[str] | None = None) -> None:
         """Starts the restored waits: a Watcher reruns its gh command, checked anew, within what is left of its
         limit; a Check keeps its due time, so one overdue fires at once, once."""
         if self._closing:
             return
         for wait in self._all.values():
-            if wait.state != "waiting" or wait.id in self._runs:
+            if wait.state != "waiting" or wait.id in self._runs or (only is not None and wait.id not in only):
                 continue
             if isinstance(wait, Watcher):
                 self._start(wait, self._run_watcher(wait))

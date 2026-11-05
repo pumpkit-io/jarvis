@@ -26,19 +26,22 @@ def talker_tools(
     end_conversation: ToolHandler,
     quiet_mode: ToolHandler,
     approve: ToolHandler,
+    resolve_scope: ToolHandler | None = None,
 ) -> tuple[HubTool, ...]:
-    return (
+    tools = (
         HubTool(
             "delegate",
             "Start your background work involving the Org as a Task, after a short request-specific spoken response. "
             "Returns at once with the Task id, and "
             "the result arrives later as an event, so there is nothing to add after calling it. "
-            "Pass task_id to continue a Task, such as answering its question.",
+            "Pass task_id to continue a Task, such as answering its question. When revising a spoken request "
+            "with existing Tasks, choose its task_id or explicitly set new_task=true for additional work.",
             object_schema(
                 {
                     "request": {**STRING, "description": "What the User wants, in their words."},
                     "context": {**STRING, "description": "Anything from the conversation the request depends on."},
                     "task_id": {**STRING, "description": "The Task this continues, such as T3."},
+                    "new_task": {"type": "boolean", "description": "Explicitly start additional work while revising a spoken request."},
                 },
                 ("request",),
             ),
@@ -85,3 +88,26 @@ def talker_tools(
             approve,
         ),
     )
+
+    if resolve_scope is not None:
+        tools += (HubTool(
+            "resolve_scope",
+            "Resolve an already locally admitted spoken revision before changing Task work or using old Approval authority. "
+            "Use the pending scope id/revision/attempt in the input. Choose the COMPLETE set of owned Tasks affected, "
+            "a genuinely new request starting at an observed raw segment, or preserve_tasks for a direct answer or "
+            "additional work that leaves previous Tasks unchanged. A local routing hint cannot choose this. "
+            "Even a direct answer needs preserve_tasks; missing selection keeps old authority held. Preserve every raw "
+            "source word and interpret intent yourself; local routing labels never choose Tasks. These controls stay "
+            "internal: answer naturally without narrating them. This commits ownership, never external Approval. "
+            "Never repeat a resolved choice.",
+            object_schema({
+                "scope_id": STRING,
+                "revision": {"type": "integer"},
+                "attempt": {"type": "integer"},
+                "disposition": {"type": "string", "enum": ["revise_tasks", "new_request", "preserve_tasks"]},
+                "task_ids": {"type": "array", "items": STRING},
+                "from_segment": {"type": "integer"},
+            }, ("scope_id", "revision", "attempt", "disposition")),
+            resolve_scope,
+        ),)
+    return tools

@@ -52,6 +52,9 @@ class ChimeStarted:
 @dataclass(frozen=True)
 class SpeechStarted:
     at: float
+    owner: int | None = None
+    candidate: int | None = None
+    started_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +63,8 @@ class CaptureAborted:
 
     at: float
     reason: str
+    owner: int | None = None
+    candidate: int | None = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +90,10 @@ class Heard:
     text: str
     lang: Lang | None
     at: float
+    owner: int | None = None
+    candidate: int | None = None
+    started_at: float | None = None
+    limited: bool = False
 
 
 @dataclass(frozen=True)
@@ -93,6 +102,7 @@ class ReplyAudio:
 
     at: float
     answers: float | None = None
+    owner: tuple[str, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -101,6 +111,7 @@ class ReplyDone:
 
     at: float
     answers: float | None = None
+    owner: tuple[str, int] | None = None
 
 
 @dataclass(frozen=True)

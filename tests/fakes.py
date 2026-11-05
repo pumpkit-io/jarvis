@@ -1,8 +1,9 @@
 """Adapters the tests inject into the Hub core: a scripted agent backend, a manual clock, recorders."""
 
 import asyncio
+import re
 import threading
-from collections.abc import AsyncIterator, Iterable, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import CoroutineType
@@ -84,6 +85,14 @@ class Tool:
 
 
 @dataclass(frozen=True)
+class ResolveScope:
+    disposition: str
+    task_ids: tuple[str, ...] = ()
+    from_segment: int | None = None
+    scope_index: int = 0
+
+
+@dataclass(frozen=True)
 class AwaitInterrupt:
     """Blocks the turn until the Hub interrupts it; the steps after it are the late deltas the SDK still sends."""
 
@@ -133,7 +142,7 @@ class NoContext:
     reason: str
 
 
-Step = Wait | Text | Tool | AwaitInterrupt | Gate | Set | Fail | Raise | Abort | Limited | Usage | Context | NoContext
+Step = Wait | Text | Tool | ResolveScope | AwaitInterrupt | Gate | Set | Fail | Raise | Abort | Limited | Usage | Context | NoContext
 
 
 @dataclass(frozen=True)
@@ -185,6 +194,18 @@ class FakeSession:
                     handler = next((t.handler for t in self.spec.tools if t.name == name), None)
                     result = await handler(args) if handler else None
                     self.tool_results.append(ToolResult(name, args, result))
+                case ResolveScope(disposition, task_ids, from_segment, scope_index):
+                    matches = re.findall(r'<pending_scope id="([^"]+)" revision="(\d+)" attempt="(\d+)"', self.received[-1])
+                    match = matches[scope_index] if scope_index < len(matches) else None
+                    if match is None:
+                        raise AssertionError("The scripted resolver needs a pending scope in the Talker's input.")
+                    args: dict[str, Any] = {"scope_id": match[0], "revision": int(match[1]), "attempt": int(match[2]),
+                                            "disposition": disposition, "task_ids": list(task_ids)}
+                    if from_segment is not None:
+                        args['from_segment'] = from_segment
+                    handler = next(t.handler for t in self.spec.tools if t.name == 'resolve_scope')
+                    result = await handler(args)
+                    self.tool_results.append(ToolResult('resolve_scope', args, result))
                 case AwaitInterrupt():
                     await self._interrupted.wait()
                 case Gate(event):
@@ -470,11 +491,12 @@ def make_hub(
     time_limit: float = 3600.0,
     runner: "StubRunner | None" = None,
     watch_limit: float = 6 * 3600.0,
+    session: Callable[[Subagent], SessionSpec] = subagent_spec,
     **options: Any,
 ) -> Hub:
     options.setdefault("wall", backend.wall)
     setup = SubagentSetup(
-        session=subagent_spec,
+        session=session,
         workspace=workspace or FakeWorkspace(),
         log_dir=log_dir,
         max_effort=max_effort,
@@ -724,17 +746,24 @@ class ScriptedAudio:
         # Each `barge_in` call's `since`.
         self.watching: list[float | None] = []
         self._onset = 0.0
+        self.owner: int | None = None
+        self.candidate = 0
+
+    def emit(self, event: InputEvent) -> None:
+        self._queue.put_nowait(event)
 
     def wake(self) -> None:
         self._queue.put_nowait(WakeWord(self._clock.now()))
 
     def speech(self) -> None:
-        self._queue.put_nowait(SpeechStarted(self._clock.now()))
+        self._onset = self._clock.now()
+        self.candidate += 1
+        self._queue.put_nowait(SpeechStarted(self._onset, None, self.candidate))
 
-    def say(self, text: str, lang: Lang | None = None) -> None:
+    def say(self, text: str, lang: Lang | None = None, *, limited: bool = False) -> None:
         """Speech onset, then the turn's transcript at its end."""
         self.speech()
-        self._queue.put_nowait(Heard(text, lang, self._clock.now()))
+        self._queue.put_nowait(Heard(text, lang, self._clock.now(), None, self.candidate, self._onset, limited))
 
     def barge(self, held: float = 0.2) -> None:
         """Speech over Jarvis that began `held` seconds ago and has held since: a Barge-in once 200 ms of it fall
@@ -754,7 +783,8 @@ class ScriptedAudio:
         """What STT made of the rest of a run that has made all the Barge-ins it may."""
         self._queue.put_nowait(Overheard(text, self._clock.now()))
 
-    def capture(self, on: bool) -> None:
+    def capture(self, on: bool, *, owner: int | None = None) -> None:
+        self.owner = owner
         self.capturing.append(on)
 
     def barge_in(self, since: float | None) -> None:

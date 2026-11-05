@@ -1,7 +1,7 @@
 """The rules behind spawn_subagent (model and effort, branch names, connector tools) and the session it builds."""
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -324,3 +324,73 @@ async def test_the_mcp_hook_denies_a_tool_off_the_read_list_and_passes_one_on_it
     denied = await decide("mcp__claude_ai_Pumpkit__post_now")
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"  # type: ignore[index]
     assert await decide("mcp__claude_ai_Pumpkit__list_posts") == {}
+
+
+async def test_source_lease_waits_before_the_existing_mcp_permission_guard(tmp_path: Path) -> None:
+    import asyncio
+    from dataclasses import replace
+    entered, release = asyncio.Event(), asyncio.Event()
+    checked: list[str] = []
+    async def lease(name: str, args: Any) -> Refused | None:
+        entered.set()
+        await release.wait()
+        return None
+    def existing(name: str, args: Any) -> Refused | None:
+        checked.append(name)
+        return Refused('Original permission refusal')
+    spec = replace(subagent_session(a_settings(tmp_path), a_subagent('fix/x')),
+                   before_tool=lease, mcp_guard=existing)
+    options = options_for(spec, '/usr/local/bin/claude')
+    matcher = next(matcher for matcher in (options.hooks or {})['PreToolUse'] if matcher.matcher == 'mcp__.*')
+    [hook] = matcher.hooks
+    pending = asyncio.ensure_future(hook(cast(Any, {'tool_name': 'mcp__write', 'tool_input': {}}), None, {'signal': None}))
+    await entered.wait()
+    assert checked == []
+    assert not pending.done()
+    release.set()
+    answer: Any = await pending
+    assert checked == ['mcp__write']
+    assert answer['hookSpecificOutput']['permissionDecision'] == 'deny'
+
+
+async def test_a_protected_call_awaits_one_lease_then_rechecks_the_actual_approval(tmp_path: Path) -> None:
+    import asyncio
+    from dataclasses import replace
+    from jarvis_hub.approvals import Approval, Approvals, EXPIRES_AFTER
+    from tests.fakes import FakeClock, StubGh
+    clock = FakeClock()
+    approvals = Approvals(org='pumpkit-io', runner=StubGh(), clock=clock,
+                          on_change=lambda: None, log=lambda entry: None)
+    asked = await approvals.request('T1', {'action': 'subagent_action', 'grants': ['x_post'],
+                                          'post': '812', 'post_action': 'post_now'})
+    assert isinstance(asked, Approval)
+    approvals.turn_began(None)
+    approvals.turn_ended(completed=True, told=[asked.id], said=asked.question())
+    approvals.turn_began('Yes.')
+    approved = approvals.decide(asked.id)
+    assert isinstance(approved, Approval)
+    approvals.hand_to(approved, 'S1')
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls: list[str] = []
+    async def lease(name: str, inputs: Any) -> Refused | None:
+        calls.append(name)
+        entered.set()
+        await release.wait()
+        return None
+    spec = replace(subagent_session(a_settings(tmp_path), a_subagent('fix/x')), before_tool=lease,
+                   mcp_guard=approvals.guard(asked.id, 'S1', connector_check))
+    options = options_for(spec, '/usr/local/bin/claude')
+    tool = 'mcp__claude_ai_Pumpkit__post_now'
+    hooks = [hook for matcher in (options.hooks or {})['PreToolUse'] for hook in matcher.hooks]
+    async def run(hook: Any) -> Any:
+        return await hook({'tool_name': tool, 'tool_input': {'post_id': '812'}}, None, {'signal': None})
+    pending = [asyncio.create_task(run(hook)) for hook in hooks]
+    await entered.wait()
+    clock.advance(EXPIRES_AFTER)
+    release.set()
+    outputs = await asyncio.gather(*pending)
+    assert calls == [tool]
+    denied = [output for output in outputs if output.get('hookSpecificOutput')]
+    assert len(denied) == 1
+    assert 'expired' in denied[0]['hookSpecificOutput']['permissionDecisionReason']
+    assert approved.state == 'expired'

@@ -3,7 +3,7 @@ User's own words. The Hub merges and deletes branches itself; any other action g
 
 import json
 import re
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from html import escape
@@ -107,6 +107,7 @@ class Approval:
     approved: float | None = None
     subagent: str | None = None
     outcome: str = ""
+    task_revision: int = 0
 
     def question(self, language: str = "en") -> str:
         prefix = "Vuole approvare questa azione" if language == "it" else "Do you approve this action"
@@ -159,6 +160,7 @@ _SAVED = Fields(
         "approved",
         "subagent",
         "outcome",
+        "task_revision",
     ),
     times=frozenset({"created", "approved"}),
 )
@@ -462,7 +464,7 @@ class Approvals:
         self._last_said: tuple[str, ...] = ()
         self._read_back = False
 
-    async def request(self, task_id: str, args: object) -> Approval | Refused:
+    async def request(self, task_id: str, args: object, *, task_revision: int = 0) -> Approval | Refused:
         """A pending Approval for the action `args` names, once the Hub has read that its target is as stated. One
         still pending on the same Task is withdrawn: the newest request is the one the User hears."""
         if not isinstance(args, dict):
@@ -480,6 +482,7 @@ class Approvals:
                 return Refused(f"Not asked: {target.change}.")
             if target.change is not None:
                 return Refused(f"Not asked: {target.change}. Look again and ask about what is there now.")
+        approval.task_revision = task_revision
         self._ids += 1
         approval.id = f"A{self._ids}"
         for older in self._all.values():
@@ -653,7 +656,8 @@ class Approvals:
             )
         return None
 
-    async def carry_out(self, approval: Approval) -> str:
+    async def carry_out(self, approval: Approval, *, authorize: Callable[[], Awaitable[Refused | None]] | None = None,
+                        authority_version: Callable[[], object] | None = None) -> str:
         """Runs an approved merge or branch delete after reading its target again; returns the Orchestrator's
         event. A changed target lapses the Approval, and the event says what changed."""
         self._running.add(approval.id)
@@ -661,7 +665,15 @@ class Approvals:
             if self._expired(approval):
                 approval.state, approval.outcome = "expired", "It expired before it ran."
                 return approval_event(approval, "expired", f"{approval.text}: {approval.outcome} Ask again.")
-            target = await self._read(approval)
+            while True:
+                if authorize is not None and (refused := await authorize()) is not None:
+                    return approval_event(approval, "held", refused.reason)
+                version = authority_version() if authority_version is not None else None
+                target = await self._read(approval)
+                if authorize is not None and (refused := await authorize()) is not None:
+                    return approval_event(approval, "held", refused.reason)
+                if authority_version is None or version == authority_version():
+                    break
             if target.change is not None:
                 approval.state, approval.outcome = "lapsed", target.change
                 text = (
@@ -669,6 +681,9 @@ class Approvals:
                     "it. Look at what changed, then ask the User again in a fresh request that says what changed."
                 )
                 return approval_event(approval, "lapsed", text)
+            if self._expired(approval):
+                approval.state, approval.outcome = "expired", "It expired before it ran."
+                return approval_event(approval, "expired", f"{approval.text}: {approval.outcome} Ask again.")
             argv = self._action_argv(approval, target.node)
             code, printed = await self._runner(argv)
             approval.state = "used"
@@ -785,11 +800,11 @@ class Approvals:
                 approval.state, approval.outcome = "used", f"{subagent_id} ended."
                 self._on_change()
 
-    def withdraw(self, task_id: str) -> None:
-        """The Task was cancelled: none of its Approvals may be acted on, except one the Hub is already running."""
+    def withdraw(self, task_id: str, *, reason: str = "Its Task was cancelled.") -> None:
+        """Cancel or supersede the Task's Approvals, except an action the Hub is already running."""
         for approval in self._all.values():
             if approval.task_id == task_id and approval.state in LIVE and approval.id not in self._running:
-                approval.state, approval.outcome = "withdrawn", "Its Task was cancelled."
+                approval.state, approval.outcome = "withdrawn", reason
         self._on_change()
 
     def lines(self, task_id: str) -> list[str]:
@@ -820,7 +835,7 @@ class Approvals:
     def load(records: list[dict[str, Any]], from_wall: TimeShift) -> list[Approval]:
         approvals: list[Approval] = []
         for r in records:
-            approval = Approval(**_SAVED.load(r, from_wall))
+            approval = Approval(**_SAVED.load({"task_revision": 0, **r}, from_wall))
             numbered(approval.id, "A")
             one_of(approval.state, get_args(ApprovalState))
             approvals.append(approval)

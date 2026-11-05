@@ -19,6 +19,7 @@ class Refused:
 BashGuard = Callable[[str], Sequence[str] | Refused]
 # Decides each MCP tool call by the tool's full name and its input: None lets it run.
 McpGuard = Callable[[str, Mapping[str, Any]], Refused | None]
+ToolLease = Callable[[str, Mapping[str, Any]], Awaitable[Refused | None]]
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,7 @@ class SessionSpec:
     skip_permissions: bool = False
     denied_tools: Sequence[str] = ()
     mcp_guard: McpGuard | None = None
+    before_tool: ToolLease | None = None
 
 
 @dataclass(frozen=True)

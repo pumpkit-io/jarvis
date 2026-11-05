@@ -157,3 +157,65 @@ async def test_contextual_verdicts_are_only_evidence_until_hub_policy_adopts_the
         assert "The checks are still running, sir." in rig.player.played()
     finally:
         await worker.close()
+
+
+async def test_relation_contract_preserves_frozen_phase_without_admitting_work() -> None:
+    candidate = Candidate('candidate-1', 'turn-1:revision-0', 'about the scheduler', 'Open an issue', '',
+                          phase='thinking', started_before_reply=True)
+    worker = AssessmentWorker(continue_when_thinking, verdicts=('stop_reply', 'amend', 'new_request', 'unrelated', 'uncertain'))
+    try:
+        result = await worker.assess(candidate, current=lambda: ('candidate-1', 'turn-1:revision-0'))
+        assert result.verdict == 'amend'
+    finally:
+        await worker.close()
+
+
+def continue_when_thinking(candidate: Candidate) -> str:
+    return 'amend' if candidate.phase == 'thinking' and candidate.started_before_reply else 'uncertain'
+
+
+def slow_prepare() -> None:
+    time.sleep(0.15)
+
+
+async def test_background_readiness_does_not_spend_the_candidate_deadline_on_cold_load() -> None:
+    worker = AssessmentWorker(directed, prepare=slow_prepare)
+    worker.start(readiness_s=5)
+    try:
+        candidate = Candidate('c', 't', 'Jarvis, stop', '', '')
+        warming = await worker.assess(candidate, current=lambda: ('c', 't'), timeout_s=0.01)
+        assert warming.reason == 'warming'
+        await until(lambda: worker.ready, timeout=5)
+        result = await worker.assess(candidate, current=lambda: ('c', 't'), timeout_s=0.5)
+        assert result.verdict == 'directed'
+    finally:
+        await worker.close()
+
+
+async def test_failed_readiness_is_bounded_and_does_not_restart_on_each_candidate() -> None:
+    worker = AssessmentWorker(directed, prepare=slow_prepare)
+    worker.start(readiness_s=0.01)
+    try:
+        await until(lambda: not worker.warming, timeout=5)
+        for index in range(3):
+            candidate = Candidate(str(index), 't', 'Jarvis, stop', '', '')
+            result = await worker.assess(candidate, current=lambda: (str(index), 't'))
+            assert result.reason == 'readiness_failed'
+        assert not worker.ready
+    finally:
+        await worker.close()
+
+
+async def test_a_prepared_worker_timeout_does_not_trigger_repeated_cold_restarts() -> None:
+    worker = AssessmentWorker(sometimes_stalled)
+    worker.start(readiness_s=5)
+    try:
+        await until(lambda: worker.ready, timeout=5)
+        first = await worker.assess(Candidate('c', 't', 'stall', '', ''),
+                                    current=lambda: ('c', 't'), timeout_s=0.02)
+        assert first.reason == 'timeout'
+        second = await worker.assess(Candidate('c2', 't', 'Jarvis, stop', '', ''),
+                                     current=lambda: ('c2', 't'), timeout_s=0.02)
+        assert second.reason == 'readiness_failed'
+    finally:
+        await worker.close()

@@ -84,6 +84,7 @@ class _Reply:
     lang: Lang
     began: float
     heard_at: float | None
+    owner: tuple[str, int] | None = None
     splitter: SentenceSplitter = field(default_factory=SentenceSplitter)
     chunks: int = 0
     first_chunk: float | None = None
@@ -126,7 +127,7 @@ class Speech:
         *,
         metrics: Metrics,
         notice: Callable[[str], None],
-        on_reply_audio: Callable[[float | None], None] | None = None,
+        on_reply_audio: Callable[[float | None, tuple[str, int] | None], None] | None = None,
         on_chime: Callable[[float], None] | None = None,
         on_ready: Callable[[], None] | None = None,
     ) -> None:
@@ -159,9 +160,9 @@ class Speech:
         """Queue a nonverbal cue; `in_reply` associates its playback with the reply `begin` opened."""
         self._queue.put_nowait(_Cached(name, lang, self._reply if in_reply else None))
 
-    def begin(self, lang: Lang, *, turn: int, heard_at: float | None) -> None:
+    def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None) -> None:
         """`heard_at` retains the User's speech-end timestamp for latency and reply ownership."""
-        self._reply = _Reply(turn, lang, self._clock.now(), heard_at)
+        self._reply = _Reply(turn, lang, self._clock.now(), heard_at, owner=owner)
         self._prune_replies()
         self._replies[turn] = self._reply
 
@@ -189,6 +190,8 @@ class Speech:
         for reply in self._replies.values():
             self._record({
                 "kind": "speech_stop", "turn": reply.turn, "request_at": reply.heard_at,
+                "request_id": reply.owner[0] if reply.owner is not None else None,
+                "revision": reply.owner[1] if reply.owner is not None else None,
                 "stopped_at": self._clock.now(), "time_basis": "perf_counter",
                 "first_meaningful_audio_ms": None if reply.first_chunk_audio is None else round(
                     (reply.first_chunk_audio - (reply.heard_at if reply.heard_at is not None else reply.began)) * 1000
@@ -311,7 +314,7 @@ class Speech:
             reply.audio_s += clip.seconds
         self._player.play(clip, starts_reply=starts_reply)
         if starts_reply and reply is not None and self._on_reply_audio is not None:
-            self._on_reply_audio(reply.heard_at)
+            self._on_reply_audio(reply.heard_at, reply.owner)
         return starts
 
     def _record_reply(self, reply: _Reply) -> None:
@@ -328,6 +331,8 @@ class Speech:
             "turn": reply.turn,
             "lang": reply.lang,
             "request_at": reply.heard_at,
+            "request_id": reply.owner[0] if reply.owner is not None else None,
+            "revision": reply.owner[1] if reply.owner is not None else None,
             "started_at": reply.began,
             "time_basis": "perf_counter",
             "first_meaningful_audio_ms": ms(reply.first_chunk_audio),

@@ -789,7 +789,7 @@ async def test_abandoned_capture_restores_timeout_and_wake_recovery_without_a_re
     metrics, output, player = RecordingMetrics(), RecordingOutput(), RecordingPlayer()
     capture = Capture(
         lambda: Engines(CountingEcho(), MarkerWake(), LoudVad(), ScriptedTurn(), stt, Everyone()),
-        Listening(max_turn_s=.6 if abort == 'retention_limit' else 30), metrics.record, output.notice,
+        Listening(max_turn_s=1.2 if abort == 'retention_limit' else 30), metrics.record, output.notice,
         source=source, backlog_s=2, clock=clock.now,
     )
     voice = VoiceMode(audio=capture, tts=FakeTts(), player=player, clock=clock,
@@ -911,8 +911,8 @@ async def test_stale_vad_start_cannot_take_ownership_of_replacement_listening() 
             self.queue: asyncio.Queue[InputEvent] = asyncio.Queue()
         def wake(self) -> None:
             self.queue.put_nowait(WakeWord(clock.now()))
-        def capture(self, on: bool) -> None:
-            capture.capture(on)
+        def capture(self, on: bool, *, owner: int | None = None) -> None:
+            capture.capture(on, owner=owner)
         def barge_in(self, since: float | None) -> None:
             capture.barge_in(since)
         async def events(self) -> AsyncIterator[InputEvent]:
@@ -1091,3 +1091,81 @@ async def test_same_frame_wake_survives_old_vad_without_releasing_its_stale_spee
         await hub.close()
         await voice.close()
         capture.close()
+
+
+@pytest.mark.parametrize('reply_finished', [False, True])
+async def test_same_owner_reply_phase_off_preserves_the_existing_endpoint_fence(reply_finished: bool) -> None:
+    source, stt = Source(), GatedEndpointStt()
+    heard: list[Heard] = []
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), LoudVad(), ScriptedTurn(), stt, Everyone()),
+        Listening(), lambda row: None, lambda text: None, source=source, backlog_s=10,
+    )
+    async def collect() -> None:
+        async for event in capture.events():
+            if isinstance(event, Heard):
+                heard.append(event)
+    capture.start()
+    collecting = asyncio.create_task(collect())
+    try:
+        await until(capture.ready.is_set)
+        capture.capture(True, owner=7)
+        source.frames(60, value=1000)
+        source.frames(60, start=.6)
+        assert await asyncio.to_thread(stt.entered.wait, 2)
+        capture.capture(False, owner=7)
+        if reply_finished:
+            capture.capture(True, owner=7)
+        source.frames(60, value=1500, start=1.2)
+        source.frames(80, start=1.8)
+        stt.release.set()
+        await until(lambda: bool(heard))
+        assert [event.text for event in heard] == ['Check the tests']
+        assert heard[0].owner == 7
+        assert heard[0].candidate is not None
+        assert heard[0].started_at is not None and heard[0].started_at < .1
+        if reply_finished:
+            return
+        source.frames(60, value=1500, start=2.6)
+        source.frames(80, start=3.2)
+        for _ in range(20):
+            await asyncio.sleep(.001)
+        assert len(heard) == 1
+    finally:
+        stt.release.set()
+        capture.close()
+        collecting.cancel()
+        await asyncio.gather(collecting, return_exceptions=True)
+
+
+async def test_replacement_after_reply_phase_off_drops_the_old_retained_turn() -> None:
+    source, stt = Source(), GatedEndpointStt()
+    heard: list[Heard] = []
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), LoudVad(), ScriptedTurn(), stt, Everyone()),
+        Listening(), lambda row: None, lambda text: None, source=source, backlog_s=10,
+    )
+    async def collect() -> None:
+        async for event in capture.events():
+            if isinstance(event, Heard):
+                heard.append(event)
+    capture.start()
+    collecting = asyncio.create_task(collect())
+    try:
+        await until(capture.ready.is_set)
+        capture.capture(True, owner=7)
+        source.frames(60, value=1000)
+        source.frames(60, start=.6)
+        assert await asyncio.to_thread(stt.entered.wait, 2)
+        capture.capture(False, owner=7)
+        capture.capture(True, owner=8)
+        source.frames(60, value=1500, start=1.2)
+        source.frames(80, start=1.8)
+        stt.release.set()
+        await until(lambda: bool(heard))
+        assert [(event.text, event.owner) for event in heard] == [('the tests', 8)]
+    finally:
+        stt.release.set()
+        capture.close()
+        collecting.cancel()
+        await asyncio.gather(collecting, return_exceptions=True)
