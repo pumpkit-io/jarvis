@@ -27,12 +27,8 @@ from tests.fakes import (
 )
 
 STARTUP_LINES = [
-    ("At your service, sir.", "am_liam"),
     ("Very good, sir.", "am_liam"),
-    ("I've reached the usage limit, sir.", "am_liam"),
-    ("Ai suoi ordini, signore.", "im_nicola"),
     ("Molto bene, signore.", "im_nicola"),
-    ("Ho raggiunto il limite di utilizzo, signore.", "im_nicola"),
 ]
 
 
@@ -192,12 +188,12 @@ async def test_cached_lines_are_synthesised_once_at_startup(
     assert sorted(tts.calls) == sorted(STARTUP_LINES)
 
     speech.say("very_good", "en")
-    speech.say("startup", "en")
+    speech.say("very_good", "en")
     speech.say("very_good", "en")
     speech.say("chime", "en")
     await speech.idle()
 
-    assert player.texts == ["Very good, sir.", "At your service, sir.", "Very good, sir.", ""]
+    assert player.texts == ["Very good, sir.", "Very good, sir.", "Very good, sir.", ""]
     assert player.clips[0] is player.clips[2]
     assert player.clips[3].seconds > 0
     assert sorted(tts.calls) == sorted(STARTUP_LINES)
@@ -370,7 +366,7 @@ async def test_without_a_voice_the_replies_still_arrive_as_text(
 ) -> None:
     speech = Speech(FakeTts(load_error=OSError("no model")), player, clock, metrics=metrics, notice=output.notice)
     speech.start()
-    speech.say("startup", "en")
+    speech.say("very_good", "en")
     backend = FakeBackend(clock, [[Text("Evening, sir.")]])
     hub = speaking_hub(backend, output, metrics, speech)
 
@@ -391,7 +387,7 @@ async def test_a_turn_typed_while_the_voice_loads_is_spoken_once_it_has(
     tts.hold.clear()
     speech = Speech(tts, player, clock, metrics=metrics, notice=output.notice)
     speech.start()
-    speech.say("startup", "en")
+    speech.say("very_good", "en")
     release = asyncio.Event()
     backend = FakeBackend(clock, [[Text("Evening, sir."), Gate(release)]])
     hub = speaking_hub(backend, output, metrics, speech)
@@ -405,7 +401,7 @@ async def test_a_turn_typed_while_the_voice_loads_is_spoken_once_it_has(
     await speech.idle()
     await speech.close()
 
-    assert player.texts == ["At your service, sir.", "Evening, sir."]
+    assert player.texts == ["Very good, sir.", "Evening, sir."]
 
 
 @pytest.mark.parametrize(
@@ -570,8 +566,8 @@ async def test_idle_gives_up_on_audio_that_stops_playing(
     player = RecordingPlayer(hold=True)
     speech = Speech(tts, player, clock, metrics=metrics, notice=output.notice)
     speech.start()
-    speech.say("startup", "en")
-    await until(lambda: player.texts == ["At your service, sir."])
+    speech.say("very_good", "en")
+    await until(lambda: player.texts == ["Very good, sir."])
 
     idling = asyncio.create_task(speech.idle())
     await asyncio.sleep(0.01)
@@ -605,7 +601,7 @@ async def test_the_chime_reports_when_it_starts_playing(
     speech = Speech(tts, player, clock, metrics=metrics, notice=output.notice, on_chime=starts.append)
     speech.start()
     try:
-        speech.say("startup", "en")
+        speech.say("very_good", "en")
         speech.say("chime", "en")
         await until(lambda: len(player.clips) == 2)
 
@@ -619,7 +615,7 @@ async def test_cached_speech_does_not_claim_a_meaningful_response(
     clock: FakeClock, metrics: RecordingMetrics, speech: Speech
 ) -> None:
     speech.begin("en", turn=45, heard_at=clock.now())
-    speech.say("usage_limit", "en", in_reply=True)
+    speech.say("very_good", "en", in_reply=True)
     await speech.idle()
     clock.advance(0.8)
     speech.feed("The build passed.")
@@ -723,3 +719,19 @@ async def test_cancelling_slow_generation_before_any_text_emits_no_filler(
     assert player.texts == []
     stopped = next(r for r in metrics.records if r["kind"] == "speech_stop")
     assert stopped["first_meaningful_audio_ms"] is None
+
+
+async def test_backend_failure_emits_operational_status_without_a_spoken_fallback(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, speech: Speech, player: RecordingPlayer
+) -> None:
+    from tests.fakes import Fail
+
+    backend = FakeBackend(clock, [[Fail("transport disconnected")]])
+    hub = speaking_hub(backend, output, metrics, speech)
+    await hub.start()
+    await hub.run(lines(clock, "Check the pending work"))
+    await speech.idle()
+
+    assert player.texts == []
+    assert any("Model unavailable" in n and "transport disconnected" in n and "Try a new request" in n for n in output.notices)
+    assert len(backend.session("talker").received) == 2

@@ -39,7 +39,7 @@ from jarvis_hub.subagents import Subagent, SubagentSetup, Subagents, ended_event
 from jarvis_hub.talker import talker_tools
 from jarvis_hub.tasks import Task, Tasks, no_task
 from jarvis_hub.voice.language import Lang, detect_language
-from jarvis_hub.voice.speech import LINES, ClipName
+from jarvis_hub.voice.speech import ClipName
 from jarvis_hub.waits import Check, Watcher, Waits, WaitSetup, cancelled_event, check_event, watcher_event
 
 
@@ -324,6 +324,7 @@ class Hub:
         speech: Speech | None = None,
         speak_typed: bool = True,
         on_end_conversation: Callable[[], None] | None = None,
+        on_model_ready: Callable[[], None] | None = None,
         talker_restart_at: float = DEFAULT_TALKER_RESTART_AT,
         floor: Floor | None = None,
         state_path: Path | None = None,
@@ -361,6 +362,8 @@ class Hub:
         # In voice mode a typed line gets a text-only reply; with `--text --speak` it is spoken.
         self._speak_typed = speak_typed
         self._on_end_conversation = on_end_conversation
+        self._on_model_ready = on_model_ready
+        self._model_available = False
         self._restart_at = talker_restart_at
         # In voice mode a restart and news wait for Jarvis to be quiet, so they never delay or talk over the User.
         self._floor = floor
@@ -422,11 +425,8 @@ class Hub:
         self._deferred: list[_OrchestratorInput] = []
         self._parked_news: list[News] = []
         self._announcing: set[asyncio.Task[None]] = set()
-        # Whether a Talker reply is on screen or being said, and whether the limit's news waits for it to end.
+        # Whether a Talker reply is on screen or being said.
         self._replying = False
-        self._news_after_reply = False
-        # Whether the limit's news is waiting for its turn to be told.
-        self._limit_news_pending = False
         # The User's own text in the Talker turn under way, for the Tasks it delegates.
         self._user_text: str | None = None
         self._approvals = Approvals(
@@ -696,17 +696,15 @@ class Hub:
             self._release_held()
 
     def _restore_limit(self, limit: SavedLimit, parked: list[News]) -> None:
-        """Brings back the usage limit, without telling the User again, and the news the limited Talker kept. A
-        limit that reset while the Hub was down clears at once, and its reset is announced once a turn of a held role
-        completes."""
+        """Restores holds and parked news without persisting the partially restored Hub."""
         self._parked_news = parked
         self._pending += sum(item.count for item in parked)
         if parked:
             self._settled.clear()
         self._limit.restore(limit)
-        # A limited Talker tells the User itself, at their next line.
-        if self._limit.blocks("orchestrator") or self._limit.blocks("subagent"):
-            self._announce_limit_news()
+        # Restored holds are visible before a new user request.
+        if self._limit.active:
+            self._limit_notice(self._limit.tell())
 
     def _restore_held(self, held: list[Leaf], quiet_mode: bool, needs_user: dict[str, str]) -> None:
         """Quiet mode and its news, then the parked news if the Talker is no longer limited, under its rules."""
@@ -804,7 +802,7 @@ class Hub:
             self._talker = await self._open_talker()
             await self._turn(WARM_UP, kind="warm_up", arrived=self._clock.now())
         except Exception as e:
-            self._output.notice(f"The Talker could not start: {e}")
+            self._output.notice(f"Model unavailable: could not start the Talker: {e}. Check Claude sign-in or connection, then restart Jarvis.")
             return
         upcoming: _TalkerInput | None = None
         while True:
@@ -1038,8 +1036,6 @@ class Hub:
                     case TurnEnd():
                         end = event
                         self._limit.observe("talker", event)
-                        if event.outcome == "limited" and show:
-                            shown += self._limit_notice(speech, self._limit.tell())
         finally:
             self._talker_gate.turn = None
             self._turn_spoken = self._turn_answers_user = self._replying = False
@@ -1049,12 +1045,17 @@ class Hub:
             end = TurnEnd("failed", end.usage, "the turn stopped without the Hub interrupting it")
         if show:
             self._output.reply_end()
-        if self._news_after_reply:
-            self._news_after_reply = False
-            self._tell_limit_news()
         # A failed restart has its own notice.
         if end.outcome == "failed" and kind != "restart":
-            self._output.notice(f"The Talker failed: {end.error}")
+            self._model_available = False
+            self._output.notice(f"Model unavailable: the Talker failed: {end.error}. Try a new request; check Claude sign-in or connection if it persists.")
+        if (
+            end.outcome == "completed" and not self._model_available
+            and not self._limit.active and not self._limit.recovery_pending
+        ):
+            self._model_available = True
+            if self._on_model_ready is not None:
+                self._on_model_ready()
         if show and (shown.strip() or end.outcome != "failed"):
             self._exchanges.append((message, shown))
         self._shown = shown
@@ -1088,7 +1089,7 @@ class Hub:
             try:
                 self._orchestrator = await self._backend.open(self._orchestrator_spec)
             except Exception as e:
-                self._output.notice(f"The Orchestrator could not connect at startup: {type(e).__name__}: {e}")
+                self._output.notice(f"Background model unavailable: {type(e).__name__}: {e}. A new Task retries the connection.")
         while True:
             item = await self._orchestrator_inbox.get()
             try:
@@ -1263,76 +1264,38 @@ class Hub:
         self._record(spec, "run", end, [], task=subagent.task_id, subagent=subagent.id, duration_ms=duration_ms)
 
     def _limited_reply(self, item: _TalkerInput) -> TurnEnd:
-        """The reply to a line while the Talker is limited: the cached line and the reset time, with no model call."""
+        """A held Talker needs no model call to show its availability."""
         speech = self._speech if item.spoken else _Silent()
         self._turn_count += 1
-        speech.begin(self._lang, turn=self._turn_count, heard_at=item.arrived if item.kind == "user" else None)
-        shown = self._limit_notice(speech, self._limit.tell())
+        speech.begin(self._lang, turn=self._turn_count, heard_at=item.arrived)
+        self._limit_notice(self._limit.tell())
+        self._persist()
         speech.end()
         self._output.reply_end()
-        self._exchanges.append((item.message, shown))
         return TurnEnd("limited")
 
-    def _limit_notice(self, speech: Speech, resets_at: float | None, *, update: bool = False) -> str:
-        """Prints that the limit was reached, with the cached line, or that its reset moved, and says it in the reply
-        `speech` has begun. Returns what was shown."""
-        lang = self._lang
-        if update:
-            text = update_sentence(resets_at, lang, self._wall())
-            speech.feed(text)
-        else:
-            when = reset_sentence(resets_at, lang, self._wall())
-            speech.say("usage_limit", lang, in_reply=True)
-            if when:
-                speech.feed(when)
-            text = f"{LINES['usage_limit'][lang]} {when}".strip()
-        speech.block_end()
-        self._output.reply(text)
-        # The User heard it, which decides whether its reset is news after a restart.
-        self._persist()
-        return text
+    def _limit_notice(self, resets_at: float | None, *, update: bool = False) -> None:
+        when = update_sentence(resets_at, "en", self._wall()) if update else reset_sentence(resets_at, "en", self._wall())
+        if resets_at is None:
+            when = "Reset time unavailable."
+        self._output.notice(
+            f"Model unavailable: usage limit. {when} Held work retries automatically; try your request again after reset."
+        )
 
     def _limit_hit(self, role: str, news: bool) -> None:
         self._write({"kind": "usage_limit", "role": role, "resets_at": self._limit.resets_at(role)})
         self._drop_reset_news()
+        if role == "talker":
+            self._model_available = False
         self._persist()
-        # A limited Talker tells the User itself, in the reply that hit it.
-        if news and role != "talker":
+        if news:
             self._announce_limit_news()
 
     def _announce_limit_news(self) -> None:
-        if self._limit_news_pending:
-            return
-        self._limit_news_pending = True
-        announcing = asyncio.create_task(self._announce_limit())
-        self._announcing.add(announcing)
-        announcing.add_done_callback(self._announcing.discard)
-
-    async def _announce_limit(self) -> None:
-        """Tells the User the limit's news: in voice mode as news, when the voice is quiet. Like news that needs the
-        User it gets through Quiet mode, since nothing they ask can be done until the reset."""
-        if self._floor is not None:
-            while not self._input_ended.is_set():
-                await self._quiet()
-                if self._floor.announce():
-                    break
-        if self._replying:
-            self._news_after_reply = True
-        else:
-            self._tell_limit_news()
-
-    def _tell_limit_news(self) -> None:
-        """Tells what the User has yet to hear of the limit as it stands now, which may be nothing by the time."""
-        self._limit_news_pending = False
         notice = self._limit.tell_news()
-        if notice is None:
-            return
-        speech = self._speech if self._floor is None or not self._input_ended.is_set() else _Silent()
-        self._turn_count += 1
-        speech.begin(self._lang, turn=self._turn_count, heard_at=None)
-        self._limit_notice(speech, notice.resets_at, update=notice.update)
-        speech.end()
-        self._output.reply_end()
+        if notice is not None:
+            self._limit_notice(notice.resets_at, update=notice.update)
+            self._persist()
 
     def _limit_cleared(self, roles: frozenset[str]) -> None:
         self._write({"kind": "usage_reset", "roles": sorted(roles)})
@@ -1346,6 +1309,8 @@ class Hub:
 
     def _limit_reset(self) -> None:
         """A turn of a held role completed after its hold cleared: the reset is real, so the User hears of it."""
+        self._model_available = True
+        self._output.notice("Model available: usage-limit recovery confirmed by a completed turn. Held work continues.")
         text = (
             "The usage limit has reset. Queued Subagents are starting and any waiting Task carries on. "
             "Say so in one sentence."

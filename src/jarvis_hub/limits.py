@@ -1,4 +1,4 @@
-"""The Max usage limit: which sessions it stopped, until when, and what Jarvis says about it."""
+"""The Max usage limit: which sessions it stopped, until when, and what the User is shown about it."""
 
 import asyncio
 import contextlib
@@ -97,8 +97,8 @@ class SavedLimit:
 
 
 class UsageLimit:
-    """Roles the limit has stopped, each until its own reset, and what the User heard of it. The User hears of the
-    limit, not of a role: once that it was reached, again when a hit moves the reset later than they heard or makes
+    """Roles the limit has stopped, each until its own reset, and what the User was shown about it. The User sees the
+    limit, not of a role: once that it was reached, again when a hit moves the reset later than they were shown or makes
     it unknown, and that it reset only once a turn of a role the limit held completes after its hold cleared, since
     only then has work really resumed. A retry that is limited again is silent. A hit after an announced reset is
     news again, since the User believes the limit is over. `on_hit` hears each hit and whether it brings news,
@@ -138,6 +138,11 @@ class UsageLimit:
     @property
     def active(self) -> bool:
         return bool(self._until)
+
+    @property
+    def recovery_pending(self) -> bool:
+        """A shown limit still awaits evidence from a successful held-role turn."""
+        return self._told
 
     def blocks(self, role: str) -> bool:
         return role in self._until

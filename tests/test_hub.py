@@ -159,7 +159,7 @@ async def test_a_talker_that_cannot_start_is_reported_and_ends_the_conversation(
     await hub.run(lines(clock, "Hello", "Hello?"))
     await hub.close()
 
-    assert output.notices == ["The Talker could not start: claude CLI not logged in"]
+    assert output.notices == ["Model unavailable: could not start the Talker: claude CLI not logged in. Check Claude sign-in or connection, then restart Jarvis."]
     assert output.replies == []
 
 
@@ -271,7 +271,7 @@ async def test_a_turn_stopped_without_the_hub_asking_is_a_failure(
     await hub.start()
     await hub.run(lines(clock, "Count to a hundred"))
 
-    assert output.notices == ["The Talker failed: the turn stopped without the Hub interrupting it"]
+    assert output.notices == ["Model unavailable: the Talker failed: the turn stopped without the Hub interrupting it. Try a new request; check Claude sign-in or connection if it persists."]
     assert metrics.records[-1]["outcome"] == "failed"
 
 
@@ -285,7 +285,7 @@ async def test_a_failed_turn_is_reported_and_the_conversation_goes_on(
     await hub.run(lines(clock, "Hello", "Hello again"))
 
     assert output.replies == ["Let me", "Back again, sir."]
-    assert output.notices == ["The Talker failed: API error 529"]
+    assert output.notices == ["Model unavailable: the Talker failed: API error 529. Try a new request; check Claude sign-in or connection if it persists."]
     assert [r["outcome"] for r in metrics.records if r["kind"] == "user"] == ["failed", "completed"]
 
 
@@ -314,7 +314,7 @@ async def test_a_talker_that_cannot_start_is_reported_before_anything_is_typed(
 
     await hub.start()
     running = asyncio.create_task(hub.run(typist.lines()))
-    await until(lambda: output.notices == ["The Talker could not start: claude CLI not logged in"])
+    await until(lambda: output.notices == ["Model unavailable: could not start the Talker: claude CLI not logged in. Check Claude sign-in or connection, then restart Jarvis."])
     await asyncio.wait_for(running, 1)
     await hub.close()
 

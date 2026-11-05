@@ -102,7 +102,8 @@ async def rig_for() -> AsyncIterator[MakeRig]:
         running = asyncio.create_task(hub.run(merge(typist.lines(), voice.lines(hub.interrupt, hub.woke))))
         rig = Rig(clock, backend, audio, player, output, metrics, typist, voice, hub, tts, running)
         rigs.append((rig, running))
-        await until(lambda: player.texts == ["At your service, sir."])
+        await until(lambda: player.voices == ["ready"])
+        output.log.clear()
         player.clips.clear()
         player.events.clear()
         return rig
@@ -1057,7 +1058,7 @@ async def test_a_recovery_report_outside_quiet_mode_is_an_announcement_once_jarv
 async def test_the_usage_limit_reset_is_held_in_quiet_mode_and_counted_with_the_news_that_waited_for_it(
     rig_for: MakeRig,
 ) -> None:
-    limit_line = "I've reached the usage limit, sir."
+    limit_line = "Model unavailable: usage limit."
     delegating = [Text("Right away, sir."), Tool("delegate", {"request": "Check the CI", "context": ""})]
     report = Tool("report", {"task_id": "T1", "spoken": "The CI is green.", "needs_user": False})
     rig: Rig = await rig_for(delegating, QUIET, [Text(AWAY)], orchestrator=[[Limited(600)], [report]])
@@ -1065,8 +1066,8 @@ async def test_the_usage_limit_reset_is_held_in_quiet_mode_and_counted_with_the_
     rig.audio.say("Check the CI")
     await until(lambda: rig.state == "follow_up")
     await rig.advance(6)
-    # Like news that needs the User, the limit itself is announced once Jarvis is idle.
-    await until(lambda: limit_line in rig.player.texts)
+    # Limit status stays on screen while the voice remains available.
+    await until(lambda: any(limit_line in n for n in rig.output.notices))
     await rig.advance(10)
     rig.audio.wake()
     rig.audio.say("Quiet mode, please")
@@ -1092,7 +1093,7 @@ async def test_the_usage_limit_reset_is_held_in_quiet_mode_and_counted_with_the_
 async def test_a_new_limit_drops_the_reset_news_held_in_quiet_mode_so_it_is_never_told_while_limited(
     rig_for: MakeRig,
 ) -> None:
-    limit_line = "I've reached the usage limit, sir."
+    limit_line = "Model unavailable: usage limit."
     delegating = [Text("Right away, sir."), Tool("delegate", {"request": "Check the CI", "context": ""})]
     again = [Text("Once more, sir."), Tool("delegate", {"request": "Check again", "context": ""})]
     report = Tool("report", {"task_id": "T1", "spoken": "The CI is green.", "needs_user": False})
@@ -1103,7 +1104,7 @@ async def test_a_new_limit_drops_the_reset_news_held_in_quiet_mode_so_it_is_neve
     rig.audio.say("Check the CI")
     await until(lambda: rig.state == "follow_up")
     await rig.advance(6)
-    await until(lambda: limit_line in rig.player.texts)
+    await until(lambda: any(limit_line in n for n in rig.output.notices))
     await rig.advance(10)
     rig.audio.wake()
     rig.audio.say("Quiet mode, please")
@@ -1112,10 +1113,10 @@ async def test_a_new_limit_drops_the_reset_news_held_in_quiet_mode_so_it_is_neve
     await rig.advance(600)
     await until(lambda: reports(rig) == 1)
     await rig.advance(60)
-    spoken_before = rig.player.texts.count(limit_line)
+    notices_before = sum(limit_line in n for n in rig.output.notices)
 
     rig.typist.type("Check again")
-    await until(lambda: rig.player.texts.count(limit_line) == spoken_before + 1)
+    await until(lambda: sum(limit_line in n for n in rig.output.notices) == notices_before + 1)
     await rig.advance(60)
     rig.audio.wake()
     await rig.advance(6)
@@ -1129,7 +1130,7 @@ async def test_a_new_limit_drops_the_reset_news_held_in_quiet_mode_so_it_is_neve
 async def test_news_told_in_one_announcement_with_the_reset_is_still_told_when_the_talker_hits_the_limit_mid_way(
     rig_for: MakeRig,
 ) -> None:
-    limit_line = "I've reached the usage limit, sir."
+    limit_line = "Model unavailable: usage limit."
     rig: Rig = await rig_for([Text("Hello, sir.")], [Limited(600)], [Text("The CI is green, sir.")])
     rig.audio.wake()
     rig.audio.say("Hello")
@@ -1141,7 +1142,7 @@ async def test_news_told_in_one_announcement_with_the_reset_is_still_told_when_t
     rig.hub._limit_reset()  # pyright: ignore[reportPrivateUsage]
     rig.hub._post_news("orchestrator", "The CI is green.", "T1")  # pyright: ignore[reportPrivateUsage]
     await until(lambda: len(talker_received(rig)) == 2)
-    await until(lambda: limit_line in rig.player.texts)
+    await until(lambda: any(limit_line in n for n in rig.output.notices))
     await rig.advance(600)
     await until(lambda: "The CI is green, sir." in rig.player.texts)
 
@@ -1151,7 +1152,7 @@ async def test_news_told_in_one_announcement_with_the_reset_is_still_told_when_t
     assert 'reason="usage_reset"' not in told[1]
 
 
-LIMIT_LINE = "I've reached the usage limit, sir."
+LIMIT_LINE = "Model unavailable: usage limit."
 DOCS_REPORT = "The docs are merged."
 
 
@@ -1195,7 +1196,7 @@ async def test_quiet_mode_lets_through_only_the_urgent_news_of_a_turn_that_waite
         orchestrator=[red_then_docs(arrival)],
     )
     await watch_the_ci(rig, arrival)
-    await until(lambda: LIMIT_LINE in rig.player.texts)
+    await until(lambda: any(LIMIT_LINE in n for n in rig.output.notices))
     limited_at = rig.clock.t
 
     # The User takes the floor just before the hold clears, so the parked turn waits for them.
@@ -1234,7 +1235,7 @@ async def test_a_parked_turn_restored_in_quiet_mode_lets_through_only_its_urgent
         delegating, quiet_then_limited, orchestrator=[red_then_docs(arrival)], state_path=state
     )
     await watch_the_ci(first, arrival)
-    await until(lambda: LIMIT_LINE in first.player.texts)
+    await until(lambda: any(LIMIT_LINE in n for n in first.output.notices))
     await first.settle()
 
     second = await rig_for([Text("CI is red, sir.")], [Text(AWAY)], state_path=crash(state, tmp_path))
@@ -1269,7 +1270,7 @@ async def parked_away(rig_for: MakeRig, tmp_path: Path) -> Path:
         await arrive(first, arrival)
     first.audio.wake()
     await first.advance(6)
-    await until(lambda: LIMIT_LINE in first.player.texts)
+    await until(lambda: any(LIMIT_LINE in n for n in first.output.notices))
     await first.settle()
     return crash(state, tmp_path)
 
