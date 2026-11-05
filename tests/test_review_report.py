@@ -66,7 +66,12 @@ def test_blocking_report_and_verdict_are_emitted_without_failing_conversion(tmp_
     json.dumps([{"type": "result", "subtype": "success", "result": REPORT}]),
     json.dumps([{"type": "result", "subtype": "success", "is_error": False, "result": None}]),
     *[json.dumps([{"type": "result", "subtype": "success", "is_error": False, "result": body}]) for body in [
-        "", "\ud800", REPORT.replace(HEAD, "b" * 40), REPORT.replace("## Spec\nNo findings.\n", ""),
+        "", "\ud800", REPORT.replace(HEAD, "b" * 40),
+        f"## sdlc review of {'b' * 40} PRIVATE_TRACE\n" + REPORT,
+        f"## sdlc review of {HEAD}\n" + REPORT,
+        "# PRIVATE_TRACE\n" + REPORT,
+        "PRIVATE_TRACE\n---\n" + REPORT,
+        "Verdict: pass PRIVATE_TRACE\n" + REPORT, REPORT.replace("## Spec\nNo findings.\n", ""),
         REPORT.replace("## Spec\nNo findings.", "## Spec"),
         REPORT.replace("## Spec", "## Standards"),
         REPORT.replace("Verdict: pass", "Verdict: pass\nVerdict: blocking (1 hard findings)"),
@@ -108,13 +113,13 @@ def test_missing_execution_file_fails_with_a_nonsecret_error(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize(("body", "diagnostics"), [
-    ("PRIVATE_SECRET\n" + REPORT,
+    ("Verdict: pass PRIVATE_SECRET\n" + REPORT,
      "expected_heading_elsewhere=true first_line_heading_like=false outer_fence=false axes_present=3"),
-    (REPORT.replace(HEAD, "b" * 40),
+    (REPORT.replace(HEAD, "b" * 40).replace("No findings.", "PRIVATE_SECRET"),
      "expected_heading_elsewhere=false first_line_heading_like=true outer_fence=false axes_present=3"),
     ("PRIVATE_SECRET\nNothing here.\n",
      "expected_heading_elsewhere=false first_line_heading_like=false outer_fence=false axes_present=0"),
-    ("```markdown\n" + REPORT + "```\n",
+    ("```markdown\nPRIVATE_SECRET\n" + REPORT + "```\n",
      "expected_heading_elsewhere=true first_line_heading_like=false outer_fence=true axes_present=3"),
 ])
 def test_heading_rejection_exposes_only_safe_format_diagnostics(tmp_path: Path, body: str, diagnostics: str) -> None:
@@ -132,3 +137,22 @@ def test_heading_rejection_exposes_only_safe_format_diagnostics(tmp_path: Path, 
     assert "PRIVATE_SECRET" not in completed.stdout + completed.stderr
     assert HEAD not in completed.stdout + completed.stderr
     assert "b" * 40 not in completed.stdout + completed.stderr
+
+
+@pytest.mark.parametrize("verdict", ["pass", "blocking (1 hard findings)"])
+def test_plain_introduction_is_preserved_under_the_verified_review_heading(tmp_path: Path, verdict: str) -> None:
+    introduction = "This review is limited to the changed code. Physical acceptance is still pending.\n"
+    original = REPORT.replace("Verdict: pass", f"Verdict: {verdict}")
+    body = introduction + original
+    execution = tmp_path / "execution.json"
+    execution.write_text(json.dumps([{"type": "result", "subtype": "success", "is_error": False, "result": body}]))
+    report, output = tmp_path / "review.md", tmp_path / "github-output"
+    completed = subprocess.run([
+        sys.executable, str(ROOT / ".github/scripts/review_report.py"),
+        "--execution-file", str(execution), "--head", HEAD,
+        "--report", str(report), "--github-output", str(output),
+    ], capture_output=True, text=True)
+    assert completed.returncode == 0, completed.stderr
+    heading, rest = original.split("\n", 1)
+    assert report.read_text() == heading + "\n\n" + introduction + rest
+    assert output.read_text() == ("verdict=pass\n" if verdict == "pass" else "verdict=blocking\n")

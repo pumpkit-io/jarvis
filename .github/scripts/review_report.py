@@ -39,7 +39,14 @@ def final_report(execution: str, head: str) -> tuple[str, str]:
         raise InvalidReview("terminal result must contain a nonempty Markdown report under 60 KB")
     lines = body.strip().splitlines()
     expected_heading = f"## sdlc review of {head}"
-    if lines[0] != expected_heading:
+    heading_matches = [index for index, line in enumerate(lines) if line == expected_heading]
+    prefix = lines[:heading_matches[0]] if len(heading_matches) == 1 else lines
+    forbidden_prefix = any(
+        re.match(r"^\s*(?:#{1,6}(?:\s|$)|`{3,}|~{3,}|Verdict:)", line)
+        or re.fullmatch(r"\s*(?:=+|-+)\s*", line)
+        for line in prefix
+    )
+    if len(heading_matches) != 1 or sum(line.strip() == expected_heading for line in lines) != 1 or forbidden_prefix:
         diagnostics = {
             "expected_heading_elsewhere": expected_heading in lines[1:],
             "first_line_heading_like": bool(re.match(r"^#{1,6}\s+", lines[0])),
@@ -65,7 +72,11 @@ def final_report(execution: str, head: str) -> tuple[str, str]:
     for start, end in zip(positions, positions[1:] + [len(lines) - 1]):
         if not any(line.strip() for line in lines[start + 1:end]):
             raise InvalidReview("review axes must contain findings or an explicit no-findings statement")
-    return body.strip() + "\n", "pass" if verdict == "Verdict: pass" else "blocking"
+    rendered = body.strip()
+    if heading_matches[0] > 0:
+        original_lines = rendered.splitlines(keepends=True)
+        rendered = expected_heading + "\n\n" + "".join(original_lines[:heading_matches[0]] + original_lines[heading_matches[0] + 1:])
+    return rendered.rstrip() + "\n", "pass" if verdict == "Verdict: pass" else "blocking"
 
 
 def main() -> int:
