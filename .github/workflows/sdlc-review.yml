@@ -47,30 +47,56 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
       - uses: anthropics/claude-code-action@v1
+        id: review
         env:
           GH_TOKEN: ${{ github.token }}
-          # The CI checkout is a main checkout, where the sdlc plugin's guard would block writing the report.
-          SDLC_ALLOW_MAIN_CHECKOUT: "1"
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
           plugin_marketplaces: https://github.com/pumpkit-io/sdlc.git
           plugins: sdlc@pumpkit-io
+          display_report: "false"
+          show_full_output: "false"
           prompt: |
             Load the review-changes skill and review pull request #${{ github.event.pull_request.number }}. This is a CI job, so nobody can answer questions.
 
             - Fixed point: ${{ github.event.pull_request.base.sha }}. HEAD is the pull request's head commit.
             - Spec: the issues the pull request body or its commit messages reference. Read the body with `gh pr view ${{ github.event.pull_request.number }}`. With no reference, skip the Spec axis.
-            - Change no tracked file. Write the final report, in Markdown, to `.sdlc-review.md` at the repo root, under the heading `## sdlc review of ${{ github.event.pull_request.head.sha }}`, ending with the skill's verdict line.
+            - Do not write or edit files. Return the complete final Markdown report as your final response. Its first line must be exactly `## sdlc review of ${{ github.event.pull_request.head.sha }}`. Do not add an introduction or wrap the report in a code fence. Include separate nonempty `## Standards`, `## Spec` and `## Correctness` sections in that order, followed by exactly one final line: `Verdict: pass` or `Verdict: blocking (N hard findings)` with a positive integer N. Do not include intermediate tool output or execution events.
+
+            Final response structure (replace each placeholder with the review, and choose exactly one valid verdict):
+            ## sdlc review of ${{ github.event.pull_request.head.sha }}
+
+            ## Standards
+            <Standards findings or explicit no-findings statement>
+
+            ## Spec
+            <Spec findings or reason this axis is skipped>
+
+            ## Correctness
+            <Correctness findings or explicit no-findings statement>
+
+            <Verdict: pass OR Verdict: blocking (N hard findings)>
           claude_args: |
             --model sonnet
-            --allowedTools "Read,Glob,Grep,Write,Task,Agent,Skill,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git rev-parse:*),Bash(git merge-base:*),Bash(gh pr view:*),Bash(gh issue view:*)"
+            --disallowedTools "Write,Edit,NotebookEdit"
+            --allowedTools "Read,Glob,Grep,Task,Agent,Skill,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git rev-parse:*),Bash(git merge-base:*),Bash(gh pr view:*),Bash(gh issue view:*)"
+      - name: Validate and emit the final review
+        id: report
+        env:
+          EXECUTION_FILE: ${{ steps.review.outputs.execution_file }}
+          REVIEW_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 .github/scripts/review_report.py \
+            --execution-file "$EXECUTION_FILE" --head "$REVIEW_HEAD" \
+            --report "$RUNNER_TEMP/sdlc-review.md" --github-output "$GITHUB_OUTPUT"
       - uses: marocchino/sticky-pull-request-comment@v2
         with:
           header: sdlc-review
-          path: .sdlc-review.md
+          path: ${{ runner.temp }}/sdlc-review.md
       - name: Fail on a blocking verdict
+        env:
+          REVIEW_VERDICT: ${{ steps.report.outputs.verdict }}
         run: |
-          verdict="$(grep -E '^Verdict: ' .sdlc-review.md | tail -n 1)"
-          echo "${verdict:-No verdict line in the report}"
-          [ "$verdict" = "Verdict: pass" ]
+          echo "Review verdict: $REVIEW_VERDICT"
+          [ "$REVIEW_VERDICT" = "pass" ]
