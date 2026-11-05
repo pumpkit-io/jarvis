@@ -557,3 +557,7 @@ Verdict: retain Sonnet at medium provisionally. It was faster and used fewer out
 ## Wake candidate comparison (#29)
 
 [Wake candidate comparison](wake-candidate-comparison.md) reuses the completed 80-take/65-minute validation sweep and adds credential-free Sherpa KWS replay. Neither tested engine meets the joint recall/false-wake gate. The comparison includes runnable evaluation, model and corpus fingerprints, setup/licensing constraints, all failed operating points and an independent confirmation plan. Runtime wake policy is unchanged.
+
+## Contextual local recognition (#31)
+
+[Contextual recognition evaluation](contextual-recognition-evaluation.md) records bounded local Qwen3/Qwen2.5 comparisons, synthetic held-out semantic errors, component cost, the isolated assessment contract and unresolved selection. No classifier is selected or wired into admission/cancellation. Physical and multiple-speaker evidence remains unavailable.
