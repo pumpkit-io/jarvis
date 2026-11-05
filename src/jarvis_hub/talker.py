@@ -30,7 +30,8 @@ def talker_tools(
     return (
         HubTool(
             "delegate",
-            "Hand work that needs the Org to the Orchestrator as a Task. Returns at once with the Task id, and "
+            "Start your background work involving the Org as a Task, after a short request-specific spoken response. "
+            "Returns at once with the Task id, and "
             "the result arrives later as an event, so there is nothing to add after calling it. "
             "Pass task_id to continue a Task, such as answering its question.",
             object_schema(
@@ -45,7 +46,7 @@ def talker_tools(
         ),
         HubTool(
             "status",
-            "List this session's Tasks: state, age, request and last report, with their Subagents, Watchers and "
+            "List your Tasks: state, age, request and last report, with their background work, Watchers and "
             "Checks. Answered at once.",
             object_schema({}),
             status,
@@ -77,8 +78,8 @@ def talker_tools(
         ),
         HubTool(
             "approve",
-            "Record the User's yes to the Approval you just asked them about, by its id. The Hub decides from its "
-            "own record of the User's words whether they say yes, and to which Approval; when they do not, the "
+            "Record the User's yes to the Approval you just asked them about, by its id. Saved User words are checked "
+            "to determine whether they say yes, and to which Approval; when they do not, the "
             "result says why, and lists the pending Approvals when the User has to say which.",
             object_schema({"approval_id": {**STRING, "description": "Such as A1."}}, ("approval_id",)),
             approve,
