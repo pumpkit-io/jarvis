@@ -55,6 +55,9 @@ def main() -> None:
     stages.append(snapshot(f"+ STT ({stt.name})", mx))
 
     from kokoro_mlx import KokoroTTS
+    from common import prepare_tts
+
+    prepare_tts()
 
     tts = KokoroTTS.from_pretrained("mlx-community/Kokoro-82M-bf16")
     tts.generate("I have opened the pull request on pumpkit and checks are running.", voice="am_liam")

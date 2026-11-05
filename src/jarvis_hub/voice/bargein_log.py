@@ -117,6 +117,8 @@ class BargeInLog:
         row = {
             "kind": "bargein",
             "onset": round(opened.onset, 3),
+            "candidate_at": opened.onset,
+            "time_basis": "perf_counter",
             "since": None if opened.since is None else round(opened.since, 3),
             "detected_ms": _ms(opened.detected - opened.onset),
             "partials": [_partial(p, opened.onset) for p in partials],

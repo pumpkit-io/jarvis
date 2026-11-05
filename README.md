@@ -51,9 +51,14 @@ The launcher follows symlinks before entering its checkout. In a git worktree, c
 ./jarvis --text --speak          # typed input with spoken replies
 ./jarvis stats --since 24h
 ./jarvis stats --bargein --since 24h
+./jarvis stats --voice --since 24h
 ```
 
 Say “Hey Jarvis” and your request, in one breath if you wish. “Hi Jarvis”, “Ehi Jarvis” and “Jarvis” are intended wake phrases; recall for the User's voice is still awaiting measurement. After a reply, the Follow-up window lets you continue without the Wake word. A whole stop phrase such as “that's all”, “stand by” or “basta così” plays the cached acknowledgment and returns to idle. A longer utterance containing those words remains a request.
+
+Replies start with generated content about the request; slow generation stays silent without a holding sentence. Background work is acknowledged before it starts.
+
+The [voice trace](docs/notes/voice-tracing.md) correlates captured requests, endpointing, transcription, Hub turns and estimated meaningful playback. It distinguishes missing measurements from zero delay.
 
 Type into the same terminal during voice mode for a text-only reply. Details appear on screen and in `.jarvis/show.log`. Ctrl-D or Ctrl-C stops the Hub. Each launch starts a fresh conversation; saved Tasks and waits survive restart, and interrupted Subagents keep their branches.
 
@@ -78,6 +83,7 @@ Ask for status or to cancel a Task by name. Quiet mode holds routine Announcemen
 - `claude` missing or authentication fails: put the installed CLI on `PATH`, run `claude` to sign in with Max, then retry `./jarvis --text`. A billing warning means the Hub removed an inherited billing switch; remove it from your shell profile too.
 - Configuration error: check the named key against `.env.example`, including units and supported choices. Text mode ignores voice settings with a warning. Stats also runs without loading voice models.
 - No microphone or audio: check macOS permission for the terminal, the selected devices and the Hub's listening notice. Use `--text` to continue without audio. With headphones, use `--headphones`.
+- eSpeak reports missing `phontab` or a `/Users/runner/...` path: run `uv sync --locked --reinstall-package espeakng-loader` in this checkout. Jarvis uses the installed wheel's data and automatically copies it into a private short `/tmp/jarvis-espeak-*` directory when the checkout path exceeds the native limit. No Homebrew eSpeak, environment override or worktree symlink is required; the private copy lasts for the process. Check `/tmp` permissions/free space if preparation fails. Test both voices without playing audio or making conversational model calls with `uv run python spikes/audio/check_tts_setup.py` (first use may download Kokoro). Historical standalone audio benchmarks use the same setup; run their existing environment with `uv run --project spikes/audio python spikes/audio/check_tts_setup.py`.
 - Voice loading takes too long: first downloads need network access. Check the model-loading error shown in the terminal. For a measured run, finish downloads first and stop other GPU-heavy processes; see the recording instructions in the spike notes.
 - Missed “Ehi Jarvis” or bare “Jarvis”: these are known weak spots in synthetic testing. Record the User's takes before selecting a different engine. Do not treat the unmeasured recall target as achieved.
 - Jarvis pauses or stops on its own speaker: try headphones and record the speaker checklist before tuning thresholds. Echo cancellation and Barge-in still need the real speaker run.

@@ -739,3 +739,23 @@ def test_a_failed_clip_write_is_reported_and_costs_the_turn_nothing(tmp_path: Pa
 
     assert len(r.heard()) == 1
     assert [row["kind"] for row in r.records if row["kind"] == "clip_error"] == ["clip_error"]
+
+
+def test_trace_distinguishes_premature_endpoint_from_a_later_continuation() -> None:
+    r = rig(clock=lambda: 200.0)
+    r.pipeline.capture(True)
+    r.feed("speech", 0.8, value=1100)
+    r.feed("silence", 0.6)
+    r.feed("speech", 0.7, value=1200)
+    r.feed("silence", 0.6)
+
+    first, continuation = r.heard()
+    before, after = r.records
+    assert before["request_at"] == first.at
+    assert after["request_at"] == continuation.at
+    assert before["endpoint_at"] == pytest.approx(101.3, abs=0.04)
+    assert after["capture_start_at"] == pytest.approx(101.2, abs=0.04)
+    assert before["stt_completed_at"] == after["stt_completed_at"] == 200.0
+    assert before["endpoint_reason"] == "complete"
+    assert before["time_basis"] == "perf_counter"
+    assert "text" not in before

@@ -292,3 +292,33 @@ def test_the_stats_command_reads_the_barge_in_log_only_with_the_flag(tmp_path: P
 
     assert "Barge-ins" not in plain.getvalue() and "No turns logged" in plain.getvalue()
     assert "stop" in flagged.getvalue() and "Barge-ins" in flagged.getvalue()
+
+
+def test_voice_trace_explains_slow_and_superseded_requests_without_cached_latency(tmp_path: Path) -> None:
+    import io
+
+    from jarvis_hub.config import load_settings
+    from jarvis_hub.main import print_stats
+
+    settings = load_settings(tmp_path, {})
+    log = settings.runtime_dir / "metrics.jsonl"
+    log.parent.mkdir(parents=True)
+    rows = [
+        {"kind": "turn", "request_at": 10.0, "end_wait_ms": 500, "stt_ms": 120},
+        {"kind": "user", "role": "talker", "turn": 2, "request_at": 10.0, "wait_ms": 700, "outcome": "ok"},
+        {"kind": "speech", "turn": 2, "request_at": 10.0, "first_audio_ms": 1500, "first_meaningful_audio_ms": 2400},
+        {"kind": "speech_stop", "turn": 3, "request_at": 20.0, "stopped_at": 22.0, "first_meaningful_audio_ms": None},
+        {"kind": "user", "role": "talker", "turn": 3, "request_at": 20.0, "outcome": "interrupted"},
+        {"kind": "capture", "captured_through_at": 10.5, "max_queue_delay_ms": 90, "dropped_frames": 4},
+        {"kind": "recognition", "candidate_at": 21.0, "stt_ms": 80},
+    ]
+    log.write_text("".join(json.dumps({"at": NOW.isoformat(), "run_id": "test", **r}) + "\n" for r in rows))
+    output = io.StringIO()
+    print_stats(settings, None, None, output, voice=True)
+
+    text = output.getvalue()
+    assert "2400" in text and "1500" not in text
+    assert "500" in text and "120" in text and "700" in text
+    assert "superseded" in text and "unavailable" in text
+    assert "dropped=4" in text and "queue_max_ms=90" in text
+    assert "candidate=21.0" in text and "stt_ms=80" in text

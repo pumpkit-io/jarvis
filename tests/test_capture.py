@@ -3,6 +3,8 @@
 import asyncio
 import threading
 from pathlib import Path
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 
@@ -204,3 +206,48 @@ def test_the_echo_reference_keeps_only_the_latest_audio() -> None:
     # Ten 100 ms blocks make the last second; the oldest were dropped.
     assert [int(samples[0]) for samples, _ in taken] == list(range(20, 30))
     assert buffer.take() == []
+
+
+async def test_trace_preserves_capture_and_playback_times_through_an_inference_stall() -> None:
+    from tests.test_player import FakeStream
+    from jarvis_hub.voice.player import Clip, SoundPlayer
+
+    records: list[dict[str, Any]] = []
+    echo, source, wake = CountingEcho(), Source(), BlockingWake()
+    now = [100.0]
+    capture = Capture(
+        lambda: engines(echo, wake), Listening(), records.append, lambda text: None,
+        source=source, backlog_s=10, clock=lambda: now[0],
+    )
+    streams: list[FakeStream] = []
+
+    def open_stream(rate: int, fill: Callable[[np.ndarray], None]) -> FakeStream:
+        streams.append(FakeStream(fill))
+        return streams[-1]
+
+    player = SoundPlayer(24_000, open_stream=open_stream, on_played=capture.reference)
+    capture.start()
+    try:
+        await until(capture.ready.is_set)
+        source.frames(8, value=3, start=99.92)
+        await asyncio.sleep(0.02)
+        player.play(Clip("Synthetic playback", "test", np.full(2400, 0.25, np.float32), 24_000))
+        np.testing.assert_array_equal(streams[0].pull(1024), 0.25)
+        now[0] = 101.0
+        source.frames(5, value=3, start=100.0)
+        wake.release.set()
+        await until(lambda: any(r.get("kind") == "capture" and r.get("captured_through_at") == 100.05 for r in records))
+
+        frames = [r for r in records if r["kind"] == "capture"]
+        assert frames[-1]["max_queue_delay_ms"] == 990
+        assert frames[-1]["processed_at"] == 101.0
+        reference = next(r for r in records if r["kind"] == "playback_reference")
+        assert reference["submitted_at"] == 100.0
+        assert reference["samples"] == 1024
+        assert reference["device_played_at"] is None
+        assert echo.referenced == 1024
+        assert all("audio" not in r and "text" not in r for r in records)
+    finally:
+        wake.release.set()
+        capture.close()
+        player.close()
