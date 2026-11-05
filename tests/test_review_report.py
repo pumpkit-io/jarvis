@@ -105,3 +105,30 @@ def test_missing_execution_file_fails_with_a_nonsecret_error(tmp_path: Path) -> 
     assert not report.exists()
     assert completed.stderr.startswith("Review output rejected:")
     assert "Traceback" not in completed.stderr
+
+
+@pytest.mark.parametrize(("body", "diagnostics"), [
+    ("PRIVATE_SECRET\n" + REPORT,
+     "expected_heading_elsewhere=true first_line_heading_like=false outer_fence=false axes_present=3"),
+    (REPORT.replace(HEAD, "b" * 40),
+     "expected_heading_elsewhere=false first_line_heading_like=true outer_fence=false axes_present=3"),
+    ("PRIVATE_SECRET\nNothing here.\n",
+     "expected_heading_elsewhere=false first_line_heading_like=false outer_fence=false axes_present=0"),
+    ("```markdown\n" + REPORT + "```\n",
+     "expected_heading_elsewhere=true first_line_heading_like=false outer_fence=true axes_present=3"),
+])
+def test_heading_rejection_exposes_only_safe_format_diagnostics(tmp_path: Path, body: str, diagnostics: str) -> None:
+    execution = tmp_path / "execution.json"
+    execution.write_text(json.dumps([{"type": "result", "subtype": "success", "is_error": False, "result": body}]))
+    report, output = tmp_path / "review.md", tmp_path / "github-output"
+    completed = subprocess.run([
+        sys.executable, str(ROOT / ".github/scripts/review_report.py"),
+        "--execution-file", str(execution), "--head", HEAD,
+        "--report", str(report), "--github-output", str(output),
+    ], capture_output=True, text=True)
+    assert completed.returncode == 1
+    assert not report.exists() and not output.exists()
+    assert completed.stderr == f"Review output rejected: review heading does not match the expected PR head; {diagnostics}\n"
+    assert "PRIVATE_SECRET" not in completed.stdout + completed.stderr
+    assert HEAD not in completed.stdout + completed.stderr
+    assert "b" * 40 not in completed.stdout + completed.stderr
