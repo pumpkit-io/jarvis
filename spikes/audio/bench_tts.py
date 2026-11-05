@@ -20,6 +20,9 @@ SERVER = "http://127.0.0.1:8880/v1"
 def bench_inprocess() -> dict:
     import mlx.core as mx
     from kokoro_mlx import KokoroTTS
+    from common import prepare_tts
+
+    prepare_tts()
 
     t0 = time.perf_counter()
     tts = KokoroTTS.from_pretrained("mlx-community/Kokoro-82M-bf16")

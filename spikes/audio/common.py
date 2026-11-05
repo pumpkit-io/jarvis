@@ -5,6 +5,7 @@ import math
 import os
 import statistics
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -23,6 +24,14 @@ RECORDINGS = DATA / "recordings"
 RESULTS = Path(os.environ.get("JARVIS_AUDIO_RESULTS", HERE / "results"))
 LOCAL_RESULTS = DATA / "results"
 TRANSCRIPT_KEYS = {"hyp", "samples", "wrong"}
+
+
+def prepare_tts() -> None:
+    """Use the runtime's bundled-data setup even in the standalone spike environment."""
+    sys.path.insert(0, str(HERE.parents[1] / "src"))
+    from jarvis_hub.voice.tts import configure_espeak
+
+    configure_espeak()
 
 
 def load_16k(path: Path) -> np.ndarray:
