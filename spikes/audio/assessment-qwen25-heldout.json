@@ -1,0 +1,218 @@
+[
+  {
+    "id": "j01",
+    "category": "addressed-stop",
+    "lang": "en",
+    "speech": "Jarvis, pause your explanation, I need to correct something.",
+    "user": "Explain the database schema.",
+    "played": "The schema contains six tables.",
+    "expected": "directed"
+  },
+  {
+    "id": "j02",
+    "category": "addressed-stop",
+    "lang": "it",
+    "speech": "Jarvis, interrompi la tua risposta, devo correggere una cosa.",
+    "user": "Descrivi lo schema.",
+    "played": "Lo schema contiene sei tabelle.",
+    "expected": "directed"
+  },
+  {
+    "id": "j03",
+    "category": "correction",
+    "lang": "en",
+    "speech": "No, I meant the authentication service, please explain that instead.",
+    "user": "Describe the notification service.",
+    "played": "Notifications are sent through a queue.",
+    "expected": "directed"
+  },
+  {
+    "id": "j04",
+    "category": "correction",
+    "lang": "it",
+    "speech": "Intendevo il servizio di autenticazione, spiega quello invece.",
+    "user": "Descrivi le notifiche.",
+    "played": "Le notifiche passano da una coda.",
+    "expected": "directed"
+  },
+  {
+    "id": "j05",
+    "category": "backchannel-then-correction",
+    "lang": "en",
+    "speech": "Sure, actually leave the database and discuss the cache.",
+    "user": "Explain persistence.",
+    "played": "The database stores all events.",
+    "expected": "directed"
+  },
+  {
+    "id": "j06",
+    "category": "correction",
+    "lang": "it",
+    "speech": "Aspetta un attimo, confronta la cache con il database.",
+    "user": "Descrivi il database.",
+    "played": "Il database conserva tutti gli eventi.",
+    "expected": "directed"
+  },
+  {
+    "id": "j07",
+    "category": "follow-up",
+    "lang": "en",
+    "speech": "What happens if that queue fills up?",
+    "user": "Explain event processing.",
+    "played": "Events enter a bounded queue.",
+    "expected": "directed"
+  },
+  {
+    "id": "j08",
+    "category": "follow-up",
+    "lang": "it",
+    "speech": "E se quella coda si riempie?",
+    "user": "Spiega gli eventi.",
+    "played": "Gli eventi arrivano in una coda limitata.",
+    "expected": "directed"
+  },
+  {
+    "id": "j09",
+    "category": "backchannel",
+    "lang": "en",
+    "speech": "Yep, mhm.",
+    "user": "Explain event processing.",
+    "played": "Events enter a bounded queue.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "j10",
+    "category": "backchannel",
+    "lang": "it",
+    "speech": "Sì, certo.",
+    "user": "Spiega gli eventi.",
+    "played": "Gli eventi arrivano in una coda limitata.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "j11",
+    "category": "other-addressee",
+    "lang": "en",
+    "speech": "Alice, stop moving that chair.",
+    "user": "Explain event processing.",
+    "played": "Events enter a bounded queue.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "j12",
+    "category": "other-addressee",
+    "lang": "it",
+    "speech": "Paolo, aspetta vicino all’ascensore.",
+    "user": "Spiega gli eventi.",
+    "played": "Gli eventi arrivano in una coda limitata.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "j13",
+    "category": "other-addressee-correction",
+    "lang": "en",
+    "speech": "Emma, actually I meant the other service.",
+    "user": "Describe the notification service.",
+    "played": "Notifications are sent through a queue.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "j14",
+    "category": "other-addressee-correction",
+    "lang": "it",
+    "speech": "Francesca, no, intendevo la settimana prossima.",
+    "user": "Spiega gli eventi.",
+    "played": "Gli eventi arrivano in una coda limitata.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "j15",
+    "category": "quoted-wake",
+    "lang": "en",
+    "speech": "The podcast presenter demonstrated saying Ehi Jarvis stop.",
+    "user": "Explain event processing.",
+    "played": "Events enter a bounded queue.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "j16",
+    "category": "quoted-wake",
+    "lang": "it",
+    "speech": "Stavamo leggendo la battuta Hey Jarvis fermati.",
+    "user": "Spiega gli eventi.",
+    "played": "Gli eventi arrivano in una coda limitata.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "j17",
+    "category": "nearby-dialogue",
+    "lang": "en",
+    "speech": "Have you called the plumber? Not yet, I will call tomorrow.",
+    "user": "Explain event processing.",
+    "played": "Events enter a bounded queue.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "j18",
+    "category": "nearby-dialogue",
+    "lang": "it",
+    "speech": "A che ora arriva il treno? Alle cinque e mezza.",
+    "user": "Spiega gli eventi.",
+    "played": "Gli eventi arrivano in una coda limitata.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "j19",
+    "category": "interrupt-vocabulary",
+    "lang": "en",
+    "speech": "That book is called Stop Worrying.",
+    "user": "Explain event processing.",
+    "played": "Events enter a bounded queue.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "j20",
+    "category": "interrupt-vocabulary",
+    "lang": "it",
+    "speech": "Il programma si chiama Aspetta e Spera.",
+    "user": "Spiega gli eventi.",
+    "played": "Gli eventi arrivano in una coda limitata.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "j21",
+    "category": "ambiguous-addressee",
+    "lang": "en",
+    "speech": "Not that, the next one.",
+    "user": "",
+    "played": "",
+    "expected": "uncertain"
+  },
+  {
+    "id": "j22",
+    "category": "ambiguous-addressee",
+    "lang": "it",
+    "speech": "Non quello, il prossimo.",
+    "user": "",
+    "played": "",
+    "expected": "uncertain"
+  },
+  {
+    "id": "j23",
+    "category": "ambiguous-addressee",
+    "lang": "en",
+    "speech": "Give me a moment.",
+    "user": "",
+    "played": "",
+    "expected": "uncertain"
+  },
+  {
+    "id": "j24",
+    "category": "ambiguous-addressee",
+    "lang": "it",
+    "speech": "Cambia il nome.",
+    "user": "",
+    "played": "",
+    "expected": "uncertain"
+  }
+]

@@ -1,0 +1,56 @@
+[
+  {
+    "id": "t01",
+    "category": "addressed-stop",
+    "lang": "en",
+    "speech": "Jarvis, please stop that explanation.",
+    "user": "Explain the merge process.",
+    "played": "First inspect the branch.",
+    "expected": "directed"
+  },
+  {
+    "id": "t02",
+    "category": "correction",
+    "lang": "it",
+    "speech": "No, controlla staging invece di produzione.",
+    "user": "Controlla produzione.",
+    "played": "Controllo produzione.",
+    "expected": "directed"
+  },
+  {
+    "id": "t03",
+    "category": "backchannel",
+    "lang": "en",
+    "speech": "Mhm, okay.",
+    "user": "Explain CI.",
+    "played": "Tests run before publishing.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "t04",
+    "category": "other-addressee",
+    "lang": "it",
+    "speech": "Marco, per favore apri la finestra.",
+    "user": "Spiegami il codice.",
+    "played": "Ci sono due moduli.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "t05",
+    "category": "quoted-wake",
+    "lang": "en",
+    "speech": "The actor said Jarvis stop in that scene.",
+    "user": "Explain CI.",
+    "played": "Tests run before publishing.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "t06",
+    "category": "ambiguous-addressee",
+    "lang": "it",
+    "speech": "Quello no.",
+    "user": "",
+    "played": "",
+    "expected": "uncertain"
+  }
+]
