@@ -18,7 +18,6 @@ from jarvis_hub.voice.state import (
     ReplyAudio,
     ReplyDone,
     Resume,
-    Say,
     SendTurn,
     SpeechStarted,
     Tick,
@@ -168,10 +167,10 @@ def test_the_wake_phrase_said_in_one_breath_is_cut_from_the_turn(heard: str, tur
         ("Grazie Jarvis, basta così.", "it"),
     ],
 )
-def test_a_stop_phrase_on_its_own_says_very_good_and_idles_without_the_model(heard: str, lang: Lang) -> None:
+def test_a_stop_phrase_on_its_own_idles_silently_without_the_model(heard: str, lang: Lang) -> None:
     voice, actions = run(WakeWord(10.0), Heard(heard, None, 12.0))
     assert voice.state == "idle"
-    assert actions == [Chime(), Say("very_good", lang)]
+    assert actions == [Chime()]
 
 
 @pytest.mark.parametrize(
@@ -186,7 +185,7 @@ def test_a_stop_phrase_inside_a_longer_utterance_goes_to_the_talker(heard: str) 
 def test_a_stop_phrase_in_the_follow_up_window_idles_too() -> None:
     voice, actions = run(WakeWord(10.0), Heard("Hi", "en", 11.0), ReplyDone(12.0, 11.0), Heard("That's all", "en", 13.0))
     assert voice.state == "idle"
-    assert actions[-1] == Say("very_good", "en")
+    assert actions == [Chime(), SendTurn("Hi", "en", 11.0)]
 
 
 def test_end_conversation_idles_once_the_reply_has_played() -> None:

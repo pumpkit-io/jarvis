@@ -139,14 +139,6 @@ class Chime:
 
 
 @dataclass(frozen=True)
-class Say:
-    """A cached line."""
-
-    name: Literal["very_good"]
-    lang: Lang
-
-
-@dataclass(frozen=True)
 class SendTurn:
     """`at`, when the turn was heard, also tags the reply begun for it."""
 
@@ -172,7 +164,7 @@ class Resume:
     """Go on with Jarvis's voice from a little before the pause."""
 
 
-Action = Chime | Say | SendTurn | Interrupt | Pause | Resume
+Action = Chime | SendTurn | Interrupt | Pause | Resume
 
 
 @dataclass(frozen=True)
@@ -400,7 +392,7 @@ def _heard(voice: Voice, text: str, lang: Lang | None, at: float, timing: Timing
             return replace(heard, state="follow_up", deadline=voice.window_ends), []
         # The wake phrase alone, or noise after the Wake word, waits for the request as the Wake word would.
         return replace(heard, state="listening", deadline=at + timing.listen_s), []
-    if (stop_lang := stop_phrase(turn)) is not None:
-        return replace(heard, state="idle", deadline=None, ending=False), [Say("very_good", stop_lang)]
+    if stop_phrase(turn) is not None:
+        return replace(heard, state="idle", deadline=None, ending=False), []
     sent = SendTurn(turn, lang, at, interrupted=voice.cut_off)
     return replace(heard, state="thinking", deadline=None, ending=False, awaiting=at, cut_off=False), [sent]
