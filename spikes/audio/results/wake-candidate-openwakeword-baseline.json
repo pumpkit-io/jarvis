@@ -1,0 +1,219 @@
+{
+  "source": "recordings",
+  "candidate": "openWakeWord hey_jarvis_v0.1 ONNX, package 0.6.0",
+  "provenance": "b575016:spikes/audio/results/wake-threshold-sweep-recordings.json",
+  "purpose": "reuse completed exploratory threshold sweep, not independent confirmation",
+  "positive_takes": 80,
+  "negative_files": 13,
+  "negative_seconds": 3900,
+  "operating_points": [
+    {
+      "vad": "vad_threshold=0.0",
+      "threshold": 0.03,
+      "recall": {
+        "Hey Jarvis": "20/20",
+        "Hi Jarvis": "19/20",
+        "Ehi Jarvis": "20/20",
+        "Jarvis": "19/20"
+      },
+      "false_wakes": 7,
+      "false_wakes_per_hour": 6.46,
+      "joint_gate_pass": false
+    },
+    {
+      "vad": "vad_threshold=0.0",
+      "threshold": 0.05,
+      "recall": {
+        "Hey Jarvis": "20/20",
+        "Hi Jarvis": "19/20",
+        "Ehi Jarvis": "20/20",
+        "Jarvis": "19/20"
+      },
+      "false_wakes": 5,
+      "false_wakes_per_hour": 4.62,
+      "joint_gate_pass": false
+    },
+    {
+      "vad": "vad_threshold=0.0",
+      "threshold": 0.1,
+      "recall": {
+        "Hey Jarvis": "20/20",
+        "Hi Jarvis": "19/20",
+        "Ehi Jarvis": "19/20",
+        "Jarvis": "17/20"
+      },
+      "false_wakes": 2,
+      "false_wakes_per_hour": 1.85,
+      "joint_gate_pass": false
+    },
+    {
+      "vad": "vad_threshold=0.0",
+      "threshold": 0.15,
+      "recall": {
+        "Hey Jarvis": "20/20",
+        "Hi Jarvis": "19/20",
+        "Ehi Jarvis": "18/20",
+        "Jarvis": "17/20"
+      },
+      "false_wakes": 1,
+      "false_wakes_per_hour": 0.92,
+      "joint_gate_pass": false
+    },
+    {
+      "vad": "vad_threshold=0.0",
+      "threshold": 0.2,
+      "recall": {
+        "Hey Jarvis": "19/20",
+        "Hi Jarvis": "19/20",
+        "Ehi Jarvis": "18/20",
+        "Jarvis": "13/20"
+      },
+      "false_wakes": 0,
+      "false_wakes_per_hour": 0.0,
+      "joint_gate_pass": false
+    },
+    {
+      "vad": "vad_threshold=0.0",
+      "threshold": 0.25,
+      "recall": {
+        "Hey Jarvis": "19/20",
+        "Hi Jarvis": "18/20",
+        "Ehi Jarvis": "18/20",
+        "Jarvis": "13/20"
+      },
+      "false_wakes": 0,
+      "false_wakes_per_hour": 0.0,
+      "joint_gate_pass": false
+    },
+    {
+      "vad": "vad_threshold=0.0",
+      "threshold": 0.3,
+      "recall": {
+        "Hey Jarvis": "19/20",
+        "Hi Jarvis": "18/20",
+        "Ehi Jarvis": "18/20",
+        "Jarvis": "13/20"
+      },
+      "false_wakes": 0,
+      "false_wakes_per_hour": 0.0,
+      "joint_gate_pass": false
+    },
+    {
+      "vad": "vad_threshold=0.0",
+      "threshold": 0.5,
+      "recall": {
+        "Hey Jarvis": "17/20",
+        "Hi Jarvis": "15/20",
+        "Ehi Jarvis": "15/20",
+        "Jarvis": "10/20"
+      },
+      "false_wakes": 0,
+      "false_wakes_per_hour": 0.0,
+      "joint_gate_pass": false
+    },
+    {
+      "vad": "vad_threshold=0.5",
+      "threshold": 0.03,
+      "recall": {
+        "Hey Jarvis": "20/20",
+        "Hi Jarvis": "19/20",
+        "Ehi Jarvis": "20/20",
+        "Jarvis": "19/20"
+      },
+      "false_wakes": 6,
+      "false_wakes_per_hour": 5.54,
+      "joint_gate_pass": false
+    },
+    {
+      "vad": "vad_threshold=0.5",
+      "threshold": 0.05,
+      "recall": {
+        "Hey Jarvis": "20/20",
+        "Hi Jarvis": "19/20",
+        "Ehi Jarvis": "20/20",
+        "Jarvis": "19/20"
+      },
+      "false_wakes": 5,
+      "false_wakes_per_hour": 4.62,
+      "joint_gate_pass": false
+    },
+    {
+      "vad": "vad_threshold=0.5",
+      "threshold": 0.1,
+      "recall": {
+        "Hey Jarvis": "20/20",
+        "Hi Jarvis": "19/20",
+        "Ehi Jarvis": "19/20",
+        "Jarvis": "17/20"
+      },
+      "false_wakes": 2,
+      "false_wakes_per_hour": 1.85,
+      "joint_gate_pass": false
+    },
+    {
+      "vad": "vad_threshold=0.5",
+      "threshold": 0.15,
+      "recall": {
+        "Hey Jarvis": "20/20",
+        "Hi Jarvis": "19/20",
+        "Ehi Jarvis": "18/20",
+        "Jarvis": "17/20"
+      },
+      "false_wakes": 1,
+      "false_wakes_per_hour": 0.92,
+      "joint_gate_pass": false
+    },
+    {
+      "vad": "vad_threshold=0.5",
+      "threshold": 0.2,
+      "recall": {
+        "Hey Jarvis": "19/20",
+        "Hi Jarvis": "19/20",
+        "Ehi Jarvis": "18/20",
+        "Jarvis": "13/20"
+      },
+      "false_wakes": 0,
+      "false_wakes_per_hour": 0.0,
+      "joint_gate_pass": false
+    },
+    {
+      "vad": "vad_threshold=0.5",
+      "threshold": 0.25,
+      "recall": {
+        "Hey Jarvis": "19/20",
+        "Hi Jarvis": "18/20",
+        "Ehi Jarvis": "18/20",
+        "Jarvis": "13/20"
+      },
+      "false_wakes": 0,
+      "false_wakes_per_hour": 0.0,
+      "joint_gate_pass": false
+    },
+    {
+      "vad": "vad_threshold=0.5",
+      "threshold": 0.3,
+      "recall": {
+        "Hey Jarvis": "19/20",
+        "Hi Jarvis": "18/20",
+        "Ehi Jarvis": "18/20",
+        "Jarvis": "13/20"
+      },
+      "false_wakes": 0,
+      "false_wakes_per_hour": 0.0,
+      "joint_gate_pass": false
+    },
+    {
+      "vad": "vad_threshold=0.5",
+      "threshold": 0.5,
+      "recall": {
+        "Hey Jarvis": "17/20",
+        "Hi Jarvis": "14/20",
+        "Ehi Jarvis": "15/20",
+        "Jarvis": "10/20"
+      },
+      "false_wakes": 0,
+      "false_wakes_per_hour": 0.0,
+      "joint_gate_pass": false
+    }
+  ]
+}

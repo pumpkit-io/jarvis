@@ -28,11 +28,9 @@ from tests.fakes import (
 
 STARTUP_LINES = [
     ("At your service, sir.", "am_liam"),
-    ("One moment, sir.", "am_liam"),
     ("Very good, sir.", "am_liam"),
     ("I've reached the usage limit, sir.", "am_liam"),
     ("Ai suoi ordini, signore.", "im_nicola"),
-    ("Un momento, signore.", "im_nicola"),
     ("Molto bene, signore.", "im_nicola"),
     ("Ho raggiunto il limite di utilizzo, signore.", "im_nicola"),
 ]
@@ -216,7 +214,7 @@ async def test_a_cached_line_is_said_in_the_language_asked_for(speech: Speech, p
     ]
 
 
-async def test_one_moment_plays_when_no_sentence_is_ready_shortly_after_the_turn(
+async def test_slow_generation_starts_with_the_real_answer_without_cached_holding_speech(
     clock: FakeClock,
     output: RecordingOutput,
     metrics: RecordingMetrics,
@@ -231,13 +229,18 @@ async def test_one_moment_plays_when_no_sentence_is_ready_shortly_after_the_turn
     await hub.run(lines(clock, "Tell me something long"))
     await speech.idle()
 
-    assert player.texts == ["One moment, sir.", "Here you are, sir."]
-    assert tts.calls.count(("One moment, sir.", "am_liam")) == 1
+    assert player.texts == ["Here you are, sir."]
+    assert ("One moment, sir.", "am_liam") not in tts.calls
     [row] = speech_rows(metrics)
-    assert row["holding_line"] is True
+    assert "holding_line" not in row
+    assert row["first_meaningful_audio_ms"] == 2000
+    turn = next(r for r in metrics.records if r.get("role") == "talker" and r["kind"] == "user")
+    assert row["turn"] == turn["turn"]
+    assert row["request_at"] == turn["request_at"]
+    assert row["meaningful_audio_basis"] == "queue_estimate"
 
 
-async def test_one_moment_is_said_in_italian_after_an_italian_turn(
+async def test_slow_italian_generation_starts_with_the_real_answer(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, speech: Speech, player: RecordingPlayer
 ) -> None:
     backend = FakeBackend(clock, [[Wait(2.0), Text("Ecco, signore.")]])
@@ -247,7 +250,7 @@ async def test_one_moment_is_said_in_italian_after_an_italian_turn(
     await hub.run(lines(clock, "Dimmi qualcosa di lungo"))
     await speech.idle()
 
-    assert player.texts == ["Un momento, signore.", "Ecco, signore."]
+    assert player.texts == ["Ecco, signore."]
 
 
 async def test_no_holding_line_when_the_first_sentence_comes_in_time(
@@ -262,7 +265,7 @@ async def test_no_holding_line_when_the_first_sentence_comes_in_time(
 
     assert player.texts == ["Quick, sir.", "And slow."]
     [row] = speech_rows(metrics)
-    assert row["holding_line"] is False
+    assert "holding_line" not in row
 
 
 async def test_no_holding_line_before_relaying_news(
@@ -338,6 +341,11 @@ async def test_interrupting_a_reply_stops_its_speech(
 
     assert player.texts == ["First sentence."]
     assert "stop" in player.events
+    stopped = next(r for r in metrics.records if r["kind"] == "speech_stop")
+    turn = next(r for r in metrics.records if r.get("role") == "talker" and r["kind"] == "user")
+    assert stopped["turn"] == turn["turn"]
+    assert stopped["request_at"] == turn["request_at"]
+    assert stopped["stopped_at"] == clock.now()
 
 
 async def test_a_sentence_that_fails_to_synthesise_is_skipped_with_a_notice(
@@ -538,7 +546,7 @@ async def test_interrupting_after_the_text_has_ended_still_stops_the_speech(
     await speech.close()
 
 
-async def test_the_holding_line_counts_from_when_the_talker_starts_on_a_line(
+async def test_waiting_behind_a_busy_talker_inserts_no_holding_speech(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, speech: Speech, player: RecordingPlayer
 ) -> None:
     release = asyncio.Event()
@@ -605,3 +613,113 @@ async def test_the_chime_reports_when_it_starts_playing(
         assert starts == [pytest.approx(clock.now() + player.clips[0].seconds)]  # pyright: ignore[reportUnknownMemberType]
     finally:
         await speech.close()
+
+
+async def test_cached_speech_does_not_claim_a_meaningful_response(
+    clock: FakeClock, metrics: RecordingMetrics, speech: Speech
+) -> None:
+    speech.begin("en", turn=45, heard_at=clock.now())
+    speech.say("usage_limit", "en", in_reply=True)
+    await speech.idle()
+    clock.advance(0.8)
+    speech.feed("The build passed.")
+    speech.end()
+    await speech.idle()
+
+    [row] = speech_rows(metrics)
+    assert row["first_audio_ms"] == 0
+    assert row["first_meaningful_audio_ms"] == 800
+
+
+async def test_stopping_after_normal_playback_does_not_supersede_the_request(
+    clock: FakeClock, metrics: RecordingMetrics, speech: Speech
+) -> None:
+    speech.begin("en", turn=70, heard_at=clock.now())
+    speech.feed("The build passed.")
+    speech.end()
+    await speech.idle()
+    speech.stop()
+
+    assert not any(r["kind"] == "speech_stop" for r in metrics.records)
+    assert len(speech_rows(metrics)) == 1
+
+
+@pytest.mark.parametrize("drained", [False, True])
+async def test_stop_traces_only_reply_audio_left_ahead_of_a_chime(
+    clock: FakeClock, metrics: RecordingMetrics, tts: FakeTts, output: RecordingOutput, drained: bool
+) -> None:
+    player = RecordingPlayer(hold=True)
+    speech = Speech(tts, player, clock, metrics=metrics, notice=output.notice)
+    speech.start()
+    try:
+        speech.begin("en", turn=71, heard_at=clock.now())
+        speech.feed("The build passed.")
+        speech.end()
+        await until(lambda: len(speech_rows(metrics)) == 1)
+        speech.say("chime", "en")
+        await until(lambda: len(player.clips) == 2)
+        if drained:
+            player.finish(1)
+        speech.stop()
+
+        stops = [r["turn"] for r in metrics.records if r["kind"] == "speech_stop"]
+        assert stops == ([] if drained else [71])
+        assert player.pending() == 0
+    finally:
+        await speech.close()
+
+
+@pytest.mark.parametrize(
+    ("utterance", "response"),
+    [
+        ("Check the open Jarvis PRs", "I'll check Jarvis's PRs, sir."),
+        ("Controlla le PR aperte di Jarvis", "Controllo le PR di Jarvis, signore."),
+    ],
+)
+async def test_request_specific_response_precedes_background_work(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, speech: Speech,
+    player: RecordingPlayer, utterance: str, response: str,
+) -> None:
+    release = asyncio.Event()
+    backend = FakeBackend(
+        clock,
+        [[Text(response + " "), Gate(release), Tool("delegate", {"request": utterance})], [Text("The checks passed.")]],
+        orchestrator=[[Tool("report", {"task_id": "T1", "spoken": "The checks passed."})]],
+    )
+    hub = speaking_hub(backend, output, metrics, speech)
+    await hub.start()
+    running = asyncio.create_task(hub.run(lines(clock, utterance)))
+    try:
+        await until(lambda: player.texts == [response])
+        assert backend.session("talker").tool_results == []
+        assert all(not s.received for s in backend.sessions if s.spec.role == "orchestrator")
+    finally:
+        release.set()
+        await running
+        await speech.idle()
+
+    turn = next(r for r in metrics.records if r.get("role") == "talker" and r["kind"] == "user")
+    assert turn["tool_before_text"] is False
+    assert backend.session("talker").tool_results[0].input == {"request": utterance}
+
+
+async def test_cancelling_slow_generation_before_any_text_emits_no_filler(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, speech: Speech, player: RecordingPlayer
+) -> None:
+    backend = FakeBackend(clock, [[Wait(3.0), AwaitInterrupt(), Text("Obsolete answer.")]])
+    hub = speaking_hub(backend, output, metrics, speech)
+    typist = Typist(clock)
+    await hub.start()
+    running = asyncio.create_task(hub.run(typist.lines()))
+    typist.type("Explain the pending work")
+    await until(lambda: clock.now() >= 1003.0)
+    await asyncio.sleep(0.01)
+    assert player.texts == []
+    assert await hub.interrupt()
+    typist.end()
+    await running
+    await speech.idle()
+
+    assert player.texts == []
+    stopped = next(r for r in metrics.records if r["kind"] == "speech_stop")
+    assert stopped["first_meaningful_audio_ms"] is None

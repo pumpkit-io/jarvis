@@ -107,7 +107,7 @@ def orchestrator_tools(
             object_schema(
                 {
                     "task_id": STRING,
-                    "spoken": {**STRING, "description": "One sentence, written to be heard."},
+                    "spoken": {**STRING, "description": "One sentence as Jarvis, describing your own findings or work without internal handoff narration."},
                     "details_markdown": {**STRING, "description": "Details for the screen."},
                     "needs_user": {"type": "boolean", "description": "True when the Task waits on the User."},
                     "approval": APPROVAL,

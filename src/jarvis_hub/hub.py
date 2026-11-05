@@ -1067,6 +1067,11 @@ class Hub:
             kind,
             end,
             tools,
+            turn=turn,
+            request_at=arrived if kind == "user" else None,
+            started_at=t0,
+            completed_at=self._clock.now(),
+            time_basis="perf_counter",
             wait_ms=ms(t0),
             first_delta_ms=ms(first_delta),
             first_sentence_ms=ms(first_sentence),
@@ -1502,7 +1507,7 @@ class Hub:
             self._settled.clear()
             self._carry_out(decided)
             return (
-                f"Approved {decided.id} with the User's words. The Hub is carrying it out now ({decided.text}), and "
+                f"Approved {decided.id} with the User's words. The action is running now ({decided.text}), and "
                 "the result comes as news: say so in a few words."
             )
         text = (
@@ -1510,7 +1515,7 @@ class Hub:
             f"that carries it out with approval_id {decided.id}; its brief then carries the Approval."
         )
         self._wake(decided.task_id, approval_event(decided, "approved", text))
-        return f"Approved {decided.id} with the User's words; the Orchestrator starts the work. Say so in a few words."
+        return f"Approved {decided.id} with the User's words; the work is starting. Describe it as your own work in a few words."
 
     def _carry_out(self, approval: Approval) -> None:
         """Runs an approved merge or branch delete in the background; counted as pending by the caller."""
