@@ -22,7 +22,7 @@ from jarvis_hub.voice.bargein import TALKING_GAP_S, Partial
 from jarvis_hub.voice.clips import ClipKind, ClipStore
 from jarvis_hub.voice.language import detect_language
 from jarvis_hub.voice.player import Samples
-from jarvis_hub.voice.state import BargeIn, Heard, InputEvent, Overheard, SpeechStarted, WakeWord
+from jarvis_hub.voice.state import BargeIn, CaptureAborted, Heard, InputEvent, Overheard, SpeechStarted, WakeWord
 
 SAMPLE_RATE = 16_000
 FRAME = SAMPLE_RATE // 100
@@ -212,7 +212,8 @@ class InputPipeline:
     def pending_endpoint(self) -> int | None:
         return None if self._pending is None else self._pending.sequence
 
-    def discard_endpoint(self, reason: str, *, block: bool = False) -> None:
+    def discard_endpoint(self, reason: str, *, block: bool = False) -> CaptureAborted | None:
+        abandoned = self._turn is not None
         pending = self._pending
         if pending is not None:
             self._endpoint_record(pending, "invalidated", reason)
@@ -223,6 +224,7 @@ class InputPipeline:
             self._vad_buf = np.zeros(0, np.int16)
             self._wake_buf = np.zeros(0, np.int16)
             self._run = None
+        return CaptureAborted(self._clock(), reason) if block and abandoned else None
 
     def _endpoint_record(self, endpoint: _Endpoint, stage: str, reason: str) -> None:
         if not self._defer_endpoints:
@@ -283,21 +285,20 @@ class InputPipeline:
         """Accept a frame whose echo was cancelled at capture time, before waiting for inference."""
         self._ring.append((frame, at))
         self._at = at
+        events: list[InputEvent] = []
         if self._clip is not None and len(self._clip[1]) < MAX_BARGE_CLIP_FRAMES:
             self._clip[1].append(frame)
         if self._turn is not None:
             self._turn.frames.append(frame)
             if self._retained_frame_limit is not None and len(self._turn.frames) > self._retained_frame_limit:
-                self.discard_endpoint("retention_limit", block=True)
-        events: list[InputEvent] = []
+                if (aborted := self.discard_endpoint("retention_limit", block=True)) is not None:
+                    return [aborted]
         self._wake_buf = np.concatenate([self._wake_buf, frame])
         while len(self._wake_buf) >= self._e.wake.chunk:
             chunk, self._wake_buf = self._wake_buf[: self._e.wake.chunk], self._wake_buf[self._e.wake.chunk :]
             ends = at - len(self._wake_buf) / SAMPLE_RATE
             if self._e.wake.score(chunk) >= self._s.wake_threshold and ends - self._last_wake >= self._s.wake_refractory_s:
                 self._last_wake = ends
-                if self._pending is not None:
-                    self.discard_endpoint("wake")
                 if self._blocked:
                     self._blocked = False
                     self._onset = None
@@ -629,8 +630,12 @@ class Capture:
             self._frames.put(None)
 
     def _publish(self, event: InputEvent, epoch: int) -> None:
-        if not self._closed and (not isinstance(event, Heard) or epoch == self._capture_epoch):
+        if not self._closed and (not isinstance(event, (Heard, CaptureAborted)) or epoch == self._capture_epoch):
             self._events.put_nowait(event)
+
+    def _abandon(self, pipeline: InputPipeline, reason: str, epoch: int) -> None:
+        if (aborted := pipeline.discard_endpoint(reason, block=True)) is not None:
+            self._on_loop(lambda event: self._publish(event, epoch), aborted)
 
     def _fence(self, pipeline: InputPipeline, epoch: int, loss_epoch: int) -> None:
         candidate = pipeline.pending_endpoint
@@ -716,7 +721,7 @@ class Capture:
                 pipeline.capture(item.on)
                 continue
             if isinstance(item, _Overflow):
-                pipeline.discard_endpoint("overflow", block=True)
+                self._abandon(pipeline, "overflow", epoch)
                 continue
             if isinstance(item, _EndpointFence):
                 with self._backlog_lock:
@@ -724,6 +729,8 @@ class Capture:
                     lost = item.loss_epoch != self._loss_epoch
                     loss_epoch = self._loss_epoch
                 reason = "capture_changed" if stale_capture else "overflow" if lost else None
+                if reason == "overflow" and pipeline.pending_endpoint == item.candidate:
+                    self._abandon(pipeline, "overflow", epoch)
                 self._on_loop(self._record, {"kind": "endpoint_fence", "stage": "processed",
                     "endpoint_candidate": item.candidate, "capture_epoch": item.capture_epoch,
                     "captured_frame_watermark": item.watermark, "processed_frame": processed_frame,
@@ -731,7 +738,7 @@ class Capture:
                 try:
                     heard = pipeline.finalize_endpoint(item.candidate, reject=reason)
                 except Exception as e:
-                    pipeline.discard_endpoint("inference_failed", block=True)
+                    self._abandon(pipeline, "inference_failed", epoch)
                     self._on_loop(self._notice, f"Could not process the audio input: {type(e).__name__}: {e}")
                     continue
                 if heard is not None:
@@ -761,7 +768,7 @@ class Capture:
             try:
                 events = pipeline.push_clean(item.pcm, item.at)
             except Exception as e:
-                pipeline.discard_endpoint("inference_failed", block=True)
+                self._abandon(pipeline, "inference_failed", epoch)
                 self._on_loop(self._notice, f"Could not process the audio input: {type(e).__name__}: {e}")
                 continue
             for event in events:

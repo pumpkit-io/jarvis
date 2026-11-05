@@ -20,6 +20,7 @@ from jarvis_hub.voice.state import (
     AnnouncementBegins,
     Chime,
     ChimeStarted,
+    CaptureAborted,
     EndConversation,
     Event,
     InputEvent,
@@ -236,6 +237,12 @@ class VoiceMode:
         before_voice = self._voice
         before, woke_at = before_voice.state, before_voice.woke_at
         self._voice, actions = step(before_voice, event, self._timing)
+        if isinstance(event, CaptureAborted) and before_voice.in_turn and before in CAPTURING:
+            reason = {
+                "retention_limit": "That request exceeded the retained audio limit.",
+                "overflow": "Audio was dropped while listening fell behind.",
+            }.get(event.reason, "That request could not be transcribed.")
+            self._notice(f"{reason} Say 'Hey Jarvis' and try again.")
         self._bargein_log.observe(before_voice, event, self._voice, actions, self._speech.played)
         after = self._voice.state
         if after != before:
