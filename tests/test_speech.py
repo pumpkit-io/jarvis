@@ -26,11 +26,6 @@ from tests.fakes import (
     until,
 )
 
-STARTUP_LINES = [
-    ("Very good, sir.", "am_liam"),
-    ("Molto bene, signore.", "im_nicola"),
-]
-
 
 @pytest.fixture
 def clock() -> FakeClock:
@@ -181,33 +176,22 @@ async def test_the_next_sentence_is_synthesised_while_the_one_before_plays(
     await speech.close()
 
 
-async def test_cached_lines_are_synthesised_once_at_startup(
+async def test_loading_prepares_only_reusable_nonverbal_cues(
     clock: FakeClock, speech: Speech, tts: FakeTts, player: RecordingPlayer
 ) -> None:
     await speech.idle()
-    assert sorted(tts.calls) == sorted(STARTUP_LINES)
+    assert tts.calls == []
 
-    speech.say("very_good", "en")
-    speech.say("very_good", "en")
-    speech.say("very_good", "en")
+    speech.say("ready", "en")
+    speech.say("ready", "en")
+    speech.say("ready", "en")
     speech.say("chime", "en")
     await speech.idle()
 
-    assert player.texts == ["Very good, sir.", "Very good, sir.", "Very good, sir.", ""]
+    assert player.texts == ["", "", "", ""]
     assert player.clips[0] is player.clips[2]
     assert player.clips[3].seconds > 0
-    assert sorted(tts.calls) == sorted(STARTUP_LINES)
-
-
-async def test_a_cached_line_is_said_in_the_language_asked_for(speech: Speech, player: RecordingPlayer) -> None:
-    speech.say("very_good", "it")
-    speech.say("very_good", "en")
-    await speech.idle()
-
-    assert list(zip(player.texts, player.voices)) == [
-        ("Molto bene, signore.", "im_nicola"),
-        ("Very good, sir.", "am_liam"),
-    ]
+    assert tts.calls == []
 
 
 async def test_slow_generation_starts_with_the_real_answer_without_cached_holding_speech(
@@ -366,7 +350,7 @@ async def test_without_a_voice_the_replies_still_arrive_as_text(
 ) -> None:
     speech = Speech(FakeTts(load_error=OSError("no model")), player, clock, metrics=metrics, notice=output.notice)
     speech.start()
-    speech.say("very_good", "en")
+    speech.say("ready", "en")
     backend = FakeBackend(clock, [[Text("Evening, sir.")]])
     hub = speaking_hub(backend, output, metrics, speech)
 
@@ -387,7 +371,7 @@ async def test_a_turn_typed_while_the_voice_loads_is_spoken_once_it_has(
     tts.hold.clear()
     speech = Speech(tts, player, clock, metrics=metrics, notice=output.notice)
     speech.start()
-    speech.say("very_good", "en")
+    speech.say("ready", "en")
     release = asyncio.Event()
     backend = FakeBackend(clock, [[Text("Evening, sir."), Gate(release)]])
     hub = speaking_hub(backend, output, metrics, speech)
@@ -401,7 +385,7 @@ async def test_a_turn_typed_while_the_voice_loads_is_spoken_once_it_has(
     await speech.idle()
     await speech.close()
 
-    assert player.texts == ["Very good, sir.", "Evening, sir."]
+    assert player.texts == ["", "Evening, sir."]
 
 
 @pytest.mark.parametrize(
@@ -566,8 +550,8 @@ async def test_idle_gives_up_on_audio_that_stops_playing(
     player = RecordingPlayer(hold=True)
     speech = Speech(tts, player, clock, metrics=metrics, notice=output.notice)
     speech.start()
-    speech.say("very_good", "en")
-    await until(lambda: player.texts == ["Very good, sir."])
+    speech.say("ready", "en")
+    await until(lambda: player.texts == [""])
 
     idling = asyncio.create_task(speech.idle())
     await asyncio.sleep(0.01)
@@ -601,21 +585,21 @@ async def test_the_chime_reports_when_it_starts_playing(
     speech = Speech(tts, player, clock, metrics=metrics, notice=output.notice, on_chime=starts.append)
     speech.start()
     try:
-        speech.say("very_good", "en")
+        speech.say("ready", "en")
         speech.say("chime", "en")
         await until(lambda: len(player.clips) == 2)
 
-        # After the startup line still queued ahead of it.
+        # The readiness cue is still queued ahead of it.
         assert starts == [pytest.approx(clock.now() + player.clips[0].seconds)]  # pyright: ignore[reportUnknownMemberType]
     finally:
         await speech.close()
 
 
-async def test_cached_speech_does_not_claim_a_meaningful_response(
+async def test_nonverbal_cues_do_not_claim_a_meaningful_response(
     clock: FakeClock, metrics: RecordingMetrics, speech: Speech
 ) -> None:
     speech.begin("en", turn=45, heard_at=clock.now())
-    speech.say("very_good", "en", in_reply=True)
+    speech.say("ready", "en", in_reply=True)
     await speech.idle()
     clock.advance(0.8)
     speech.feed("The build passed.")

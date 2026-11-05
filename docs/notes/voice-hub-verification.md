@@ -6,7 +6,7 @@ Status on 2026-11-04: documentation and fake-adapter checks are implemented. A c
 
 Record the commit, macOS and hardware, dependency versions (`uv tree`), installed `claude --version`, model names and efforts, engine settings, devices and whether headphones were used. Finish downloads and stop other GPU-heavy processes before timing. Keep raw logs and recordings local; commit only reviewed aggregate results and versions. Do not publish transcripts or personal account data.
 
-Use one fresh launch and a recorded start/end timestamp per measurement block. `.jarvis/metrics.jsonl` appends across launches, so use the timestamps to select that block. Do not delete existing runtime state to obtain an empty log. Exclude warm-up, restart, typed, cached stop-phrase and Announcement turns from the spoken-request latency sample; retain their counts separately.
+Use one fresh launch and a recorded start/end timestamp per measurement block. `.jarvis/metrics.jsonl` appends across launches, so use the timestamps to select that block. Do not delete existing runtime state to obtain an empty log. Exclude warm-up, restart, typed, silent end-control and Announcement turns from the spoken-request latency sample; retain their counts separately.
 
 ## Recording and baseline
 
@@ -48,6 +48,7 @@ For each model and request, record whether the brief preserves scope, model/effo
 
 ## Startup and unavailable status
 
+- [ ] Verify EN/IT whole-utterance end controls return idle silently and add no model turn. Longer requests containing those words must reach the Talker. When the Talker generates a farewell and calls `end_conversation`, let that reply finish before idle, with no extra acknowledgment.
 - [ ] Confirm loading notices precede readiness, with a nonverbal cue and no startup greeting. Distinguish model, speech and listening readiness; a speech cue alone does not establish that the model or microphone is ready.
 - [ ] Use fake limits to verify known/unknown resets, held work, repeated-limit backoff and actionable status without spoken fallback. A timer clearing is not recovery evidence. Confirm the notice and generated recovery Announcement follow an actual successful held-role turn, including Quiet mode.
 - [ ] Confirm backend errors show their cause and retry/restart step while typed input remains usable under the existing lifecycle. Keep any real-model and device check separately authorized.

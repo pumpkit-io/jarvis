@@ -28,7 +28,6 @@ from jarvis_hub.voice.state import (
     ReplyAudio,
     ReplyDone,
     Resume,
-    Say,
     SendTurn,
     Tick,
     Timing,
@@ -187,7 +186,7 @@ class VoiceMode:
         await self._speech.idle()
 
     async def quiet(self) -> None:
-        """Returns once the machine is idle and nothing is playing, such as a cached line said on the way to idle."""
+        """Returns once the machine is idle and queued audio has drained."""
         while True:
             await self._idle.wait()
             await self._speech.idle()
@@ -295,8 +294,6 @@ class VoiceMode:
         match action:
             case Chime():
                 self._speech.say("chime", "en")
-            case Say(name, lang):
-                self._speech.say(name, lang)
             case SendTurn(text, lang, at, interrupted):
                 heard = self._heard_before_cut if interrupted else None
                 self._lines.put_nowait(Line(text, at, lang, typed=False, interrupted=heard))
