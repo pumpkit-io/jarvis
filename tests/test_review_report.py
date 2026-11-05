@@ -41,7 +41,7 @@ def test_successful_action_emits_report_without_agent_file_write(tmp_path: Path)
     assert "private trace" not in completed.stdout + completed.stderr + report.read_text()
 
 
-def test_blocking_review_is_published_before_verdict_failure(tmp_path: Path) -> None:
+def test_blocking_report_and_verdict_are_emitted_without_failing_conversion(tmp_path: Path) -> None:
     body = REPORT.replace("No findings.", "One likely bug.", 1).replace("Verdict: pass", "Verdict: blocking (1 hard findings)")
     execution = tmp_path / "execution.json"
     execution.write_text(json.dumps([{"type": "result", "subtype": "success", "is_error": False, "result": body}]))
