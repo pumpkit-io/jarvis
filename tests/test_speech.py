@@ -235,6 +235,11 @@ async def test_one_moment_plays_when_no_sentence_is_ready_shortly_after_the_turn
     assert tts.calls.count(("One moment, sir.", "am_liam")) == 1
     [row] = speech_rows(metrics)
     assert row["holding_line"] is True
+    assert row["first_meaningful_audio_ms"] == 2000
+    turn = next(r for r in metrics.records if r.get("role") == "talker" and r["kind"] == "user")
+    assert row["turn"] == turn["turn"]
+    assert row["request_at"] == turn["request_at"]
+    assert row["meaningful_audio_basis"] == "queue_estimate"
 
 
 async def test_one_moment_is_said_in_italian_after_an_italian_turn(
@@ -338,6 +343,11 @@ async def test_interrupting_a_reply_stops_its_speech(
 
     assert player.texts == ["First sentence."]
     assert "stop" in player.events
+    stopped = next(r for r in metrics.records if r["kind"] == "speech_stop")
+    turn = next(r for r in metrics.records if r.get("role") == "talker" and r["kind"] == "user")
+    assert stopped["turn"] == turn["turn"]
+    assert stopped["request_at"] == turn["request_at"]
+    assert stopped["stopped_at"] == clock.now()
 
 
 async def test_a_sentence_that_fails_to_synthesise_is_skipped_with_a_notice(
@@ -605,3 +615,19 @@ async def test_the_chime_reports_when_it_starts_playing(
         assert starts == [pytest.approx(clock.now() + player.clips[0].seconds)]  # pyright: ignore[reportUnknownMemberType]
     finally:
         await speech.close()
+
+
+async def test_cached_speech_does_not_claim_a_meaningful_response(
+    clock: FakeClock, metrics: RecordingMetrics, speech: Speech
+) -> None:
+    speech.begin("en", turn=45, heard_at=clock.now())
+    speech.say("holding_line", "en", in_reply=True)
+    await speech.idle()
+    clock.advance(0.8)
+    speech.feed("The build passed.")
+    speech.end()
+    await speech.idle()
+
+    [row] = speech_rows(metrics)
+    assert row["first_audio_ms"] == 0
+    assert row["first_meaningful_audio_ms"] == 800
