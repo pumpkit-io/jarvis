@@ -1,0 +1,831 @@
+{
+  "scope": "Synthetic development/calibration and adapter failures, not held-out accuracy evidence",
+  "full_local_archive": ".jarvis/semantic/development-results",
+  "experiments": [
+    {
+      "model_revision": "173234aa840d113125e9f2271100ddbaf16c9620",
+      "mlx_lm": "0.32.2",
+      "sample": "pre-labeled synthetic text, no physical accuracy claim",
+      "policy_wiring": false,
+      "false_stop_or_admission_candidates": 0,
+      "missed_directed": 8,
+      "negative_count": 16,
+      "directed_count": 8,
+      "cold_roundtrip_ms": 5778.210750009748,
+      "warm_p50_ms": 80.88670800498221,
+      "warm_p90_ms": 86.90279199799988,
+      "onset_to_decision_ms": null,
+      "stt_ms": null,
+      "missing_evidence": [
+        "actual audio onset",
+        "STT cost/errors",
+        "speaker/addressee acoustic cues",
+        "physical playback/capture",
+        "independent human labeling"
+      ],
+      "experiment": "Initial 8-token unnormalized-format component evaluation; superseded adapter, retained failure",
+      "peak_rss_bytes": 637960192,
+      "experiment_file": "assessment-qwen06-format-baseline.json",
+      "mismatches": []
+    },
+    {
+      "model_revision": "173234aa840d113125e9f2271100ddbaf16c9620",
+      "mlx_lm": "0.32.2",
+      "prompt_sha256": "74ecbd87d1636c256e33713776d58ef89df75c7e07a2b8d42f57b2e7220b923d",
+      "cases_sha256": "9f3b69df30bddda9e2ce69bc47081acd9dab3d7b0bc022ad16c1100c321a835c",
+      "sampling": {
+        "temperature": 0,
+        "max_tokens": 16,
+        "thinking": false,
+        "input_token_limit": 2048
+      },
+      "invalid": 1,
+      "timeouts": 0,
+      "sample": "pre-labeled synthetic text, no physical accuracy claim",
+      "policy_wiring": false,
+      "hub_replay": "existing tests.test_voice_mode rig_for seam, fake backend/audio",
+      "false_stop_or_admission_candidates": 0,
+      "missed_directed": 8,
+      "negative_count": 16,
+      "directed_count": 8,
+      "cold_roundtrip_ms": 2194.7738750022836,
+      "warm_p50_ms": 80.94241700018756,
+      "warm_p90_ms": 82.71404101105873,
+      "onset_to_decision_ms": null,
+      "stt_ms": null,
+      "missing_evidence": [
+        "actual audio onset",
+        "STT cost/errors",
+        "speaker/addressee acoustic cues",
+        "physical playback/capture",
+        "independent human labeling"
+      ],
+      "peak_rss_bytes": 834125824,
+      "peak_mlx_bytes": 691307648,
+      "experiment_file": "assessment-qwen06-hub.json",
+      "mismatches": [
+        {
+          "id": "d01",
+          "expected": "directed",
+          "verdict": "uncertain",
+          "reason": "assessed"
+        },
+        {
+          "id": "d02",
+          "expected": "directed",
+          "verdict": "uncertain",
+          "reason": "assessed"
+        },
+        {
+          "id": "d03",
+          "expected": "directed",
+          "verdict": "uncertain",
+          "reason": "assessed"
+        },
+        {
+          "id": "d04",
+          "expected": "directed",
+          "verdict": "uncertain",
+          "reason": "invalid"
+        },
+        {
+          "id": "d05",
+          "expected": "directed",
+          "verdict": "uncertain",
+          "reason": "assessed"
+        },
+        {
+          "id": "d06",
+          "expected": "directed",
+          "verdict": "uncertain",
+          "reason": "assessed"
+        },
+        {
+          "id": "d07",
+          "expected": "directed",
+          "verdict": "uncertain",
+          "reason": "assessed"
+        },
+        {
+          "id": "d08",
+          "expected": "directed",
+          "verdict": "uncertain",
+          "reason": "assessed"
+        },
+        {
+          "id": "n01",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "assessed"
+        },
+        {
+          "id": "n02",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "assessed"
+        },
+        {
+          "id": "n03",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "assessed"
+        },
+        {
+          "id": "n04",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "assessed"
+        },
+        {
+          "id": "n05",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "assessed"
+        },
+        {
+          "id": "n06",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "assessed"
+        },
+        {
+          "id": "n07",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "assessed"
+        },
+        {
+          "id": "n08",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "assessed"
+        },
+        {
+          "id": "n09",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "assessed"
+        },
+        {
+          "id": "n10",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "assessed"
+        },
+        {
+          "id": "n11",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "assessed"
+        },
+        {
+          "id": "n12",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "assessed"
+        }
+      ]
+    },
+    {
+      "model_revision": "173234aa840d113125e9f2271100ddbaf16c9620",
+      "mlx_lm": "0.32.2",
+      "prompt_sha256": "f5fdfbe8ea62ebb7f7a274d7f227c1921c14b16323b8694a4a83b912ac73af1c",
+      "cases_sha256": "1297f35bb361eb9d09dad9247f3f6b18a894b87cbbb91c2be513550df305ae61",
+      "sampling": {
+        "temperature": 0,
+        "max_tokens": 1,
+        "mode": "constrained",
+        "thinking": false,
+        "input_token_limit": 2048
+      },
+      "invalid": 6,
+      "timeouts": 0,
+      "sample": "pre-labeled synthetic text, no physical accuracy claim",
+      "policy_wiring": false,
+      "hub_replay": "existing tests.test_voice_mode rig_for seam, fake backend/audio",
+      "false_stop_or_admission_candidates": 0,
+      "missed_directed": 2,
+      "negative_count": 4,
+      "directed_count": 2,
+      "cold_roundtrip_ms": 2210.0230829964858,
+      "warm_p50_ms": 75.59837499866262,
+      "warm_p90_ms": 81.14408300025389,
+      "onset_to_decision_ms": null,
+      "stt_ms": null,
+      "missing_evidence": [
+        "actual audio onset",
+        "STT cost/errors",
+        "speaker/addressee acoustic cues",
+        "physical playback/capture",
+        "independent human labeling"
+      ],
+      "peak_rss_bytes": 849231872,
+      "peak_mlx_bytes": 711574716,
+      "experiment_file": "assessment-qwen06-mask-defect.json",
+      "mismatches": [
+        {
+          "id": "t01",
+          "expected": "directed",
+          "verdict": "uncertain",
+          "reason": "invalid"
+        },
+        {
+          "id": "t02",
+          "expected": "directed",
+          "verdict": "uncertain",
+          "reason": "invalid"
+        },
+        {
+          "id": "t03",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "invalid"
+        },
+        {
+          "id": "t04",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "invalid"
+        },
+        {
+          "id": "t05",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "invalid"
+        }
+      ],
+      "experiment": "Adapter defect: mask addressed batch axis instead of vocabulary axis. All outputs invalid. Excluded from semantic comparison; fixed by vocabulary-axis broadcast and regression test."
+    },
+    {
+      "model_revision": "173234aa840d113125e9f2271100ddbaf16c9620",
+      "mlx_lm": "0.32.2",
+      "prompt_sha256": "f5fdfbe8ea62ebb7f7a274d7f227c1921c14b16323b8694a4a83b912ac73af1c",
+      "cases_sha256": "1297f35bb361eb9d09dad9247f3f6b18a894b87cbbb91c2be513550df305ae61",
+      "sampling": {
+        "temperature": 0,
+        "max_tokens": 1,
+        "mode": "constrained",
+        "thinking": false,
+        "input_token_limit": 2048
+      },
+      "invalid": 0,
+      "timeouts": 0,
+      "sample": "pre-labeled synthetic text, no physical accuracy claim",
+      "policy_wiring": false,
+      "hub_replay": "existing tests.test_voice_mode rig_for seam, fake backend/audio",
+      "false_stop_or_admission_candidates": 4,
+      "missed_directed": 0,
+      "negative_count": 4,
+      "directed_count": 2,
+      "cold_roundtrip_ms": 2120.167708999361,
+      "warm_p50_ms": 77.01070800248999,
+      "warm_p90_ms": 84.6413749968633,
+      "onset_to_decision_ms": null,
+      "stt_ms": null,
+      "missing_evidence": [
+        "actual audio onset",
+        "STT cost/errors",
+        "speaker/addressee acoustic cues",
+        "physical playback/capture",
+        "independent human labeling"
+      ],
+      "peak_rss_bytes": 841416704,
+      "peak_mlx_bytes": 711574716,
+      "experiment_file": "assessment-qwen06-tuning-unprefixed.json",
+      "mismatches": [
+        {
+          "id": "t03",
+          "expected": "unrelated",
+          "verdict": "directed",
+          "reason": "assessed"
+        },
+        {
+          "id": "t04",
+          "expected": "unrelated",
+          "verdict": "directed",
+          "reason": "assessed"
+        },
+        {
+          "id": "t05",
+          "expected": "unrelated",
+          "verdict": "directed",
+          "reason": "assessed"
+        },
+        {
+          "id": "t06",
+          "expected": "uncertain",
+          "verdict": "directed",
+          "reason": "assessed"
+        }
+      ],
+      "experiment": "Calibration before few-shot examples/assistant prefix; all six constrained labels were directed. Not held-out evidence."
+    },
+    {
+      "model_revision": "173234aa840d113125e9f2271100ddbaf16c9620",
+      "mlx_lm": "0.32.2",
+      "prompt_sha256": "f5fdfbe8ea62ebb7f7a274d7f227c1921c14b16323b8694a4a83b912ac73af1c",
+      "cases_sha256": "1297f35bb361eb9d09dad9247f3f6b18a894b87cbbb91c2be513550df305ae61",
+      "implementation_sha256": "6871976fd11b3f360acad29d623f1f3b353daa846015e3b5f633c7e54a4e800d",
+      "examples_sha256": "1297f35bb361eb9d09dad9247f3f6b18a894b87cbbb91c2be513550df305ae61",
+      "fewshot_ids": [
+        "t01",
+        "t03",
+        "t04",
+        "t06"
+      ],
+      "assistant_prefix": "empty thinking envelope when missing, then Decision: ",
+      "sampling": {
+        "temperature": 0,
+        "max_tokens": 1,
+        "mode": "constrained",
+        "thinking": false,
+        "input_token_limit": 2048
+      },
+      "invalid": 0,
+      "timeouts": 0,
+      "sample": "pre-labeled synthetic text, no physical accuracy claim",
+      "policy_wiring": false,
+      "hub_replay": "existing tests.test_voice_mode rig_for seam, fake backend/audio",
+      "false_stop_or_admission_candidates": 3,
+      "missed_directed": 0,
+      "negative_count": 4,
+      "directed_count": 2,
+      "cold_roundtrip_ms": 2191.665082995314,
+      "warm_p50_ms": 141.60875001107343,
+      "warm_p90_ms": 144.37770799850114,
+      "onset_to_decision_ms": null,
+      "stt_ms": null,
+      "missing_evidence": [
+        "actual audio onset",
+        "STT cost/errors",
+        "speaker/addressee acoustic cues",
+        "physical playback/capture",
+        "independent human labeling"
+      ],
+      "peak_rss_bytes": 850460672,
+      "peak_mlx_bytes": 848888376,
+      "experiment_file": "assessment-qwen06-tuning.json",
+      "mismatches": [
+        {
+          "id": "t03",
+          "expected": "unrelated",
+          "verdict": "directed",
+          "reason": "assessed"
+        },
+        {
+          "id": "t04",
+          "expected": "unrelated",
+          "verdict": "directed",
+          "reason": "assessed"
+        },
+        {
+          "id": "t05",
+          "expected": "unrelated",
+          "verdict": "directed",
+          "reason": "assessed"
+        }
+      ]
+    },
+    {
+      "model_revision": "173234aa840d113125e9f2271100ddbaf16c9620",
+      "mlx_lm": "0.32.2",
+      "prompt_sha256": "74ecbd87d1636c256e33713776d58ef89df75c7e07a2b8d42f57b2e7220b923d",
+      "cases_sha256": "9f3b69df30bddda9e2ce69bc47081acd9dab3d7b0bc022ad16c1100c321a835c",
+      "sampling": {
+        "temperature": 0,
+        "max_tokens": 16,
+        "thinking": false,
+        "input_token_limit": 2048
+      },
+      "invalid": 1,
+      "timeouts": 0,
+      "sample": "pre-labeled synthetic text, no physical accuracy claim",
+      "policy_wiring": false,
+      "false_stop_or_admission_candidates": 0,
+      "missed_directed": 8,
+      "negative_count": 16,
+      "directed_count": 8,
+      "cold_roundtrip_ms": 3556.3472080102656,
+      "warm_p50_ms": 151.3556249992689,
+      "warm_p90_ms": 236.5716250060359,
+      "onset_to_decision_ms": null,
+      "stt_ms": null,
+      "missing_evidence": [
+        "actual audio onset",
+        "STT cost/errors",
+        "speaker/addressee acoustic cues",
+        "physical playback/capture",
+        "independent human labeling"
+      ],
+      "experiment": "Corrected framing component replay; two candidate processes overlapped, so timing is not isolated",
+      "peak_rss_bytes": 679526400,
+      "experiment_file": "assessment-qwen06.json",
+      "mismatches": []
+    },
+    {
+      "model_revision": "21457c6f51ed54a7c16e988c0844db973815c137",
+      "mlx_lm": "0.32.2",
+      "prompt_sha256": "74ecbd87d1636c256e33713776d58ef89df75c7e07a2b8d42f57b2e7220b923d",
+      "cases_sha256": "9f3b69df30bddda9e2ce69bc47081acd9dab3d7b0bc022ad16c1100c321a835c",
+      "sampling": {
+        "temperature": 0,
+        "max_tokens": 8,
+        "thinking": false,
+        "input_token_limit": 2048
+      },
+      "invalid": 24,
+      "timeouts": 0,
+      "sample": "pre-labeled synthetic text, no physical accuracy claim",
+      "policy_wiring": false,
+      "false_stop_or_admission_candidates": 0,
+      "missed_directed": 8,
+      "negative_count": 16,
+      "directed_count": 8,
+      "cold_roundtrip_ms": 3842.676959000528,
+      "warm_p50_ms": 254.79887498659082,
+      "warm_p90_ms": 258.3077910094289,
+      "onset_to_decision_ms": null,
+      "stt_ms": null,
+      "missing_evidence": [
+        "actual audio onset",
+        "STT cost/errors",
+        "speaker/addressee acoustic cues",
+        "physical playback/capture",
+        "independent human labeling"
+      ],
+      "experiment": "Initial 8-token unnormalized-format component evaluation; superseded adapter, retained failure",
+      "peak_rss_bytes": 959447040,
+      "experiment_file": "assessment-qwen17-format-baseline.json",
+      "mismatches": []
+    },
+    {
+      "model_revision": "21457c6f51ed54a7c16e988c0844db973815c137",
+      "mlx_lm": "0.32.2",
+      "prompt_sha256": "74ecbd87d1636c256e33713776d58ef89df75c7e07a2b8d42f57b2e7220b923d",
+      "cases_sha256": "9f3b69df30bddda9e2ce69bc47081acd9dab3d7b0bc022ad16c1100c321a835c",
+      "sampling": {
+        "temperature": 0,
+        "max_tokens": 16,
+        "thinking": false,
+        "input_token_limit": 2048
+      },
+      "invalid": 16,
+      "timeouts": 0,
+      "sample": "pre-labeled synthetic text, no physical accuracy claim",
+      "policy_wiring": false,
+      "hub_replay": "existing tests.test_voice_mode rig_for seam, fake backend/audio",
+      "false_stop_or_admission_candidates": 0,
+      "missed_directed": 8,
+      "negative_count": 16,
+      "directed_count": 8,
+      "cold_roundtrip_ms": 2465.102084010141,
+      "warm_p50_ms": 273.4784159983974,
+      "warm_p90_ms": 282.81304200936574,
+      "onset_to_decision_ms": null,
+      "stt_ms": null,
+      "missing_evidence": [
+        "actual audio onset",
+        "STT cost/errors",
+        "speaker/addressee acoustic cues",
+        "physical playback/capture",
+        "independent human labeling"
+      ],
+      "peak_rss_bytes": 1440104448,
+      "peak_mlx_bytes": 1338002760,
+      "experiment_file": "assessment-qwen17-hub.json",
+      "mismatches": [
+        {
+          "id": "d01",
+          "expected": "directed",
+          "verdict": "uncertain",
+          "reason": "invalid"
+        },
+        {
+          "id": "d02",
+          "expected": "directed",
+          "verdict": "uncertain",
+          "reason": "invalid"
+        },
+        {
+          "id": "d03",
+          "expected": "directed",
+          "verdict": "uncertain",
+          "reason": "assessed"
+        },
+        {
+          "id": "d04",
+          "expected": "directed",
+          "verdict": "uncertain",
+          "reason": "assessed"
+        },
+        {
+          "id": "d05",
+          "expected": "directed",
+          "verdict": "uncertain",
+          "reason": "invalid"
+        },
+        {
+          "id": "d06",
+          "expected": "directed",
+          "verdict": "uncertain",
+          "reason": "invalid"
+        },
+        {
+          "id": "d07",
+          "expected": "directed",
+          "verdict": "uncertain",
+          "reason": "invalid"
+        },
+        {
+          "id": "d08",
+          "expected": "directed",
+          "verdict": "uncertain",
+          "reason": "invalid"
+        },
+        {
+          "id": "n01",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "invalid"
+        },
+        {
+          "id": "n02",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "invalid"
+        },
+        {
+          "id": "n03",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "invalid"
+        },
+        {
+          "id": "n04",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "invalid"
+        },
+        {
+          "id": "n05",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "invalid"
+        },
+        {
+          "id": "n06",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "invalid"
+        },
+        {
+          "id": "n07",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "invalid"
+        },
+        {
+          "id": "n08",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "invalid"
+        },
+        {
+          "id": "n09",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "assessed"
+        },
+        {
+          "id": "n10",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "assessed"
+        },
+        {
+          "id": "n11",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "invalid"
+        },
+        {
+          "id": "n12",
+          "expected": "unrelated",
+          "verdict": "uncertain",
+          "reason": "invalid"
+        }
+      ]
+    },
+    {
+      "model_revision": "21457c6f51ed54a7c16e988c0844db973815c137",
+      "mlx_lm": "0.32.2",
+      "prompt_sha256": "f5fdfbe8ea62ebb7f7a274d7f227c1921c14b16323b8694a4a83b912ac73af1c",
+      "cases_sha256": "1297f35bb361eb9d09dad9247f3f6b18a894b87cbbb91c2be513550df305ae61",
+      "sampling": {
+        "temperature": 0,
+        "max_tokens": 1,
+        "mode": "constrained",
+        "thinking": false,
+        "input_token_limit": 2048
+      },
+      "invalid": 0,
+      "timeouts": 0,
+      "sample": "pre-labeled synthetic text, no physical accuracy claim",
+      "policy_wiring": false,
+      "hub_replay": "existing tests.test_voice_mode rig_for seam, fake backend/audio",
+      "false_stop_or_admission_candidates": 4,
+      "missed_directed": 0,
+      "negative_count": 4,
+      "directed_count": 2,
+      "cold_roundtrip_ms": 2502.014457990299,
+      "warm_p50_ms": 191.09679199755192,
+      "warm_p90_ms": 191.67991600988898,
+      "onset_to_decision_ms": null,
+      "stt_ms": null,
+      "missing_evidence": [
+        "actual audio onset",
+        "STT cost/errors",
+        "speaker/addressee acoustic cues",
+        "physical playback/capture",
+        "independent human labeling"
+      ],
+      "peak_rss_bytes": 1263796224,
+      "peak_mlx_bytes": 1359957332,
+      "experiment_file": "assessment-qwen17-tuning-unprefixed.json",
+      "mismatches": [
+        {
+          "id": "t03",
+          "expected": "unrelated",
+          "verdict": "directed",
+          "reason": "assessed"
+        },
+        {
+          "id": "t04",
+          "expected": "unrelated",
+          "verdict": "directed",
+          "reason": "assessed"
+        },
+        {
+          "id": "t05",
+          "expected": "unrelated",
+          "verdict": "directed",
+          "reason": "assessed"
+        },
+        {
+          "id": "t06",
+          "expected": "uncertain",
+          "verdict": "directed",
+          "reason": "assessed"
+        }
+      ],
+      "experiment": "Calibration before few-shot examples/assistant prefix; all six constrained labels were directed. Not held-out evidence."
+    },
+    {
+      "model_revision": "21457c6f51ed54a7c16e988c0844db973815c137",
+      "mlx_lm": "0.32.2",
+      "prompt_sha256": "f5fdfbe8ea62ebb7f7a274d7f227c1921c14b16323b8694a4a83b912ac73af1c",
+      "cases_sha256": "1297f35bb361eb9d09dad9247f3f6b18a894b87cbbb91c2be513550df305ae61",
+      "fewshot_ids": [
+        "t01",
+        "t03",
+        "t04",
+        "t06"
+      ],
+      "assistant_prefix": "empty thinking envelope when missing, then Decision: ",
+      "sampling": {
+        "temperature": 0,
+        "max_tokens": 1,
+        "mode": "constrained",
+        "thinking": false,
+        "input_token_limit": 2048
+      },
+      "invalid": 0,
+      "timeouts": 0,
+      "sample": "pre-labeled synthetic text, no physical accuracy claim",
+      "policy_wiring": false,
+      "hub_replay": "existing tests.test_voice_mode rig_for seam, fake backend/audio",
+      "false_stop_or_admission_candidates": 0,
+      "missed_directed": 0,
+      "negative_count": 4,
+      "directed_count": 2,
+      "cold_roundtrip_ms": 2665.2642080007354,
+      "warm_p50_ms": 368.9298750105081,
+      "warm_p90_ms": 381.94170899805613,
+      "onset_to_decision_ms": null,
+      "stt_ms": null,
+      "missing_evidence": [
+        "actual audio onset",
+        "STT cost/errors",
+        "speaker/addressee acoustic cues",
+        "physical playback/capture",
+        "independent human labeling"
+      ],
+      "peak_rss_bytes": 1171341312,
+      "peak_mlx_bytes": 1682592084,
+      "experiment_file": "assessment-qwen17-tuning.json",
+      "mismatches": []
+    },
+    {
+      "model_revision": "21457c6f51ed54a7c16e988c0844db973815c137",
+      "mlx_lm": "0.32.2",
+      "prompt_sha256": "74ecbd87d1636c256e33713776d58ef89df75c7e07a2b8d42f57b2e7220b923d",
+      "cases_sha256": "9f3b69df30bddda9e2ce69bc47081acd9dab3d7b0bc022ad16c1100c321a835c",
+      "sampling": {
+        "temperature": 0,
+        "max_tokens": 16,
+        "thinking": false,
+        "input_token_limit": 2048
+      },
+      "invalid": 16,
+      "timeouts": 0,
+      "sample": "pre-labeled synthetic text, no physical accuracy claim",
+      "policy_wiring": false,
+      "false_stop_or_admission_candidates": 0,
+      "missed_directed": 8,
+      "negative_count": 16,
+      "directed_count": 8,
+      "cold_roundtrip_ms": 3248.5724589932943,
+      "warm_p50_ms": 281.565999990562,
+      "warm_p90_ms": 418.1986670009792,
+      "onset_to_decision_ms": null,
+      "stt_ms": null,
+      "missing_evidence": [
+        "actual audio onset",
+        "STT cost/errors",
+        "speaker/addressee acoustic cues",
+        "physical playback/capture",
+        "independent human labeling"
+      ],
+      "experiment": "Corrected framing component replay; two candidate processes overlapped, so timing is not isolated",
+      "peak_rss_bytes": 1102118912,
+      "experiment_file": "assessment-qwen17.json",
+      "mismatches": []
+    },
+    {
+      "model_revision": "8b403126fc14f14cfc99bb4cfa72ecbc129ea677",
+      "mlx_lm": "0.32.2",
+      "prompt_sha256": "f5fdfbe8ea62ebb7f7a274d7f227c1921c14b16323b8694a4a83b912ac73af1c",
+      "cases_sha256": "de3bb98c969e87124e6adcc8dcf44a63b22306b162d0bdb032f6675b8ff56f04",
+      "implementation_sha256": "53ff1cb05cd1e3dd7ce4a9f71a6612acb7ce51aade29b03cbd9bbf29385c8b1c",
+      "examples_sha256": "de3bb98c969e87124e6adcc8dcf44a63b22306b162d0bdb032f6675b8ff56f04",
+      "fewshot_ids": [
+        "c21",
+        "c23",
+        "c24",
+        "c26"
+      ],
+      "assistant_prefix": "Qwen3 empty thinking envelope when missing; all models Decision: ",
+      "sampling": {
+        "temperature": 0,
+        "max_tokens": 1,
+        "mode": "constrained",
+        "thinking": false,
+        "input_token_limit": 2048
+      },
+      "invalid": 0,
+      "timeouts": 0,
+      "sample": "pre-labeled synthetic text, no physical accuracy claim",
+      "policy_wiring": false,
+      "hub_replay": "existing tests.test_voice_mode rig_for seam, fake backend/audio",
+      "false_stop_or_admission_candidates": 2,
+      "missed_directed": 1,
+      "negative_count": 4,
+      "directed_count": 2,
+      "cold_roundtrip_ms": 4136.642249999568,
+      "warm_p50_ms": 349.8207920056302,
+      "warm_p90_ms": 357.9977089975728,
+      "onset_to_decision_ms": null,
+      "stt_ms": null,
+      "missing_evidence": [
+        "actual audio onset",
+        "STT cost/errors",
+        "speaker/addressee acoustic cues",
+        "physical playback/capture",
+        "independent human labeling"
+      ],
+      "experiment_file": "assessment-qwen25-calibration.json",
+      "peak_rss_bytes": 1116897280,
+      "peak_mlx_bytes": 1623505212,
+      "mismatches": [
+        {
+          "id": "c22",
+          "expected": "directed",
+          "verdict": "unrelated",
+          "reason": "assessed"
+        },
+        {
+          "id": "c23",
+          "expected": "unrelated",
+          "verdict": "directed",
+          "reason": "assessed"
+        },
+        {
+          "id": "c25",
+          "expected": "unrelated",
+          "verdict": "directed",
+          "reason": "assessed"
+        }
+      ]
+    }
+  ]
+}

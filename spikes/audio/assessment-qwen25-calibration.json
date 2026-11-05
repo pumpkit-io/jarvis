@@ -1,0 +1,56 @@
+[
+  {
+    "id": "c21",
+    "category": "addressed-stop",
+    "lang": "en",
+    "speech": "Jarvis, stop the explanation for a moment.",
+    "user": "Explain the queue.",
+    "played": "A queue holds incoming work.",
+    "expected": "directed"
+  },
+  {
+    "id": "c22",
+    "category": "correction",
+    "lang": "it",
+    "speech": "No, mi riferivo alla coda degli eventi.",
+    "user": "Spiegami la coda delle attività.",
+    "played": "Questa coda conserva le attività.",
+    "expected": "directed"
+  },
+  {
+    "id": "c23",
+    "category": "backchannel",
+    "lang": "en",
+    "speech": "Yeah, uh huh.",
+    "user": "Explain the queue.",
+    "played": "A queue holds incoming work.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "c24",
+    "category": "other-addressee",
+    "lang": "it",
+    "speech": "Giorgio, abbassa il volume per favore.",
+    "user": "Spiegami la coda.",
+    "played": "La coda conserva gli eventi.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "c25",
+    "category": "quoted-wake",
+    "lang": "en",
+    "speech": "I heard her say Jarvis cancel in the recording.",
+    "user": "Explain the queue.",
+    "played": "A queue holds incoming work.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "c26",
+    "category": "ambiguous-addressee",
+    "lang": "it",
+    "speech": "Non adesso.",
+    "user": "",
+    "played": "",
+    "expected": "uncertain"
+  }
+]

@@ -1,0 +1,218 @@
+[
+  {
+    "id": "d01",
+    "category": "addressed-stop",
+    "lang": "en",
+    "speech": "Jarvis, stop speaking.",
+    "user": "Explain the deployment process.",
+    "played": "First check the build.",
+    "expected": "directed"
+  },
+  {
+    "id": "d02",
+    "category": "addressed-stop",
+    "lang": "it",
+    "speech": "Jarvis, fermati.",
+    "user": "Spiegami i risultati.",
+    "played": "Il primo controllo è passato.",
+    "expected": "directed"
+  },
+  {
+    "id": "d03",
+    "category": "correction",
+    "lang": "en",
+    "speech": "Actually, I meant the staging branch.",
+    "user": "Review the production branch.",
+    "played": "I will review production.",
+    "expected": "directed"
+  },
+  {
+    "id": "d04",
+    "category": "correction",
+    "lang": "it",
+    "speech": "No, intendevo il repository jarvis.",
+    "user": "Controlla pumpkit.",
+    "played": "Controllo pumpkit.",
+    "expected": "directed"
+  },
+  {
+    "id": "d05",
+    "category": "backchannel-then-correction",
+    "lang": "en",
+    "speech": "Okay, actually compare yesterday instead.",
+    "user": "Compare this week with last week.",
+    "played": "This week has ten changes.",
+    "expected": "directed"
+  },
+  {
+    "id": "d06",
+    "category": "correction",
+    "lang": "it",
+    "speech": "Aspetta, rispondi in italiano.",
+    "user": "Explain those changes.",
+    "played": "The first change improves startup.",
+    "expected": "directed"
+  },
+  {
+    "id": "d07",
+    "category": "follow-up",
+    "lang": "en",
+    "speech": "Which of those checks failed?",
+    "user": "Tell me how CI went.",
+    "played": "Two checks failed.",
+    "expected": "directed"
+  },
+  {
+    "id": "d08",
+    "category": "follow-up",
+    "lang": "it",
+    "speech": "Quale dei due repository?",
+    "user": "Dove si trova il problema?",
+    "played": "Il problema coinvolge due repository.",
+    "expected": "directed"
+  },
+  {
+    "id": "n01",
+    "category": "backchannel",
+    "lang": "en",
+    "speech": "Okay.",
+    "user": "Explain those changes.",
+    "played": "The first change improves startup.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "n02",
+    "category": "backchannel",
+    "lang": "it",
+    "speech": "Sì, mhm.",
+    "user": "Spiegami i risultati.",
+    "played": "Il primo controllo è passato.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "n03",
+    "category": "other-addressee",
+    "lang": "en",
+    "speech": "Marco, stop the video please.",
+    "user": "Explain the build.",
+    "played": "The build has three stages.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "n04",
+    "category": "other-addressee",
+    "lang": "it",
+    "speech": "Giulia, aspetta, passami il sale.",
+    "user": "Spiegami i risultati.",
+    "played": "Il primo controllo è passato.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "n05",
+    "category": "quoted-wake",
+    "lang": "en",
+    "speech": "She told him to say \"Jarvis, stop\" in the demo.",
+    "user": "Explain the build.",
+    "played": "The build has three stages.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "n06",
+    "category": "quoted-wake",
+    "lang": "it",
+    "speech": "Nel film dice \"Ehi Jarvis, fermati\".",
+    "user": "Spiegami i risultati.",
+    "played": "Il primo controllo è passato.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "n07",
+    "category": "nearby-dialogue",
+    "lang": "en",
+    "speech": "Did you see the match yesterday? No, I missed it.",
+    "user": "Explain the build.",
+    "played": "The build has three stages.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "n08",
+    "category": "nearby-dialogue",
+    "lang": "it",
+    "speech": "Hai preso il pane? Sì, è sul tavolo.",
+    "user": "Spiegami i risultati.",
+    "played": "Il primo controllo è passato.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "n09",
+    "category": "other-addressee-correction",
+    "lang": "en",
+    "speech": "Sarah, actually I meant the other branch.",
+    "user": "Review production.",
+    "played": "I will review production.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "n10",
+    "category": "other-addressee-correction",
+    "lang": "it",
+    "speech": "Luca, no, intendevo il ramo staging.",
+    "user": "Controlla produzione.",
+    "played": "Controllo produzione.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "n11",
+    "category": "quoted-interruption",
+    "lang": "en",
+    "speech": "I was quoting the phrase wait stop, not asking you.",
+    "user": "Explain the build.",
+    "played": "The build has three stages.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "n12",
+    "category": "reported-request",
+    "lang": "it",
+    "speech": "Le ho detto di chiedere a Jarvis una revisione.",
+    "user": "Spiegami i risultati.",
+    "played": "Il primo controllo è passato.",
+    "expected": "unrelated"
+  },
+  {
+    "id": "a01",
+    "category": "ambiguous-addressee",
+    "lang": "en",
+    "speech": "Stop.",
+    "user": "",
+    "played": "",
+    "expected": "uncertain"
+  },
+  {
+    "id": "a02",
+    "category": "ambiguous-addressee",
+    "lang": "it",
+    "speech": "Aspetta.",
+    "user": "",
+    "played": "",
+    "expected": "uncertain"
+  },
+  {
+    "id": "a03",
+    "category": "ambiguous-addressee",
+    "lang": "en",
+    "speech": "No, the other one.",
+    "user": "",
+    "played": "",
+    "expected": "uncertain"
+  },
+  {
+    "id": "a04",
+    "category": "ambiguous-addressee",
+    "lang": "it",
+    "speech": "Va bene, cambia quello.",
+    "user": "",
+    "played": "",
+    "expected": "uncertain"
+  }
+]
