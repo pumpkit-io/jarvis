@@ -103,6 +103,9 @@ class _Reply:
     holding_line: bool = False
     gaps: int = 0
     audio_s: float = 0.0
+    generation_done: bool = False
+    # Later clips remain in pending() after this reply has drained.
+    trailing_audio_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -154,6 +157,7 @@ class Speech:
         self._queue: asyncio.Queue[_Say | _Cached | _End] = asyncio.Queue()
         self._cache: dict[tuple[ClipName, Lang], Clip] = {}
         self._reply: _Reply | None = None
+        self._replies: dict[int, _Reply] = {}
         self._generation = 0
         self._synthesising = False
         self._holding_line: asyncio.Task[None] | None = None
@@ -176,6 +180,8 @@ class Speech:
         """
         self._cancel_holding_line()
         self._reply = _Reply(turn, lang, self._clock.now(), heard_at)
+        self._prune_replies()
+        self._replies[turn] = self._reply
         if heard_at is not None:
             self._holding_line = asyncio.create_task(self._hold_the_line(self._reply))
 
@@ -200,6 +206,17 @@ class Speech:
 
     def stop(self) -> None:
         """Drop the reply and everything queued or playing."""
+        self._prune_replies()
+        for reply in self._replies.values():
+            self._record({
+                "kind": "speech_stop", "turn": reply.turn, "request_at": reply.heard_at,
+                "stopped_at": self._clock.now(), "time_basis": "perf_counter",
+                "first_meaningful_audio_ms": None if reply.first_chunk_audio is None else round(
+                    (reply.first_chunk_audio - (reply.heard_at if reply.heard_at is not None else reply.began)) * 1000
+                ),
+                "meaningful_audio_basis": "queue_estimate",
+            })
+        self._replies.clear()
         self._generation += 1
         self._cancel_holding_line()
         self._reply = None
@@ -271,7 +288,17 @@ class Speech:
             except Exception as e:
                 self._notice(f"Could not speak a sentence: {type(e).__name__}: {e}")
             finally:
+                if isinstance(item, _End):
+                    item.reply.generation_done = True
+                    self._prune_replies()
                 self._queue.task_done()
+
+    def _prune_replies(self) -> None:
+        pending = self._player.pending()
+        self._replies = {
+            turn: reply for turn, reply in self._replies.items()
+            if not reply.generation_done or (reply.audio_s > 0 and pending > reply.trailing_audio_s + 1e-9)
+        }
 
     async def _handle(self, item: _Say | _Cached | _End) -> None:
         match item:
@@ -296,6 +323,11 @@ class Speech:
 
     def _play(self, clip: Clip, reply: _Reply | None, *, sentence: bool) -> float:
         """Plays `clip` after what is queued; returns when it starts."""
+        self._prune_replies()
+        for queued in self._replies.values():
+            queued.trailing_audio_s += clip.seconds
+        if reply is not None:
+            reply.trailing_audio_s = 0.0
         starts = self._clock.now() + self._player.pending()
         starts_reply = reply is not None and reply.first_audio is None
         if reply is not None:
@@ -336,6 +368,11 @@ class Speech:
             "kind": "speech",
             "turn": reply.turn,
             "lang": reply.lang,
+            "request_at": reply.heard_at,
+            "started_at": reply.began,
+            "time_basis": "perf_counter",
+            "first_meaningful_audio_ms": ms(reply.first_chunk_audio),
+            "meaningful_audio_basis": "queue_estimate",
             "voice": voice_for(reply.lang),
             "chunks": reply.chunks,
             "holding_line": reply.holding_line,

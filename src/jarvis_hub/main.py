@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, TextIO
+from uuid import uuid4
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -25,7 +26,7 @@ from jarvis_hub.config import ConfigError, Settings, VoiceSettings, load_setting
 from jarvis_hub.hub import Clock, Hub, Line, Metrics, Output
 from jarvis_hub.orchestrator import orchestrator_spec
 from jarvis_hub.subagents import Subagent, SubagentSetup, subagent_session
-from jarvis_hub.stats import parse_when, read_rows, render, render_bargein, summarise, summarise_bargein
+from jarvis_hub.stats import parse_when, read_rows, render, render_bargein, render_voice_trace, summarise, summarise_bargein
 from jarvis_hub.talker import talker_spec
 from jarvis_hub.voice import language
 from jarvis_hub.voice.clips import ClipSettings, ClipStore
@@ -127,10 +128,11 @@ def listening(voice: VoiceSettings) -> Listening:
 class JsonlMetrics:
     def __init__(self, path: Path) -> None:
         self._path = path
+        self._run_id = uuid4().hex
 
     def record(self, entry: dict[str, Any]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        row = {"at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"), **entry}
+        row = {"at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"), "run_id": self._run_id, **entry}
         with self._path.open("a") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
@@ -397,12 +399,15 @@ def _ignored_in_text(error: str) -> None:
 
 
 def print_stats(
-    settings: Settings, since: str | None, until: str | None, stdout: TextIO, *, bargein: bool = False
+    settings: Settings, since: str | None, until: str | None, stdout: TextIO, *, bargein: bool = False, voice: bool = False
 ) -> None:
     now = datetime.now(timezone.utc)
     start = parse_when(since, now) if since else None
     end = parse_when(until, now, end=True) if until else None
     rows = read_rows(settings.runtime_dir / "metrics.jsonl")
+    if voice:
+        stdout.write(render_voice_trace(rows, start, end) + "\n")
+        return
     if bargein:
         stdout.write(render_bargein(summarise_bargein(rows, start, end), start, end) + "\n")
         return
@@ -421,13 +426,14 @@ def main() -> None:
     stats.add_argument(
         "--until", help="end of the range, written like --since (a bare date takes in that whole day); default now"
     )
+    stats.add_argument("--voice", action="store_true", help="trace captured requests, recognition and meaningful audio")
     stats.add_argument("--bargein", action="store_true", help="report the Barge-in decision log instead")
     args = parser.parse_args()
 
     if args.command == "stats":
         try:
             settings = load_settings(Path(__file__).resolve().parents[2], os.environ, ignore_voice=lambda error: None)
-            print_stats(settings, args.since, args.until, sys.stdout, bargein=args.bargein)
+            print_stats(settings, args.since, args.until, sys.stdout, bargein=args.bargein, voice=args.voice)
         except (ConfigError, ValueError) as e:
             sys.exit(f"jarvis-hub: {e}")
         return

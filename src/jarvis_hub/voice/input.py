@@ -12,7 +12,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import numpy as np
@@ -128,6 +128,7 @@ class _Turn:
     wake: float | None = None
     judged_silence: float | None = None
     smart_turn_ms: float = 0.0
+    assessments: list[dict[str, Any]] = field(default_factory=lambda: [])
 
 
 class InputPipeline:
@@ -294,7 +295,14 @@ class InputPipeline:
         start = onset - self._s.bargein_lead_s
         frames = [f for f, t in self._ring if t - 0.01 >= start - STAMP_SLACK_S]
         audio = np.concatenate(frames).astype(np.float32) / 32768.0
+        began = self._clock()
         text = self._e.stt.transcribe(audio).strip()
+        completed = self._clock()
+        self._record({
+            "kind": "recognition", "candidate_at": onset, "captured_through_at": at,
+            "stt_started_at": began, "stt_completed_at": completed,
+            "stt_ms": round((completed - began) * 1000, 1), "time_basis": "perf_counter",
+        })
         return Partial(text, at, max(0.0, self._last_speech - onset), at - self._last_speech)
 
     def _begin_turn(self, onset: float) -> _Turn:
@@ -314,7 +322,10 @@ class InputPipeline:
             turn.judged_silence = self._last_speech
             began = self._clock()
             p = self._e.turn.complete(self._audio(turn))
-            turn.smart_turn_ms += (self._clock() - began) * 1000
+            completed = self._clock()
+            turn.smart_turn_ms += (completed - began) * 1000
+            turn.assessments.append({"captured_through_at": at, "started_at": began,
+                                     "completed_at": completed, "score": round(p, 3)})
             turn.verdicts.append(round(p, 3))
             if p < self._s.smart_turn_threshold:
                 return None
@@ -335,16 +346,27 @@ class InputPipeline:
         self._onset = None
         audio = self._audio(turn)
         text, stt_ms = "", 0.0
+        stt_started: float | None = None
+        stt_completed: float | None = None
         admitted = self._e.gate.admits(audio)
         # STT mishears the wake phrase ("A Jarvis", "Hey George"), so it is cut by time: it ended before the hit.
         after = turn.wake - turn.start if turn.wake is not None else 0.0
         if admitted:
-            began = self._clock()
+            stt_started = self._clock()
             text = self._e.stt.transcribe(audio, after=after).strip()
-            stt_ms = (self._clock() - began) * 1000
+            stt_completed = self._clock()
+            stt_ms = (stt_completed - stt_started) * 1000
         self._record(
             {
                 "kind": "turn",
+                "time_basis": "perf_counter",
+                "request_at": self._last_speech,
+                "capture_start_at": turn.start,
+                "endpoint_at": at,
+                "endpoint_reason": "max_turn" if at - turn.start >= self._s.max_turn_s else "complete",
+                "stt_started_at": stt_started,
+                "stt_completed_at": stt_completed,
+                "assessments": turn.assessments,
                 "speech_s": round(self._last_speech - turn.start, 2),
                 "end_wait_ms": round((at - self._last_speech) * 1000),
                 "smart_turn": turn.verdicts,
@@ -426,7 +448,15 @@ class Capture:
         source: FrameSource | None = None,
         backlog_s: float = 2.0,
         clips: ClipStore | None = None,
+        clock: Callable[[], float] = time.perf_counter,
     ) -> None:
+        self._clock = clock
+        self._trace_frames = 0
+        self._max_delay_ms = 0.0
+        self._dropped = 0
+        self._reference_block = 0
+        self._reference_samples = 0
+        self._reference_last_report = float("-inf")
         self._clips = clips
         self._load = load
         self._settings = settings
@@ -461,6 +491,18 @@ class Capture:
     def reference(self, samples: Samples, rate: int) -> None:
         if (echo := self._echo) is not None:
             echo.reference(samples, rate)
+            submitted = self._clock()
+            self._reference_block += 1
+            self._reference_samples += len(samples)
+            detailed = self._clips is not None and self._clips.enabled
+            if detailed or submitted - self._reference_last_report >= 1.0:
+                self._reference_last_report = submitted
+                self._on_loop(self._record, {
+                    "kind": "playback_reference", "time_basis": "perf_counter",
+                    "block": self._reference_block, "submitted_at": submitted,
+                    "samples": len(samples), "sample_rate": rate,
+                    "total_samples": self._reference_samples, "device_played_at": None,
+                })
 
     async def events(self) -> AsyncIterator[InputEvent]:
         while True:
@@ -481,6 +523,7 @@ class Capture:
     def _push(self, frame: Pcm, at: float) -> None:
         with self._backlog_lock:
             if self._backlog >= self._max_backlog:
+                self._dropped += 1
                 if not self._behind:
                     self._behind = True
                     self._on_loop(self._notice, "Listening is falling behind the microphone: dropping audio.")
@@ -509,7 +552,7 @@ class Capture:
             self._on_loop(self._notice, f"Listening is off: {type(e).__name__}: {e}")
             return
         pipeline = InputPipeline(
-            engines, self._settings, lambda row: self._on_loop(self._record, row), clips=self._clips
+            engines, self._settings, lambda row: self._on_loop(self._record, row), clock=self._clock, clips=self._clips
         )
         self.ready.set()
         self._on_loop(self._record, {"kind": "ears_loaded", "load_ms": round((time.perf_counter() - began) * 1000)})
@@ -534,6 +577,9 @@ class Capture:
                     "The microphone gives only silence. If macOS has not allowed it, turn on your terminal app in "
                     "System Settings > Privacy & Security > Microphone, then restart Jarvis.",
                 )
+            processed = self._clock()
+            self._trace_frames += 1
+            self._max_delay_ms = max(self._max_delay_ms, (processed - item[1]) * 1000)
             try:
                 events = pipeline.push(*item)
             except Exception as e:
@@ -541,3 +587,21 @@ class Capture:
                 continue
             for event in events:
                 self._on_loop(self._events.put_nowait, event)
+            with self._backlog_lock:
+                backlog = self._backlog
+                dropped = self._dropped
+                detailed = self._clips is not None and self._clips.enabled
+                report = detailed or self._trace_frames >= 100 or (backlog == 0 and (dropped > 0 or self._max_delay_ms >= 100))
+                if report:
+                    self._dropped = 0
+            if report:
+                self._on_loop(self._record, {
+                    "kind": "capture", "time_basis": "perf_counter",
+                    "captured_through_at": item[1], "processed_at": processed,
+                    "completed_at": self._clock(), "frames": self._trace_frames,
+                    "queued_frames": backlog, "dropped_frames": dropped,
+                    "max_queue_delay_ms": round(self._max_delay_ms, 1),
+                    "device_captured_at": None,
+                })
+                self._trace_frames = 0
+                self._max_delay_ms = 0.0

@@ -289,3 +289,51 @@ def render_bargein(stats: BargeStats, since: datetime | None, until: datetime | 
 def _barge_latency(metric: str, values: list[int]) -> tuple[str, ...]:
     p50, p90 = percentile(values, 50), percentile(values, 90)
     return (metric, str(len(values)), "-" if p50 is None else f"{p50:,}", "-" if p90 is None else f"{p90:,}")
+
+
+def render_voice_trace(rows: Iterable[object], since: datetime | None, until: datetime | None) -> str:
+    requests: dict[tuple[str, float], dict[str, Any]] = {}
+    evidence: list[str] = []
+    for raw in rows:
+        at = _at(raw)
+        if not isinstance(raw, dict) or at is None or (since and at < since) or (until and at >= until):
+            continue
+        row = cast(dict[str, Any], raw)
+        run = str(row.get("run_id", "legacy"))
+        kind, request = row.get("kind"), row.get("request_at")
+        if isinstance(request, (int, float)) and kind in ("turn", "user", "speech", "speech_stop"):
+            item = requests.setdefault((run, request), {})
+            item.update(row)
+            if kind == "speech_stop":
+                item["superseded"] = True
+            if item.get("superseded"):
+                item["outcome"] = "superseded"
+        if kind == "capture":
+            evidence.append(
+                f"{run} capture={row.get('captured_through_at')} queue_max_ms={row.get('max_queue_delay_ms')} "
+                f"dropped={row.get('dropped_frames')}"
+            )
+        elif kind == "recognition":
+            evidence.append(f"{run} candidate={row.get('candidate_at')} stt_ms={row.get('stt_ms')}")
+        elif kind == "bargein":
+            evidence.append(f"{run} candidate={row.get('onset')} decision={row.get('decision')} at={row.get('decided_at')}")
+        elif kind == "playback_reference":
+            evidence.append(
+                f"{run} reference_block={row.get('block')} submitted={row.get('submitted_at')} "
+                f"samples={row.get('samples')} rate={row.get('sample_rate')}"
+            )
+    table: list[tuple[str, ...]] = [
+        ("run", "request_at", "turn", "endpoint ms", "STT ms", "Hub wait ms", "meaningful ms (estimated)", "outcome")
+    ]
+    for (run, request), item in requests.items():
+        def cell(name: str) -> str:
+            value = item.get(name)
+            return "unavailable" if value is None else str(value)
+
+        table.append((run, str(request), cell("turn"), cell("end_wait_ms"), cell("stt_ms"), cell("wait_ms"),
+                      cell("first_meaningful_audio_ms"), cell("outcome")))
+    return "\n".join([
+        "Jarvis voice trace (perf_counter seconds within each run)", "", *_align(table, left=3), "",
+        "Physical ADC/DAC timestamps: unavailable; meaningful audio uses the playback queue estimate.",
+        "Cached speech and chimes are excluded. Missing evidence is unavailable, never zero.", *evidence,
+    ])
