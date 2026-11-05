@@ -354,6 +354,7 @@ async def test_playback_is_removed_while_user_speech_survives_an_inference_stall
                     or any('Could not' in notice for notice in notices))
         assert not any('Could not' in notice for notice in notices), notices
         if overlap:
+            await until(lambda: any(isinstance(e, Heard) for e in heard))
             assert [e.text for e in heard if isinstance(e, Heard)] == ['User correction']
             if not headphones:
                 assert all(np.isin(frame, [0, 1000]).all() for frame in apms[0].output[8:])
@@ -397,3 +398,774 @@ async def test_successful_cancellation_does_not_report_a_silent_microphone() -> 
         assert not any('Microphone' in notice for notice in notices)
     finally:
         capture.close()
+
+
+class GatedEndpointStt(ScriptedStt):
+    def __init__(self) -> None:
+        super().__init__(words={1000: 'Check', 1500: 'the tests'})
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def transcribe(self, audio: Samples, *, after: float = 0.0) -> str:
+        if not self.heard:
+            self.entered.set()
+            assert self.release.wait(timeout=3)
+        return super().transcribe(audio, after=after)
+
+
+async def test_queued_continuation_during_stt_keeps_the_opening_and_commits_once() -> None:
+    source, stt = Source(), GatedEndpointStt()
+    records: list[dict[str, Any]] = []
+    heard: list[Heard] = []
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), LoudVad(), ScriptedTurn(), stt, Everyone()),
+        Listening(), records.append, lambda text: None, source=source, backlog_s=10,
+    )
+    async def collect() -> None:
+        async for event in capture.events():
+            if isinstance(event, Heard):
+                heard.append(event)
+    capture.start()
+    collecting = asyncio.create_task(collect())
+    try:
+        await until(capture.ready.is_set)
+        capture.capture(True)
+        source.frames(60, value=1000)
+        source.frames(60, start=.6)
+        assert await asyncio.to_thread(stt.entered.wait, 2)
+        source.frames(60, value=1500, start=1.2)
+        source.frames(80, start=1.8)
+        stt.release.set()
+        await until(lambda: any(row.get('captured_through_at') == 2.6 for row in records))
+        await asyncio.sleep(.02)
+        assert [event.text for event in heard] == ['Check the tests']
+        assert len(stt.heard) == 2
+        prepared = [row for row in records if row.get('stage') == 'prepared']
+        assert len(prepared) == 2
+        assert prepared[0]['candidate'] == prepared[1]['candidate']
+        assert prepared[0]['endpoint_candidate'] != prepared[1]['endpoint_candidate']
+        assert [row['reason'] for row in records if row.get('stage') == 'invalidated'] == ['resumed']
+        assert len([row for row in records if row.get('stage') == 'committed']) == 1
+        for row in records:
+            if row['kind'] == 'endpoint_fence' and row['stage'] == 'processed':
+                assert row['processed_frame'] == row['captured_frame_watermark']
+    finally:
+        stt.release.set()
+        capture.close()
+        collecting.cancel()
+        await asyncio.gather(collecting, return_exceptions=True)
+
+
+@pytest.mark.parametrize('invalidate', ['capture', 'replacement', 'overflow', 'shutdown'])
+async def test_endpoint_ownership_changes_during_stt_reject_the_old_result(invalidate: str) -> None:
+    source, stt = Source(), GatedEndpointStt()
+    records: list[dict[str, Any]] = []
+    events: list[object] = []
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), LoudVad(), ScriptedTurn(), stt, Everyone()),
+        Listening(), records.append, lambda text: None, source=source, backlog_s=2,
+    )
+    async def collect() -> None:
+        async for event in capture.events():
+            events.append(event)
+    capture.start()
+    collecting = asyncio.create_task(collect())
+    try:
+        await until(capture.ready.is_set)
+        capture.capture(True)
+        source.frames(60, value=1000)
+        source.frames(60, start=.6)
+        assert await asyncio.to_thread(stt.entered.wait, 2)
+        if invalidate in ('capture', 'replacement'):
+            capture.capture(False)
+            if invalidate == 'replacement':
+                capture.capture(True)
+        elif invalidate == 'overflow':
+            source.frames(400, start=1.2)
+        else:
+            capture.close()
+        stt.release.set()
+        await until(lambda: any(row.get('stage') == 'invalidated' for row in records))
+        await asyncio.sleep(.02)
+        assert not any(isinstance(event, Heard) for event in events)
+        assert not any(row.get('stage') == 'committed' for row in records)
+        assert len(stt.heard) == 1
+        assert all('text' not in row for row in records)
+    finally:
+        stt.release.set()
+        capture.close()
+        collecting.cancel()
+        await asyncio.gather(collecting, return_exceptions=True)
+
+
+async def test_fixed_fence_commits_while_later_silence_keeps_arriving_without_retranscription() -> None:
+    source, stt = Source(), GatedEndpointStt()
+    pumping = threading.Event()
+    next_at = [3.0]
+    class PumpingWake(MarkerWake):
+        def score(self, chunk: np.ndarray) -> float:
+            if pumping.is_set():
+                source.frames(8, start=next_at[0])
+                next_at[0] += .08
+            return 0.0
+    records: list[dict[str, Any]] = []
+    heard: list[Heard] = []
+    capture = Capture(
+        lambda: Engines(CountingEcho(), PumpingWake(), LoudVad(), ScriptedTurn(), stt, Everyone()),
+        Listening(), records.append, lambda text: None, source=source, backlog_s=10,
+    )
+    async def collect() -> None:
+        async for event in capture.events():
+            if isinstance(event, Heard):
+                heard.append(event)
+    capture.start()
+    collecting = asyncio.create_task(collect())
+    try:
+        await until(capture.ready.is_set)
+        capture.capture(True)
+        source.frames(60, value=1000)
+        source.frames(60, start=.6)
+        assert await asyncio.to_thread(stt.entered.wait, 2)
+        source.frames(100, start=1.2)
+        pumping.set()
+        stt.release.set()
+        await until(lambda: bool(heard))
+        assert pumping.is_set()
+        pumping.clear()
+        assert [event.text for event in heard] == ['Check']
+        assert len(stt.heard) == 1
+        assert len([row for row in records if row['kind'] == 'endpoint_fence' and row['stage'] == 'inserted']) == 1
+    finally:
+        pumping.clear()
+        stt.release.set()
+        capture.close()
+        collecting.cancel()
+        await asyncio.gather(collecting, return_exceptions=True)
+
+
+@pytest.mark.parametrize('queued_frames,expected', [(1, 'Check'), (4, 'Check the tests')])
+async def test_fence_revalidates_only_complete_vad_windows(queued_frames: int, expected: str) -> None:
+    class FourFrameVad(LoudVad):
+        chunk = 640
+    source, stt = Source(), GatedEndpointStt()
+    heard: list[Heard] = []
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), FourFrameVad(), ScriptedTurn(), stt, Everyone()),
+        Listening(), lambda row: None, lambda text: None, source=source, backlog_s=10,
+    )
+    async def collect() -> None:
+        async for event in capture.events():
+            if isinstance(event, Heard):
+                heard.append(event)
+    capture.start()
+    collecting = asyncio.create_task(collect())
+    try:
+        await until(capture.ready.is_set)
+        capture.capture(True)
+        source.frames(60, value=1000)
+        source.frames(52, start=.6)
+        assert await asyncio.to_thread(stt.entered.wait, 2)
+        source.frames(queued_frames, value=1500, start=1.12)
+        stt.release.set()
+        if queued_frames == 4:
+            await asyncio.sleep(.02)
+            assert heard == []
+            source.frames(60, start=1.16)
+        await until(lambda: bool(heard))
+        assert [event.text for event in heard] == [expected]
+        assert len(stt.heard) == (2 if queued_frames == 4 else 1)
+    finally:
+        stt.release.set()
+        capture.close()
+        collecting.cancel()
+        await asyncio.gather(collecting, return_exceptions=True)
+
+
+@pytest.mark.parametrize('typed_during_stt', [False, True])
+@pytest.mark.parametrize('intraturn_wake', [False, True])
+@pytest.mark.parametrize('one_breath', [False, True])
+async def test_queued_endpoint_delivers_one_complete_hub_request_and_task_and_preserves_typing(
+    typed_during_stt: bool, intraturn_wake: bool, one_breath: bool,
+) -> None:
+    from jarvis_hub.voice.state import Timing
+    from jarvis_hub.voice.voice_mode import VoiceMode, merge
+    from tests.fakes import (FakeBackend, FakeClock, FakeTts, RecordingMetrics, RecordingOutput,
+                             RecordingPlayer, Text, Tool, Typist, make_hub)
+
+    clock, source, stt = FakeClock(), Source(), GatedEndpointStt()
+    spoken = [Text('I will check.'), Tool('delegate', {'request': 'Check the tests', 'context': ''})]
+    typed = [Text('Typed input received.')]
+    backend = FakeBackend(clock, [typed, spoken] if typed_during_stt else [spoken, typed])
+    metrics, output, player = RecordingMetrics(), RecordingOutput(), RecordingPlayer()
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), LoudVad(), ScriptedTurn(), stt, Everyone()),
+        Listening(), metrics.record, output.notice, source=source, backlog_s=10, clock=clock.now,
+    )
+    voice = VoiceMode(audio=capture, tts=FakeTts(), player=player, clock=clock,
+                      timing=Timing(6.0, 4.0, 6.0, .5), metrics=metrics, notice=output.notice)
+    hub = make_hub(backend, output, metrics, speech=voice.speech, speak_typed=False,
+                   on_end_conversation=voice.end_conversation, floor=voice)
+    typist = Typist(clock)
+    await hub.start()
+    capture.start()
+    voice.start()
+    running = asyncio.create_task(hub.run(merge(typist.lines(), voice.lines(hub.interrupt, hub.woke))))
+    try:
+        await until(capture.ready.is_set)
+        await until(lambda: player.voices == ['ready'])
+        source.frames(8, value=2000, start=1000.0)
+        if one_breath:
+            source.frames(140, value=1000, start=1000.08)
+        await until(lambda: voice.state == 'listening')
+        if not one_breath:
+            source.frames(140, value=1000, start=1000.08)
+        source.frames(60, start=1001.48)
+        assert await asyncio.to_thread(stt.entered.wait, 2)
+        if typed_during_stt:
+            typist.type('Show the status')
+            await until(lambda: any('Typed input received.' in text for text in output.replies))
+        continuation_at = 1002.08
+        if intraturn_wake:
+            source.frames(8, value=2000, start=continuation_at)
+            continuation_at += .08
+        source.frames(60, value=1500, start=continuation_at)
+        source.frames(80, start=continuation_at + .6)
+        stt.release.set()
+        await until(lambda: any(result.name == 'delegate' for session in backend.all_sessions('talker')
+                               for result in session.tool_results))
+        users = [m for session in backend.all_sessions('talker') for m in session.received if m.startswith('<user')]
+        typed_message = '<user lang="en" typed="true">Show the status</user>'
+        spoken_message = '<user lang="en">Check the tests</user>'
+        assert users == ([typed_message, spoken_message] if typed_during_stt else [spoken_message])
+        assert len(backend.all_sessions('orchestrator')) == 1
+        assert len([result for session in backend.all_sessions('talker') for result in session.tool_results
+                    if result.name == 'delegate']) == 1
+        if not typed_during_stt:
+            typist.type('Show the status')
+        await until(lambda: any('Typed input received.' in text for text in output.replies))
+        assert [m for session in backend.all_sessions('talker') for m in session.received
+                if m.startswith('<user')] == ([typed_message, spoken_message] if typed_during_stt
+                                               else [spoken_message, typed_message])
+        assert 'Typed input received.' not in player.texts
+    finally:
+        stt.release.set()
+        typist.end()
+        await asyncio.wait([running], timeout=1)
+        await hub.close()
+        await voice.close()
+        capture.close()
+
+
+async def test_speech_starting_after_the_fence_is_a_later_request() -> None:
+    source, stt = Source(), GatedEndpointStt()
+    stt.release.set()
+    heard: list[Heard] = []
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), LoudVad(), ScriptedTurn(), stt, Everyone()),
+        Listening(), lambda row: None, lambda text: None, source=source, backlog_s=10,
+    )
+    async def collect() -> None:
+        async for event in capture.events():
+            if isinstance(event, Heard):
+                heard.append(event)
+    capture.start()
+    collecting = asyncio.create_task(collect())
+    try:
+        await until(capture.ready.is_set)
+        capture.capture(True)
+        source.frames(60, value=1000)
+        source.frames(60, start=.6)
+        await until(lambda: len(heard) == 1)
+        source.frames(60, value=1500, start=1.2)
+        source.frames(60, start=1.8)
+        await until(lambda: len(heard) == 2)
+        assert [event.text for event in heard] == ['Check', 'the tests']
+    finally:
+        capture.close()
+        collecting.cancel()
+        await asyncio.gather(collecting, return_exceptions=True)
+
+
+@pytest.mark.parametrize('fail_call', [1, 2])
+async def test_failed_transcription_discards_retained_audio_until_rearmed(fail_call: int) -> None:
+    class FailingStt(GatedEndpointStt):
+        def transcribe(self, audio: Samples, *, after: float = 0.0) -> str:
+            text = super().transcribe(audio, after=after)
+            if len(self.heard) == fail_call:
+                raise RuntimeError('synthetic STT failure')
+            return text
+    source, stt = Source(), FailingStt()
+    notices: list[str] = []
+    heard: list[Heard] = []
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), LoudVad(), ScriptedTurn(), stt, Everyone()),
+        Listening(), lambda row: None, notices.append, source=source, backlog_s=10,
+    )
+    async def collect() -> None:
+        async for event in capture.events():
+            if isinstance(event, Heard):
+                heard.append(event)
+    capture.start()
+    collecting = asyncio.create_task(collect())
+    try:
+        await until(capture.ready.is_set)
+        capture.capture(True)
+        source.frames(60, value=1000)
+        source.frames(60, start=.6)
+        assert await asyncio.to_thread(stt.entered.wait, 2)
+        source.frames(60, value=1500, start=1.2)
+        source.frames(80, start=1.8)
+        stt.release.set()
+        await until(lambda: any('synthetic STT failure' in text for text in notices))
+        await asyncio.sleep(.02)
+        assert heard == []
+        assert len(stt.heard) == fail_call
+        capture.capture(True)
+        source.frames(60, value=1500, start=2.6)
+        source.frames(60, start=3.2)
+        await until(lambda: bool(heard))
+        assert [event.text for event in heard] == ['the tests']
+    finally:
+        stt.release.set()
+        capture.close()
+        collecting.cancel()
+        await asyncio.gather(collecting, return_exceptions=True)
+
+
+async def test_repeated_resumption_cannot_grow_retained_audio_without_bound() -> None:
+    source = Source()
+    class ResumingStt(GatedEndpointStt):
+        def __init__(self) -> None:
+            super().__init__()
+            self.next_at = .8
+        def transcribe(self, audio: Samples, *, after: float = 0.0) -> str:
+            text = super().transcribe(audio, after=after)
+            if len(self.heard) < 12:
+                source.frames(40, value=1500, start=self.next_at)
+                self.next_at += .4
+            return text
+    stt = ResumingStt()
+    records: list[dict[str, Any]] = []
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), LoudVad(), ScriptedTurn(), stt, Everyone()),
+        Listening(max_turn_s=.6), records.append, lambda text: None, source=source, backlog_s=2,
+    )
+    capture.start()
+    try:
+        await until(capture.ready.is_set)
+        capture.capture(True)
+        source.frames(80, value=1000)
+        assert await asyncio.to_thread(stt.entered.wait, 2)
+        stt.release.set()
+        await until(lambda: any(row.get('reason') == 'retention_limit' for row in records))
+        assert not any(row.get('stage') == 'committed' for row in records)
+        assert max(len(audio) for audio in stt.heard) <= 261 * FRAME
+    finally:
+        stt.release.set()
+        capture.close()
+
+
+@pytest.mark.parametrize('abort', ['inference_failed', 'overflow', 'retention_limit'])
+async def test_abandoned_capture_restores_timeout_and_wake_recovery_without_a_request(abort: str) -> None:
+    from jarvis_hub.voice.state import Timing
+    from jarvis_hub.voice.voice_mode import VoiceMode, merge
+    from tests.fakes import (FakeBackend, FakeClock, FakeTts, RecordingMetrics, RecordingOutput,
+                             RecordingPlayer, Text, Typist, make_hub)
+
+    clock, source = FakeClock(), Source()
+    class AbortingStt(GatedEndpointStt):
+        next_at = 1001.28
+        resuming = True
+        def transcribe(self, audio: Samples, *, after: float = 0.0) -> str:
+            text = super().transcribe(audio, after=after)
+            if len(self.heard) == 1 and abort == 'inference_failed':
+                raise RuntimeError('synthetic STT failure')
+            if abort == 'retention_limit' and self.resuming and len(self.heard) < 12:
+                source.frames(40, value=1500, start=self.next_at)
+                self.next_at += .4
+            return text
+    stt = AbortingStt()
+    backend = FakeBackend(clock, [[Text('Recovered.')]])
+    metrics, output, player = RecordingMetrics(), RecordingOutput(), RecordingPlayer()
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), LoudVad(), ScriptedTurn(), stt, Everyone()),
+        Listening(max_turn_s=1.2 if abort == 'retention_limit' else 30), metrics.record, output.notice,
+        source=source, backlog_s=2, clock=clock.now,
+    )
+    voice = VoiceMode(audio=capture, tts=FakeTts(), player=player, clock=clock,
+                      timing=Timing(6.0, 4.0, 6.0, .5), metrics=metrics, notice=output.notice)
+    hub = make_hub(backend, output, metrics, speech=voice.speech, speak_typed=False,
+                   on_end_conversation=voice.end_conversation, floor=voice)
+    typist = Typist(clock)
+    await hub.start()
+    capture.start()
+    voice.start()
+    running = asyncio.create_task(hub.run(merge(typist.lines(), voice.lines(hub.interrupt, hub.woke))))
+    try:
+        await until(capture.ready.is_set)
+        await until(lambda: player.voices == ['ready'])
+        source.frames(8, value=2000, start=1000)
+        await until(lambda: voice.state == 'listening')
+        source.frames(60, value=1000, start=1000.08)
+        source.frames(60, start=1000.68)
+        assert await asyncio.to_thread(stt.entered.wait, 2)
+        if abort == 'overflow':
+            source.frames(400, value=1500, start=1001.28)
+        stt.release.set()
+        await until(lambda: any(row.get('reason') == abort for row in metrics.records)
+                    or any('synthetic STT failure' in text for text in output.notices))
+        for _ in range(30):
+            await asyncio.sleep(.001)
+        assert not [m for session in backend.all_sessions('talker') for m in session.received if m.startswith('<user')]
+        assert backend.all_sessions('orchestrator') == []
+        assert not any(player.texts)
+        stt.resuming = False
+        clock.advance(60)
+        await until(lambda: voice.state == 'idle')
+        assert any('try again' in text for text in output.notices)
+        source.frames(8, value=2000, start=clock.now())
+        await until(lambda: voice.state == 'listening')
+        source.frames(30, value=1500, start=clock.now() + .08)
+        source.frames(80, start=clock.now() + .38)
+        await until(lambda: any(m.startswith('<user') for session in backend.all_sessions('talker')
+                               for m in session.received))
+        assert [m for session in backend.all_sessions('talker') for m in session.received
+                if m.startswith('<user')] == ['<user lang="en">the tests</user>']
+    finally:
+        stt.release.set()
+        typist.end()
+        await asyncio.wait([running], timeout=1)
+        await hub.close()
+        await voice.close()
+        capture.close()
+
+
+async def test_failed_old_capture_cannot_abort_its_replacement() -> None:
+    from jarvis_hub.voice.state import CaptureAborted
+
+    class FailingFirstStt(GatedEndpointStt):
+        def transcribe(self, audio: Samples, *, after: float = 0.0) -> str:
+            text = super().transcribe(audio, after=after)
+            if len(self.heard) == 1:
+                raise RuntimeError('old capture failed')
+            return text
+    source, stt = Source(), FailingFirstStt()
+    events: list[object] = []
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), LoudVad(), ScriptedTurn(), stt, Everyone()),
+        Listening(), lambda row: None, lambda text: None, source=source, backlog_s=10,
+    )
+    async def collect() -> None:
+        async for event in capture.events():
+            events.append(event)
+    capture.start()
+    collecting = asyncio.create_task(collect())
+    try:
+        await until(capture.ready.is_set)
+        capture.capture(True)
+        source.frames(60, value=1000)
+        source.frames(60, start=.6)
+        assert await asyncio.to_thread(stt.entered.wait, 2)
+        capture.capture(False)
+        capture.capture(True)
+        source.frames(60, value=1500, start=1.2)
+        source.frames(80, start=1.8)
+        stt.release.set()
+        await until(lambda: any(isinstance(event, Heard) for event in events))
+        assert not any(isinstance(event, CaptureAborted) for event in events)
+        assert [event.text for event in events if isinstance(event, Heard)] == ['the tests']
+    finally:
+        stt.release.set()
+        capture.close()
+        collecting.cancel()
+        await asyncio.gather(collecting, return_exceptions=True)
+
+
+async def test_stale_vad_start_cannot_take_ownership_of_replacement_listening() -> None:
+    from collections.abc import AsyncIterator
+    from jarvis_hub.voice.state import InputEvent, Timing, WakeWord
+    from jarvis_hub.voice.voice_mode import VoiceMode, merge
+    from tests.fakes import (FakeBackend, FakeClock, FakeTts, RecordingMetrics, RecordingOutput,
+                             RecordingPlayer, Typist, make_hub)
+
+    class GatedVad(LoudVad):
+        def __init__(self) -> None:
+            self.entered, self.release = threading.Event(), threading.Event()
+            self.once = True
+        def probability(self, chunk: np.ndarray) -> float:
+            if self.once and (chunk == 1000).any():
+                self.once = False
+                self.entered.set()
+                assert self.release.wait(timeout=3)
+            return super().probability(chunk)
+
+    clock, source, vad = FakeClock(), Source(), GatedVad()
+    backend = FakeBackend(clock)
+    metrics, output, player = RecordingMetrics(), RecordingOutput(), RecordingPlayer()
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), vad, ScriptedTurn(), ScriptedStt(), Everyone()),
+        Listening(), metrics.record, output.notice, source=source, backlog_s=10, clock=clock.now,
+    )
+    class InterleavedWake:
+        def __init__(self) -> None:
+            self.queue: asyncio.Queue[InputEvent] = asyncio.Queue()
+        def wake(self) -> None:
+            self.queue.put_nowait(WakeWord(clock.now()))
+        def capture(self, on: bool, *, owner: int | None = None) -> None:
+            capture.capture(on, owner=owner)
+        def barge_in(self, since: float | None) -> None:
+            capture.barge_in(since)
+        async def events(self) -> AsyncIterator[InputEvent]:
+            async def forward() -> None:
+                async for event in capture.events():
+                    self.queue.put_nowait(event)
+            forwarding = asyncio.create_task(forward())
+            try:
+                while True:
+                    yield await self.queue.get()
+            finally:
+                forwarding.cancel()
+                await asyncio.gather(forwarding, return_exceptions=True)
+    audio = InterleavedWake()
+    voice = VoiceMode(audio=audio, tts=FakeTts(), player=player, clock=clock,
+                      timing=Timing(6.0, 4.0, 6.0, .5), metrics=metrics, notice=output.notice)
+    hub = make_hub(backend, output, metrics, speech=voice.speech, speak_typed=False,
+                   on_end_conversation=voice.end_conversation, floor=voice)
+    typist = Typist(clock)
+    await hub.start()
+    capture.start()
+    voice.start()
+    running = asyncio.create_task(hub.run(merge(typist.lines(), voice.lines(hub.interrupt, hub.woke))))
+    try:
+        await until(capture.ready.is_set)
+        await until(lambda: player.voices == ['ready'])
+        audio.wake()
+        await until(lambda: voice.state == 'listening')
+        source.frames(4, value=1000, start=clock.now())
+        assert await asyncio.to_thread(vad.entered.wait, 2)
+        clock.advance(7)
+        await until(lambda: voice.state == 'idle')
+        audio.wake()
+        await until(lambda: voice.state == 'listening')
+        vad.release.set()
+        for _ in range(30):
+            await asyncio.sleep(.001)
+        source.frames(8, start=clock.now())
+        for _ in range(30):
+            await asyncio.sleep(.001)
+        clock.advance(60)
+        await until(lambda: voice.state == 'idle')
+        assert not [m for session in backend.all_sessions('talker') for m in session.received if m.startswith('<user')]
+        assert backend.all_sessions('orchestrator') == []
+        assert not any(player.texts)
+    finally:
+        vad.release.set()
+        typist.end()
+        await asyncio.wait([running], timeout=1)
+        await hub.close()
+        await voice.close()
+        capture.close()
+
+
+@pytest.mark.parametrize('disable_first', [False, True])
+async def test_replacement_capture_cannot_recreate_a_discarded_onset(disable_first: bool) -> None:
+    from jarvis_hub.voice.state import SpeechStarted
+
+    class GatedVad(LoudVad):
+        def __init__(self) -> None:
+            self.entered, self.release = threading.Event(), threading.Event()
+            self.once = True
+        def probability(self, chunk: np.ndarray) -> float:
+            if self.once:
+                self.once = False
+                self.entered.set()
+                assert self.release.wait(timeout=3)
+            return super().probability(chunk)
+    source, vad = Source(), GatedVad()
+    stt = ScriptedStt(words={1000: 'Check', 1500: 'the tests'})
+    records: list[dict[str, Any]] = []
+    events: list[object] = []
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), vad, ScriptedTurn(), stt, Everyone()),
+        Listening(), records.append, lambda text: None, source=source, backlog_s=10,
+    )
+    async def collect() -> None:
+        async for event in capture.events():
+            events.append(event)
+    capture.start()
+    collecting = asyncio.create_task(collect())
+    try:
+        await until(capture.ready.is_set)
+        capture.capture(True)
+        source.frames(4, value=1000)
+        assert await asyncio.to_thread(vad.entered.wait, 2)
+        if disable_first:
+            capture.capture(False)
+        capture.capture(True)
+        source.frames(60, start=.04)
+        vad.release.set()
+        await until(lambda: any(row.get('captured_through_at') == .64 for row in records))
+        await asyncio.sleep(.02)
+        assert not any(isinstance(event, (SpeechStarted, Heard)) for event in events)
+        assert stt.heard == []
+        source.frames(60, value=1500, start=.64)
+        source.frames(60, start=1.24)
+        await until(lambda: any(isinstance(event, Heard) for event in events))
+        assert [event.text for event in events if isinstance(event, Heard)] == ['the tests']
+    finally:
+        vad.release.set()
+        capture.close()
+        collecting.cancel()
+        await asyncio.gather(collecting, return_exceptions=True)
+
+
+async def test_same_frame_wake_survives_old_vad_without_releasing_its_stale_speech_start() -> None:
+    from jarvis_hub.voice.state import Timing
+    from jarvis_hub.voice.voice_mode import VoiceMode, merge
+    from tests.fakes import (FakeBackend, FakeClock, FakeTts, RecordingMetrics, RecordingOutput,
+                             RecordingPlayer, Text, Typist, make_hub)
+
+    class GatedWakeVad(LoudVad):
+        chunk = 1280
+        def __init__(self) -> None:
+            self.armed = False
+            self.entered, self.release = threading.Event(), threading.Event()
+        def probability(self, chunk: np.ndarray) -> float:
+            if self.armed and (chunk == 2000).any():
+                self.armed = False
+                self.entered.set()
+                assert self.release.wait(timeout=3)
+            return super().probability(chunk)
+    clock, source, vad = FakeClock(), Source(), GatedWakeVad()
+    stt = ScriptedStt(words={1000: 'Check', 1500: 'the tests'})
+    backend = FakeBackend(clock, [[Text('Recovered.')]])
+    metrics, output, player = RecordingMetrics(), RecordingOutput(), RecordingPlayer()
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), vad, ScriptedTurn(), stt, Everyone()),
+        Listening(), metrics.record, output.notice, source=source, backlog_s=10, clock=clock.now,
+    )
+    voice = VoiceMode(audio=capture, tts=FakeTts(), player=player, clock=clock,
+                      timing=Timing(6.0, 4.0, 6.0, .5), metrics=metrics, notice=output.notice)
+    hub = make_hub(backend, output, metrics, speech=voice.speech, speak_typed=False,
+                   on_end_conversation=voice.end_conversation, floor=voice)
+    typist = Typist(clock)
+    await hub.start()
+    capture.start()
+    voice.start()
+    running = asyncio.create_task(hub.run(merge(typist.lines(), voice.lines(hub.interrupt, hub.woke))))
+    try:
+        await until(capture.ready.is_set)
+        await until(lambda: player.voices == ['ready'])
+        source.frames(8, value=2000, start=clock.now())
+        source.frames(96, start=clock.now() + .08)
+        await until(lambda: voice.state == 'listening')
+        clock.advance(3)
+        vad.armed = True
+        source.frames(8, value=2000, start=clock.now())
+        assert await asyncio.to_thread(vad.entered.wait, 2)
+        clock.advance(4)
+        await until(lambda: voice.state == 'idle')
+        vad.release.set()
+        await until(lambda: voice.state == 'listening')
+        source.frames(8, start=clock.now())
+        for _ in range(30):
+            await asyncio.sleep(.001)
+        assert stt.heard == []
+        assert not [m for session in backend.all_sessions('talker') for m in session.received if m.startswith('<user')]
+        assert backend.all_sessions('orchestrator') == []
+        clock.advance(60)
+        await until(lambda: voice.state == 'idle')
+        source.frames(8, value=2000, start=clock.now())
+        source.frames(30, value=1000, start=clock.now() + .08)
+        await until(lambda: voice.state == 'listening')
+        source.frames(30, value=1500, start=clock.now() + .38)
+        source.frames(60, start=clock.now() + .68)
+        await until(lambda: any(m.startswith('<user') for session in backend.all_sessions('talker')
+                               for m in session.received))
+        assert [m for session in backend.all_sessions('talker') for m in session.received
+                if m.startswith('<user')] == ['<user lang="en">Check the tests</user>']
+    finally:
+        vad.release.set()
+        typist.end()
+        await asyncio.wait([running], timeout=1)
+        await hub.close()
+        await voice.close()
+        capture.close()
+
+
+@pytest.mark.parametrize('reply_finished', [False, True])
+async def test_same_owner_reply_phase_off_preserves_the_existing_endpoint_fence(reply_finished: bool) -> None:
+    source, stt = Source(), GatedEndpointStt()
+    heard: list[Heard] = []
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), LoudVad(), ScriptedTurn(), stt, Everyone()),
+        Listening(), lambda row: None, lambda text: None, source=source, backlog_s=10,
+    )
+    async def collect() -> None:
+        async for event in capture.events():
+            if isinstance(event, Heard):
+                heard.append(event)
+    capture.start()
+    collecting = asyncio.create_task(collect())
+    try:
+        await until(capture.ready.is_set)
+        capture.capture(True, owner=7)
+        source.frames(60, value=1000)
+        source.frames(60, start=.6)
+        assert await asyncio.to_thread(stt.entered.wait, 2)
+        capture.capture(False, owner=7)
+        if reply_finished:
+            capture.capture(True, owner=7)
+        source.frames(60, value=1500, start=1.2)
+        source.frames(80, start=1.8)
+        stt.release.set()
+        await until(lambda: bool(heard))
+        assert [event.text for event in heard] == ['Check the tests']
+        assert heard[0].owner == 7
+        assert heard[0].candidate is not None
+        assert heard[0].started_at is not None and heard[0].started_at < .1
+        if reply_finished:
+            return
+        source.frames(60, value=1500, start=2.6)
+        source.frames(80, start=3.2)
+        for _ in range(20):
+            await asyncio.sleep(.001)
+        assert len(heard) == 1
+    finally:
+        stt.release.set()
+        capture.close()
+        collecting.cancel()
+        await asyncio.gather(collecting, return_exceptions=True)
+
+
+async def test_replacement_after_reply_phase_off_drops_the_old_retained_turn() -> None:
+    source, stt = Source(), GatedEndpointStt()
+    heard: list[Heard] = []
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), LoudVad(), ScriptedTurn(), stt, Everyone()),
+        Listening(), lambda row: None, lambda text: None, source=source, backlog_s=10,
+    )
+    async def collect() -> None:
+        async for event in capture.events():
+            if isinstance(event, Heard):
+                heard.append(event)
+    capture.start()
+    collecting = asyncio.create_task(collect())
+    try:
+        await until(capture.ready.is_set)
+        capture.capture(True, owner=7)
+        source.frames(60, value=1000)
+        source.frames(60, start=.6)
+        assert await asyncio.to_thread(stt.entered.wait, 2)
+        capture.capture(False, owner=7)
+        capture.capture(True, owner=8)
+        source.frames(60, value=1500, start=1.2)
+        source.frames(80, start=1.8)
+        stt.release.set()
+        await until(lambda: bool(heard))
+        assert [(event.text, event.owner) for event in heard] == [('the tests', 8)]
+    finally:
+        stt.release.set()
+        capture.close()
+        collecting.cancel()
+        await asyncio.gather(collecting, return_exceptions=True)

@@ -25,6 +25,7 @@ from jarvis_hub.voice.state import (
     AnnouncementBegins,
     Chime,
     ChimeStarted,
+    CaptureAborted,
     EndConversation,
     Event,
     InputEvent,
@@ -308,7 +309,7 @@ class VoiceMode:
         while True:
             event = await self._next_event()
             if isinstance(event, _Related):
-                if self.owns(event.owner.token) and event.epoch == self._epoch:
+                if event.fragments is self._inflight and self.owns(event.owner.token) and event.epoch == self._epoch:
                     self._applying_fragments = event.fragments
                     applying = asyncio.create_task(self._apply_related(event, interrupt))
                     self._applying.add(applying)
@@ -318,13 +319,23 @@ class VoiceMode:
                 if not self._applying:
                     self._start_assessment()
                 continue
-            if isinstance(event, (Heard, SpeechStarted)):
+            if isinstance(event, (Heard, SpeechStarted, CaptureAborted)):
                 if event.owner is not None and event.owner != self._epoch:
                     continue
                 if event.candidate is not None:
                     if event.candidate <= self._accepted_candidate:
                         continue
                     self._latest_candidate = max(self._latest_candidate, event.candidate)
+            if isinstance(event, CaptureAborted):
+                self._waiting.clear()
+                self._retained.clear()
+                self._inflight = ()
+                self._applying_fragments = ()
+                self._origins.clear()
+                if event.candidate is not None:
+                    self._accepted_candidate = max(self._accepted_candidate, event.candidate)
+                if self._owned is not None and self._voice.state == "thinking":
+                    self._notice("That additional speech was lost. Say 'Hey Jarvis' and try again.")
             if isinstance(event, Heard) and event.limited:
                 self._notice("Spoken input reached its duration limit. Repeat or split the request.")
                 if self._voice.state in CAPTURING:
@@ -387,6 +398,8 @@ class VoiceMode:
             self._owned = replace(self._owned, semantic_start=start)
 
     def typed_input(self) -> None:
+        if self._owned is None and self._voice.in_turn and self._voice.state in CAPTURING:
+            return
         before = self._voice.state
         self._voice = Voice()
         self._retire()
@@ -421,7 +434,7 @@ class VoiceMode:
                               tuple(fragment.heard.text for fragment in fragments))
 
         def current() -> tuple[str, str]:
-            return (candidate.candidate_id, candidate.turn_id) if self.owns(owner.token) and epoch == self._epoch else ("", "")
+            return (candidate.candidate_id, candidate.turn_id) if self.owns(owner.token) and epoch == self._epoch and self._inflight is fragments else ("", "")
 
         async def assess() -> None:
             if self._recognition is None:
@@ -435,7 +448,7 @@ class VoiceMode:
         self._assessing = asyncio.create_task(assess())
 
     async def _apply_related(self, related: _Related, interrupt: Callable[[], Awaitable[Any]]) -> None:
-        if not self.owns(related.owner.token) or related.epoch != self._epoch:
+        if related.fragments is not self._applying_fragments or not self.owns(related.owner.token) or related.epoch != self._epoch:
             return
         self._applying_fragments = ()
         verdict = related.result.verdict
@@ -510,6 +523,12 @@ class VoiceMode:
         if self._voice.state == "idle" and before_voice.state != "idle":
             self._retire()
         self._sync_capture()
+        if isinstance(event, CaptureAborted) and before_voice.in_turn and before in CAPTURING:
+            reason = {
+                "retention_limit": "That request exceeded the retained audio limit.",
+                "overflow": "Audio was dropped while listening fell behind.",
+            }.get(event.reason, "That request could not be transcribed.")
+            self._notice(f"{reason} Say 'Hey Jarvis' and try again.")
         self._bargein_log.observe(before_voice, event, self._voice, actions, self._speech.played)
         after = self._voice.state
         if after != before:

@@ -2473,3 +2473,73 @@ async def test_typed_end_controls_remain_generated_text_without_audio(rig_for: M
     assert rig.player.texts == []
     assert rig.state == "idle"
     assert len(talker_received(rig)) == turns
+
+
+@pytest.mark.parametrize('pending', [True, False])
+async def test_capture_abort_discards_unadmitted_fragments_without_stopping_owned_work(
+    rig_for: MakeRig, pending: bool,
+) -> None:
+    from jarvis_hub.voice.state import CaptureAborted
+    class AbortedRelation(LocalRelation):
+        def __init__(self) -> None:
+            super().__init__('amend' if pending else 'uncertain')
+            self.release = asyncio.Event()
+        async def assess(self, candidate: Any, *, current: Any, timeout_s: float = 2.0) -> Any:
+            result = await super().assess(candidate, current=current, timeout_s=timeout_s)
+            if pending and len(self.candidates) == 1:
+                try:
+                    await self.release.wait()
+                except asyncio.CancelledError:
+                    await self.release.wait()
+            return result
+    relation, finish = AbortedRelation(), asyncio.Event()
+    rig = await rig_for(
+        [Tool('delegate', {'request': 'Check build'}), Gate(finish), Text('The original answer, sir.')],
+        [Text('An obsolete fragment, sir.')], orchestrator=[[AwaitInterrupt()]], recognition=relation,
+    )
+    rig.audio.wake()
+    rig.audio.say('Check build')
+    await until(lambda: bool(rig.backend.all_sessions('orchestrator')))
+    rig.audio.say('about the obsolete fragment')
+    await until(lambda: len(relation.candidates) == 1)
+    await rig.settle()
+    rig.audio.speech()
+    rig.audio.emit(CaptureAborted(rig.clock.now(), 'overflow', rig.audio.owner, rig.audio.candidate))
+    await rig.settle()
+    relation.release.set()
+    await rig.settle()
+    assert len(rig.user_messages()) == 1
+    assert rig.state == 'thinking'
+    status = next(tool.handler for tool in rig.backend.session('talker').spec.tools if tool.name == 'status')
+    assert 'Check build' in await status({})
+    relation.verdict = 'uncertain'
+    rig.audio.say('a fresh fragment')
+    await until(lambda: len(relation.candidates) == 2)
+    assert relation.candidates[-1].transcript == 'a fresh fragment'
+    finish.set()
+    await until(lambda: rig.state == 'follow_up')
+    assert 'The original answer, sir.' in rig.player.texts
+
+
+async def test_an_old_capture_abort_cannot_discard_a_replacement_owners_assessment(rig_for: MakeRig) -> None:
+    from jarvis_hub.voice.state import CaptureAborted
+    relation = DelayedRelation()
+    rig = await rig_for([AwaitInterrupt()], [AwaitInterrupt()],
+                        [ResolveScope('preserve_tasks'), Text('Updated, sir.')], recognition=relation)
+    rig.audio.wake()
+    rig.audio.say('The old request')
+    await until(lambda: len(rig.user_messages()) == 1)
+    old_owner = rig.audio.owner
+    await rig.advance(.6)
+    rig.audio.wake()
+    await until(lambda: rig.state == 'listening')
+    rig.audio.say('The fresh request')
+    await until(lambda: len(rig.user_messages()) == 2)
+    rig.audio.say('with its continuation')
+    await until(lambda: len(relation.candidates) == 1)
+    assert rig.audio.owner != old_owner
+    rig.audio.emit(CaptureAborted(rig.clock.now(), 'overflow', old_owner, rig.audio.candidate))
+    await rig.settle()
+    relation.release.set()
+    await until(lambda: len(rig.user_messages()) == 3)
+    assert 'The fresh request with its continuation' in rig.user_messages()[-1]
