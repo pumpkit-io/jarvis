@@ -20,13 +20,10 @@ from jarvis_hub.voice.player import Clip, Player, Samples
 from jarvis_hub.voice.splitter import SentenceSplitter
 from jarvis_hub.voice.tts import Synthesizer
 
-ClipName = Literal["chime", "startup", "very_good", "usage_limit"]
+ClipName = Literal["chime", "ready", "very_good"]
 
 LINES: dict[ClipName, dict[Lang, str]] = {
-    "startup": {"en": "At your service, sir.", "it": "Ai suoi ordini, signore."},
     "very_good": {"en": "Very good, sir.", "it": "Molto bene, signore."},
-    # The reset time is not known at startup; the Hub says it after this line.
-    "usage_limit": {"en": "I've reached the usage limit, sir.", "it": "Ho raggiunto il limite di utilizzo, signore."},
 }
 
 # With queued audio this long unplayed, as from a paused player or a device that stopped pulling, `idle` gives up.
@@ -135,6 +132,7 @@ class Speech:
         notice: Callable[[str], None],
         on_reply_audio: Callable[[float | None], None] | None = None,
         on_chime: Callable[[float], None] | None = None,
+        on_ready: Callable[[], None] | None = None,
     ) -> None:
         self._tts = tts
         self._player = player
@@ -145,6 +143,7 @@ class Speech:
         self._on_reply_audio = on_reply_audio
         # Called with the time the chime starts playing, behind whatever is queued ahead of it.
         self._on_chime = on_chime
+        self._on_ready = on_ready
         # One thread: MLX ties its streams to the thread that loaded the model.
         self._thread = _DaemonThread("tts")
         self._queue: asyncio.Queue[_Say | _Cached | _End] = asyncio.Queue()
@@ -251,6 +250,7 @@ class Speech:
         tone = chime(self._tts.sample_rate)
         for lang in ("en", "it"):
             self._cache["chime", lang] = Clip("", "chime", tone, self._tts.sample_rate)
+            self._cache["ready", lang] = Clip("", "ready", tone, self._tts.sample_rate)
 
     async def _work(self, loading: "asyncio.Future[None]") -> None:
         began = self._clock.now()
@@ -258,6 +258,8 @@ class Speech:
             await loading
             ready = True
             self._record({"kind": "voice_loaded", "load_ms": round((self._clock.now() - began) * 1000)})
+            if self._on_ready is not None:
+                self._on_ready()
         except Exception as e:
             self._notice(f"Speech is off: the voice could not load: {type(e).__name__}: {e}")
             ready = False

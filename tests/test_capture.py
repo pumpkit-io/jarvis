@@ -7,9 +7,10 @@ from collections.abc import Callable
 from typing import Any
 
 import numpy as np
+import pytest
 
 from jarvis_hub.voice.clips import ClipSettings, ClipStore
-from jarvis_hub.voice.engines import ReferenceBuffer
+from jarvis_hub.voice.engines import NoEchoCancellation, ReferenceBuffer, WebRtcEchoCancellation
 from jarvis_hub.voice.input import Capture, Engines, Listening, Push
 from jarvis_hub.voice.player import Samples
 from jarvis_hub.voice.state import Heard
@@ -251,3 +252,148 @@ async def test_trace_preserves_capture_and_playback_times_through_an_inference_s
         wake.release.set()
         capture.close()
         player.close()
+
+
+@pytest.mark.parametrize("overlap", [False, True])
+@pytest.mark.parametrize("headphones", [False, True])
+async def test_playback_is_removed_while_user_speech_survives_an_inference_stall(
+    monkeypatch: pytest.MonkeyPatch, overlap: bool, headphones: bool,
+) -> None:
+    from jarvis_hub.voice.player import Clip, SoundPlayer
+    from jarvis_hub.voice.state import BargeIn, WakeWord
+    from tests.test_player import FakeStream
+
+    from collections import deque
+    from livekit import rtc
+
+    class AudioFrame:
+        def __init__(self, data: bytes, rate: int, channels: int, samples: int) -> None:
+            self.data = bytearray(data)
+
+    monkeypatch.setattr(rtc, 'AudioFrame', AudioFrame)
+
+    class AlignedApm:
+        def __init__(self, **settings: Any) -> None:
+            self.reference_frames: deque[np.ndarray] = deque()
+            self.output: list[np.ndarray] = []
+
+        def process_reverse_stream(self, frame: rtc.AudioFrame) -> None:
+            pcm = np.frombuffer(bytes(frame.data), np.int16)
+            self.reference_frames.append(np.repeat(pcm[::3], 2))
+
+        def process_stream(self, frame: rtc.AudioFrame) -> None:
+            pcm = np.frombuffer(frame.data, np.int16)
+            if self.reference_frames:
+                pcm[:] -= self.reference_frames.popleft()
+            self.output.append(pcm.copy())
+
+    apms: list[AlignedApm] = []
+
+    def apm(**settings: Any) -> AlignedApm:
+        apms.append(AlignedApm(**settings))
+        return apms[-1]
+
+    monkeypatch.setattr(rtc, 'AudioProcessingModule', apm)
+
+    class StalledWake(MarkerWake):
+        def __init__(self) -> None:
+            self.entered, self.release = threading.Event(), threading.Event()
+            self.first = True
+
+        def score(self, chunk: np.ndarray) -> float:
+            if self.first:
+                self.first = False
+                self.entered.set()
+                self.release.wait(timeout=5)
+            return super().score(chunk)
+
+    echo = NoEchoCancellation() if headphones else WebRtcEchoCancellation()
+    source, wake = Source(), StalledWake()
+    heard: list[object] = []
+    notices: list[str] = []
+    records: list[dict[str, Any]] = []
+    stt = ScriptedStt(words={1000: 'User correction', 6553: 'Jarvis echo'})
+    capture = Capture(
+        lambda: Engines(echo, wake, LoudVad(), ScriptedTurn(), stt, Everyone()),
+        Listening(), records.append, notices.append, source=source, backlog_s=3,
+    )
+    streams: list[FakeStream] = []
+
+    def open_stream(rate: int, fill: Callable[[np.ndarray], None]) -> FakeStream:
+        streams.append(FakeStream(fill))
+        return streams[-1]
+
+    player = SoundPlayer(24_000, open_stream=open_stream, on_played=capture.reference)
+    capture.start()
+    async def collect() -> None:
+        async for event in capture.events():
+            heard.append(event)
+    collecting = asyncio.create_task(collect())
+    try:
+        await until(capture.ready.is_set)
+        capture.capture(True)
+        capture.barge_in(0.0)
+        source.frames(8, value=3)
+        assert await asyncio.to_thread(wake.entered.wait, 2)
+        player.play(Clip('First synthetic sentence.', 'test', np.full(12_480, .2, np.float32), 24_000))
+        player.play(Clip('Second synthetic sentence.', 'test', np.full(12_480, .4, np.float32), 24_000))
+        assert source.push is not None
+        at = .08
+        for block in range(35):
+            if block == 22:
+                player.stop()
+            out = streams[0].pull(960)
+            for pcm in (out * 32767).astype(np.int16).reshape(-1, 240):
+                at = round(at + .01, 6)
+                captured = np.zeros(160, np.int16) if headphones else np.repeat(pcm[::3], 2)
+                if overlap and 8 <= block < 18:
+                    captured += 1000
+                source.push(captured, at)
+        wake.release.set()
+        await until(lambda: any(row.get('captured_through_at') == at for row in records)
+                    or any('Could not' in notice for notice in notices))
+        assert not any('Could not' in notice for notice in notices), notices
+        if overlap:
+            assert [e.text for e in heard if isinstance(e, Heard)] == ['User correction']
+            if not headphones:
+                assert all(np.isin(frame, [0, 1000]).all() for frame in apms[0].output[8:])
+            return
+        assert not any(isinstance(e, (Heard, BargeIn, WakeWord)) for e in heard)
+        if not headphones:
+            assert not any(frame.any() for frame in apms[0].output[8:])
+
+        source.frames(40, value=1000, start=at)
+        source.frames(80, start=at + .4)
+        await until(lambda: any(isinstance(e, Heard) for e in heard))
+        assert [e.text for e in heard if isinstance(e, Heard)] == ['User correction']
+    finally:
+        wake.release.set()
+        capture.close()
+        player.close()
+        collecting.cancel()
+        try:
+            await collecting
+        except asyncio.CancelledError:
+            pass
+
+
+async def test_successful_cancellation_does_not_report_a_silent_microphone() -> None:
+    class RemovedPlayback(CountingEcho):
+        def process(self, frame: np.ndarray) -> np.ndarray:
+            return np.zeros_like(frame)
+
+    notices: list[str] = []
+    records: list[dict[str, Any]] = []
+    source = Source()
+    capture = Capture(
+        lambda: engines(RemovedPlayback()), Listening(), records.append, notices.append,
+        source=source, backlog_s=10,
+    )
+    capture.start()
+    try:
+        await until(capture.ready.is_set)
+        source.frames(350, value=1000)
+        await until(lambda: any(row.get('captured_through_at') == 3.5 for row in records))
+        assert not any('Microphone' in notice for notice in notices)
+    finally:
+        capture.close()

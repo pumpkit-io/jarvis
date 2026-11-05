@@ -3,7 +3,7 @@ end-of-turn detection, the speaker gate and STT, reported as the voice state mac
 speaks, speech held over it is a Barge-in, with partial transcripts for its decision.
 
 `InputPipeline` is the frame-by-frame logic with every engine injected; `Capture` runs it on a thread of its own,
-fed by the `Microphone` or another `FrameSource`.
+fed by the `Microphone` or another `FrameSource`. Capture cancels echo before frames wait for inference.
 """
 
 import asyncio
@@ -37,7 +37,7 @@ MAX_BARGE_CLIP_FRAMES = 500
 
 class EchoCanceller(Protocol):
     def process(self, frame: Pcm) -> Pcm:
-        """One 10 ms capture frame, with the echo of what was played taken out. Called on the input thread only."""
+        """One 10 ms capture frame, processed serially before inference can queue it."""
         ...
 
     def reference(self, samples: Samples, rate: int) -> None:
@@ -205,7 +205,10 @@ class InputPipeline:
         self._partials_due = []
 
     def push(self, frame: Pcm, at: float) -> list[InputEvent]:
-        frame = self._e.echo.process(frame)
+        return self.push_clean(self._e.echo.process(frame), at)
+
+    def push_clean(self, frame: Pcm, at: float) -> list[InputEvent]:
+        """Accept a frame whose echo was cancelled at capture time, before waiting for inference."""
         self._ring.append((frame, at))
         self._at = at
         if self._clip is not None and len(self._clip[1]) < MAX_BARGE_CLIP_FRAMES:
@@ -388,7 +391,7 @@ Push = Callable[[Pcm, float], None]
 
 class FrameSource(Protocol):
     def open(self, push: Push) -> None:
-        """Starts calling `push` with each 10 ms frame and the time its last sample was captured, from any thread."""
+        """Calls `push` serially with each 10 ms frame and its final capture time, from any thread."""
         ...
 
     def close(self) -> None: ...
@@ -435,6 +438,7 @@ class Capture:
     """The pipeline on a frame source, the microphone by default. Engines load and run on a thread of their own,
     since MLX ties a model to the thread that loaded it; `ready` is set once they have loaded and frames flow.
 
+    Echo cancellation runs on the source callback before frames join the inference queue.
     Frames wait at most `backlog_s` for that thread; past it they are dropped, so a slow engine costs audio, not
     an ever later Wake word and a growing queue.
     """
@@ -464,7 +468,7 @@ class Capture:
         self._notice = notice
         self._source: FrameSource = source if source is not None else Microphone()
         # Frames and switches in the order they happened; None stops the thread.
-        self._frames: queue.SimpleQueue[tuple[Pcm, float] | _Capture | _BargeIn | None] = queue.SimpleQueue()
+        self._frames: queue.SimpleQueue[tuple[Pcm, float, bool] | _Capture | _BargeIn | None] = queue.SimpleQueue()
         self._max_backlog = round(backlog_s * 100)
         self._backlog = 0
         self._behind = False
@@ -521,6 +525,15 @@ class Capture:
         self._loop.call_soon_threadsafe(fn, arg)
 
     def _push(self, frame: Pcm, at: float) -> None:
+        echo = self._echo
+        if echo is None:
+            return
+        raw_silent = not frame.any()
+        try:
+            frame = echo.process(frame)
+        except Exception as error:
+            self._on_loop(self._notice, f"Could not process the audio input: {type(error).__name__}: {error}")
+            return
         with self._backlog_lock:
             if self._backlog >= self._max_backlog:
                 self._dropped += 1
@@ -529,7 +542,7 @@ class Capture:
                     self._on_loop(self._notice, "Listening is falling behind the microphone: dropping audio.")
                 return
             self._backlog += 1
-        self._frames.put((frame, at))
+        self._frames.put((frame, at, raw_silent))
 
     def _run(self) -> None:
         began = time.perf_counter()
@@ -546,9 +559,10 @@ class Capture:
             with self._source_lock:
                 if self._closed:
                     return
-                self._source.open(self._push)
                 self._echo = engines.echo
+                self._source.open(self._push)
         except Exception as e:
+            self._echo = None
             self._on_loop(self._notice, f"Listening is off: {type(e).__name__}: {e}")
             return
         pipeline = InputPipeline(
@@ -556,7 +570,7 @@ class Capture:
         )
         self.ready.set()
         self._on_loop(self._record, {"kind": "ears_loaded", "load_ms": round((time.perf_counter() - began) * 1000)})
-        self._on_loop(self._notice, 'Listening for "Hey Jarvis".')
+        self._on_loop(self._notice, 'Listening ready: waiting for "Hey Jarvis".')
         silent = 0
         while (item := self._frames.get()) is not None:
             if isinstance(item, _Capture):
@@ -570,7 +584,7 @@ class Capture:
                 # Caught up: a later backlog gets its own notice.
                 if self._backlog == 0:
                     self._behind = False
-            silent = silent + 1 if not item[0].any() else 0
+            silent = silent + 1 if item[2] else 0
             if silent == round(SILENT_MIC_S * 100):
                 self._on_loop(
                     self._notice,
@@ -581,7 +595,7 @@ class Capture:
             self._trace_frames += 1
             self._max_delay_ms = max(self._max_delay_ms, (processed - item[1]) * 1000)
             try:
-                events = pipeline.push(*item)
+                events = pipeline.push_clean(item[0], item[1])
             except Exception as e:
                 self._on_loop(self._notice, f"Could not process the audio input: {type(e).__name__}: {e}")
                 continue

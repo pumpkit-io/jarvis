@@ -287,14 +287,22 @@ async def text_mode(
         except Exception as e:
             output.notice(f"Speech is off: no audio output: {type(e).__name__}: {e}")
         else:
-            speech = Speech(voice.tts, player, clock, metrics=metrics, notice=output.notice)
-    hub = settings_hub(settings, backend=backend, clock=clock, output=output, metrics=metrics, speech=speech)
+            speech = Speech(
+                voice.tts, player, clock, metrics=metrics, notice=output.notice,
+                on_ready=lambda: output.notice("Speech ready."),
+            )
+    hub = settings_hub(
+        settings, backend=backend, clock=clock, output=output, metrics=metrics, speech=speech,
+        on_model_ready=lambda: output.notice("Model ready."),
+    )
     try:
+        output.notice("Model loading.")
         await hub.start()
         await asyncio.to_thread(language.warm_up)
         if speech is not None:
+            output.notice("Speech loading.")
             speech.start()
-            speech.say("startup", "en")
+            speech.say("ready", "en")
         if interactive:
             stdout.write(PROMPT)
             stdout.flush()
@@ -359,11 +367,14 @@ async def voice_mode(
         on_end_conversation=conversation.end_conversation,
         floor=conversation,
         preconnect_orchestrator=True,
+        on_model_ready=lambda: output.notice("Model ready."),
     )
     try:
+        output.notice("Model loading.")
         await hub.start()
         await asyncio.to_thread(language.warm_up)
         conversation.start()
+        output.notice("Listening loading.")
         listener.start()
         if stdin.isatty():
             stdout.write(PROMPT)
@@ -417,7 +428,7 @@ def print_stats(
 def main() -> None:
     parser = argparse.ArgumentParser(prog="jarvis-hub", description="Run the Jarvis Hub.")
     parser.add_argument("--text", action="store_true", help="talk by typing, with no audio")
-    parser.add_argument("--speak", action="store_true", help="with --text, also speak the replies aloud")
+    parser.add_argument("--speak", action="store_true", help="with --text, speak generated replies; readiness is nonverbal")
     parser.add_argument("--headphones", action="store_true", help="voice mode with echo cancellation off")
     parser.add_argument("--debug", action="store_true", help="show the voice state machine's transitions")
     commands = parser.add_subparsers(dest="command", metavar="stats")
