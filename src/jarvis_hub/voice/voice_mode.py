@@ -274,7 +274,11 @@ class VoiceMode:
         if capturing != (before in CAPTURING):
             self._audio.capture(capturing)
         try:
-            self._metrics.record({"kind": "voice", "from": before, "to": after, "on": type(event).__name__})
+            self._metrics.record({
+                "kind": "voice", "from": before, "to": after, "on": type(event).__name__,
+                "event_at": event.at, "processed_at": self._clock.now(), "time_basis": "perf_counter",
+                "request_at": getattr(event, "answers", self._voice.awaiting),
+            })
         except Exception as e:
             self._notice(f"Could not write metrics: {e}")
         if self._debug:

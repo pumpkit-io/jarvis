@@ -154,6 +154,7 @@ class Speech:
         self._queue: asyncio.Queue[_Say | _Cached | _End] = asyncio.Queue()
         self._cache: dict[tuple[ClipName, Lang], Clip] = {}
         self._reply: _Reply | None = None
+        self._last_reply: _Reply | None = None
         self._generation = 0
         self._synthesising = False
         self._holding_line: asyncio.Task[None] | None = None
@@ -176,6 +177,7 @@ class Speech:
         """
         self._cancel_holding_line()
         self._reply = _Reply(turn, lang, self._clock.now(), heard_at)
+        self._last_reply = self._reply
         if heard_at is not None:
             self._holding_line = asyncio.create_task(self._hold_the_line(self._reply))
 
@@ -200,6 +202,16 @@ class Speech:
 
     def stop(self) -> None:
         """Drop the reply and everything queued or playing."""
+        if (reply := self._last_reply) is not None:
+            self._record({
+                "kind": "speech_stop", "turn": reply.turn, "request_at": reply.heard_at,
+                "stopped_at": self._clock.now(), "time_basis": "perf_counter",
+                "first_meaningful_audio_ms": None if reply.first_chunk_audio is None else round(
+                    (reply.first_chunk_audio - (reply.heard_at if reply.heard_at is not None else reply.began)) * 1000
+                ),
+                "meaningful_audio_basis": "queue_estimate",
+            })
+            self._last_reply = None
         self._generation += 1
         self._cancel_holding_line()
         self._reply = None
@@ -336,6 +348,11 @@ class Speech:
             "kind": "speech",
             "turn": reply.turn,
             "lang": reply.lang,
+            "request_at": reply.heard_at,
+            "started_at": reply.began,
+            "time_basis": "perf_counter",
+            "first_meaningful_audio_ms": ms(reply.first_chunk_audio),
+            "meaningful_audio_basis": "queue_estimate",
             "voice": voice_for(reply.lang),
             "chunks": reply.chunks,
             "holding_line": reply.holding_line,
