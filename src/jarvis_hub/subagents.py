@@ -107,6 +107,7 @@ class Subagent:
     # The Approval this Subagent acts on, which widens its connector tools (ADR 0013).
     approval: str | None = None
     task_revision: int = 0
+    stop_requested: bool = False
     stop: asyncio.Event = field(default_factory=asyncio.Event)
 
     @property
@@ -237,6 +238,9 @@ class Subagents:
     def get(self, subagent_id: object) -> Subagent | None:
         return self._all.get(str(subagent_id).strip().upper()) if subagent_id else None
 
+    def unfinished_task_ids(self) -> set[str]:
+        return {subagent.task_id for subagent in self._all.values() if subagent.state not in FINISHED}
+
     def live(self, task_id: str) -> list[Subagent]:
         return [s for s in self._all.values() if s.task_id == task_id and s.state not in FINISHED]
 
@@ -265,6 +269,7 @@ class Subagents:
             return f"There is no Subagent {subagent_id}."
         if subagent.state in FINISHED:
             return f"{subagent.id} is already {subagent.state}."
+        subagent.stop_requested = True
         subagent.stop.set()
         kept = " Its worktree and branch are kept." if subagent.writes else ""
         return f"Stopping {subagent.id}; its report follows as an event.{kept}"
@@ -278,7 +283,7 @@ class Subagents:
         """Saved Subagents, checked whole and not yet restored."""
         subagents: list[Subagent] = []
         for r in records:
-            subagent = Subagent(**_SAVED.load({"task_revision": 0, **r}, from_wall))
+            subagent = Subagent(**_SAVED.load({"task_revision": 0, "stop_requested": False, **r}, from_wall))
             numbered(subagent.id, "S")
             one_of(subagent.state, get_args(SubagentState))
             if not is_effort(subagent.effort):
@@ -293,7 +298,7 @@ class Subagents:
         for subagent in subagents:
             self._all[subagent.id] = subagent
             self._ids = max(self._ids, numbered(subagent.id, "S"))
-            if subagent.state == "queued" and subagent.started is None:
+            if subagent.state == "queued" and subagent.started is None and not subagent.stop_requested:
                 continue
             if subagent.state not in FINISHED:
                 subagent.state = "interrupted"

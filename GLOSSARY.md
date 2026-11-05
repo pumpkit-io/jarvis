@@ -80,6 +80,10 @@ _Avoid_: hotword, trigger phrase
 An admitted User request with an identity that survives resumed speech or correction. Each accepted change creates a revision, preserving the opening and added words in order. The current revision owns its Talker generation and reply; replacing or retiring it makes old results stale.
 _Avoid_: treating every transcript fragment as a fresh request
 
+**Spoken scope**:
+The Hub's pending decision about which existing Tasks an already locally admitted spoken revision changes. The Talker selects the complete affected Task set, a separate request or no change. Unresolved scope holds old Task and Approval authority without rewriting their targets.
+_Avoid_: treating a local floor decision as a Task selection
+
 **Follow-up window**:
 The few seconds after Jarvis finishes speaking when the User can go on without the Wake word. When it passes in silence, Jarvis goes idle without a word.
 _Avoid_: grace period, listening timeout

@@ -321,13 +321,13 @@ class Waits:
             else:
                 self._checks = max(self._checks, numbered(wait.id, "C"))
 
-    def resume(self) -> None:
+    def resume(self, *, only: set[str] | None = None) -> None:
         """Starts the restored waits: a Watcher reruns its gh command, checked anew, within what is left of its
         limit; a Check keeps its due time, so one overdue fires at once, once."""
         if self._closing:
             return
         for wait in self._all.values():
-            if wait.state != "waiting" or wait.id in self._runs:
+            if wait.state != "waiting" or wait.id in self._runs or (only is not None and wait.id not in only):
                 continue
             if isinstance(wait, Watcher):
                 self._start(wait, self._run_watcher(wait))

@@ -35,6 +35,7 @@ class Task:
         self.revision += 1
         self.request = text
         self.words.append(text)
+        self.state = "working"
 
     def discard_message(self) -> None:
         self.waiting = max(0, self.waiting - 1)
@@ -103,9 +104,9 @@ class Tasks:
         self._tasks[task.id] = task
         return task
 
-    def dump(self, to_wall: TimeShift) -> list[dict[str, Any]]:
+    def dump(self, to_wall: TimeShift, *, include: set[str] | None = None) -> list[dict[str, Any]]:
         """The open Tasks, for the state file; finished ones end with the launch (story 24)."""
-        return [_SAVED.dump(t, to_wall) for t in self._tasks.values() if t.open]
+        return [_SAVED.dump(t, to_wall) for t in self._tasks.values() if t.open or t.id in (include or set())]
 
     @staticmethod
     def load(records: list[dict[str, Any]], from_wall: TimeShift) -> list[Task]:

@@ -26,6 +26,7 @@ from tests.fakes import (
     RecordingMetrics,
     RecordingOutput,
     RecordingPlayer,
+    ResolveScope,
     ScriptedAudio,
     Step,
     Text,
@@ -54,7 +55,8 @@ class Rig:
     running: asyncio.Task[None]
 
     def user_messages(self) -> list[str]:
-        return [m for s in self.backend.all_sessions("talker") for m in s.received if m.startswith("<user")]
+        return [m.split("\n<spoken_scopes>", 1)[0] for s in self.backend.all_sessions("talker")
+                for m in s.received if m.startswith("<user")]
 
     def states(self) -> list[str]:
         return [r["to"] for r in self.metrics.records if r["kind"] == "voice"]
@@ -103,7 +105,7 @@ async def rig_for() -> AsyncIterator[MakeRig]:
         typist = Typist(clock)
         await hub.start()
         voice.start()
-        running = asyncio.create_task(hub.run(merge(typist.lines(), voice.lines(hub.interrupt, hub.woke))))
+        running = asyncio.create_task(hub.run(merge(typist.lines(), voice.lines(hub.interrupt, hub.woke, hub.admit_spoken_revision))))
         rig = Rig(clock, backend, audio, player, output, metrics, typist, voice, hub, tts, running)
         rigs.append((rig, running))
         await until(lambda: player.voices == ["ready"])
@@ -1693,7 +1695,7 @@ async def test_resumed_thought_replaces_obsolete_generation_and_delegates_once(r
     relation = LocalRelation('amend')
     rig = await rig_for(
         [AwaitInterrupt(), Text('Obsolete reply.'), Tool('delegate', {'request': 'Open an issue'})],
-        [Text('I will investigate the scheduler, sir.'), Tool('delegate', {'request': 'Open an issue about the scheduler'})],
+        [ResolveScope('preserve_tasks'), Text('I will investigate the scheduler, sir.'), Tool('delegate', {'request': 'Open an issue about the scheduler'})],
         recognition=relation,
     )
     rig.audio.wake()
@@ -1709,7 +1711,8 @@ async def test_resumed_thought_replaces_obsolete_generation_and_delegates_once(r
     assert relation.candidates[0].admitted_turn == 'Open an issue'
     assert relation.candidates[0].phase == 'thinking'
     owners = [(row['request_id'], row['revision']) for row in rig.metrics.records if row['kind'] == 'user']
-    assert owners == [('spoken-1', 0), ('spoken-1', 1)]
+    assert owners[0][0] == owners[1][0]
+    assert [revision for _, revision in owners] == [0, 1]
 
 
 @pytest.mark.parametrize('verdict', ['unrelated', 'uncertain'])
@@ -1764,7 +1767,7 @@ async def test_a_delayed_relation_cannot_revise_a_replaced_owner(rig_for: MakeRi
     assert 'about the old scheduler' not in '\n'.join(rig.user_messages())
 
 
-async def test_distinct_new_request_does_not_append_the_opening(rig_for: MakeRig) -> None:
+async def test_local_new_request_hint_preserves_the_opening_until_explicit_scope_choice(rig_for: MakeRig) -> None:
     relation = LocalRelation('new_request')
     rig = await rig_for([AwaitInterrupt()], [Text('Checking, sir.')], recognition=relation)
     rig.audio.wake()
@@ -1772,7 +1775,7 @@ async def test_distinct_new_request_does_not_append_the_opening(rig_for: MakeRig
     await until(lambda: len(rig.user_messages()) == 1)
     rig.audio.say('Instead check the latest build')
     await until(lambda: len(rig.user_messages()) == 2)
-    assert rig.user_messages()[-1] == '<user lang="en">Instead check the latest build</user>'
+    assert rig.user_messages()[-1] == '<user lang="en">Explain the scheduler Instead check the latest build</user>'
 
 
 async def test_a_thinking_candidate_finishing_after_first_audio_revises_the_same_request(rig_for: MakeRig) -> None:
@@ -1799,7 +1802,7 @@ async def test_a_revision_reuses_the_already_delegated_task_identity(rig_for: Ma
     relation = LocalRelation('amend')
     rig = await rig_for(
         [Tool('delegate', {'request': 'Open an issue'}), AwaitInterrupt()],
-        [Tool('delegate', {'request': 'Open an issue about the scheduler'}), Text('Updated, sir.')],
+        [ResolveScope('revise_tasks', ('T1',)), Tool('delegate', {'request': 'Open an issue about the scheduler', 'task_id': 'T1'}), Text('Updated, sir.')],
         orchestrator=[[], []], recognition=relation,
     )
     rig.audio.wake()
@@ -1900,7 +1903,7 @@ async def test_an_amended_multi_task_request_requires_explicit_task_ownership(ri
     relation = LocalRelation('amend')
     rig = await rig_for(
         [Tool('delegate', {'request': 'Check build'}), Tool('delegate', {'request': 'Check docs'}), AwaitInterrupt()],
-        [Tool('delegate', {'request': 'Check build and docs today'}),
+        [Tool('delegate', {'request': 'Check build and docs today'}), ResolveScope('revise_tasks', ('T1',)),
          Tool('delegate', {'request': 'Wrong task', 'task_id': 'T999'}),
          Tool('delegate', {'request': 'Conflicting intent', 'task_id': 'T1', 'new_task': True}),
          Tool('delegate', {'request': 'Check build today', 'task_id': 'T1'}),
@@ -1960,7 +1963,7 @@ async def test_a_revised_task_cannot_reuse_or_recreate_the_old_pending_approval(
     approval: dict[str, Any] = {'action': 'subagent_action', 'description': 'Publish release 42', 'grants': []}
     rig = await rig_for(
         [Tool('delegate', {'request': 'Publish release 42'}), AwaitInterrupt()],
-        [Tool('delegate', {'request': 'Publish release 43 instead'}), Text('Revised, sir.')],
+        [ResolveScope('revise_tasks', ('T1',)), Tool('delegate', {'request': 'Publish release 43 instead', 'task_id': 'T1'}), Text('Revised, sir.')],
         orchestrator=[[Gate(report_gate), Tool('report', {'task_id': 'T1', 'spoken': 'Publish release 42?',
                                                         'needs_user': True, 'approval': approval})], []],
         recognition=relation,
@@ -2002,7 +2005,7 @@ async def test_a_stale_producer_usage_limit_still_establishes_the_global_hold(ri
     report_gate = asyncio.Event()
     rig = await rig_for(
         [Tool('delegate', {'request': 'Check build'}), AwaitInterrupt()],
-        [Tool('delegate', {'request': 'Check build and tests'}), Text('Updated, sir.')],
+        [ResolveScope('revise_tasks', ('T1',)), Tool('delegate', {'request': 'Check build and tests', 'task_id': 'T1'}), Text('Updated, sir.')],
         orchestrator=[[Gate(report_gate), Limited(600)], []], recognition=relation,
     )
     rig.audio.wake()
@@ -2035,7 +2038,7 @@ async def test_old_subagent_preparation_cannot_start_after_the_request_revision(
              'model': 'sonnet', 'effort': 'low', 'writes': False}
     rig = await rig_for(
         [Tool('delegate', {'request': 'Check build'}), AwaitInterrupt()],
-        [Tool('delegate', {'request': 'Check build and tests'}), Text('Updated, sir.')],
+        [ResolveScope('revise_tasks', ('T1',)), Tool('delegate', {'request': 'Check build and tests', 'task_id': 'T1'}), Text('Updated, sir.')],
         orchestrator=[[Tool('spawn_subagent', spawn)], []], recognition=relation, workspace=workspace,
     )
     rig.audio.wake()
@@ -2057,7 +2060,7 @@ async def test_accepted_revision_intent_is_durable_before_the_new_talker_delegat
     handoff = asyncio.Event()
     rig = await rig_for(
         [Tool('delegate', {'request': 'Publish release 42'}), AwaitInterrupt()],
-        [Gate(handoff), Tool('delegate', {'request': 'Publish release 43 instead'})],
+        [Gate(handoff), ResolveScope('revise_tasks', ('T1',)), Tool('delegate', {'request': 'Publish release 43 instead', 'task_id': 'T1'})],
         orchestrator=[[AwaitInterrupt()]], recognition=LocalRelation('amend'), state_path=path,
     )
     rig.audio.wake()
@@ -2067,14 +2070,15 @@ async def test_accepted_revision_intent_is_durable_before_the_new_talker_delegat
     await until(lambda: len(rig.user_messages()) == 2)
     snapshot = json.loads(path.read_text())
     [task] = snapshot['tasks']
-    assert task['revision'] == 1
-    assert task['request'] == 'Publish release 42 actually release 43'
-    assert task['words'][-1] == task['request']
-    assert snapshot['unanswered'] == []
+    assert task['revision'] == 0
+    assert task['request'] == 'Publish release 42'
+    [scope] = snapshot['spoken_scopes']
+    assert scope['segments'] == ['Publish release 42', 'actually release 43']
+    assert scope['pending'] is True
     restart_path = tmp_path / 'restart.json'
     restart_path.write_text(json.dumps(snapshot))
-    restored = await rig_for(orchestrator=[[AwaitInterrupt()]], state_path=restart_path)
-    await until(lambda: bool(restored.backend.all_sessions('orchestrator')))
+    restored = await rig_for([ResolveScope('revise_tasks', ('T1',)), Tool('delegate', {'request': 'Publish release 42 actually release 43', 'task_id': 'T1'})], orchestrator=[[AwaitInterrupt()]], state_path=restart_path)
+    await until(lambda: bool(restored.backend.all_sessions('orchestrator')) and bool(restored.backend.session('orchestrator').received))
     assert 'Publish release 42 actually release 43' in restored.backend.session('orchestrator').received[0]
     handoff.set()
 
@@ -2100,8 +2104,8 @@ async def test_restart_cannot_run_an_obsolete_prepared_subagent_during_cleanup(
              'model': 'sonnet', 'effort': 'low', 'writes': False}
     rig = await rig_for(
         [Tool('delegate', {'request': 'Check build'}), AwaitInterrupt()],
-        [Tool('delegate', {'request': 'Check build and tests'}), Text('Updated, sir.')],
-        orchestrator=[[Tool('spawn_subagent', spawn)], []], recognition=LocalRelation('amend'),
+        [ResolveScope('revise_tasks', ('T1',)), Tool('delegate', {'request': 'Check build and tests', 'task_id': 'T1'}), Text('Updated, sir.')],
+        orchestrator=[[Tool('spawn_subagent', spawn)], [AwaitInterrupt()]], recognition=LocalRelation('amend'),
         workspace=workspace, state_path=path,
     )
     rig.audio.wake()
@@ -2186,7 +2190,7 @@ async def test_amending_one_task_during_shared_recovery_preserves_the_other_task
     report_gate = asyncio.Event()
     rig = await rig_for(
         [Tool('delegate', {'request': 'Check build', 'task_id': 'T1'}), AwaitInterrupt()],
-        [Tool('delegate', {'request': 'Check build and tests', 'task_id': 'T1'}), Text('Updated, sir.')],
+        [ResolveScope('revise_tasks', ('T1',)), Tool('delegate', {'request': 'Check build and tests', 'task_id': 'T1'}), Text('Updated, sir.')],
         orchestrator=[[
             Gate(report_gate),
             Tool('report', {'task_id': 'T1', 'spoken': 'Old build result', 'needs_user': False}),
@@ -2222,7 +2226,7 @@ async def test_no_saved_revision_snapshot_keeps_the_old_live_approval(
     approval: dict[str, Any] = {'action': 'subagent_action', 'description': 'Publish release 42', 'grants': []}
     rig = await rig_for(
         [Tool('delegate', {'request': 'Publish release 42'}), AwaitInterrupt()],
-        [Gate(handoff), Text('Revised, sir.')],
+        [Gate(handoff), ResolveScope('revise_tasks', ('T1',)), Text('Revised, sir.')],
         orchestrator=[[Tool('report', {'task_id': 'T1', 'spoken': 'Publish release 42?',
                                       'needs_user': True, 'approval': approval})]],
         recognition=LocalRelation('amend'), state_path=tmp_path / 'state.json',
@@ -2232,6 +2236,8 @@ async def test_no_saved_revision_snapshot_keeps_the_old_live_approval(
     await until(lambda: any(snapshot['approvals'] for snapshot in snapshots))
     rig.audio.say('actually release 43')
     await until(lambda: len(rig.user_messages()) == 2)
+    handoff.set()
+    await until(lambda: any(snapshot['tasks'] and snapshot['tasks'][0]['revision'] == 1 for snapshot in snapshots))
     revised = [snapshot for snapshot in snapshots if snapshot['tasks'] and snapshot['tasks'][0]['revision'] == 1]
     assert revised
     assert all('actually release 43' in snapshot['tasks'][0]['request'] for snapshot in revised)
@@ -2244,7 +2250,7 @@ async def test_an_amended_turn_can_first_bind_an_explicit_existing_task(rig_for:
     rig = await rig_for(
         [Tool('delegate', {'request': 'Check build'}), Text('Checking, sir.')],
         [AwaitInterrupt()],
-        [Tool('delegate', {'request': 'Continue the build check including tests', 'task_id': 'T1'}), Text('Updated, sir.')],
+        [ResolveScope('preserve_tasks'), Tool('delegate', {'request': 'Continue the build check including tests', 'task_id': 'T1'}), Text('Updated, sir.')],
         orchestrator=[[Gate(finished), Tool('report', {'task_id': 'T1', 'spoken': 'Build checked', 'needs_user': False})], []], recognition=LocalRelation('amend'),
     )
     rig.typist.type('Check build')

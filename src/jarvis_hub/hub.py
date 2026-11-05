@@ -10,7 +10,7 @@ import json
 import re
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Callable, Coroutine, Iterable
+from collections.abc import Mapping, AsyncIterator, Callable, Coroutine, Iterable
 from dataclasses import asdict, dataclass, replace
 from html import escape
 from pathlib import Path
@@ -35,6 +35,7 @@ from jarvis_hub.limits import SavedLimit, UsageLimit, reset_sentence, update_sen
 from jarvis_hub.news import Leaf, News, fresh
 from jarvis_hub.orchestrator import orchestrator_tools
 from jarvis_hub.state import Fields, StateFile, UnreadableState
+from jarvis_hub.spoken import SpokenScopes
 from jarvis_hub.subagent_rules import connector_check
 from jarvis_hub.subagents import Subagent, SubagentSetup, Subagents, ended_event, kept_line, over_time_event
 from jarvis_hub.talker import talker_tools
@@ -103,6 +104,8 @@ class Floor(Protocol):
 
     def typed_input(self) -> None: ...
 
+    def semantic_context(self, owner: tuple[str, int], start: int) -> None: ...
+
     def announce(self) -> bool:
         """Claims the voice for news if Jarvis is still idle, so a Wake word interrupts it; False if not idle."""
         ...
@@ -141,6 +144,8 @@ class Line:
     interrupted: str | None = None
     request_id: str | None = None
     revision: int = 0
+    segments: tuple[str, ...] = ()
+    relation_hint: str | None = None
 
 
 # Sent once at launch, in the background, so the first real turn finds the prompt cached (ADR 0006); never shown.
@@ -349,6 +354,7 @@ class Hub:
             end_conversation=self._end_conversation,
             quiet_mode=self._quiet_mode_tool,
             approve=self._approve,
+            resolve_scope=self._resolve_scope,
         )
         self._talker_spec = replace(talker, tools=tuple(replace(tool, handler=self._owned_tool(tool.handler)) for tool in tools))
         self._orchestrator_spec = replace(
@@ -413,8 +419,6 @@ class Hub:
         self._input_ended = asyncio.Event()
         self._turn_count = 0
         self._active_spoken_owner: tuple[str, int] | None = None
-        self._spoken_tasks: dict[str, dict[int, list[str]]] = {}
-        self._spoken_latest: dict[str, int] = {}
         self._turn_task_revisions: dict[str, int] = {}
         self._producer_revisions: dict[str, int] = {}
         self._persist_suspended = False
@@ -448,6 +452,13 @@ class Hub:
         self._replying = False
         # The User's own text in the Talker turn under way, for the Tasks it delegates.
         self._user_text: str | None = None
+        self._scopes = SpokenScopes(clock, change=self._persist, notice=output.notice)
+        self._active_scope_authority: dict[str, tuple[int, int]] = {}
+        self._active_scope_id: str | None = None
+        self._scope_news: list[Leaf] = []
+        self._scope_inputs: list[_OrchestratorInput] = []
+        self._scope_queued: dict[str, Subagent] = {}
+        self._scope_waits: set[str] = set()
         self._approvals = Approvals(
             org=waits.org, runner=waits.runner, clock=clock, on_change=self._persist, log=self._write
         )
@@ -455,6 +466,7 @@ class Hub:
         # What the Talker turn under way has shown so far, for the Approvals it names.
         self._shown = ""
         self._carrying_out: set[asyncio.Task[None]] = set()
+        self._approval_runs: dict[str, asyncio.Task[None]] = {}
         self._session_for = subagents.session
         self._subagents = Subagents(
             setup=replace(subagents, session=self._subagent_session),
@@ -506,6 +518,7 @@ class Hub:
     async def close(self) -> None:
         """Stops everything; Tasks, their waits and the Subagents it interrupts are saved for the next launch."""
         self._closing = True
+        await self._scopes.close()
         await self._waits.close()
         await self._subagents.close()
         await self._limit.close()
@@ -526,17 +539,35 @@ class Hub:
                 await session.close()
         self._talker = self._orchestrator = None
 
+    def admit_spoken_revision(self, line: Line) -> None:
+        if line.request_id is None:
+            return
+        self._persist_suspended = True
+        try:
+            scope = self._scopes.admit(line.request_id, line.revision, line.segments or (line.text,), line.arrived)
+            for task_id in scope.task_ids:
+                task = self._tasks.get(task_id)
+                if task is not None:
+                    scope.task_context[task_id] = f"{task.request} (state: {task.state})" + (
+                        f" Last report: {task.last_report}" if task.last_report else "")
+            self._park_scope_news()
+        finally:
+            self._persist_suspended = False
+        self._persist()
+
     async def _read(self, inputs: AsyncIterator[Line]) -> None:
         async for line in inputs:
             if text := line.text.strip():
                 if line.typed and self._floor is not None:
                     self._floor.typed_input()
                     await self.interrupt()
+                if line.typed:
+                    self._scopes.typed(text)
                 if line.request_id is not None:
                     owner = (line.request_id, line.revision)
                     if self._floor is not None and not self._floor.owns(owner):
                         continue
-                    await self._revise_spoken_tasks(line.request_id, line.revision, line.text)
+                    self.admit_spoken_revision(line)
                     if self._floor is not None and not self._floor.owns(owner):
                         continue
                 self._read_lang = lang = line.lang or detect_language(text, self._read_lang)
@@ -589,6 +620,10 @@ class Hub:
 
     def _queue_news(self, leaf: Leaf) -> None:
         """News for the Talker: in voice mode an Announcement once Jarvis is quiet, or held while Quiet mode is on."""
+        if leaf.task_id is not None and self._scopes.held(leaf.task_id):
+            self._scope_news.append(leaf)
+            self._persist()
+            return
         if self._floor is None:
             self._post(self._talker_inbox, _told(News.one(leaf)))
             return
@@ -596,6 +631,40 @@ class Hub:
         self._settled.clear()
         self._queue(News.one(leaf))
         self._arrived.set()
+        self._persist()
+
+    def _park_scope_news(self) -> None:
+        held = self._scopes.held_tasks()
+        dropped = 0
+        def take(items: Iterable[News]) -> list[News]:
+            nonlocal dropped
+            remaining: list[News] = []
+            for news in items:
+                leaves = [leaf for leaf in news.leaves() if leaf.task_id in held]
+                self._scope_news.extend(leaves)
+                dropped += len(leaves)
+                if rest := news.without_tasks(held):
+                    remaining.append(rest)
+            return remaining
+        self._news = deque(take(self._news))
+        self._parked_news = take(self._parked_news)
+        leaves = [leaf for leaf in self._held if leaf.task_id in held]
+        self._scope_news.extend(leaves)
+        self._held = [leaf for leaf in self._held if leaf.task_id not in held]
+        dropped += len(leaves)
+        for _ in range(dropped):
+            self._handled()
+
+    def _release_scope_news(self) -> None:
+        waiting, self._scope_news = self._scope_news, []
+        for leaf in waiting:
+            task = self._tasks.get(leaf.task_id)
+            if task is not None and leaf.revision != task.revision:
+                continue
+            if leaf.task_id is not None and self._scopes.held(leaf.task_id):
+                self._scope_news.append(leaf)
+            else:
+                self._queue_news(leaf)
         self._persist()
 
     def _queue(self, news: News) -> None:
@@ -683,10 +752,12 @@ class Hub:
         def to_wall(t: float) -> float:
             return wall - (now - t)
 
-        tasks = self._tasks.dump(to_wall)
+        tasks = self._tasks.dump(to_wall, include=self._scopes.held_tasks() | self._subagents.unfinished_task_ids())
         ids = {t["id"] for t in tasks}
         data = {
             "saved_at": wall,
+            "spoken_scopes": self._scopes.dump(to_wall),
+            "scope_news": [leaf.dump(to_wall) for leaf in self._scope_news],
             "tasks": tasks,
             "subagents": self._subagents.dump(ids, to_wall),
             "waits": [w for w in self._waits.dump(to_wall) if w["task_id"] in ids],
@@ -774,11 +845,13 @@ class Hub:
             limit = UsageLimit.load(data["usage_limit"])
             parked = [News.load(r, from_wall) for r in data["parked"]]
             approvals = Approvals.load(data["approvals"], from_wall)
+            self._scopes.restore(data.get("spoken_scopes", []), from_wall)
+            self._scope_news = [Leaf.load(record, from_wall) for record in data.get("scope_news", [])]
         except (KeyError, TypeError, ValueError, IndexError, AttributeError) as e:
             self._output.notice(self._state.set_aside(f"could not be read whole ({type(e).__name__}: {e})"))
             return None
         self._restore_limit(limit, parked)
-        if not tasks:
+        if not tasks and not self._scopes.pending():
             self._restore_held(held, quiet_mode, needs_user)
             return None
         self._tasks.restore(tasks)
@@ -803,14 +876,18 @@ class Hub:
         for subagent in cut_off:
             self._approvals.subagent_ended(subagent.id)
         queued = self._subagents.queued()
+        self._scope_queued = {subagent.id: subagent for subagent in queued if self._scopes.held(subagent.task_id)}
+        queued = [subagent for subagent in queued if subagent.id not in self._scope_queued]
         self._waits.restore(waits)
+        self._scope_waits = {wait.id for wait in waits if self._scopes.held(wait.task_id)}
+        self._scope_inputs = [item for item in unanswered if self._scopes.held(item.task_id)]
         self._unanswered = unanswered
         interrupted = [s for s in map(self._subagents.get, told) if s is not None]
         self._interrupted = [s.id for s in interrupted]
         # After the rest, since releasing held news saves the state file.
         self._restore_held(held, quiet_mode, needs_user)
         # A restored Watcher or queued Subagent ends on its own, and the recovery message is news still to come.
-        self._pending += 1 + sum(isinstance(w, Watcher) for w in waits) + len(queued) + len(unfinished)
+        self._pending += 1 + sum(isinstance(w, Watcher) and w.id not in self._scope_waits for w in waits) + len(queued) + len(unfinished)
         self._settled.clear()
         relevant = [subagent for subagent in interrupted + cut_off
                     if current(subagent.task_id, subagent.task_revision)]
@@ -830,15 +907,22 @@ class Hub:
         try:
             for subagent in cut_off:
                 await self._subagents.free_interrupted(subagent)
-            ids = tuple(task.id for task in tasks if task.open)
+            pending_scopes = self._scopes.pending()
+            if pending_scopes:
+                text = "\n\n".join(scope.text for scope in pending_scopes)
+                self._post(self._talker_inbox, _TalkerInput("user", self._clock.now(),
+                    user_message(text, self._lang, typed=False), heard=text, typed=False, spoken=False))
+            ids = tuple(task.id for task in tasks if task.open and not self._scopes.held(task.id))
             if ids:
                 listing = self._tasks.open_status(self._clock.now(), self._task_lines)
-                carried = tuple(self._unanswered)
-                message = recovery_message(listing, interrupted, list(carried), problems)
+                carried = tuple(item for item in self._unanswered if not self._scopes.held(item.task_id))
+                available_interrupted = [subagent for subagent in interrupted if not self._scopes.held(subagent.task_id)]
+                message = recovery_message(listing, available_interrupted, list(carried), problems)
                 self._ask(_OrchestratorInput("", message, self._clock.now(), restart=ids, carried=carried))
             self._interrupted = []
         finally:
-            self._waits.resume()
+            self._waits.resume(only={wait.id for task in tasks for wait in self._waits.live(task.id)
+                                     if wait.id not in self._scope_waits})
             # Each still waits for the usage limit, when the restored one holds.
             for subagent in queued:
                 self._subagents.start(subagent)
@@ -862,6 +946,16 @@ class Hub:
                 item, upcoming = upcoming, None
                 await self._talker_gate.before_next_turn()
             item = self._with_away(item)
+            if item.news is not None:
+                held = self._scopes.held_tasks()
+                moved = [leaf for leaf in item.news.leaves() if leaf.task_id in held]
+                if moved:
+                    self._scope_news.extend(moved)
+                    for _ in moved:
+                        self._handled()
+                    item = replace(item, news=item.news.without_tasks(held))
+                    if item.kind == "event" and item.news is None:
+                        continue
             if item.news is not None:
                 stale = {leaf.task_id for leaf in item.news.leaves() if leaf.task_id is not None
                          and (task := self._tasks.get(leaf.task_id)) is not None and leaf.revision != task.revision}
@@ -894,7 +988,11 @@ class Hub:
                     if owner is not None and self._floor is not None and not self._floor.owns(owner):
                         end = TurnEnd("interrupted")
                     else:
-                        end = await self._turn(item.message, kind=item.kind, arrived=item.arrived, spoken=item.spoken, owner=owner)
+                        authority = self._scopes.activate() if item.kind == "user" else {}
+                        scope_context = self._scopes.context() if authority else ""
+                        message = "\n".join(part for part in (item.message, scope_context) if part)
+                        end = await self._turn(message, kind=item.kind, arrived=item.arrived, spoken=item.spoken,
+                                               owner=owner, scope_authority=authority)
                 told = [leaf.approval for leaf in (item.news.leaves() if item.news else ()) if leaf.approval]
                 self._approvals.turn_ended(completed=end.outcome == "completed", told=told, said=self._shown)
                 if end.outcome == "limited":
@@ -907,6 +1005,7 @@ class Hub:
                     self._handled()
                 if parked:
                     self._persist()
+                self._scopes.prune()
             upcoming = await self._restart_if_full(end.context)
 
     async def _next_input(self) -> _TalkerInput:
@@ -1050,6 +1149,7 @@ class Hub:
         spoken: bool = True,
         session: AgentSession | None = None,
         owner: tuple[str, int] | None = None,
+        scope_authority: dict[str, tuple[int, int]] | None = None,
     ) -> TurnEnd:
         session = session or self._talker
         assert session is not None
@@ -1066,9 +1166,8 @@ class Hub:
         end = TurnEnd("failed", error="the session ended without a result")
         self._talker_gate.turn = turn if show else None
         self._active_spoken_owner = owner
-        if owner is not None:
-            self._spoken_tasks = {owner[0]: self._spoken_tasks.get(owner[0], {})}
-            self._spoken_latest = {owner[0]: self._spoken_latest.get(owner[0], owner[1])}
+        self._active_scope_authority = scope_authority or {}
+        self._active_scope_id = owner[0] if owner is not None else next(iter(self._active_scope_authority), None)
         self._turn_spoken = show and spoken
         self._turn_answers_user = self._turn_spoken and kind == "user"
         speech = self._speech if self._turn_spoken else _Silent()
@@ -1107,6 +1206,12 @@ class Hub:
         finally:
             self._talker_gate.turn = None
             self._active_spoken_owner = None
+            for scope in self._scopes.settled(self._active_scope_authority):
+                for task_id in scope.selected:
+                    self._resume_scope_task(task_id, scope.task_context.get(task_id, ""))
+            self._scopes.fail(self._active_scope_authority)
+            self._active_scope_authority = {}
+            self._active_scope_id = None
             self._turn_spoken = self._turn_answers_user = self._replying = False
             if self._interrupted_turn != turn:
                 speech.end()
@@ -1163,6 +1268,12 @@ class Hub:
                 self._output.notice(f"Background model unavailable: {type(e).__name__}: {e}. A new Task retries the connection.")
         while True:
             item = await self._orchestrator_inbox.get()
+            if not item.restart and self._scopes.held(item.task_id):
+                self._scope_inputs.append(item)
+                if task := self._tasks.get(item.task_id):
+                    task.discard_message()
+                self._handled()
+                continue
             try:
                 await self._orchestrator_gate.before_next_turn()
                 await self._orchestrator_turn(item)
@@ -1170,7 +1281,7 @@ class Hub:
                 # Whatever went wrong on this Task, the next one in the queue still gets its turn.
                 error = f"{type(e).__name__}: {e}"
                 task = self._tasks.get(item.task_id)
-                if task is not None and task.state == "working":
+                if task is not None and task.state == "working" and task.revision == item.revision and not self._scopes.held(task.id):
                     self._fail(task, error)
                 self._output.notice(f"The Orchestrator failed on {item.task_id}: {error}")
             finally:
@@ -1181,9 +1292,10 @@ class Hub:
 
     async def _orchestrator_turn(self, item: _OrchestratorInput) -> None:
         task = self._tasks.get(item.task_id)
-        if task is not None and not item.restart and task.revision != item.revision:
-            task.discard_message()
-            return
+        if task is not None and not item.restart:
+            if not await self._scopes.wait(task.id) or task.revision != item.revision:
+                task.discard_message()
+                return
         if item.restart:
             tasks = [t for t in map(self._tasks.get, item.restart) if t is not None and not t.cancelled]
         else:
@@ -1258,7 +1370,7 @@ class Hub:
         )
 
     def _after_turn(self, task: Task, end: TurnEnd, reports: int, item: _OrchestratorInput) -> None:
-        if not item.restart and task.revision != item.revision:
+        if self._scopes.held(task.id) or (not item.restart and task.revision != item.revision):
             return
         # Only news still to come (a Subagent's or Watcher's end, a Check, a queued message) carries a Task on.
         quiet = not (task.id in self._spawned or task.waiting or self._has_pending(task.id))
@@ -1435,18 +1547,22 @@ class Hub:
         self._pending += 1
         self._settled.clear()
 
-    async def _revise_spoken_tasks(self, request_id: str, revision: int, text: str) -> None:
-        previous = self._spoken_latest.get(request_id, 0)
-        self._spoken_latest[request_id] = revision
-        if revision <= previous:
-            return
-        task_ids = {task_id for tasks in self._spoken_tasks.get(request_id, {}).values() for task_id in tasks}
+    async def _resolve_scope(self, args: dict[str, Any]) -> str:
+        choice = self._scopes.choose(args, self._active_scope_authority)
+        if isinstance(choice, Refused):
+            return choice.reason
+        for task_id in choice.task_ids:
+            task = self._tasks.get(task_id)
+            if task is None or task.cancelled:
+                return "Cannot revise an unknown or cancelled Task: " + task_id
+        task_ids = set(choice.task_ids)
+        prior_task_ids = set(choice.scope.task_ids)
         self._persist_suspended = True
         try:
             for task_id in task_ids:
                 task = self._tasks.get(task_id)
                 if task is not None:
-                    task.revise(text)
+                    task.revise(choice.scope.current_text)
             self._unanswered = [item for item in self._unanswered if item.task_id not in task_ids]
             for task_id in task_ids:
                 self._approvals.withdraw(task_id, reason="Its spoken request was revised.")
@@ -1471,12 +1587,89 @@ class Hub:
                 self._handled()
             for task_id in task_ids:
                 self._needs_user.pop(task_id, None)
+            self._scopes.commit(choice)
         finally:
             self._persist_suspended = False
         self._persist()
+        if self._active_spoken_owner is None:
+            self._active_scope_id = choice.scope.id
+        if self._floor is not None:
+            self._floor.semantic_context((choice.scope.id, choice.scope.revision), choice.scope.semantic_start)
+        self._release_scope_news()
+        self._release_scope_work()
+        for approval in self._approvals.live():
+            if approval.task_id in prior_task_ids and approval.state == "approved" and approval.action in HUB_ACTIONS and not self._scopes.held(approval.task_id) and approval.id not in self._approval_runs:
+                self._pending += 1
+                self._settled.clear()
+                self._carry_out(approval)
+        for task_id in prior_task_ids:
+            task = self._tasks.get(task_id)
+            active = task_id in self._turn_tasks and self._task_current(task_id)
+            if task is not None and task.state in ("working", "queued") and task_id not in task_ids and not self._scopes.held(task_id) and not active and not task.waiting and not self._has_pending(task_id):
+                self._resume_scope_task(task_id, choice.scope.task_context.get(task_id, ""))
         turn = self._orchestrator_gate.turn
         if self._turn_tasks and set(self._turn_tasks).issubset(task_ids) and turn is not None and self._orchestrator is not None:
             await self._orchestrator_gate.interrupt(self._orchestrator, turn)
+        return "Resolved spoken scope: " + choice.disposition + "."
+
+    def _resume_scope_task(self, task_id: str, previous: str = "") -> None:
+        task = self._tasks.get(task_id)
+        active = task_id in self._turn_tasks and self._task_current(task_id)
+        if task is None or task.state not in ("working", "queued") or active or task.waiting or self._scopes.held(task_id) or self._has_pending(task_id):
+            return
+        context = "Task scope was explicitly resolved. Continue existing work without repeating completed actions."
+        if previous:
+            context += "\nPrevious Task context: " + previous
+        context += "\n" + "\n".join(self._task_lines(task_id))
+        task.queue_message()
+        self._ask(_OrchestratorInput(task.id, task_message(task, task.request, context, continues=True),
+                                    self._clock.now(), revision=task.revision))
+
+    def _release_scope_work(self) -> None:
+        waiting, self._scope_inputs = self._scope_inputs, []
+        released: set[str] = set()
+        for item in waiting:
+            task = self._tasks.get(item.task_id)
+            if task is None or task.cancelled or task.revision != item.revision:
+                self._unanswered = [old for old in self._unanswered if old is not item]
+                continue
+            if self._scopes.held(task.id):
+                self._scope_inputs.append(item)
+                continue
+            task.queue_message()
+            self._post(self._orchestrator_inbox, item)
+            released.add(task.id)
+        for subagent_id, subagent in list(self._scope_queued.items()):
+            if self._scopes.held(subagent.task_id):
+                continue
+            self._scope_queued.pop(subagent_id)
+            task = self._tasks.get(subagent.task_id)
+            if task is None or task.cancelled or task.revision != subagent.task_revision:
+                subagent.stop_requested = True
+                subagent.stop.set()
+            self._pending += 1
+            self._settled.clear()
+            self._subagents.start(subagent)
+            released.add(subagent.task_id)
+        resume_waits: set[str] = set()
+        for wait_id in list(self._scope_waits):
+            wait = self._waits.get(wait_id)
+            if wait is None or wait.state != "waiting":
+                self._scope_waits.discard(wait_id)
+            elif not self._scopes.held(wait.task_id):
+                self._scope_waits.discard(wait_id)
+                resume_waits.add(wait_id)
+                released.add(wait.task_id)
+                if isinstance(wait, Watcher):
+                    self._pending += 1
+                    self._settled.clear()
+        self._waits.resume(only=resume_waits)
+        for scope in self._scopes.pending():
+            released.difference_update(scope.task_ids)
+        for task_id in released:
+            task = self._tasks.get(task_id)
+            if task is not None and task.state in ("working", "queued") and not task.waiting and not self._has_pending(task_id):
+                self._resume_scope_task(task_id)
         self._persist()
 
     def _task_current(self, task_id: str) -> bool:
@@ -1494,8 +1687,11 @@ class Hub:
                 target = wait.task_id if wait is not None else None
             if target is None and len(self._turn_tasks) == 1:
                 target = self._turn_tasks[0]
-            if isinstance(target, str) and target in self._turn_tasks and not self._task_current(target):
-                return "Refused: this Task revision was superseded."
+            if isinstance(target, str) and target in self._turn_tasks:
+                if not await self._scopes.wait(target):
+                    return "Refused: Task scope remains unresolved."
+                if not self._task_current(target):
+                    return "Refused: this Task revision was superseded."
             return await handler(args)
         return guarded
 
@@ -1514,19 +1710,19 @@ class Hub:
         context = str(args.get("context") or "").strip()
         if not request:
             return "request is required."
-        owner = self._active_spoken_owner
+        scope = self._scopes.get(self._active_scope_id)
+        if scope is not None and scope.pending:
+            return "Resolve the pending spoken scope before delegating work; choose its complete affected Task set."
         if args.get("new_task") and args.get("task_id"):
             return "Choose task_id for existing work or new_task=true for additional work, never both."
-        if owner is not None and owner[1] > 0:
-            revisions = self._spoken_tasks.get(owner[0], {})
-            known = {task for tasks in revisions.values() for task in tasks}
-            if known and args.get("task_id") and args["task_id"] not in known:
+        if scope is not None and scope.revision > 0 and scope.task_ids:
+            known = set(scope.task_ids)
+            if args.get("task_id") and args["task_id"] not in known:
                 return "Choose task_id from this spoken request's Tasks: " + ", ".join(sorted(known))
-            if known and not args.get("new_task") and not args.get("task_id"):
-                if len(known) == 1 and not revisions.get(owner[1]):
-                    args = {**args, "task_id": next(iter(known))}
-                else:
-                    return "Choose task_id to revise existing work (" + ", ".join(sorted(known)) + "), or new_task=true for additional work."
+            if args.get("task_id") and scope.disposition == "revise_tasks" and args["task_id"] not in scope.selected:
+                return "This scope did not select that Task for revision."
+            if not args.get("new_task") and not args.get("task_id"):
+                return "Choose task_id for selected existing work, or new_task=true for additional work."
         continues = bool(args.get("task_id"))
         if continues:
             task = self._tasks.get(args["task_id"])
@@ -1536,12 +1732,10 @@ class Hub:
                 return f"{task.id} was cancelled. Delegate without task_id to start a new one."
         else:
             task = self._tasks.create(request, self._clock.now())
-        if owner is not None:
-            self._spoken_tasks.setdefault(owner[0], {}).setdefault(owner[1], []).append(task.id)
-        if self._user_text is not None:
-            recorded_revision = owner is not None and owner[1] > 0 and task.words and task.words[-1] == self._user_text
-            if not recorded_revision:
-                task.words.append(self._user_text)
+        self._scopes.bind(self._active_scope_id, task.id, task.request)
+        words = scope.current_text if scope is not None else self._user_text
+        if words is not None and (not task.words or task.words[-1] != words):
+            task.words.append(words)
         task.queue_message()
         message = task_message(task, request, context, continues=continues)
         self._ask(_OrchestratorInput(task.id, message, self._clock.now(), revision=task.revision))
@@ -1558,14 +1752,24 @@ class Hub:
         return held + self._approvals.lines(task_id) + self._subagents.lines(task_id, revision=revision) + self._waits.lines(task_id, revision=revision)
 
     def _has_pending(self, task_id: str) -> bool:
-        return bool(self._subagents.live(task_id) or self._waits.live(task_id))
+        task = self._tasks.get(task_id)
+        if task is None:
+            return False
+        return bool(any(subagent.task_revision == task.revision and not subagent.stop_requested
+                        for subagent in self._subagents.live(task_id))
+                    or any(wait.task_revision == task.revision for wait in self._waits.live(task_id))
+                    or any(item.task_id == task_id and item.revision == task.revision for item in self._scope_inputs))
 
     async def _cancel(self, args: dict[str, Any]) -> str:
-        if self._waits.get(args.get("task_id")) is not None:
+        if wait := self._waits.get(args.get("task_id")):
+            if self._scopes.held(wait.task_id):
+                return "Resolve the pending spoken scope before cancelling this wait."
             return self._cancel_wait_for_user(args["task_id"])
         task = self._tasks.get(args.get("task_id"))
         if task is None:
             return no_task(args.get("task_id"))
+        if self._scopes.held(task.id):
+            return "Resolve the pending spoken scope before cancelling this Task."
         if not task.cancel():
             return f"{task.id} is already {task.state}."
         for subagent in self._subagents.live(task.id):
@@ -1645,9 +1849,17 @@ class Hub:
         return "Reported to the User."
 
     async def _approve(self, args: dict[str, Any]) -> str:
+        wanted = self._approvals.get(args.get("approval_id"))
+        if (wanted is not None and self._scopes.held(wanted.task_id)) or (
+            wanted is None and any(self._scopes.held(approval.task_id) for approval in self._approvals.pending())
+        ):
+            return "Resolve the pending spoken scope before using an old Approval."
         decided = self._approvals.decide(args.get("approval_id"))
         if isinstance(decided, str):
             return decided
+        task = self._tasks.get(decided.task_id)
+        self._scopes.bind(self._active_scope_id, decided.task_id, task.request if task is not None else "")
+        self._persist()
         if decided.action in HUB_ACTIONS:
             self._pending += 1
             self._settled.clear()
@@ -1664,27 +1876,55 @@ class Hub:
         return f"Approved {decided.id} with the User's words; the work is starting. Describe it as your own work in a few words."
 
     def _carry_out(self, approval: Approval) -> None:
-        """Runs an approved merge or branch delete in the background; counted as pending by the caller."""
-
+        if approval.id in self._approval_runs:
+            self._handled()
+            return
+        async def authorize() -> Refused | None:
+            if not await self._scopes.wait(approval.task_id):
+                return Refused("Task scope remains unresolved; the action has not been dispatched.")
+            task = self._tasks.get(approval.task_id)
+            if self._closing or task is None or task.cancelled or task.revision != approval.task_revision:
+                approval.state, approval.outcome = "withdrawn", "Its Task revision was superseded before dispatch."
+                self._persist()
+                return Refused(approval.outcome)
+            return None
         async def run() -> None:
             try:
-                self._wake(approval.task_id, await self._approvals.carry_out(approval))
-            except Exception as e:
-                self._output.notice(f"The Hub could not carry out {approval.id}: {type(e).__name__}: {e}")
+                event = await self._approvals.carry_out(approval, authorize=authorize,
+                    authority_version=lambda: self._scopes.version(approval.task_id))
+                task = self._tasks.get(approval.task_id)
+                if task is not None and task.revision == approval.task_revision:
+                    self._wake(approval.task_id, event)
+            except Exception as error:
+                self._output.notice(f"The Hub could not carry out {approval.id}: {type(error).__name__}: {error}")
             finally:
                 self._handled()
-
         carrying = asyncio.create_task(run())
+        self._approval_runs[approval.id] = carrying
         self._carrying_out.add(carrying)
-        carrying.add_done_callback(self._carrying_out.discard)
+        def finished(task: asyncio.Task[None]) -> None:
+            self._carrying_out.discard(task)
+            if self._approval_runs.get(approval.id) is task:
+                self._approval_runs.pop(approval.id)
+        carrying.add_done_callback(finished)
 
     def _subagent_session(self, subagent: Subagent) -> SessionSpec:
-        """A Subagent's session, its connector check widened by the Approval it holds, if any (ADR 0013)."""
         spec = self._session_for(subagent)
-        if subagent.approval is None:
-            return spec
-        guard = self._approvals.guard(subagent.approval, subagent.id, spec.mcp_guard or connector_check)
-        return replace(spec, mcp_guard=guard)
+        guard = spec.mcp_guard
+        if subagent.approval is not None:
+            guard = self._approvals.guard(subagent.approval, subagent.id, guard or connector_check)
+        async def lease(name: str, args: Mapping[str, Any]) -> Refused | None:
+            if spec.before_tool is not None:
+                refused = await spec.before_tool(name, args)
+                if refused is not None:
+                    return refused
+            if not await self._scopes.wait(subagent.task_id):
+                return Refused("Task scope remains unresolved.")
+            task = self._tasks.get(subagent.task_id)
+            if self._closing or task is None or task.cancelled or task.revision != subagent.task_revision:
+                return Refused("This Subagent's Task revision was superseded.")
+            return None
+        return replace(spec, mcp_guard=guard, before_tool=lease)
 
     def _turn_task(self, tool: str, args: dict[str, Any]) -> Task | str:
         """The Task a tool call is for: the turn's own, or in the recovery turn the one its task_id names."""
@@ -1712,7 +1952,8 @@ class Hub:
         prepared = await self._subagents.prepare(task.id, args, task.words, task_revision=self._turn_task_revisions[task.id])
         if isinstance(prepared, Refused):
             return prepared.reason
-        if not self._task_current(task.id):
+        if not await self._scopes.wait(task.id) or not self._task_current(task.id):
+            prepared.stop_requested = True
             prepared.stop.set()
             self._producer_revisions[prepared.id] = self._turn_task_revisions.get(task.id, task.revision - 1)
             self._pending += 1
@@ -1851,11 +2092,14 @@ class Hub:
         return f"Cancelled {cancelled.id}."
 
     def _watcher_ended(self, watcher: Watcher) -> None:
+        unstarted = watcher.id in self._scope_waits
+        self._scope_waits.discard(watcher.id)
         try:
             if watcher.state != "cancelled" and self._producer_current(watcher.id, watcher.task_id):
                 self._wake(watcher.task_id, watcher_event(watcher))
         finally:
-            self._handled()
+            if not unstarted:
+                self._handled()
 
     def _check_due(self, check: Check) -> None:
         if not self._producer_current(check.id, check.task_id):

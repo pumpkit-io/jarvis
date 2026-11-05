@@ -1,6 +1,7 @@
 """Adapters the tests inject into the Hub core: a scripted agent backend, a manual clock, recorders."""
 
 import asyncio
+import re
 import threading
 from collections.abc import AsyncIterator, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -84,6 +85,14 @@ class Tool:
 
 
 @dataclass(frozen=True)
+class ResolveScope:
+    disposition: str
+    task_ids: tuple[str, ...] = ()
+    from_segment: int | None = None
+    scope_index: int = 0
+
+
+@dataclass(frozen=True)
 class AwaitInterrupt:
     """Blocks the turn until the Hub interrupts it; the steps after it are the late deltas the SDK still sends."""
 
@@ -133,7 +142,7 @@ class NoContext:
     reason: str
 
 
-Step = Wait | Text | Tool | AwaitInterrupt | Gate | Set | Fail | Raise | Abort | Limited | Usage | Context | NoContext
+Step = Wait | Text | Tool | ResolveScope | AwaitInterrupt | Gate | Set | Fail | Raise | Abort | Limited | Usage | Context | NoContext
 
 
 @dataclass(frozen=True)
@@ -185,6 +194,18 @@ class FakeSession:
                     handler = next((t.handler for t in self.spec.tools if t.name == name), None)
                     result = await handler(args) if handler else None
                     self.tool_results.append(ToolResult(name, args, result))
+                case ResolveScope(disposition, task_ids, from_segment, scope_index):
+                    matches = re.findall(r'<pending_scope id="([^"]+)" revision="(\d+)" attempt="(\d+)"', self.received[-1])
+                    match = matches[scope_index] if scope_index < len(matches) else None
+                    if match is None:
+                        raise AssertionError("The scripted resolver needs a pending scope in the Talker's input.")
+                    args: dict[str, Any] = {"scope_id": match[0], "revision": int(match[1]), "attempt": int(match[2]),
+                                            "disposition": disposition, "task_ids": list(task_ids)}
+                    if from_segment is not None:
+                        args['from_segment'] = from_segment
+                    handler = next(t.handler for t in self.spec.tools if t.name == 'resolve_scope')
+                    result = await handler(args)
+                    self.tool_results.append(ToolResult('resolve_scope', args, result))
                 case AwaitInterrupt():
                     await self._interrupted.wait()
                 case Gate(event):

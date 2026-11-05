@@ -10,6 +10,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
+from uuid import uuid4
 
 from jarvis_hub.hub import Line
 from jarvis_hub.voice.assessment import Assessment, Candidate
@@ -179,6 +180,8 @@ class VoiceMode:
         self._recognition = recognition
         self._epoch = 0
         self._request_sequence = 0
+        self._request_namespace = uuid4().hex
+        self._admitted: Callable[[Line], None] = lambda line: None
         self._owned: SpokenTurn | None = None
         self._reply_started: tuple[tuple[str, int], float] | None = None
         self._reply_finished: tuple[tuple[str, int], float] | None = None
@@ -223,11 +226,13 @@ class VoiceMode:
         self._events.put_nowait(EndConversation(self._clock.now()))
 
     async def lines(
-        self, interrupt: Callable[[], Awaitable[Any]], woke: Callable[[], None] = lambda: None
+        self, interrupt: Callable[[], Awaitable[Any]], woke: Callable[[], None] = lambda: None,
+        admitted: Callable[[Line], None] = lambda line: None,
     ) -> AsyncIterator[Line]:
         """The User's spoken turns, for as long as this is iterated. `woke` hears of each Wake word that opens
         listening, before the turn that follows it."""
         self._woke = woke
+        self._admitted = admitted
         tasks = [asyncio.create_task(self._listen()), asyncio.create_task(self._drive(interrupt))]
         try:
             while True:
@@ -377,6 +382,10 @@ class VoiceMode:
         self._origins.clear()
         self._sync_capture()
 
+    def semantic_context(self, owner: tuple[str, int], start: int) -> None:
+        if self.owns(owner) and self._owned is not None and 0 <= start < len(self._owned.segments):
+            self._owned = replace(self._owned, semantic_start=start)
+
     def typed_input(self) -> None:
         before = self._voice.state
         self._voice = Voice()
@@ -408,7 +417,8 @@ class VoiceMode:
         first = fragments[0]
         transcript = " ".join(fragment.heard.text for fragment in fragments).strip()
         candidate = Candidate(f"{epoch}:{heard.candidate}:{heard.at}", f"{owner.id}:{owner.revision}",
-                              transcript, owner.text, self._speech.played(), first.phase, first.before_reply)
+                              transcript, owner.semantic_text, self._speech.played(), first.phase, first.before_reply,
+                              tuple(fragment.heard.text for fragment in fragments))
 
         def current() -> tuple[str, str]:
             return (candidate.candidate_id, candidate.turn_id) if self.owns(owner.token) and epoch == self._epoch else ("", "")
@@ -450,21 +460,13 @@ class VoiceMode:
             self.speech.stop()
             await interrupt()
             return
-        if verdict not in ("amend", "new_request"):
+        if verdict not in ("directed", "amend", "new_request"):
             if verdict != "unrelated":
                 self._retained.extend(related.fragments)
             return
         try:
-            if verdict == "new_request":
-                waiting, origins = tuple(self._waiting), dict(self._origins)
-                self._retire()
-                self._waiting.extend(waiting)
-                self._origins.update(origins)
-                self._request_sequence += 1
-                updated = SpokenTurn(f"spoken-{self._request_sequence}", 0, related.candidate.transcript,
-                                     related.heard.at, related.heard.lang)
-            else:
-                updated = related.owner.amended(related.candidate.transcript, related.heard.at, related.heard.lang)
+            updated = related.owner.amended(related.candidate.transcript, related.heard.at, related.heard.lang,
+                                            segments=tuple(fragment.heard.text for fragment in related.fragments))
         except ValueError as error:
             self._notice(str(error))
             return
@@ -481,10 +483,12 @@ class VoiceMode:
         if before != "thinking":
             self._transition(before, "thinking", related.heard)
         self._sync_capture()
+        line = Line(updated.text, updated.arrived, updated.lang, typed=False, interrupted=played or None,
+                    request_id=updated.id, revision=updated.revision, segments=updated.segments, relation_hint=verdict)
+        self._admitted(line)
         await interrupt()
         if self.owns(updated.token):
-            self._lines.put_nowait(Line(updated.text, updated.arrived, updated.lang, typed=False,
-                                       interrupted=played or None, request_id=updated.id, revision=updated.revision))
+            self._lines.put_nowait(line)
         self._start_assessment()
 
     def _step(self, event: Event) -> list[Action]:
@@ -498,7 +502,7 @@ class VoiceMode:
         if any(isinstance(action, SendTurn) for action in actions):
             heard = next(action for action in actions if isinstance(action, SendTurn))
             self._request_sequence += 1
-            self._owned = SpokenTurn(f"spoken-{self._request_sequence}", 0, heard.text, heard.at, heard.lang)
+            self._owned = SpokenTurn(f"spoken-{self._request_namespace}-{self._request_sequence}", 0, heard.text, heard.at, heard.lang)
             self._reply_started = None
             self._reply_finished = None
             if isinstance(event, Heard) and event.candidate is not None:
@@ -565,7 +569,8 @@ class VoiceMode:
                 heard = self._heard_before_cut if interrupted else None
                 self._lines.put_nowait(Line(text, at, lang, typed=False, interrupted=heard,
                                            request_id=self._owned.id if self._owned else None,
-                                           revision=self._owned.revision if self._owned else 0))
+                                           revision=self._owned.revision if self._owned else 0,
+                                           segments=self._owned.segments if self._owned else (text,)))
             case Pause():
                 self._player.pause()
                 self._debug_notice("voice: paused for a Barge-in")

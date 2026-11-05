@@ -922,6 +922,9 @@ class AlwaysQuiet:
     def typed_input(self) -> None:
         pass
 
+    def semantic_context(self, owner: tuple[str, int], start: int) -> None:
+        pass
+
     def announce(self) -> bool:
         return True
 

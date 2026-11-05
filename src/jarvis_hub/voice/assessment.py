@@ -23,6 +23,7 @@ class Candidate:
     played_text: str
     phase: str | None = None
     started_before_reply: bool | None = None
+    observed_segments: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

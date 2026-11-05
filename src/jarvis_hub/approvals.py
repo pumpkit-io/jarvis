@@ -3,7 +3,7 @@ User's own words. The Hub merges and deletes branches itself; any other action g
 
 import json
 import re
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from html import escape
@@ -656,7 +656,8 @@ class Approvals:
             )
         return None
 
-    async def carry_out(self, approval: Approval) -> str:
+    async def carry_out(self, approval: Approval, *, authorize: Callable[[], Awaitable[Refused | None]] | None = None,
+                        authority_version: Callable[[], object] | None = None) -> str:
         """Runs an approved merge or branch delete after reading its target again; returns the Orchestrator's
         event. A changed target lapses the Approval, and the event says what changed."""
         self._running.add(approval.id)
@@ -664,7 +665,15 @@ class Approvals:
             if self._expired(approval):
                 approval.state, approval.outcome = "expired", "It expired before it ran."
                 return approval_event(approval, "expired", f"{approval.text}: {approval.outcome} Ask again.")
-            target = await self._read(approval)
+            while True:
+                if authorize is not None and (refused := await authorize()) is not None:
+                    return approval_event(approval, "held", refused.reason)
+                version = authority_version() if authority_version is not None else None
+                target = await self._read(approval)
+                if authorize is not None and (refused := await authorize()) is not None:
+                    return approval_event(approval, "held", refused.reason)
+                if authority_version is None or version == authority_version():
+                    break
             if target.change is not None:
                 approval.state, approval.outcome = "lapsed", target.change
                 text = (
