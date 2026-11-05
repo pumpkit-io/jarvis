@@ -583,8 +583,9 @@ async def test_fence_revalidates_only_complete_vad_windows(queued_frames: int, e
 
 @pytest.mark.parametrize('typed_during_stt', [False, True])
 @pytest.mark.parametrize('intraturn_wake', [False, True])
+@pytest.mark.parametrize('one_breath', [False, True])
 async def test_queued_endpoint_delivers_one_complete_hub_request_and_task_and_preserves_typing(
-    typed_during_stt: bool, intraturn_wake: bool,
+    typed_during_stt: bool, intraturn_wake: bool, one_breath: bool,
 ) -> None:
     from jarvis_hub.voice.state import Timing
     from jarvis_hub.voice.voice_mode import VoiceMode, merge
@@ -613,14 +614,17 @@ async def test_queued_endpoint_delivers_one_complete_hub_request_and_task_and_pr
         await until(capture.ready.is_set)
         await until(lambda: player.voices == ['ready'])
         source.frames(8, value=2000, start=1000.0)
+        if one_breath:
+            source.frames(140, value=1000, start=1000.08)
         await until(lambda: voice.state == 'listening')
-        source.frames(220, value=1000, start=1000.08)
-        source.frames(60, start=1002.28)
+        if not one_breath:
+            source.frames(140, value=1000, start=1000.08)
+        source.frames(60, start=1001.48)
         assert await asyncio.to_thread(stt.entered.wait, 2)
         if typed_during_stt:
             typist.type('Show the status')
             await until(lambda: any('Typed input received.' in text for text in output.replies))
-        continuation_at = 1002.88
+        continuation_at = 1002.08
         if intraturn_wake:
             source.frames(8, value=2000, start=continuation_at)
             continuation_at += .08
@@ -875,3 +879,215 @@ async def test_failed_old_capture_cannot_abort_its_replacement() -> None:
         capture.close()
         collecting.cancel()
         await asyncio.gather(collecting, return_exceptions=True)
+
+
+async def test_stale_vad_start_cannot_take_ownership_of_replacement_listening() -> None:
+    from collections.abc import AsyncIterator
+    from jarvis_hub.voice.state import InputEvent, Timing, WakeWord
+    from jarvis_hub.voice.voice_mode import VoiceMode, merge
+    from tests.fakes import (FakeBackend, FakeClock, FakeTts, RecordingMetrics, RecordingOutput,
+                             RecordingPlayer, Typist, make_hub)
+
+    class GatedVad(LoudVad):
+        def __init__(self) -> None:
+            self.entered, self.release = threading.Event(), threading.Event()
+            self.once = True
+        def probability(self, chunk: np.ndarray) -> float:
+            if self.once and (chunk == 1000).any():
+                self.once = False
+                self.entered.set()
+                assert self.release.wait(timeout=3)
+            return super().probability(chunk)
+
+    clock, source, vad = FakeClock(), Source(), GatedVad()
+    backend = FakeBackend(clock)
+    metrics, output, player = RecordingMetrics(), RecordingOutput(), RecordingPlayer()
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), vad, ScriptedTurn(), ScriptedStt(), Everyone()),
+        Listening(), metrics.record, output.notice, source=source, backlog_s=10, clock=clock.now,
+    )
+    class InterleavedWake:
+        def __init__(self) -> None:
+            self.queue: asyncio.Queue[InputEvent] = asyncio.Queue()
+        def wake(self) -> None:
+            self.queue.put_nowait(WakeWord(clock.now()))
+        def capture(self, on: bool) -> None:
+            capture.capture(on)
+        def barge_in(self, since: float | None) -> None:
+            capture.barge_in(since)
+        async def events(self) -> AsyncIterator[InputEvent]:
+            async def forward() -> None:
+                async for event in capture.events():
+                    self.queue.put_nowait(event)
+            forwarding = asyncio.create_task(forward())
+            try:
+                while True:
+                    yield await self.queue.get()
+            finally:
+                forwarding.cancel()
+                await asyncio.gather(forwarding, return_exceptions=True)
+    audio = InterleavedWake()
+    voice = VoiceMode(audio=audio, tts=FakeTts(), player=player, clock=clock,
+                      timing=Timing(6.0, 4.0, 6.0, .5), metrics=metrics, notice=output.notice)
+    hub = make_hub(backend, output, metrics, speech=voice.speech, speak_typed=False,
+                   on_end_conversation=voice.end_conversation, floor=voice)
+    typist = Typist(clock)
+    await hub.start()
+    capture.start()
+    voice.start()
+    running = asyncio.create_task(hub.run(merge(typist.lines(), voice.lines(hub.interrupt, hub.woke))))
+    try:
+        await until(capture.ready.is_set)
+        await until(lambda: player.voices == ['ready'])
+        audio.wake()
+        await until(lambda: voice.state == 'listening')
+        source.frames(4, value=1000, start=clock.now())
+        assert await asyncio.to_thread(vad.entered.wait, 2)
+        clock.advance(7)
+        await until(lambda: voice.state == 'idle')
+        audio.wake()
+        await until(lambda: voice.state == 'listening')
+        vad.release.set()
+        for _ in range(30):
+            await asyncio.sleep(.001)
+        source.frames(8, start=clock.now())
+        for _ in range(30):
+            await asyncio.sleep(.001)
+        clock.advance(60)
+        await until(lambda: voice.state == 'idle')
+        assert not [m for session in backend.all_sessions('talker') for m in session.received if m.startswith('<user')]
+        assert backend.all_sessions('orchestrator') == []
+        assert not any(player.texts)
+    finally:
+        vad.release.set()
+        typist.end()
+        await asyncio.wait([running], timeout=1)
+        await hub.close()
+        await voice.close()
+        capture.close()
+
+
+@pytest.mark.parametrize('disable_first', [False, True])
+async def test_replacement_capture_cannot_recreate_a_discarded_onset(disable_first: bool) -> None:
+    from jarvis_hub.voice.state import SpeechStarted
+
+    class GatedVad(LoudVad):
+        def __init__(self) -> None:
+            self.entered, self.release = threading.Event(), threading.Event()
+            self.once = True
+        def probability(self, chunk: np.ndarray) -> float:
+            if self.once:
+                self.once = False
+                self.entered.set()
+                assert self.release.wait(timeout=3)
+            return super().probability(chunk)
+    source, vad = Source(), GatedVad()
+    stt = ScriptedStt(words={1000: 'Check', 1500: 'the tests'})
+    records: list[dict[str, Any]] = []
+    events: list[object] = []
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), vad, ScriptedTurn(), stt, Everyone()),
+        Listening(), records.append, lambda text: None, source=source, backlog_s=10,
+    )
+    async def collect() -> None:
+        async for event in capture.events():
+            events.append(event)
+    capture.start()
+    collecting = asyncio.create_task(collect())
+    try:
+        await until(capture.ready.is_set)
+        capture.capture(True)
+        source.frames(4, value=1000)
+        assert await asyncio.to_thread(vad.entered.wait, 2)
+        if disable_first:
+            capture.capture(False)
+        capture.capture(True)
+        source.frames(60, start=.04)
+        vad.release.set()
+        await until(lambda: any(row.get('captured_through_at') == .64 for row in records))
+        await asyncio.sleep(.02)
+        assert not any(isinstance(event, (SpeechStarted, Heard)) for event in events)
+        assert stt.heard == []
+        source.frames(60, value=1500, start=.64)
+        source.frames(60, start=1.24)
+        await until(lambda: any(isinstance(event, Heard) for event in events))
+        assert [event.text for event in events if isinstance(event, Heard)] == ['the tests']
+    finally:
+        vad.release.set()
+        capture.close()
+        collecting.cancel()
+        await asyncio.gather(collecting, return_exceptions=True)
+
+
+async def test_same_frame_wake_survives_old_vad_without_releasing_its_stale_speech_start() -> None:
+    from jarvis_hub.voice.state import Timing
+    from jarvis_hub.voice.voice_mode import VoiceMode, merge
+    from tests.fakes import (FakeBackend, FakeClock, FakeTts, RecordingMetrics, RecordingOutput,
+                             RecordingPlayer, Text, Typist, make_hub)
+
+    class GatedWakeVad(LoudVad):
+        chunk = 1280
+        def __init__(self) -> None:
+            self.armed = False
+            self.entered, self.release = threading.Event(), threading.Event()
+        def probability(self, chunk: np.ndarray) -> float:
+            if self.armed and (chunk == 2000).any():
+                self.armed = False
+                self.entered.set()
+                assert self.release.wait(timeout=3)
+            return super().probability(chunk)
+    clock, source, vad = FakeClock(), Source(), GatedWakeVad()
+    stt = ScriptedStt(words={1000: 'Check', 1500: 'the tests'})
+    backend = FakeBackend(clock, [[Text('Recovered.')]])
+    metrics, output, player = RecordingMetrics(), RecordingOutput(), RecordingPlayer()
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), vad, ScriptedTurn(), stt, Everyone()),
+        Listening(), metrics.record, output.notice, source=source, backlog_s=10, clock=clock.now,
+    )
+    voice = VoiceMode(audio=capture, tts=FakeTts(), player=player, clock=clock,
+                      timing=Timing(6.0, 4.0, 6.0, .5), metrics=metrics, notice=output.notice)
+    hub = make_hub(backend, output, metrics, speech=voice.speech, speak_typed=False,
+                   on_end_conversation=voice.end_conversation, floor=voice)
+    typist = Typist(clock)
+    await hub.start()
+    capture.start()
+    voice.start()
+    running = asyncio.create_task(hub.run(merge(typist.lines(), voice.lines(hub.interrupt, hub.woke))))
+    try:
+        await until(capture.ready.is_set)
+        await until(lambda: player.voices == ['ready'])
+        source.frames(8, value=2000, start=clock.now())
+        source.frames(96, start=clock.now() + .08)
+        await until(lambda: voice.state == 'listening')
+        clock.advance(3)
+        vad.armed = True
+        source.frames(8, value=2000, start=clock.now())
+        assert await asyncio.to_thread(vad.entered.wait, 2)
+        clock.advance(4)
+        await until(lambda: voice.state == 'idle')
+        vad.release.set()
+        await until(lambda: voice.state == 'listening')
+        source.frames(8, start=clock.now())
+        for _ in range(30):
+            await asyncio.sleep(.001)
+        assert stt.heard == []
+        assert not [m for session in backend.all_sessions('talker') for m in session.received if m.startswith('<user')]
+        assert backend.all_sessions('orchestrator') == []
+        clock.advance(60)
+        await until(lambda: voice.state == 'idle')
+        source.frames(8, value=2000, start=clock.now())
+        source.frames(30, value=1000, start=clock.now() + .08)
+        await until(lambda: voice.state == 'listening')
+        source.frames(30, value=1500, start=clock.now() + .38)
+        source.frames(60, start=clock.now() + .68)
+        await until(lambda: any(m.startswith('<user') for session in backend.all_sessions('talker')
+                               for m in session.received))
+        assert [m for session in backend.all_sessions('talker') for m in session.received
+                if m.startswith('<user')] == ['<user lang="en">Check the tests</user>']
+    finally:
+        vad.release.set()
+        typist.end()
+        await asyncio.wait([running], timeout=1)
+        await hub.close()
+        await voice.close()
+        capture.close()

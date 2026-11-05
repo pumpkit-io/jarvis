@@ -201,12 +201,13 @@ class InputPipeline:
         self._at = 0.0
 
     def capture(self, on: bool) -> None:
+        # Idle speech may contain the Wake word and request together; retain it only on a fresh enable.
+        if not on or self._capturing:
+            self.discard_endpoint("capture_changed")
+            self._ring.clear()
+            self._vad_buf = np.zeros(0, np.int16)
         self._capturing = on
         self._blocked = False
-        if self._pending is not None:
-            self.discard_endpoint("capture_changed")
-        if not on:
-            self._turn = None
 
     @property
     def pending_endpoint(self) -> int | None:
@@ -630,7 +631,7 @@ class Capture:
             self._frames.put(None)
 
     def _publish(self, event: InputEvent, epoch: int) -> None:
-        if not self._closed and (not isinstance(event, (Heard, CaptureAborted)) or epoch == self._capture_epoch):
+        if not self._closed and (isinstance(event, WakeWord) or epoch == self._capture_epoch):
             self._events.put_nowait(event)
 
     def _abandon(self, pipeline: InputPipeline, reason: str, epoch: int) -> None:
