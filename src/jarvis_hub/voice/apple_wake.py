@@ -64,10 +64,11 @@ class AppleWake:
                 output.setframerate(16000)
                 output.writeframes(pcm.tobytes())
             response = self._request(str(path))
-        text = response.get('text')
-        if not isinstance(text, str):
+        segments = response.get('segments')
+        if not isinstance(segments, list) or not all(isinstance(segment, str) for segment in cast(list[object], segments)):
             self.close()
             raise RuntimeError('Apple wake returned an invalid result; restart Jarvis after running ' + SETUP)
+        text = ' '.join(cast(list[str], segments))
         return WakeMatch(KEYWORD.search(text) is not None, KEYWORD.fullmatch(text.strip(' \t\r\n,.;:!?')) is not None)
 
     def _request(self, argument: str) -> dict[str, Any]:

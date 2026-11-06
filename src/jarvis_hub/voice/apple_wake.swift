@@ -34,12 +34,12 @@ func emit(_ value: [String: Any]) throws {
                 return
             }
             let analyzer = SpeechAnalyzer(modules: [module], options: .init(priority: .utility, modelRetention: .whileInUse))
-            let reader = Task { () throws -> String in
+            let reader = Task { () throws -> [String] in
                 var texts: [String] = []
                 for try await result in module.results where result.isFinal {
                     texts.append(String(result.text.characters))
                 }
-                return texts.joined()
+                return texts
             }
             do {
                 let file = try AVAudioFile(forReading: URL(fileURLWithPath: argument))
@@ -48,7 +48,7 @@ func emit(_ value: [String: Any]) throws {
                 } else {
                     await analyzer.cancelAndFinishNow()
                 }
-                try emit(["text": try await reader.value])
+                try emit(["segments": try await reader.value])
             } catch {
                 await analyzer.cancelAndFinishNow()
                 reader.cancel()

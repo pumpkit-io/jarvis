@@ -825,7 +825,7 @@ class Capture:
         )
         self.ready.set()
         self._on_loop(self._record, {"kind": "ears_loaded", "load_ms": round((time.perf_counter() - began) * 1000)})
-        self._on_loop(self._notice, 'Listening ready: waiting for "Hey Jarvis".')
+        self._on_loop(self._notice, 'Listening ready: local wake initialized; physical recognition remains unqualified.')
         silent = 0
         epoch = 0
         processed_frame = 0

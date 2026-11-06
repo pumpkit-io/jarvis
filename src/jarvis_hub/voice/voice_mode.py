@@ -736,6 +736,17 @@ class VoiceMode:
         version = period.version
         if self._settle_empty_cumulative(period):
             return
+        if period.phase == "listening" and period.owner is None and selected:
+            first = selected[0]
+            opening = without_wake_phrase(first.text)
+            if not opening and first.final and first.key in decision.directed:
+                period.sources.pop(first.candidate, None)
+                period.active.discard(first.candidate)
+                self._reject_source(first.candidate)
+                if self._settle_empty_cumulative(period):
+                    return
+            selected = (replace(first, text=opening), *selected[1:])
+            selected = tuple(source for source in selected if source.text.strip())
         line: Line | None = None
         if (decision.ready and selected and not period.active and all(source.final for source in selected)
                 and (period.stopped or decision.floor or self._voice.state in ("listening", "thinking", "follow_up", "idle"))):
