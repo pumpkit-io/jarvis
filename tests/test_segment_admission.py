@@ -84,7 +84,7 @@ async def test_stop_vector_silences_without_admitting_other_observed_speech(rig_
     await until(lambda: len(decisions.candidates) == 1)
     await rig.settle()
     rig.audio.say("Jarvis, stop your answer.")
-    await until(lambda: rig.state == "listening")
+    await until(lambda: rig.state == "follow_up")
     assert len(rig.user_messages()) == 1
 
 

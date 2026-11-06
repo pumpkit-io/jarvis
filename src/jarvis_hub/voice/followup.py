@@ -1,4 +1,4 @@
-"""Source-time eligibility and bounded speech retained by one completed reply's window."""
+"""Source-time eligibility and bounded speech for a completed reply or active Announcement."""
 
 from dataclasses import dataclass, field
 
@@ -15,6 +15,8 @@ class FollowUpWindow:
     admitted_turn: str
     played_text: str
     source: SpokenTurn | None
+    phase: str = "follow_up"
+    completed_at: float | None = None
     retained: tuple[Heard, ...] = ()
     waiting: list[Heard] = field(default_factory=lambda: list[Heard]())
     inflight: tuple[Heard, ...] = ()

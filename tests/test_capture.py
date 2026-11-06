@@ -1546,3 +1546,76 @@ async def test_replacement_after_reply_phase_off_drops_the_old_retained_turn() -
         capture.close()
         collecting.cancel()
         await asyncio.gather(collecting, return_exceptions=True)
+
+
+async def test_full_playback_candidate_keeps_opening_beyond_preroll_with_reference_active() -> None:
+    source, echo = Source(), CountingEcho()
+    stt = ScriptedStt(words={1000: 'Actually only review', 3000: 'the endpoint changes'})
+    capture = Capture(
+        lambda: Engines(echo, MarkerWake(), LoudVad(), ScriptedTurn(), stt, Everyone()),
+        Listening(preroll_s=.3), lambda row: None, lambda notice: None, source=source, backlog_s=6,
+    )
+    received: list[Any] = []
+
+    async def collect() -> None:
+        async for event in capture.events():
+            received.append(event)
+
+    capture.start()
+    collecting = asyncio.create_task(collect())
+    try:
+        await until(capture.ready.is_set)
+        capture.capture(True, owner=7, idle=False)
+        capture.barge_in(None)
+        capture.reference(np.ones(2400, np.float32), 24000)
+        source.frames(100, value=1000)
+        source.frames(300, value=3000, start=1)
+        source.frames(60, start=4)
+        await until(lambda: any(isinstance(event, Heard) for event in received))
+        heard = [event for event in received if isinstance(event, Heard)]
+        assert len(heard) == 1
+        assert heard[0].text == 'Actually only review the endpoint changes'
+        assert heard[0].owner == 7
+        assert echo.referenced == 2400 and len(stt.heard) == 1
+        assert len(stt.heard[0]) > 3 * 16000
+    finally:
+        capture.close()
+        collecting.cancel()
+        await asyncio.gather(collecting, return_exceptions=True)
+
+
+async def test_nonidle_wake_hit_cannot_cut_the_opening_from_ordinary_stt() -> None:
+    class LateVad(LoudVad):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def probability(self, chunk: np.ndarray) -> float:
+            self.calls += 1
+            return 0.0 if self.calls <= 3 else super().probability(chunk)
+
+    source = Source()
+    stt = ScriptedStt(words={2000: 'Jarvis was quoted', 3000: 'by someone else'})
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), LateVad(), ScriptedTurn(), stt, Everyone()),
+        Listening(), lambda row: None, lambda notice: None, source=source, backlog_s=2,
+    )
+    received: list[Any] = []
+    async def collect() -> None:
+        async for event in capture.events():
+            received.append(event)
+    capture.start()
+    collecting = asyncio.create_task(collect())
+    try:
+        await until(capture.ready.is_set)
+        capture.capture(True, owner=9, idle=False)
+        capture.barge_in(None)
+        source.frames(16, value=2000)
+        source.frames(40, value=3000, start=.16)
+        source.frames(60, start=.56)
+        await until(lambda: any(isinstance(event, Heard) for event in received))
+        assert stt.after == [0.0]
+        assert [event.text for event in received if isinstance(event, Heard)] == ['Jarvis was quoted by someone else']
+    finally:
+        capture.close()
+        collecting.cancel()
+        await asyncio.gather(collecting, return_exceptions=True)

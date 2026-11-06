@@ -96,7 +96,7 @@ class Engines:
 
 @dataclass(frozen=True)
 class Listening:
-    """Thresholds, each a `JARVIS_*` setting."""
+    """Capture thresholds and bounds, with internal legacy partial-replay parameters."""
 
     wake_threshold: float = 0.5
     vad_threshold: float = 0.5
@@ -175,6 +175,7 @@ class InputPipeline:
         self._wake_buf = np.zeros(0, np.int16)
         self._vad_buf = np.zeros(0, np.int16)
         self._last_wake = float("-inf")
+        self._activation_wake = float("-inf")
         # The current stretch of speech, whether or not it is a turn: its onset and the end of its latest speech.
         self._onset: float | None = None
         self._last_speech = 0.0
@@ -331,7 +332,9 @@ class InputPipeline:
             ends = at - len(self._wake_buf) / SAMPLE_RATE
             if self._e.wake.score(chunk) >= self._s.wake_threshold and ends - self._last_wake >= self._s.wake_refractory_s:
                 self._last_wake = ends
-                if self._blocked:
+                if not self._capturing:
+                    self._activation_wake = ends
+                if self._blocked and not self._capturing:
                     self._blocked = False
                     self._onset = None
                 events.append(WakeWord(ends))
@@ -436,7 +439,7 @@ class InputPipeline:
         frames = [f for f, t in self._ring if t - 0.01 >= start - STAMP_SLACK_S]
         first = self._ring[-len(frames)][1] - 0.01 if frames else self._ring[-1][1]
         self._turn_sequence += 1
-        return _Turn(first, frames, [], wake=self._last_wake if self._last_wake > first else None,
+        return _Turn(first, frames, [], wake=self._activation_wake if self._activation_wake > first else None,
                      candidate=self._turn_sequence, owner=self._owner, onset=onset)
 
     def _end_of_turn(self, turn: _Turn, at: float) -> Heard | None:

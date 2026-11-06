@@ -55,10 +55,7 @@ class VoiceSettings:
     chime_guard_ms: int = 500
     wake_refractory_ms: int = 2000
     onset_pad_ms: int = 200
-    bargein_min_speech_ms: int = 200
-    bargein_decide_ms: int = 800
-    bargein_guard_ms: int = 250
-    # Opt-in audio clips of Barge-ins and turns under `.jarvis/clips/`, pruned to these limits (voice/clips.py).
+    # Opt-in audio clips of captured turns under `.jarvis/clips/`, pruned to these limits (voice/clips.py).
     audio_clips: bool = False
     clips_max_count: int = 500
     clips_max_days: float = 14.0
@@ -183,9 +180,6 @@ def load_settings(
             chime_guard_ms=round(number("JARVIS_CHIME_GUARD_MS", 500, 0, 5000)),
             wake_refractory_ms=round(number("JARVIS_WAKE_REFRACTORY_MS", 2000, 0, 10000)),
             onset_pad_ms=round(number("JARVIS_ONSET_PAD_MS", 200, 0, 1000)),
-            bargein_min_speech_ms=round(number("JARVIS_BARGEIN_MIN_SPEECH_MS", 200, 0, 2000, low_open=True)),
-            bargein_decide_ms=round(number("JARVIS_BARGEIN_DECIDE_MS", 800, 0, 5000, low_open=True)),
-            bargein_guard_ms=round(number("JARVIS_BARGEIN_GUARD_MS", 250, 0, 5000)),
             audio_clips=choice("JARVIS_AUDIO_CLIPS", "off", ("off", "on")) == "on",
             clips_max_count=round(number("JARVIS_CLIPS_MAX_COUNT", 500, 1, 1_000_000)),
             clips_max_days=number("JARVIS_CLIPS_MAX_DAYS", 14, 0, 3650, low_open=True),

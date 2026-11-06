@@ -93,7 +93,7 @@ async def test_voice_mode_wakes_hears_answers_aloud_and_idles(tmp_path: Path, co
         return player
 
     stdin, stdout, stderr = HeldStdin(), io.StringIO(), io.StringIO()
-    config = settings(tmp_path, VoiceSettings(follow_up_s=3.0, end_silence_ms=400, max_turn_s=20.0, onset_pad_ms=300, bargein_min_speech_ms=150))
+    config = settings(tmp_path, VoiceSettings(follow_up_s=3.0, end_silence_ms=400, max_turn_s=20.0, onset_pad_ms=300))
     running = asyncio.create_task(
         voice_mode(
             settings=config,
@@ -119,9 +119,12 @@ async def test_voice_mode_wakes_hears_answers_aloud_and_idles(tmp_path: Path, co
     microphone.wake()
     await until(lambda: microphone.capturing == [True])
     microphone.say("What time is it?")
-    await until(lambda: microphone.capturing == [True, False, True])
+    await until(lambda: player.texts[-1:] == ["Half past nine, sir."])
+    for _ in range(50):
+        await asyncio.sleep(0)
+    assert microphone.capturing == [True]
     clock.advance(3.0)
-    await until(lambda: microphone.capturing == [True, False, True, False])
+    await until(lambda: microphone.capturing == [True, False])
     stdin.done.set()
     await asyncio.wait_for(running, timeout=5)
 
@@ -130,7 +133,6 @@ async def test_voice_mode_wakes_hears_answers_aloud_and_idles(tmp_path: Path, co
     [(choice, listening)] = chosen
     assert choice.aec == "off"
     assert (listening.end_silence_s, listening.max_turn_s, listening.onset_pad_s) == (0.4, 20.0, 0.3)
-    assert listening.bargein_min_speech_s == 0.15
     assert microphone.closed and player.closed
     assert all(session.closed for session in backend.sessions)
     if connection == "held":
@@ -139,7 +141,7 @@ async def test_voice_mode_wakes_hears_answers_aloud_and_idles(tmp_path: Path, co
     assert [r["to"] for r in rows if r["kind"] == "voice"] == ["listening", "thinking", "speaking", "follow_up", "idle"]
 
 
-def test_the_barge_in_windows_reach_the_voice_state_machine() -> None:
-    voice = timing(VoiceSettings(bargein_decide_ms=600, bargein_guard_ms=400))
+def test_mechanical_listening_windows_reach_the_voice_state_machine() -> None:
+    voice = timing(VoiceSettings(follow_up_s=8, listen_s=5, chime_guard_ms=300))
 
-    assert (voice.decide_s, voice.guard_s) == (0.6, 0.4)
+    assert (voice.follow_up_s, voice.listen_s, voice.chime_s) == (8, 5, 0.3)

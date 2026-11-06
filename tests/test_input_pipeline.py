@@ -311,7 +311,7 @@ def test_jarvis_said_later_in_the_turn_cuts_nothing_more() -> None:
     r.feed("wake", 0.1)
     r.pipeline.capture(True)
     r.feed("speech", 2.5)
-    # "...tell Ada that Jarvis will handle the deploy": a second hit, well past the refractory time.
+    # A quoted name past the idle refractory time remains part of the captured request.
     r.feed("wake", 0.1)
     r.feed("speech", 0.5)
     r.feed("silence", 0.6)
@@ -816,3 +816,15 @@ def test_captured_onset_is_separate_from_retained_pre_roll() -> None:
     capture_start = record['capture_start_at']
     assert isinstance(capture_start, float)
     assert capture_start < T0 + 0.3
+
+
+def test_keyword_hit_during_ordinary_capture_cannot_rearm_audio_discarded_after_loss() -> None:
+    r = rig()
+    r.pipeline.capture(True)
+    r.feed('speech', .4)
+    assert r.pipeline.discard_endpoint('overflow', block=True) is not None
+    r.feed('wake', .16)
+    r.feed('speech', .6)
+    r.feed('silence', .6)
+    assert not any(isinstance(event, Heard) for event in r.events)
+    assert r.stt.heard == []

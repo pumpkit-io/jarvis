@@ -102,8 +102,6 @@ def timing(voice: VoiceSettings) -> Timing:
         announce_follow_up_s=voice.announce_follow_up_s,
         listen_s=voice.listen_s,
         chime_s=voice.chime_guard_ms / 1000,
-        decide_s=voice.bargein_decide_ms / 1000,
-        guard_s=voice.bargein_guard_ms / 1000,
     )
 
 
@@ -122,7 +120,6 @@ def listening(voice: VoiceSettings) -> Listening:
         max_turn_s=voice.max_turn_s,
         wake_refractory_s=voice.wake_refractory_ms / 1000,
         onset_pad_s=voice.onset_pad_ms / 1000,
-        bargein_min_speech_s=voice.bargein_min_speech_ms / 1000,
     )
 
 
