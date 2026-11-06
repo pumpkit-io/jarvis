@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 
 from bench_endpoint import ComparedTurn, replay
@@ -96,3 +98,30 @@ def test_replay_distinguishes_silence_fallback_from_a_complete_score() -> None:
         ScriptedStt(), Everyone(),
     )
     assert replay(audio, fixed, Listening(end_silence_s=1.5, end_extend_s=0.))['commit_causes'] == ['fixed_silence']
+
+
+def test_local_model_provenance_hashes_actual_files_without_claiming_the_reference_revision(tmp_path: Path) -> None:
+    from bench_endpoint import text_model_provenance
+
+    first, second = tmp_path / 'first', tmp_path / 'second'
+    first.mkdir()
+    second.mkdir()
+    (first / 'model_quant.onnx').write_bytes(b'abc')
+    (first / 'tokenizer.json').write_bytes(b'hello')
+    (second / 'model_quant.onnx').write_bytes(b'hello')
+    (second / 'tokenizer.json').write_bytes(b'abc')
+    first_metadata = text_model_provenance(first)
+    second_metadata = text_model_provenance(second)
+    assert first_metadata == {
+        'expected_reference_revision': '59245aac1f0a0f170277ebecc32ddaea418083b4',
+        'source_files_sha256': {
+            'model_quant.onnx': 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+            'tokenizer.json': '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824',
+        },
+        'scorer_version': 'namo-onnx-class1-softmax-v1',
+    }
+    assert second_metadata['source_files_sha256'] == {
+        'model_quant.onnx': '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824',
+        'tokenizer.json': 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+    }
+    assert 'namo_revision' not in first_metadata and 'actual_revision' not in first_metadata

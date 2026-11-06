@@ -83,7 +83,7 @@ uv run python spikes/audio/bench_endpoint.py --data .jarvis/endpoint-heldout --m
 uv run python spikes/audio/bench_endpoint.py --data .jarvis/endpoint-heldout --method fixed-1500 --out .jarvis/endpoint/heldout-fixed.json
 ```
 
-Download public Namo weights separately, then run completely local inference with that directory. This replay never downloads or sends text to a remote assessment service:
+Download public Namo weights separately, then run completely local inference with that directory. New replay outputs name the expected reference revision separately from SHA256 hashes of the local `model_quant.onnx` and `tokenizer.json` files and the class-1 softmax scorer version. A compatible custom directory is permitted; its actual upstream revision is not inferred from its path. Historical aggregate artifacts retain their original provenance and are not rewritten as newly verified file-hash measurements. This replay never downloads or sends text to a remote assessment service:
 
 ```sh
 HF_HUB_DISABLE_XET=1 uv run python -c 'from huggingface_hub import snapshot_download; print(snapshot_download("videosdk-live/Namo-Turn-Detector-v1-Multilingual", revision="59245aac1f0a0f170277ebecc32ddaea418083b4", allow_patterns=["model_quant.onnx", "tokenizer.json", "LICENSE"]))'

@@ -1,6 +1,7 @@
 """Opt-in saved-audio endpoint replay; no devices, subscription turns or transcript output."""
 
 import argparse
+import hashlib
 import json
 import math
 import statistics
@@ -13,6 +14,7 @@ from jarvis_hub.voice.input import FRAME, SAMPLE_RATE, Engines, InputPipeline, L
 from jarvis_hub.voice.state import CAPTURING, ReplyDone, SendTurn, Tick, Timing, Voice, step
 
 NAMO_REVISION = '59245aac1f0a0f170277ebecc32ddaea418083b4'
+NAMO_SCORER_VERSION = 'namo-onnx-class1-softmax-v1'
 METHODS = ('baseline', 'acoustic-margin', 'joint', 'joint-margin', 'fused', 'fixed-1500')
 
 
@@ -99,6 +101,18 @@ class NoWake:
         return 0.
 
 
+def text_model_provenance(folder: Path) -> dict[str, Any]:
+    hashes: dict[str, str] = {}
+    for name in ('model_quant.onnx', 'tokenizer.json'):
+        with (folder / name).open('rb') as source:
+            hashes[name] = hashlib.file_digest(source, 'sha256').hexdigest()
+    return {
+        'expected_reference_revision': NAMO_REVISION,
+        'source_files_sha256': hashes,
+        'scorer_version': NAMO_SCORER_VERSION,
+    }
+
+
 class TextCompletion:
     def __init__(self, folder: Path) -> None:
         import onnxruntime as ort
@@ -110,6 +124,7 @@ class TextCompletion:
         self.session = ort.InferenceSession(str(folder / 'model_quant.onnx'), sess_options=options,
                                             providers=['CPUExecutionProvider'])
         self.tokenizer = Tokenizer.from_file(str(folder / 'tokenizer.json'))
+        self.provenance = text_model_provenance(folder)
 
     def score(self, text: str) -> float:
         tokens = self.tokenizer.encode(text)
@@ -184,7 +199,7 @@ def main() -> None:
     successful = [row for row in results if 'failure' not in row]
     payload = {
         'method': args.method, 'selected_for_runtime': False,
-        'namo_revision': NAMO_REVISION if text is not None else None,
+        'text_model_provenance': text.provenance if text is not None else None,
         'timing': '10 ms audio-time replay; scripted 400 ms reply; excludes real Hub/device/generation latency',
         'percentiles': 'p50 median; p90 nearest rank',
         'samples': len(results), 'failures': len(results) - len(successful),
