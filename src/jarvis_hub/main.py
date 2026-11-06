@@ -36,6 +36,7 @@ from jarvis_hub.voice.player import Player, Samples, SoundPlayer
 from jarvis_hub.voice.speech import Speech, SpeechClock
 from jarvis_hub.voice.state import Timing
 from jarvis_hub.voice.tts import KokoroSynthesizer, Synthesizer
+from jarvis_hub.voice.admission import configured_assessor
 from jarvis_hub.voice.voice_mode import AudioInput, VoiceMode, merge
 from jarvis_hub.waits import WaitSetup
 from jarvis_hub.workspace import default_workspace
@@ -101,8 +102,6 @@ def timing(voice: VoiceSettings) -> Timing:
         announce_follow_up_s=voice.announce_follow_up_s,
         listen_s=voice.listen_s,
         chime_s=voice.chime_guard_ms / 1000,
-        decide_s=voice.bargein_decide_ms / 1000,
-        guard_s=voice.bargein_guard_ms / 1000,
     )
 
 
@@ -121,7 +120,6 @@ def listening(voice: VoiceSettings) -> Listening:
         max_turn_s=voice.max_turn_s,
         wake_refractory_s=voice.wake_refractory_ms / 1000,
         onset_pad_s=voice.onset_pad_ms / 1000,
-        bargein_min_speech_s=voice.bargein_min_speech_ms / 1000,
     )
 
 
@@ -346,6 +344,8 @@ async def voice_mode(
     except Exception as e:
         output.notice(f"Voice mode needs an audio output: {type(e).__name__}: {e}. Run `jarvis-hub --text` instead.")
         return
+    admission = configured_assessor(voice.admission_backend, voice.admission_model,
+                                    settings.repo_dir / "prompts" / "admission.md", notice=output.notice)
     conversation = VoiceMode(
         audio=listener,
         tts=ears.tts,
@@ -355,6 +355,7 @@ async def voice_mode(
         metrics=metrics,
         notice=output.notice,
         debug=debug,
+        recognition=admission,
     )
     hub = settings_hub(
         settings,
@@ -371,6 +372,8 @@ async def voice_mode(
     )
     try:
         output.notice("Model loading.")
+        if admission is not None:
+            admission.start()
         await hub.start()
         await asyncio.to_thread(language.warm_up)
         conversation.start()

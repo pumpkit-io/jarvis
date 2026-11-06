@@ -246,7 +246,7 @@ async def test_text_only_recovery_resolves_second_scope_and_delegates_its_words(
     await until(lambda: rig.state == 'follow_up')
     release_first.set()
     await rig.settle()
-    rig.clock.advance(1)
+    await rig.advance(6)
     rig.audio.wake()
     rig.audio.say('Check docs')
     await until(lambda: len(rig.backend.session('orchestrator').received) == 2)
