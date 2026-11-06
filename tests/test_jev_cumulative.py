@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 import httpx
+import pytest
 
 from jarvis_hub.voice.cumulative import Snapshot, Source
 from jarvis_hub.voice.jev import JevAssessor
@@ -201,4 +202,36 @@ async def test_malformed_reply_preserves_reported_usage_without_exposing_respons
     assert assessor.usage['unknown_usage'] == 0
     assert any('malformed response' in notice for notice in notices)
     assert not any('PRIVATE' in notice for notice in notices)
+    await assessor.close()
+
+
+async def test_request_recorder_failure_releases_busy_state_without_inventing_provider_usage() -> None:
+    rejected = False
+    calls = 0
+    def record(row: dict[str, Any]) -> None:
+        nonlocal rejected
+        if row['kind'] == 'jev_request' and not rejected:
+            rejected = True
+            raise OSError('disk full')
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        body = json.loads(request.content)
+        answers: dict[str, Any] = {}
+        for name, question in body['questions'].items():
+            label = 'keep' if name == 'floor' else 'unfinished' if name == 'readiness' else 'unrelated'
+            answers[name] = dict(type='choice', choice=label, confidence=.95,
+                                 probabilities={choice: .9 if choice == label else .1 / (len(question['criteria']) - 1)
+                                                for choice in question['criteria']})
+        return httpx.Response(200, json=dict(model='jev-1.14.0', answers=answers, usage=dict(input_tokens=80, output_tokens=4)))
+    assessor = JevAssessor('fake-key', notice=lambda message: None, record=record, transport=httpx.MockTransport(respond))
+    snapshot = Snapshot('s', (Source(1, 1, 'Background speech.', 1, 2, 2),), 3, 'speaking', '', '', None)
+    with pytest.raises(OSError, match='disk full'):
+        await assessor.assess_snapshot(snapshot)
+    assert calls == 0
+    assert assessor.usage['requests'] == 0 and assessor.usage['unknown_usage'] == 0
+    recovered = await assessor.assess_snapshot(snapshot)
+    assert recovered.reason == 'assessed' and calls == 1
+    assert assessor.usage['requests'] == 1 and assessor.usage['succeeded'] == 1
+    assert assessor.usage['input_tokens'] == 80 and assessor.usage['unknown_usage'] == 0
     await assessor.close()

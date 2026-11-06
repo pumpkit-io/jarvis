@@ -146,11 +146,11 @@ class JevAssessor:
              'voice_only': 'Only stop the voice, without another request.', 'uncertain': 'Wait for more evidence.'})
         began = time.perf_counter()
         self._busy = True
-        self._usage['requests'] += 1
-        self._usage['questions'] += len(questions)
-        attempted = True
-        self._record({'kind': 'jev_request', 'model': MODEL, 'snapshot_id': snapshot.id, 'questions': len(questions)})
         try:
+            self._record({'kind': 'jev_request', 'model': MODEL, 'snapshot_id': snapshot.id, 'questions': len(questions)})
+            self._usage['requests'] += 1
+            self._usage['questions'] += len(questions)
+            attempted = True
             async with asyncio.timeout(.75):
                 response = await self._client.post('https://api.typesafe.ai/v1/systemone',
                     headers={'Authorization': f'Bearer {self._api_key}'}, json=dict(model=MODEL, state=state, questions=questions))
