@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -26,7 +27,7 @@ from jarvis_hub.config import ConfigError, Settings, VoiceSettings, load_setting
 from jarvis_hub.hub import Clock, Hub, Line, Metrics, Output
 from jarvis_hub.orchestrator import orchestrator_spec
 from jarvis_hub.subagents import Subagent, SubagentSetup, subagent_session
-from jarvis_hub.stats import parse_when, read_rows, render, render_bargein, render_voice_trace, summarise, summarise_bargein
+from jarvis_hub.stats import parse_rows, parse_when, read_rows, render, render_bargein, render_voice_trace, summarise, summarise_bargein
 from jarvis_hub.talker import talker_spec
 from jarvis_hub.voice import language
 from jarvis_hub.voice.clips import ClipSettings, ClipStore
@@ -410,8 +411,28 @@ def _ignored_in_text(error: str) -> None:
 
 
 def print_stats(
-    settings: Settings, since: str | None, until: str | None, stdout: TextIO, *, bargein: bool = False, voice: bool = False
+    settings: Settings, since: str | None, until: str | None, stdout: TextIO, *, bargein: bool = False, voice: bool = False,
+    latency_plan: Path | None = None, latency_observations: Path | None = None, metrics_path: Path | None = None,
 ) -> None:
+    if latency_plan is not None or latency_observations is not None:
+        if latency_plan is None or latency_observations is None or since or until or voice or bargein:
+            raise ValueError("Controlled latency needs both plan and observations, without time filters or other reports.")
+        from jarvis_hub.latency import latency_report
+        path = metrics_path or settings.runtime_dir / "metrics.jsonl"
+        try:
+            plan_bytes, observation_bytes = latency_plan.read_bytes(), latency_observations.read_bytes()
+            digest = hashlib.sha256(plan_bytes).hexdigest()
+            metric_bytes = path.read_bytes() if path.exists() else None
+            snapshot = "" if metric_bytes is None else metric_bytes.decode("utf-8")
+            report = latency_report(json.loads(plan_bytes), json.loads(observation_bytes), parse_rows(snapshot), plan_sha256=digest)
+            report["input_hashes"] = dict(plan=digest, observations=hashlib.sha256(observation_bytes).hexdigest(),
+                                          metrics=hashlib.sha256(metric_bytes).hexdigest() if metric_bytes is not None else None)
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            raise ValueError("Controlled latency input files are missing, unreadable or malformed JSON.") from None
+        stdout.write(json.dumps(report, indent=2, allow_nan=False) + "\n")
+        return
+    if metrics_path is not None:
+        raise ValueError("A metrics override requires the controlled latency plan and observations.")
     now = datetime.now(timezone.utc)
     start = parse_when(since, now) if since else None
     end = parse_when(until, now, end=True) if until else None
@@ -437,6 +458,9 @@ def main() -> None:
     stats.add_argument(
         "--until", help="end of the range, written like --since (a bare date takes in that whole day); default now"
     )
+    stats.add_argument("--latency-plan", type=Path, help="frozen controlled-sample JSON plan; outputs an offline JSON report")
+    stats.add_argument("--latency-observations", type=Path, help="hash-bound sample bindings and reviewed physical observations")
+    stats.add_argument("--metrics", type=Path, help="metrics JSONL for the controlled latency report")
     stats.add_argument("--voice", action="store_true", help="trace captured requests, recognition and meaningful audio")
     stats.add_argument("--bargein", action="store_true", help="report the Barge-in decision log instead")
     args = parser.parse_args()
@@ -444,7 +468,8 @@ def main() -> None:
     if args.command == "stats":
         try:
             settings = load_settings(Path(__file__).resolve().parents[2], os.environ, ignore_voice=lambda error: None)
-            print_stats(settings, args.since, args.until, sys.stdout, bargein=args.bargein, voice=args.voice)
+            print_stats(settings, args.since, args.until, sys.stdout, bargein=args.bargein, voice=args.voice,
+                        latency_plan=args.latency_plan, latency_observations=args.latency_observations, metrics_path=args.metrics)
         except (ConfigError, ValueError) as e:
             sys.exit(f"jarvis-hub: {e}")
         return

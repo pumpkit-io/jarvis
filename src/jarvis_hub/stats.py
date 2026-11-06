@@ -7,7 +7,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, TypeGuard, cast
+from typing import Any, TypeGuard, TypeVar, cast
 
 ROLES = ("talker", "orchestrator", "subagent")
 # What `voice/bargein_log.py` writes as a Barge-in's decision.
@@ -62,7 +62,10 @@ def _is_date(text: str) -> bool:
     return True
 
 
-def percentile(values: list[int], p: float) -> int | None:
+_Number = TypeVar("_Number", int, float)
+
+
+def percentile(values: list[_Number], p: float) -> _Number | None:
     """Nearest rank: the smallest value that at least p percent of the values do not exceed."""
     if not values:
         return None
@@ -74,7 +77,12 @@ def read_rows(path: Path) -> Iterator[object]:
     """Every non-blank line of the log, parsed; a line that is not JSON (a write cut short) comes as None."""
     if not path.exists():
         return
-    for line in path.read_text().splitlines():
+    yield from parse_rows(path.read_text())
+
+
+def parse_rows(text: str) -> Iterator[object]:
+    """Parse a fixed metrics snapshot, retaining malformed lines as unavailable evidence."""
+    for line in text.splitlines():
         if not line.strip():
             continue
         try:
