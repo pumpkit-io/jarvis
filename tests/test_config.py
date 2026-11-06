@@ -205,6 +205,11 @@ def test_voice_settings_out_of_range_are_refused(checkout: Path, line: str) -> N
         load_settings(checkout, environ={})
 
 
+def test_apple_idle_wake_is_an_explicit_engine_choice(checkout: Path) -> None:
+    assert load_settings(checkout, environ={"JARVIS_WAKE_ENGINE": "apple-vad"}).voice.wake_engine == "apple-vad"
+    assert load_settings(checkout, environ={}).voice.wake_engine == "openwakeword"
+
+
 @pytest.mark.parametrize("name", ["JARVIS_FOLLOWUP_SECONDS", "JARVIS_END_SILENCE_MS", "JARVIS_CLIPS_MAX_MB"])
 @pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
 def test_nonfinite_voice_numbers_are_configuration_errors(checkout: Path, name: str, value: str) -> None:
