@@ -13,7 +13,7 @@ import pytest
 from jarvis_hub.agents.backend import Context, SessionSpec
 from jarvis_hub.subagents import Subagent
 from jarvis_hub.hub import WARM_UP, Hub
-from jarvis_hub.voice.assessment import Verdict
+from jarvis_hub.voice.assessment import Assessment, Candidate, SegmentAction, Verdict
 from jarvis_hub.voice.state import Heard, SpeechStarted, Timing
 from jarvis_hub.voice.voice_mode import VoiceMode, merge
 from tests.fakes import (
@@ -79,6 +79,18 @@ class Rig:
 
 
 MakeRig = Callable[..., Awaitable[Rig]]
+
+
+class FollowUpDecision:
+    def __init__(self, action: SegmentAction = "floor") -> None:
+        self.action: SegmentAction = action
+
+    async def assess(self, candidate: Candidate, *, current: Callable[[], tuple[str, str]], timeout_s: float = 2.0) -> Assessment:
+        return Assessment(candidate.candidate_id, candidate.turn_id, "directed", "scripted", 0,
+                          tuple(self.action for _ in candidate.observed_segments))
+
+    async def close(self) -> None:
+        pass
 
 
 @pytest.fixture
@@ -160,7 +172,7 @@ async def test_hey_jarvis_and_the_request_in_one_breath(rig_for: MakeRig) -> Non
 
 
 async def test_a_follow_up_inside_the_window_needs_no_wake_word(rig_for: MakeRig) -> None:
-    rig: Rig = await rig_for([Text("Opened, sir.")], [Text("Green, sir.")])
+    rig: Rig = await rig_for([Text("Opened, sir.")], [Text("Green, sir.")], recognition=FollowUpDecision())
 
     rig.audio.wake()
     rig.audio.say("Open a PR for the login bug")
@@ -169,7 +181,7 @@ async def test_a_follow_up_inside_the_window_needs_no_wake_word(rig_for: MakeRig
     rig.audio.say("And is the CI green?")
     await until(lambda: len(rig.user_messages()) == 2 and rig.state == "follow_up")
 
-    assert rig.user_messages()[-1] == '<user lang="en">And is the CI green?</user>'
+    assert rig.user_messages()[-1] == '<user lang="en">Open a PR for the login bug And is the CI green?</user>'
     assert [t for t in rig.player.texts if t] == ["Opened, sir.", "Green, sir."]
     assert rig.player.voices.count("chime") == 1
 
@@ -218,7 +230,7 @@ async def test_a_noise_only_turn_is_dropped(rig_for: MakeRig) -> None:
 async def test_a_whole_utterance_end_control_idles_silently_without_another_model_turn(
     rig_for: MakeRig, opening: str, answer: str, ending: str
 ) -> None:
-    rig: Rig = await rig_for([Text(answer)])
+    rig: Rig = await rig_for([Text(answer)], recognition=FollowUpDecision("stop"))
     rig.audio.wake()
     rig.audio.say(opening)
     await until(lambda: rig.state == "follow_up")
@@ -349,7 +361,7 @@ async def test_a_full_talker_restarts_only_once_jarvis_is_idle(rig_for: MakeRig)
 
 
 async def test_a_follow_up_said_before_idle_is_answered_on_the_old_talker_then_it_restarts(rig_for: MakeRig) -> None:
-    rig: Rig = await rig_for([Text("Opened, sir."), FULL], [Text("Green, sir."), FULL])
+    rig: Rig = await rig_for([Text("Opened, sir."), FULL], [Text("Green, sir."), FULL], recognition=FollowUpDecision())
 
     rig.audio.wake()
     rig.audio.say("Open a PR for the login bug")
@@ -469,7 +481,7 @@ _REPORTS = ["The typo fix is up.", "The docs are merged."]
 
 
 async def news_rig(
-    rig_for: MakeRig, *scripts: list[Step], items: int = 1, state_path: Path | None = None
+    rig_for: MakeRig, *scripts: list[Step], items: int = 1, state_path: Path | None = None, recognition: Any = None
 ) -> tuple[Rig, list[asyncio.Event]]:
     """A rig that delegated `items` Tasks and is idle again; setting `arrivals[i]` brings Task i's news to the Hub.
 
@@ -482,7 +494,7 @@ async def news_rig(
         [Gate(arrival), Tool("report", {"task_id": f"T{i + 1}", "spoken": _REPORTS[i], "needs_user": False})]
         for i, arrival in enumerate(arrivals)
     ]
-    rig: Rig = await rig_for(delegating, *scripts, orchestrator=reports, state_path=state_path)
+    rig: Rig = await rig_for(delegating, *scripts, orchestrator=reports, state_path=state_path, recognition=recognition)
     rig.audio.wake()
     rig.audio.say("Fix the typo and merge the docs")
     await until(lambda: rig.state == "follow_up")
@@ -1654,7 +1666,7 @@ async def test_a_turn_that_cuts_jarvis_off_soon_after_a_resume_marks_it_a_likely
 async def test_a_plain_follow_up_after_a_resume_is_no_repeat(
     rig_for: MakeRig,
 ) -> None:
-    rig = await rig_for(STORY, [Text("Sure, sir.")], [Text("Fine, sir.")])
+    rig = await rig_for(STORY, [Text("Sure, sir.")], [Text("Fine, sir.")], recognition=FollowUpDecision())
     await speaking(rig)
     await resumed_over(rig, "Okay.")
     rig.player.finish()
