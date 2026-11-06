@@ -1,6 +1,8 @@
 """Follow-up speech needs contextual admission within its original source-time window."""
 
 import asyncio
+import json
+from pathlib import Path
 from collections.abc import Callable
 
 import pytest
@@ -568,3 +570,147 @@ async def test_rejected_future_onset_cannot_reenter_after_earlier_thinking_admis
     rig.audio.say("Fresh request")
     await until(lambda: ("said", "Fresh request") in rig.output.log)
     assert len(decisions.candidates) == (2 if rejected == 1 else 1)
+
+
+@pytest.mark.parametrize("ending", ["That's all.", "Basta così."])
+async def test_contextually_admitted_whole_end_control_closes_silently_without_changing_work(
+    rig_for: MakeRig, tmp_path: Path, ending: str,
+) -> None:
+    from tests.test_voice_mode import news_rig, talker_received
+
+    gate = asyncio.Event()
+    decisions = Decisions([("floor",)], gate)
+    state = tmp_path / "state.json"
+    rig, _ = await news_rig(rig_for, [Text("The build is green.")], [Text("Must not run.")],
+                            state_path=state, recognition=decisions)
+    rig.audio.wake()
+    rig.audio.say("Show the status")
+    await until(lambda: rig.state == "follow_up")
+    await rig.settle()
+    before = json.loads(state.read_text())
+    assert before["tasks"]
+    turns, messages, playback = len(talker_received(rig)), rig.user_messages(), rig.player.events.copy()
+    rig.audio.say(ending)
+    await until(lambda: len(decisions.candidates) == 1)
+    await rig.settle()
+    assert rig.state == "follow_up"
+    gate.set()
+    await rig.settle()
+
+    assert rig.state == "idle"
+    assert rig.user_messages() == messages
+    assert len(talker_received(rig)) == turns
+    assert rig.player.events == playback
+    after = json.loads(state.read_text())
+    assert after["tasks"] == before["tasks"]
+    assert after["spoken_scopes"] == before["spoken_scopes"]
+    assert after["approvals"] == before["approvals"]
+
+
+@pytest.mark.parametrize("action", ["ignore", "uncertain"])
+@pytest.mark.parametrize("ending", ["That's all.", "Basta così.", "Lena, that's all."])
+async def test_unadmitted_end_words_cannot_close_a_follow_up(
+    rig_for: MakeRig, action: SegmentAction, ending: str,
+) -> None:
+    decisions = Decisions([(action,)])
+    rig = await rig_for([Text("The build is green.")], [Text("Must not run.")], recognition=decisions)
+    rig.audio.wake()
+    rig.audio.say("Show the status")
+    await until(lambda: rig.state == "follow_up")
+    rig.audio.say(ending)
+    await until(lambda: len(decisions.candidates) == 1)
+    await rig.settle()
+    assert rig.state == "follow_up" and len(rig.user_messages()) == 1
+    await rig.advance(6)
+    assert rig.state == "idle"
+
+
+@pytest.mark.parametrize("utterance", ["Thanks Jarvis, check the CI", "Grazie Jarvis, controlla le PR"])
+async def test_admitted_longer_follow_up_keeps_end_words_as_raw_request(rig_for: MakeRig, utterance: str) -> None:
+    decisions = Decisions([("floor",)])
+    rig = await rig_for([Text("The build is green.")], [Text("The tests pass.")], recognition=decisions)
+    rig.audio.wake()
+    rig.audio.say("Show the status")
+    await until(lambda: rig.state == "follow_up")
+    rig.audio.say(utterance)
+    await until(lambda: len(rig.user_messages()) == 2)
+    assert f"Show the status {utterance}</user>" in rig.user_messages()[-1]
+
+
+async def test_only_selected_whole_follow_up_text_controls_silent_end(rig_for: MakeRig) -> None:
+    decisions = Decisions([("uncertain",), ("ignore", "floor")])
+    rig = await rig_for([Text("The build is green.")], [Text("Must not run.")], recognition=decisions)
+    rig.audio.wake()
+    rig.audio.say("Show the status")
+    await until(lambda: rig.state == "follow_up")
+    rig.audio.say("Lena, dinner is ready.")
+    await until(lambda: len(decisions.candidates) == 1)
+    await rig.settle()
+    rig.audio.say("That's all.")
+    await until(lambda: len(decisions.candidates) == 2)
+    await rig.settle()
+    assert decisions.candidates[-1].observed_segments == ("Lena, dinner is ready.", "That's all.")
+    assert rig.state == "idle" and len(rig.user_messages()) == 1
+
+
+@pytest.mark.parametrize("ending", ["That's all.", "Basta così."])
+async def test_eligible_postreply_end_control_delivered_after_expiry_still_ends_silently(
+    rig_for: MakeRig, ending: str,
+) -> None:
+    from tests.test_voice_mode import talker_received
+
+    decisions = Decisions([("floor",)])
+    rig = await rig_for([Text("The build is green.")], [Text("Must not run.")], recognition=decisions)
+    rig.audio.wake()
+    rig.audio.say("Show the status")
+    await until(lambda: rig.state == "follow_up")
+    await rig.advance(5.9)
+    onset, owner, candidate = rig.clock.now(), rig.audio.owner, rig.audio.candidate + 1
+    await rig.advance(.2)
+    assert rig.state == "idle"
+    turns, playback = len(talker_received(rig)), rig.player.events.copy()
+    rig.audio.emit(SpeechStarted(rig.clock.now(), owner, candidate, onset))
+    rig.audio.emit(Heard(ending, None, rig.clock.now(), owner, candidate, onset))
+    await until(lambda: len(decisions.candidates) == 1)
+    await rig.settle()
+    assert decisions.candidates[0].phase == "follow_up"
+    assert rig.state == "idle" and len(rig.user_messages()) == 1
+    assert len(talker_received(rig)) == turns and rig.player.events == playback
+
+
+@pytest.mark.parametrize("origin", ["speaking", "announce"])
+@pytest.mark.parametrize("action", ["floor", "stop"])
+async def test_playback_origin_end_words_delivered_in_follow_up_keep_contextual_semantics(
+    rig_for: MakeRig, origin: str, action: SegmentAction,
+) -> None:
+    from tests.test_voice_mode import NEWS, STORY, news_rig, speaking
+
+    decisions = Decisions([(action,)])
+    if origin == "announce":
+        rig, [arrival] = await news_rig(rig_for, [Text(NEWS)], [Text("A new answer.")], recognition=decisions)
+        rig.player.hold = True
+        arrival.set()
+        await until(lambda: rig.state == "announce" and NEWS in rig.player.texts)
+    else:
+        rig = await rig_for(STORY, [Text("A new answer.")], recognition=decisions)
+        await speaking(rig)
+    await rig.advance(.1)
+    onset, owner, candidate = rig.clock.now(), rig.audio.owner, rig.audio.candidate + 1
+    await rig.advance(.1)
+    rig.player.finish()
+    await rig.advance(.1)
+    await until(lambda: rig.state == "follow_up")
+    rig.audio.emit(SpeechStarted(rig.clock.now(), owner, candidate, onset))
+    rig.audio.emit(Heard("That's all.", None, rig.clock.now(), owner, candidate, onset))
+    await until(lambda: len(decisions.candidates) == 1)
+    await rig.settle()
+    assert decisions.candidates[0].phase == origin
+    if action == "floor":
+        expected = "Tell me a story That's all." if origin == "speaking" else "That's all."
+        assert ("said", expected) in rig.output.log
+        assert any(f"{expected}</user>" in message for message in rig.backend.session("talker").received)
+        assert "A new answer." in rig.player.texts
+    else:
+        assert rig.state == ("follow_up" if origin == "speaking" else "idle")
+        assert len(rig.user_messages()) == 1
+        assert "A new answer." not in rig.player.texts
