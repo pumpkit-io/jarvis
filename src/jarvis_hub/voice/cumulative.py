@@ -34,6 +34,8 @@ class Snapshot:
     played_text: str
     request: tuple[str, int] | None
     played_basis: str = 'queue_estimate'
+    pauses: tuple[tuple[float, float], ...] = ()
+    active_sources: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -66,3 +68,5 @@ class TalkingPeriod:
     stopped: bool = False
     dirty: bool = False
     reassess_at: float = float('inf')
+    pauses: list[tuple[float, float]] = field(default_factory=lambda: list[tuple[float, float]]())
+    last_speech_at: float | None = None
