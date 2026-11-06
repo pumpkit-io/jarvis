@@ -109,7 +109,9 @@ Two findings for the sentence splitter (Ticket on spoken replies): text blocks b
 
 ### Baseline: today's launcher
 
-**Status: waiting on the User's recording session** (shared with Ticket #5). It cannot be faked: it needs the User speaking.
+**Historical fixed sample available; integrated Hub physical comparison remains pending.** At `b575016:docs/notes/phase-0-spikes.md:345`, the ten prescribed VoiceMode prompt attempts, including recognition mistakes, gave estimated end-of-speech-to-first-audio p50 5.455 s and p90 5.877 s. All thirteen exchanges (initial blank audio, ten prescribed prompts, extra Italian correction and closing) gave p50 5.473 s and p90 7.712 s. The extra correction took 66.23 s, including approximately 61.88 s in the analyzer's STT interval; it remains a separate failure outside the fixed prescribed sample. There were no reported missing-hook fallbacks, dropped calls or unusable log lines. The analyzer subtracts the logged 1000 ms silence tail, so this is not sample-accurate physical alignment.
+
+The following procedure records how that baseline was collected; completed recordings and hooks remain local and need no rerun for context. The [controlled Hub latency report](controlled-voice-latency.md) retains these aggregate definitions separately from new measurements.
 
 How it is measured. `./jarvis` runs `converse` in a loop: each call speaks, then records until VoiceMode hears its silence threshold (1000 ms), transcribes, and returns; the model then makes the next call, which synthesises and plays. For each turn, `spikes/agent/baseline/analyze.py` takes
 
