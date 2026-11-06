@@ -390,3 +390,181 @@ async def test_late_announcement_speech_cannot_enter_the_raw_follow_up_path(rig_
     await rig.settle()
     assert len(rig.user_messages()) == 1 and len(decisions.candidates) == 1
     assert decisions.candidates[0].phase in ("speaking", "announce")
+
+
+async def test_long_thinking_onset_survives_natural_expiry_and_excludes_future_onsets(rig_for: MakeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.fakes import Gate, ResolveScope
+
+    answer = asyncio.Event()
+    decisions = Decisions([("floor",)])
+    rig = await rig_for([Gate(answer), Text("The build is green.")],
+                        [ResolveScope("preserve_tasks"), Text("The tests pass too.")], recognition=decisions)
+    capture = rig.audio.capture
+    settings: list[tuple[bool, bool]] = []
+
+    def recording_capture(on: bool, *, owner: int | None = None, idle: bool = False, wake_candidate: int | None = None) -> bool:
+        settings.append((on, idle))
+        return capture(on, owner=owner, idle=idle, wake_candidate=wake_candidate)
+
+    monkeypatch.setattr(rig.audio, "capture", recording_capture)
+    rig.audio.wake()
+    rig.audio.say("Show the status")
+    await until(lambda: rig.state == "thinking")
+    await rig.advance(.1)
+    onset, owner = rig.clock.now(), rig.audio.owner
+    rig.audio.speech()
+    candidate = rig.audio.candidate
+    await rig.advance(.1)
+    answer.set()
+    await until(lambda: rig.state == "follow_up")
+    await rig.advance(6.1)
+    await until(lambda: rig.state == "idle")
+    assert settings[-1] == (True, False)
+    rig.audio.say("Lena, dinner is ready.")
+    rig.audio.emit(Heard("And compare all test results", None, rig.clock.now(), owner, candidate, onset))
+    await until(lambda: ("said", "Show the status And compare all test results") in rig.output.log)
+    assert decisions.candidates[0].observed_segments == ("And compare all test results",)
+    assert sum(text == "Show the status And compare all test results" for kind, text in rig.output.log if kind == "said") == 1
+
+
+@pytest.mark.parametrize("terminal", ["floor", "ignore", "uncertain", "abort", "limited", "retention"])
+async def test_long_thinking_source_defers_news_until_terminal_cleanup(rig_for: MakeRig, terminal: str) -> None:
+    from jarvis_hub.voice.state import CaptureAborted
+    from tests.fakes import Gate, ResolveScope, Step
+    from tests.test_voice_mode import news_rig
+
+    answer = asyncio.Event()
+    action: SegmentAction = "floor" if terminal == "floor" else "ignore" if terminal == "ignore" else "uncertain"
+    decisions = Decisions([(action,)])
+    responses: list[list[Step]] = [[ResolveScope("preserve_tasks"), Text("The tests pass too.")], [Text("Queued news.")]] if terminal == "floor" else [[Text("Queued news.")]]
+    rig, [arrival] = await news_rig(rig_for, [Gate(answer), Text("The build is green.")], *responses, recognition=decisions)
+    rig.audio.wake()
+    rig.audio.say("Show the status")
+    await until(lambda: rig.state == "thinking")
+    await rig.advance(.1)
+    onset, owner = rig.clock.now(), rig.audio.owner
+    rig.audio.speech()
+    candidate = rig.audio.candidate
+    await rig.advance(.1)
+    answer.set()
+    await until(lambda: rig.state == "follow_up")
+    arrival.set()
+    await rig.advance(6.1)
+    assert "Queued news." not in rig.player.texts
+    if terminal == "abort":
+        rig.audio.emit(CaptureAborted(rig.clock.now(), "overflow", owner, candidate))
+    else:
+        words = "x" * 6001 if terminal == "retention" else "And compare all test results"
+        rig.audio.emit(Heard(words, None, rig.clock.now(), owner, candidate, onset, limited=terminal == "limited"))
+    if terminal == "floor":
+        await until(lambda: ("said", "Show the status And compare all test results") in rig.output.log)
+        await rig.advance(6.1)
+    await until(lambda: "Queued news." in rig.player.texts)
+    if terminal != "floor":
+        assert not any("And compare" in text for kind, text in rig.output.log if kind == "said")
+    assert len(decisions.candidates) == (0 if terminal in ("abort", "limited", "retention") else 1)
+
+
+async def test_typed_replacement_retires_long_thinking_source_after_expiry(rig_for: MakeRig) -> None:
+    from tests.fakes import Gate
+
+    answer = asyncio.Event()
+    decisions = Decisions([("floor",)])
+    rig = await rig_for([Gate(answer), Text("The build is green.")], [Text("Typed answer.")], recognition=decisions)
+    rig.audio.wake()
+    rig.audio.say("Show the status")
+    await until(lambda: rig.state == "thinking")
+    await rig.advance(.1)
+    onset, owner = rig.clock.now(), rig.audio.owner
+    rig.audio.speech()
+    candidate = rig.audio.candidate
+    await rig.advance(.1)
+    answer.set()
+    await until(lambda: rig.state == "follow_up")
+    await rig.advance(6.1)
+    rig.typist.type("Tell me the time")
+    await until(lambda: len(rig.user_messages()) == 2)
+    rig.audio.emit(Heard("And compare all test results", None, rig.clock.now(), owner, candidate, onset))
+    await rig.settle()
+    assert not decisions.candidates and len(rig.user_messages()) == 2
+
+
+@pytest.mark.parametrize("action", ["ignore", "uncertain", "floor"])
+async def test_empty_fragment_releases_quiet_after_superseded_terminal_assessment(rig_for: MakeRig, action: SegmentAction) -> None:
+    from tests.test_voice_mode import news_rig
+
+    gate = asyncio.Event()
+    decisions = Decisions([(action,)], gate)
+    rig, [arrival] = await news_rig(rig_for, [Text("The build is green.")], [Text("Queued news.")], recognition=decisions)
+    rig.audio.wake()
+    rig.audio.say("Show the status")
+    await until(lambda: rig.state == "follow_up")
+    await rig.advance(5)
+    rig.audio.say("Maybe dinner later.")
+    await until(lambda: len(decisions.candidates) == 1)
+    await rig.advance(.5)
+    rig.audio.say("")
+    arrival.set()
+    await rig.advance(.6)
+    gate.set()
+    await until(lambda: "Queued news." in rig.player.texts)
+    assert len(rig.user_messages()) == 2
+
+
+@pytest.mark.parametrize("rejected", [1, 65, None])
+async def test_rejected_future_onset_cannot_reenter_after_earlier_thinking_admission(rig_for: MakeRig, rejected: int | None) -> None:
+    from tests.fakes import Gate, ResolveScope, Step
+    from jarvis_hub.voice.state import CaptureAborted
+
+    answer, second = asyncio.Event(), asyncio.Event()
+    decisions = Decisions([("floor",), ("floor",)])
+    responses: list[list[Step]] = [[ResolveScope("preserve_tasks"), Text("Newer answer.")], [Text("Fresh answer.")]] if rejected == 1 else [[Text("Fresh answer.")]]
+    rig = await rig_for([Gate(answer), Text("The build is green.")],
+                        [ResolveScope("preserve_tasks"), Gate(second), Text("The tests pass too.")], *responses, recognition=decisions)
+    rig.audio.wake()
+    rig.audio.say("Show the status")
+    await until(lambda: rig.state == "thinking")
+    await rig.advance(.1)
+    onset, owner = rig.clock.now(), rig.audio.owner
+    rig.audio.speech()
+    candidate = rig.audio.candidate
+    await rig.advance(.1)
+    answer.set()
+    await until(lambda: rig.state == "follow_up")
+    await rig.advance(6.1)
+    if rejected is None:
+        rig.audio.emit(SpeechStarted(rig.clock.now(), owner, None, rig.clock.now()))
+        future = None
+    else:
+        for _ in range(rejected):
+            rig.audio.speech()
+        future = rig.audio.candidate
+    future_onset = rig.clock.now()
+    await rig.settle()
+    rig.audio.emit(Heard("And compare all test results", None, rig.clock.now(), owner, candidate, onset))
+    await until(lambda: ("said", "Show the status And compare all test results") in rig.output.log)
+    rig.audio.emit(Heard("Lena, dinner is ready.", None, rig.clock.now(), owner, future, future_onset))
+    await rig.settle()
+    assert len(decisions.candidates) == 1
+    if rejected == 1:
+        newer = asyncio.Event()
+        decisions.gate = newer
+        rig.audio.say("And the SDK too")
+        await until(lambda: len(decisions.candidates) == 2)
+        rig.audio.emit(CaptureAborted(rig.clock.now(), "overflow", owner, future))
+        await rig.settle()
+        newer.set()
+        second.set()
+        await until(lambda: ("said", "Show the status And compare all test results And the SDK too") in rig.output.log)
+    else:
+        rig.audio.say("Jarvis, this unknown source must wait.")
+        await rig.settle()
+        assert len(decisions.candidates) == 1
+        assert sum(kind == "notice" and "fresh wake" in text for kind, text in rig.output.log) == 1
+    second.set()
+    await until(lambda: rig.state == "follow_up")
+    await rig.advance(6.1)
+    rig.audio.wake()
+    rig.audio.say("Fresh request")
+    await until(lambda: ("said", "Fresh request") in rig.output.log)
+    assert len(decisions.candidates) == (2 if rejected == 1 else 1)

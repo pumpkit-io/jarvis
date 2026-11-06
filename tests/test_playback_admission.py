@@ -263,3 +263,52 @@ async def test_directed_continuation_after_voice_stop_holds_task_scope_until_tal
     choose.set()
     await until(lambda: bool(rig.backend.session('orchestrator').tool_results))
     assert rig.backend.session('orchestrator').tool_results[0].result == 'Reported to the User.'
+
+
+async def test_keyword_hit_after_public_idle_cannot_retire_an_eligible_pending_source(rig_for: MakeRig) -> None:
+    from jarvis_hub.voice.state import Heard
+    from tests.fakes import Gate
+
+    answer = asyncio.Event()
+    decisions = Decisions([('floor',)])
+    rig = await rig_for([Gate(answer), Text('The original answer.')],
+                        [ResolveScope('preserve_tasks'), Text('The complete answer.')], recognition=decisions)
+    rig.audio.wake()
+    rig.audio.say('Explain the scheduler')
+    await until(lambda: rig.state == 'thinking')
+    await rig.advance(.1)
+    onset, owner = rig.clock.now(), rig.audio.owner
+    rig.audio.speech()
+    candidate = rig.audio.candidate
+    await rig.advance(.1)
+    answer.set()
+    await until(lambda: rig.state == 'follow_up')
+    await rig.advance(6.1)
+    assert rig.state == 'idle'
+    chimes = rig.player.voices.count('chime')
+    rig.audio.emit(WakeWord(rig.clock.now()))
+    await rig.settle()
+    assert rig.player.voices.count('chime') == chimes
+    rig.audio.emit(Heard('including all retry rules', None, rig.clock.now(), owner, candidate, onset))
+    await until(lambda: ('said', 'Explain the scheduler including all retry rules') in rig.output.log)
+
+
+async def test_playback_origin_candidate_retains_its_owner_through_natural_follow_up_expiry(rig_for: MakeRig) -> None:
+    from jarvis_hub.voice.state import Heard
+
+    decisions = Decisions([('floor',)])
+    rig = await rig_for(STORY, [ResolveScope('preserve_tasks'), Text('The complete answer.')], recognition=decisions)
+    await speaking(rig)
+    onset, owner = rig.clock.now(), rig.audio.owner
+    rig.audio.speech()
+    candidate = rig.audio.candidate
+    await rig.settle()
+    rig.player.finish()
+    await rig.advance(.1)
+    await until(lambda: rig.state == 'follow_up')
+    await rig.advance(6.1)
+    assert rig.state == 'idle'
+    rig.audio.emit(Heard('Actually only explain the retry rules', None, rig.clock.now(), owner, candidate, onset))
+    await until(lambda: ('said', 'Tell me a story Actually only explain the retry rules') in rig.output.log)
+    assert decisions.candidates[0].phase == 'speaking'
+    assert decisions.candidates[0].started_before_reply is False
