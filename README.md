@@ -106,4 +106,4 @@ uv run pyright
 
 Default tests use fake agents, clock and audio and do not spend subscription quota. Real-model and real-GitHub tests are opt-in. [AGENTS.md](AGENTS.md), also loaded by `CLAUDE.md`, contains developer instructions; runtime prompts live in `prompts/`. Domain terms are in [GLOSSARY.md](GLOSSARY.md).
 
-[Spike notes](docs/notes/phase-0-spikes.md) record versions, measurements and accepted limits. [The final verification checklist](docs/notes/voice-hub-verification.md) covers the recording session, model comparison and remaining release gates. The automated suite alone does not establish wake recall, speaker behavior or real-world latency.
+[Spike notes](docs/notes/phase-0-spikes.md) record versions, measurements and accepted limits. [The final verification checklist](docs/notes/voice-hub-verification.md) covers the recording session, model comparison and remaining release gates. The automated suite alone does not establish wake recall, speaker behavior or real-world latency. The [Spec #26 acceptance session](docs/notes/spec26-acceptance-session.md) prepares the missing targeted checks and separates physical results from development evidence.
