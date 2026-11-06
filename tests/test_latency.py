@@ -192,3 +192,77 @@ def test_malformed_tool_metadata_cannot_claim_delegation_or_a_latency_pass() -> 
     report = latency_report(plan, observations, rows, plan_sha256=DIGEST)
     assert report["counts"]["invalid"] == 1 and report["physical_latency_targets"] == "unmet"
     assert "PRIVATE_SENTINEL" not in json.dumps(report)
+
+
+def chronology_data() -> tuple[dict[str, Any], dict[str, Any], list[object]]:
+    plan, observations, rows = sample_data()
+    user, speech = cast(dict[str, Any], rows[0]), cast(dict[str, Any], rows[1])
+    user.update(started_at=1.6, completed_at=2.1, duration_ms=500, total_ms=1100, first_delta_ms=700)
+    speech.update(started_at=1.65, first_audio_ms=1000)
+    rows.append(dict(kind="turn", run_id="run1", time_basis="perf_counter", at="2026-11-06T10:00:59Z",
+                     request_at=1.0, capture_start_at=.5, endpoint_at=1.4,
+                     stt_started_at=1.4, stt_completed_at=1.5, stt_ms=100, end_wait_ms=400))
+    return plan, observations, rows
+
+
+@pytest.mark.parametrize("bad", ["audio_before_chunk", "backward_stt", "bad_speech_wall", "backward_hub",
+                                    "backward_capture", "backward_endpoint", "stt_before_endpoint", "wrong_input_clock",
+                                    "missing_input_clock", "bad_input_wall", "bad_stop_wall", "inconsistent_stt",
+                                    "inconsistent_wait", "inconsistent_chunk", "chunk_before_reply_start", "partial_hub_pair", "stop_before_audio"])
+def test_relevant_metric_chronology_invalidates_sample_and_physical_gate(bad: str) -> None:
+    plan, observations, rows = chronology_data()
+    user, speech, capture = cast(dict[str, Any], rows[0]), cast(dict[str, Any], rows[1]), cast(dict[str, Any], rows[-1])
+    if bad == "audio_before_chunk": speech["first_meaningful_audio_ms"] = 100
+    elif bad == "backward_stt": capture.update(stt_started_at=100, stt_completed_at=90)
+    elif bad == "bad_speech_wall": speech["at"] = "not-a-clock"
+    elif bad == "backward_hub": user["completed_at"] = 1.5
+    elif bad == "backward_capture": capture["capture_start_at"] = 1.1
+    elif bad == "backward_endpoint": capture["endpoint_at"] = .9
+    elif bad == "stt_before_endpoint": capture["stt_started_at"] = 1.3
+    elif bad == "wrong_input_clock": capture["time_basis"] = "wall"
+    elif bad == "missing_input_clock": capture.pop("time_basis")
+    elif bad == "bad_input_wall": capture["at"] = "PRIVATE_SENTINEL"
+    elif bad == "bad_stop_wall": rows.append(dict(speech, kind="speech_stop", at="PRIVATE_SENTINEL"))
+    elif bad == "inconsistent_stt": capture["stt_ms"] = 99 - .01
+    elif bad == "inconsistent_wait": user["wait_ms"] = 590
+    elif bad == "inconsistent_chunk": speech["chunk_to_audio_ms"] = 110
+    elif bad == "chunk_before_reply_start": speech["started_at"] = 1.95
+    elif bad == "partial_hub_pair": user.pop("started_at")
+    else: rows.append(dict(speech, kind="speech_stop", stopped_at=1.9))
+    report = latency_report(plan, observations, rows, plan_sha256=DIGEST)
+    assert report["counts"]["eligible"] == 30
+    assert report["counts"]["invalid"] == 1
+    assert report["invalid_metric_rows"] >= 1
+    assert report["physical"]["all"]["n"] == 29
+    assert report["physical_latency_targets"] == "unmet"
+    assert "PRIVATE_SENTINEL" not in json.dumps(report)
+
+
+def test_valid_streaming_and_independent_millisecond_rounding_are_preserved() -> None:
+    plan, observations, rows = chronology_data()
+    speech = cast(dict[str, Any], rows[1])
+    speech.update(first_chunk_ms=900, first_meaningful_audio_ms=1001, first_audio_ms=1001, chunk_to_audio_ms=100)
+    report = latency_report(plan, observations, rows, plan_sha256=DIGEST)
+    assert report["physical_latency_targets"] == "met"
+    assert report["invalid_metric_rows"] == report["counts"]["invalid"] == 0
+    assert report["samples"][0]["queue_ms"] == 1001
+
+
+@pytest.mark.parametrize("missing", ["stt_started_at", "stt_completed_at"])
+def test_partial_stt_timestamp_pair_is_invalid(missing: str) -> None:
+    plan, observations, rows = chronology_data()
+    cast(dict[str, Any], rows[-1]).pop(missing)
+    report = latency_report(plan, observations, rows, plan_sha256=DIGEST)
+    assert report["counts"]["invalid"] == report["invalid_metric_rows"] == 1
+    assert report["physical_latency_targets"] == "unmet"
+
+
+def test_missing_input_component_pairs_remain_unavailable_not_invented() -> None:
+    plan, observations, rows = chronology_data()
+    capture = cast(dict[str, Any], rows[-1])
+    capture.pop("stt_started_at"); capture.pop("stt_completed_at")
+    capture.pop("endpoint_at")
+    report = latency_report(plan, observations, rows, plan_sha256=DIGEST)
+    assert report["samples"][0]["components"]["stt_ms"] is None
+    assert report["samples"][0]["components"]["endpoint_wait_ms"] is None
+    assert report["counts"]["invalid"] == 0

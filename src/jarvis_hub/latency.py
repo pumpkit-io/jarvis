@@ -78,6 +78,58 @@ def _difference(end: float | None, start: float | None) -> float | None:
     return None if end is None or start is None else _number(end - start)
 
 
+def _ordered(row: dict[str, Any], *names: str) -> None:
+    values = [_optional(row, name) for name in names]
+    available = [value for value in values if value is not None]
+    if any(end < start for start, end in zip(available, available[1:])):
+        raise ValueError("Invalid metric chronology.")
+
+
+def _consistent(row: dict[str, Any], duration: str, end: str, start: str, scale: float = 1) -> None:
+    elapsed, finish, begin = (_optional(row, name) for name in (duration, end, start))
+    if elapsed is not None and finish is not None and begin is not None:
+        # The logger rounds intervals independently; one millisecond is arithmetic tolerance, never a latency allowance.
+        if round(abs(elapsed - (finish - begin) * scale), 6) > 1:
+            raise ValueError("Inconsistent metric interval.")
+
+
+def _chronology(row: dict[str, Any]) -> None:
+    kind = row.get("kind")
+    if kind not in ("user", "speech", "speech_stop", "turn"):
+        return
+    if row.get("time_basis") != "perf_counter":
+        raise ValueError("Unverified metric clock.")
+    if kind != "turn" or "at" in row:
+        _wall(row.get("at"))
+    if kind == "user":
+        if (row.get("started_at") is None) != (row.get("completed_at") is None):
+            raise ValueError("Incomplete Hub timestamp pair.")
+        _ordered(row, "request_at", "started_at", "completed_at")
+        _ordered(row, "wait_ms", "first_delta_ms", "first_sentence_ms", "total_ms")
+        _consistent(row, "wait_ms", "started_at", "request_at", 1000)
+        _consistent(row, "total_ms", "completed_at", "request_at", 1000)
+        _consistent(row, "duration_ms", "completed_at", "started_at", 1000)
+    elif kind in ("speech", "speech_stop"):
+        _ordered(row, "request_at", "started_at", "stopped_at")
+        _ordered(row, "first_chunk_ms", "first_meaningful_audio_ms")
+        _ordered(row, "first_audio_ms", "first_meaningful_audio_ms")
+        _consistent(row, "chunk_to_audio_ms", "first_meaningful_audio_ms", "first_chunk_ms")
+        request, started, chunk = (_optional(row, name) for name in ("request_at", "started_at", "first_chunk_ms"))
+        if request is not None and started is not None and chunk is not None:
+            if chunk < round((started - request) * 1000):
+                raise ValueError("Chunk precedes reply start.")
+        stopped, audio = _optional(row, "stopped_at"), _optional(row, "first_meaningful_audio_ms")
+        if request is not None and stopped is not None and audio is not None:
+            if audio > round((stopped - request) * 1000):
+                raise ValueError("Audio follows reply stop.")
+    else:
+        if (row.get("stt_started_at") is None) != (row.get("stt_completed_at") is None):
+            raise ValueError("Incomplete STT timestamp pair.")
+        _ordered(row, "capture_start_at", "request_at", "endpoint_at", "stt_started_at", "stt_completed_at")
+        _consistent(row, "stt_ms", "stt_completed_at", "stt_started_at", 1000)
+        _consistent(row, "end_wait_ms", "endpoint_at", "request_at", 1000)
+
+
 def _physical(observation: dict[str, Any]) -> float | None:
     physical = observation.get("physical")
     if physical is None:
@@ -157,6 +209,7 @@ def latency_report(plan_data: object, observation_data: object, rows: Iterable[o
         try:
             for name in names:
                 _optional(row, name)
+            _chronology(row)
         except ValueError:
             invalid_rows += 1
             row["invalid_timing"] = True
@@ -223,6 +276,8 @@ def latency_report(plan_data: object, observation_data: object, rows: Iterable[o
             users, speeches, stopped = entries.get("user", []), entries.get("speech", []), entries.get("speech_stop", [])
             if len(users) > 1 or len(speeches) > 1 or len(stopped) > 1:
                 raise ValueError("ambiguous_events")
+            if any(row.get("invalid_timing") for events in entries.values() for row in events):
+                raise ValueError("invalid_related_metric")
             if not users:
                 result["status"] = "missing"
                 result["reason"] = "missing_user_result"
@@ -276,8 +331,10 @@ def latency_report(plan_data: object, observation_data: object, rows: Iterable[o
             matches = [row for row in input_turns if row.get("run_id") == key[0] and row.get("request_at") == request_at]
             if len(matches) > 1 or any(row.get("invalid_timing") for row in matches):
                 raise ValueError("ambiguous_input_turn")
-            components.update(endpoint_wait_ms=_optional(matches[0], "end_wait_ms") if matches else None,
-                              stt_ms=_optional(matches[0], "stt_ms") if matches else None)
+            source = matches[0] if matches else {}
+            components.update(endpoint_wait_ms=_optional(source, "end_wait_ms") if source.get("endpoint_at") is not None else None,
+                              stt_ms=_optional(source, "stt_ms") if source.get("stt_started_at") is not None
+                              and source.get("stt_completed_at") is not None else None)
             result.update(status="completed", queue_ms=queue, physical_ms=result["physical_ms"], components=components)
             counts["completed"] += 1
         except ValueError:
