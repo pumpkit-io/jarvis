@@ -12,7 +12,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 import numpy as np
@@ -21,6 +21,7 @@ from numpy.typing import NDArray
 from jarvis_hub.voice.bargein import TALKING_GAP_S, Partial
 from jarvis_hub.voice.clips import ClipKind, ClipStore
 from jarvis_hub.voice.language import detect_language
+from jarvis_hub.voice.idle_wake import IdleRecognizer, IdleResult, IdleUtterance, IdleWake
 from jarvis_hub.voice.player import Samples
 from jarvis_hub.voice.state import BargeIn, CaptureAborted, Heard, InputEvent, Overheard, SpeechStarted, WakeWord
 
@@ -85,16 +86,17 @@ class EveryoneGate:
 @dataclass(frozen=True)
 class Engines:
     echo: EchoCanceller
-    wake: WakeDetector
+    wake: WakeDetector | None
     vad: VoiceActivity
     turn: TurnDetector
     stt: Transcriber
     gate: SpeakerGate
+    idle_wake: IdleRecognizer | None = None
 
 
 @dataclass(frozen=True)
 class Listening:
-    """Thresholds, each a `JARVIS_*` setting."""
+    """Capture thresholds and bounds, with internal legacy partial-replay parameters."""
 
     wake_threshold: float = 0.5
     vad_threshold: float = 0.5
@@ -160,8 +162,10 @@ class InputPipeline:
         clips: ClipStore | None = None,
         defer_endpoints: bool = False,
         retained_frame_limit: int | None = None,
+        idle_wake: IdleWake | None = None,
     ) -> None:
         self._e = engines
+        self._idle_wake = idle_wake
         self._s = settings
         self._record = record
         # Times Smart Turn and STT for the metrics.
@@ -171,6 +175,7 @@ class InputPipeline:
         self._wake_buf = np.zeros(0, np.int16)
         self._vad_buf = np.zeros(0, np.int16)
         self._last_wake = float("-inf")
+        self._activation_wake = float("-inf")
         # The current stretch of speech, whether or not it is a turn: its onset and the end of its latest speech.
         self._onset: float | None = None
         self._last_speech = 0.0
@@ -222,6 +227,22 @@ class InputPipeline:
     @property
     def pending_endpoint(self) -> int | None:
         return None if self._pending is None else self._pending.sequence
+
+    def activate_idle(self, utterance: IdleUtterance, owner: int | None) -> list[InputEvent]:
+        self._turn_sequence += 1
+        self._last_speech = utterance.speech_at
+        self._turn = _Turn(utterance.start, utterance.frames.copy(), [], candidate=self._turn_sequence,
+                           owner=owner, onset=utterance.onset)
+        self._onset = utterance.onset
+        events: list[InputEvent] = [SpeechStarted(utterance.onset, owner, self._turn_sequence, utterance.onset)]
+        if (heard := self._end_of_turn(self._turn, self._at)) is not None:
+            events.append(heard)
+        return events
+
+    def abort_idle(self, owner: int | None, reason: str) -> CaptureAborted:
+        self.discard_endpoint(reason, block=True)
+        self._turn_sequence += 1
+        return CaptureAborted(self._clock(), reason, owner, self._turn_sequence, wake_handoff=True)
 
     def discard_endpoint(self, reason: str, *, block: bool = False) -> CaptureAborted | None:
         abandoned = self._turn
@@ -306,20 +327,25 @@ class InputPipeline:
                 if (aborted := self.discard_endpoint("retention_limit", block=True)) is not None:
                     return [aborted]
         self._wake_buf = np.concatenate([self._wake_buf, frame])
-        while len(self._wake_buf) >= self._e.wake.chunk:
+        while self._e.wake is not None and self._e.idle_wake is None and len(self._wake_buf) >= self._e.wake.chunk:
             chunk, self._wake_buf = self._wake_buf[: self._e.wake.chunk], self._wake_buf[self._e.wake.chunk :]
             ends = at - len(self._wake_buf) / SAMPLE_RATE
             if self._e.wake.score(chunk) >= self._s.wake_threshold and ends - self._last_wake >= self._s.wake_refractory_s:
                 self._last_wake = ends
-                if self._blocked:
+                if not self._capturing:
+                    self._activation_wake = ends
+                if self._blocked and not self._capturing:
                     self._blocked = False
                     self._onset = None
                 events.append(WakeWord(ends))
         self._vad_buf = np.concatenate([self._vad_buf, frame])
+        idle_vad: list[tuple[float, bool]] = []
         while len(self._vad_buf) >= self._e.vad.chunk:
             chunk, self._vad_buf = self._vad_buf[: self._e.vad.chunk], self._vad_buf[self._e.vad.chunk :]
             ends = at - len(self._vad_buf) / SAMPLE_RATE
-            if self._e.vad.probability(chunk) >= self._s.vad_threshold:
+            probability = self._e.vad.probability(chunk)
+            idle_vad.append((ends, probability >= .5))
+            if probability >= self._s.vad_threshold:
                 if self._onset is None:
                     self._onset = ends - len(chunk) / SAMPLE_RATE
                 if self._run is None:
@@ -327,6 +353,10 @@ class InputPipeline:
                 self._last_speech = ends
             else:
                 self._run, self._run_spent, self._run_rearmed, self._overheard = None, False, False, None
+        if self._e.wake is None or self._e.idle_wake is not None:
+            self._wake_buf = np.zeros(0, np.int16)
+        if self._idle_wake is not None:
+            self._idle_wake.observe(frame, at, idle_vad)
         if self._turn is None or self._capturing:
             events += self._barge_events(at)
         if self._onset is not None and self._turn is None and at - self._last_speech >= self._s.end_silence_s:
@@ -409,7 +439,7 @@ class InputPipeline:
         frames = [f for f, t in self._ring if t - 0.01 >= start - STAMP_SLACK_S]
         first = self._ring[-len(frames)][1] - 0.01 if frames else self._ring[-1][1]
         self._turn_sequence += 1
-        return _Turn(first, frames, [], wake=self._last_wake if self._last_wake > first else None,
+        return _Turn(first, frames, [], wake=self._activation_wake if self._activation_wake > first else None,
                      candidate=self._turn_sequence, owner=self._owner, onset=onset)
 
     def _end_of_turn(self, turn: _Turn, at: float) -> Heard | None:
@@ -524,6 +554,9 @@ class _Capture:
     on: bool
     epoch: int
     owner: int | None = None
+    idle: bool = False
+    wake_candidate: int | None = None
+    loss_epoch: int = 0
 
 
 @dataclass(frozen=True)
@@ -590,10 +623,12 @@ class Capture:
         self._notice = notice
         self._source: FrameSource = source if source is not None else Microphone()
         # Frames and switches in the order they happened; None stops the thread.
-        self._frames: queue.SimpleQueue[_CapturedFrame | _Capture | _BargeIn | _EndpointFence | _Overflow | None] = queue.SimpleQueue()
+        self._frames: queue.SimpleQueue[_CapturedFrame | _Capture | _BargeIn | _EndpointFence | _Overflow | IdleResult | None] = queue.SimpleQueue()
         self._capture_epoch = 0
         self._capture_owner: int | None = None
         self._capture_on = False
+        self._idle_wake: IdleWake | None = None
+        self._ready_wake: tuple[int, int, int] | None = None
         self._loss_epoch = 0
         self._frame_sequence = 0
         self._fenced_candidate: int | None = None
@@ -614,13 +649,21 @@ class Capture:
         self._loop = asyncio.get_running_loop()
         threading.Thread(target=self._run, name="capture", daemon=True).start()
 
-    def capture(self, on: bool, *, owner: int | None = None) -> None:
+    def capture(self, on: bool, *, owner: int | None = None, idle: bool = False, wake_candidate: int | None = None) -> bool:
         with self._backlog_lock:
+            if self._closed:
+                return False
+            if wake_candidate is not None and self._ready_wake != (wake_candidate, self._capture_epoch, self._loss_epoch):
+                return False
+            if wake_candidate is not None and (self._idle_wake is None or not self._idle_wake.available(wake_candidate)):
+                return False
+            self._ready_wake = None
             phase_change = owner is not None and owner == self._capture_owner and on != self._capture_on
             if not phase_change:
                 self._capture_epoch += 1
             self._capture_owner, self._capture_on = owner, on
-            self._frames.put(_Capture(on, self._capture_epoch, owner))
+            self._frames.put(_Capture(on, self._capture_epoch, owner, idle, wake_candidate, self._loss_epoch))
+        return True
 
     def barge_in(self, since: float | None) -> None:
         self._frames.put(_BargeIn(since))
@@ -652,12 +695,18 @@ class Capture:
             self._source.close()
         with self._backlog_lock:
             self._frames.put(None)
+        if self._idle_wake is not None:
+            self._idle_wake.close()
 
     def _publish(self, event: InputEvent, epoch: int) -> None:
         if not self._closed and (isinstance(event, WakeWord) or epoch == self._capture_epoch):
+            if isinstance(event, Heard):
+                event = replace(event, delivered_at=self._clock())
             self._events.put_nowait(event)
 
     def _abandon(self, pipeline: InputPipeline, reason: str, epoch: int) -> None:
+        if self._idle_wake is not None:
+            self._idle_wake.invalidate(reason, loss_epoch=self._loss_epoch)
         if (aborted := pipeline.discard_endpoint(reason, block=True)) is not None:
             self._on_loop(lambda event: self._publish(event, epoch), aborted)
 
@@ -708,6 +757,9 @@ class Capture:
         began = time.perf_counter()
         try:
             engines = self._load()
+            if engines.idle_wake is not None:
+                self._idle_wake = IdleWake(engines.idle_wake, self._frames.put,
+                                            lambda row: self._on_loop(self._record, row))
             if self._clips is not None:
                 try:
                     self._clips.prune()
@@ -718,10 +770,14 @@ class Capture:
                     )
             with self._source_lock:
                 if self._closed:
+                    if self._idle_wake is not None:
+                        self._idle_wake.close()
                     return
                 self._echo = engines.echo
                 self._source.open(self._push)
         except Exception as e:
+            if self._idle_wake is not None:
+                self._idle_wake.close()
             self._echo = None
             self._on_loop(self._notice, f"Listening is off: {type(e).__name__}: {e}")
             return
@@ -729,6 +785,7 @@ class Capture:
             engines, self._settings, lambda row: self._on_loop(self._record, row), clock=self._clock,
             clips=self._clips, defer_endpoints=True,
             retained_frame_limit=round(self._settings.max_turn_s * 100) + self._max_backlog + 1,
+            idle_wake=self._idle_wake,
         )
         self.ready.set()
         self._on_loop(self._record, {"kind": "ears_loaded", "load_ms": round((time.perf_counter() - began) * 1000)})
@@ -742,7 +799,56 @@ class Capture:
                 break
             if isinstance(item, _Capture):
                 epoch = item.epoch
+                retained = None
+                handoff_failure = None
+                idle_wake = self._idle_wake
+                if idle_wake is not None:
+                    with self._backlog_lock:
+                        current = item.epoch == self._capture_epoch
+                        lost = item.loss_epoch != self._loss_epoch
+                    if current and item.on and item.wake_candidate is not None:
+                        retained = idle_wake.take(item.wake_candidate)
+                        if lost or (retained is not None and retained.loss_epoch != self._loss_epoch):
+                            handoff_failure = "overflow"
+                            retained = None
+                        elif retained is None:
+                            handoff_failure = "retention_limit"
+                    idle_wake.mode(item.idle, epoch, item.owner, self._loss_epoch)
                 pipeline.capture(item.on, owner=item.owner)
+                if handoff_failure is not None:
+                    aborted = pipeline.abort_idle(item.owner, handoff_failure)
+                    self._on_loop(lambda event, owner=epoch: self._publish(event, owner), aborted)
+                    self._on_loop(self._record, {"kind": "idle_wake", "stage": "handoff_rejected",
+                                                "reason": handoff_failure, "source_owner": item.owner,
+                                                "capture_epoch": epoch})
+                elif retained is not None and not retained.wake_only:
+                    for event in pipeline.activate_idle(retained, item.owner):
+                        self._on_loop(lambda event, owner=epoch: self._publish(event, owner), event)
+                    self._fence(pipeline, epoch, self._loss_epoch)
+                continue
+            if isinstance(item, IdleResult):
+                utterance = item.utterance
+                with self._backlog_lock:
+                    current = utterance.epoch == self._capture_epoch and utterance.loss_epoch == self._loss_epoch
+                if not current:
+                    self._on_loop(self._record, {"kind": "idle_wake", "stage": "stale_result",
+                                                "candidate": utterance.identity})
+                    continue
+                if item.error is not None and self._idle_wake is not None:
+                    self._idle_wake.close()
+                    self._on_loop(self._notice, "Idle wake recognition is unavailable. Run `uv run python -m "
+                                  "jarvis_hub.voice.apple_wake --check`, then restart Jarvis or select "
+                                  "JARVIS_WAKE_ENGINE=openwakeword.")
+                    continue
+                if current and self._idle_wake is not None and self._idle_wake.result(item):
+                    self._on_loop(self._record, {"kind": "idle_wake", "stage": "keyword_matched",
+                                                "candidate": utterance.identity, "decided_at": self._clock()})
+                    with self._backlog_lock:
+                        if self._ready_wake is not None and self._idle_wake.available(self._ready_wake[0]):
+                            continue
+                        self._ready_wake = (utterance.identity, utterance.epoch, utterance.loss_epoch)
+                    event = WakeWord(utterance.onset, self._clock(), utterance.owner, utterance.identity)
+                    self._on_loop(lambda event, source=utterance.epoch, loss=utterance.loss_epoch: self._publish_idle(event, source, loss), event)
                 continue
             if isinstance(item, _Overflow):
                 self._abandon(pipeline, "overflow", epoch)
@@ -779,6 +885,8 @@ class Capture:
                     self._behind = False
                 loss_epoch = self._loss_epoch
             processed_frame = item.sequence
+            if self._idle_wake is not None:
+                self._idle_wake.loss(loss_epoch)
             silent = silent + 1 if item.raw_silent else 0
             if silent == round(SILENT_MIC_S * 100):
                 self._on_loop(
@@ -817,3 +925,9 @@ class Capture:
                 self._trace_frames = 0
                 self._max_delay_ms = 0.0
         pipeline.discard_endpoint("shutdown")
+        if self._idle_wake is not None:
+            self._idle_wake.close()
+
+    def _publish_idle(self, event: WakeWord, epoch: int, loss_epoch: int) -> None:
+        if not self._closed and epoch == self._capture_epoch and loss_epoch == self._loss_epoch:
+            self._events.put_nowait(event)
