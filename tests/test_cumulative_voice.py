@@ -15,11 +15,17 @@ from tests.test_voice_mode import MakeRig, STORY, rig_for as rig_for, speaking, 
 class ScriptedJev:
     cumulative = True
 
-    def __init__(self) -> None:
+    def __init__(self, *, auto_initial: bool = True) -> None:
+        self.auto_initial = auto_initial
+        self.initial_snapshots: list[Snapshot] = []
         self.snapshots: list[Snapshot] = []
         self.replies: asyncio.Queue[Decision] = asyncio.Queue()
 
     async def assess_snapshot(self, snapshot: Snapshot) -> Decision:
+        if self.auto_initial and snapshot.phase == 'listening':
+            self.initial_snapshots.append(snapshot)
+            return Decision(snapshot.id, tuple(source.key for source in snapshot.sources), False,
+                            all(source.final for source in snapshot.sources), False, 'assessed')
         self.snapshots.append(snapshot)
         return await self.replies.get()
 

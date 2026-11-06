@@ -50,6 +50,7 @@ from jarvis_hub.voice.state import (
     VoiceState,
     step,
     stop_phrase,
+    without_wake_phrase,
 )
 from jarvis_hub.voice.tts import Synthesizer
 
@@ -509,12 +510,18 @@ class VoiceMode:
             return True
         if not isinstance(event, (SpeechStarted, Hypothesis, Heard, CaptureAborted)):
             return False
-        if period is None and self._voice.state not in ("thinking", "speaking", "announce", "follow_up"):
+        if period is None and self._voice.state not in ("listening", "thinking", "speaking", "announce", "follow_up"):
             return False
         if event.owner is not None and event.owner != self._epoch:
             return True
         candidate = event.candidate
         if candidate is None or candidate <= self._accepted_candidate or candidate in self._rejected_sources or self._reject_unknown_sources:
+            return True
+        if (isinstance(event, Heard) and self._voice.state == "listening" and self._owned is None
+                and stop_phrase(without_wake_phrase(event.text)) is not None):
+            self._period = None
+            for action in self._step(event):
+                await self._act(action, interrupt)
             return True
         if period is None:
             window = self._follow_up
@@ -525,6 +532,12 @@ class VoiceMode:
             self._limit_cumulative(period)
             return True
         if isinstance(event, SpeechStarted):
+            if self._voice.state == "listening":
+                self._voice = replace(self._voice, deadline=None, in_turn=True)
+            onset = event.started_at if event.started_at is not None else event.at
+            if period.last_speech_at is not None and onset > period.last_speech_at:
+                period.pauses.append((period.last_speech_at, onset))
+                period.pauses = period.pauses[-32:]
             period.active.add(candidate)
             period.version += 1
             period.dirty = True
@@ -544,6 +557,8 @@ class VoiceMode:
                             event.delivered_at if event.delivered_at is not None else self._clock.now(), True,
                             previous.pauses if previous is not None else (), event.lang)
         period.sources[candidate] = source
+        period.last_speech_at = max(period.last_speech_at if period.last_speech_at is not None else source.speech_at,
+                                    source.speech_at)
         period.version += 1
         period.dirty = True
         period.reassess_at = self._clock.now() + .4
@@ -560,7 +575,11 @@ class VoiceMode:
         self._notice("Cumulative speech reached its retention limit or lost audio. Use a fresh wake or typed input.")
         if period.stopped:
             self._voice = Voice(state="follow_up", deadline=self._clock.now() + self._timing.follow_up_s)
-            self._sync_capture()
+        elif self._voice.state == "listening":
+            before = self._voice.state
+            self._voice = Voice()
+            self._transition(before, "idle", Tick(self._clock.now()))
+        self._sync_capture()
 
     def _assess_cumulative(self) -> None:
         period = self._period
@@ -576,7 +595,9 @@ class VoiceMode:
             return
         snapshot = Snapshot(f"{period.epoch}:{period.opened}:{period.sequence}", sources, self._clock.now(),
                             period.phase, period.preceding_request, period.played_text,
-                            period.owner.token if period.owner is not None else None)
+                            period.owner.token if period.owner is not None else None,
+                            pauses=tuple(sorted(set(period.pauses) | {pause for source in sources for pause in source.pauses})),
+                            active_sources=tuple(sorted(period.active)))
         version = period.version
         recognition = cast(CumulativeRecognition, self._recognition)
         async def assess() -> None:
@@ -612,11 +633,13 @@ class VoiceMode:
             self._period = None
             if period.stopped:
                 self._voice = replace(self._voice, in_turn=False, deadline=self._clock.now() + self._timing.follow_up_s)
-                self._sync_capture()
+            elif self._voice.state == "listening":
+                self._voice = replace(self._voice, in_turn=False, deadline=self._clock.now() + self._timing.listen_s)
+            self._sync_capture()
             return
         line: Line | None = None
         if (decision.ready and selected and not period.active and all(source.final for source in selected)
-                and (period.stopped or decision.floor or self._voice.state in ("follow_up", "idle"))):
+                and (period.stopped or decision.floor or self._voice.state in ("listening", "thinking", "follow_up", "idle"))):
             text = " ".join(source.text for source in selected)
             last = selected[-1]
             try:
@@ -635,7 +658,8 @@ class VoiceMode:
                         revision=owned.revision, segments=owned.segments,
                         interrupted=(period.played_text or None) if period.stopped or decision.floor else None)
             self._admitted(line)
-        if decision.floor and selected and not period.stopped:
+        if (selected and not period.stopped and self._voice.state in ("thinking", "speaking", "announce")
+                and (decision.floor or line is not None)):
             period.stopped = True
             before = self._voice.state
             self._voice = replace(self._voice, state="follow_up", deadline=None, in_turn=True,
@@ -663,6 +687,15 @@ class VoiceMode:
             self._voice = Voice(state="thinking", awaiting=line.arrived)
             self._sync_capture()
             if line.request_id is not None and self.owns((line.request_id, line.revision)):
+                submitted = self._clock.now()
+                last = selected[-1]
+                self._metrics.record({"kind": "cumulative_readiness", "snapshot_id": snapshot.id,
+                                      "request_id": line.request_id, "revision": line.revision,
+                                      "speech_end_at": last.speech_at, "submitted_at": submitted,
+                                      "final_source_observed_at": last.observed_at,
+                                      "end_wait_ms": round((submitted - last.speech_at) * 1000),
+                                      "readiness_wait_ms": round((submitted - last.observed_at) * 1000),
+                                      "time_basis": "perf_counter"})
                 self._lines.put_nowait(line)
 
     def _follow_up_event(self, event: SpeechStarted | Heard) -> bool:
@@ -891,7 +924,7 @@ class VoiceMode:
     def typed_input(self) -> None:
         self._typed_at = self._clock.now()
         # STT can hold an initial recording before its queued onset reaches this state machine.
-        if self._owned is None and self._follow_up is None and self._voice.state in CAPTURING:
+        if self._owned is None and self._follow_up is None and self._period is None and self._voice.state in CAPTURING:
             return
         before = self._voice.state
         self._voice = Voice()

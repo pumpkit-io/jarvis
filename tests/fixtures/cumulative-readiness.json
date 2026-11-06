@@ -1,0 +1,180 @@
+{
+  "version": 1,
+  "purpose": "Synthetic development intents; not an untouched semantic confirmation set.",
+  "unfinished": [
+    {
+      "id": "en-mid_sentence-0.5s",
+      "lang": "en",
+      "placement": "mid_sentence",
+      "gap_s": 0.5,
+      "opening": "Could you explain why",
+      "continuation": "the retry test is skipped?",
+      "ready_during_gap": false,
+      "expected": "Could you explain why the retry test is skipped?"
+    },
+    {
+      "id": "en-mid_sentence-1s",
+      "lang": "en",
+      "placement": "mid_sentence",
+      "gap_s": 1,
+      "opening": "Could you explain why",
+      "continuation": "the retry test is skipped?",
+      "ready_during_gap": false,
+      "expected": "Could you explain why the retry test is skipped?"
+    },
+    {
+      "id": "en-mid_sentence-2s",
+      "lang": "en",
+      "placement": "mid_sentence",
+      "gap_s": 2,
+      "opening": "Could you explain why",
+      "continuation": "the retry test is skipped?",
+      "ready_during_gap": false,
+      "expected": "Could you explain why the retry test is skipped?"
+    },
+    {
+      "id": "en-mid_sentence-3s",
+      "lang": "en",
+      "placement": "mid_sentence",
+      "gap_s": 3,
+      "opening": "Could you explain why",
+      "continuation": "the retry test is skipped?",
+      "ready_during_gap": false,
+      "expected": "Could you explain why the retry test is skipped?"
+    },
+    {
+      "id": "en-complete_sentence-0.5s",
+      "lang": "en",
+      "placement": "complete_sentence",
+      "gap_s": 0.5,
+      "opening": "The build passes.",
+      "continuation": "But explain why the retry test is skipped.",
+      "ready_during_gap": false,
+      "expected": "The build passes. But explain why the retry test is skipped."
+    },
+    {
+      "id": "en-complete_sentence-1s",
+      "lang": "en",
+      "placement": "complete_sentence",
+      "gap_s": 1,
+      "opening": "The build passes.",
+      "continuation": "But explain why the retry test is skipped.",
+      "ready_during_gap": false,
+      "expected": "The build passes. But explain why the retry test is skipped."
+    },
+    {
+      "id": "en-complete_sentence-2s",
+      "lang": "en",
+      "placement": "complete_sentence",
+      "gap_s": 2,
+      "opening": "The build passes.",
+      "continuation": "But explain why the retry test is skipped.",
+      "ready_during_gap": false,
+      "expected": "The build passes. But explain why the retry test is skipped."
+    },
+    {
+      "id": "en-complete_sentence-3s",
+      "lang": "en",
+      "placement": "complete_sentence",
+      "gap_s": 3,
+      "opening": "The build passes.",
+      "continuation": "But explain why the retry test is skipped.",
+      "ready_during_gap": false,
+      "expected": "The build passes. But explain why the retry test is skipped."
+    },
+    {
+      "id": "it-mid_sentence-0.5s",
+      "lang": "it",
+      "placement": "mid_sentence",
+      "gap_s": 0.5,
+      "opening": "Mi spieghi perché",
+      "continuation": "il test dei tentativi viene saltato?",
+      "ready_during_gap": false,
+      "expected": "Mi spieghi perché il test dei tentativi viene saltato?"
+    },
+    {
+      "id": "it-mid_sentence-1s",
+      "lang": "it",
+      "placement": "mid_sentence",
+      "gap_s": 1,
+      "opening": "Mi spieghi perché",
+      "continuation": "il test dei tentativi viene saltato?",
+      "ready_during_gap": false,
+      "expected": "Mi spieghi perché il test dei tentativi viene saltato?"
+    },
+    {
+      "id": "it-mid_sentence-2s",
+      "lang": "it",
+      "placement": "mid_sentence",
+      "gap_s": 2,
+      "opening": "Mi spieghi perché",
+      "continuation": "il test dei tentativi viene saltato?",
+      "ready_during_gap": false,
+      "expected": "Mi spieghi perché il test dei tentativi viene saltato?"
+    },
+    {
+      "id": "it-mid_sentence-3s",
+      "lang": "it",
+      "placement": "mid_sentence",
+      "gap_s": 3,
+      "opening": "Mi spieghi perché",
+      "continuation": "il test dei tentativi viene saltato?",
+      "ready_during_gap": false,
+      "expected": "Mi spieghi perché il test dei tentativi viene saltato?"
+    },
+    {
+      "id": "it-complete_sentence-0.5s",
+      "lang": "it",
+      "placement": "complete_sentence",
+      "gap_s": 0.5,
+      "opening": "La build passa.",
+      "continuation": "Ma spiegami perché il test dei tentativi viene saltato.",
+      "ready_during_gap": false,
+      "expected": "La build passa. Ma spiegami perché il test dei tentativi viene saltato."
+    },
+    {
+      "id": "it-complete_sentence-1s",
+      "lang": "it",
+      "placement": "complete_sentence",
+      "gap_s": 1,
+      "opening": "La build passa.",
+      "continuation": "Ma spiegami perché il test dei tentativi viene saltato.",
+      "ready_during_gap": false,
+      "expected": "La build passa. Ma spiegami perché il test dei tentativi viene saltato."
+    },
+    {
+      "id": "it-complete_sentence-2s",
+      "lang": "it",
+      "placement": "complete_sentence",
+      "gap_s": 2,
+      "opening": "La build passa.",
+      "continuation": "Ma spiegami perché il test dei tentativi viene saltato.",
+      "ready_during_gap": false,
+      "expected": "La build passa. Ma spiegami perché il test dei tentativi viene saltato."
+    },
+    {
+      "id": "it-complete_sentence-3s",
+      "lang": "it",
+      "placement": "complete_sentence",
+      "gap_s": 3,
+      "opening": "La build passa.",
+      "continuation": "Ma spiegami perché il test dei tentativi viene saltato.",
+      "ready_during_gap": false,
+      "expected": "La build passa. Ma spiegami perché il test dei tentativi viene saltato."
+    }
+  ],
+  "finished": [
+    {
+      "id": "en-finished",
+      "lang": "en",
+      "text": "Explain the skipped retry test.",
+      "endpoint_delay_s": 0.5
+    },
+    {
+      "id": "it-finished",
+      "lang": "it",
+      "text": "Spiegami il test dei tentativi saltato.",
+      "endpoint_delay_s": 0.5
+    }
+  ]
+}
