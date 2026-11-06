@@ -356,7 +356,7 @@ async def test_queued_news_cannot_replace_eligible_pending_follow_up_after_expir
 async def test_late_playback_speech_cannot_enter_the_raw_follow_up_path(rig_for: MakeRig) -> None:
     from tests.test_voice_mode import STORY, speaking
 
-    decisions = Decisions([("floor",)])
+    decisions = Decisions([("ignore",)])
     rig = await rig_for(STORY, [Text("Must not run.")], recognition=decisions)
     await speaking(rig)
     onset, candidate = rig.clock.now(), rig.audio.candidate + 1
@@ -367,13 +367,14 @@ async def test_late_playback_speech_cannot_enter_the_raw_follow_up_path(rig_for:
     rig.audio.emit(SpeechStarted(rig.clock.now(), rig.audio.owner, candidate, onset))
     rig.audio.emit(Heard("Lena, change that.", None, rig.clock.now(), rig.audio.owner, candidate, onset))
     await rig.settle()
-    assert len(rig.user_messages()) == 1 and not decisions.candidates
+    assert len(rig.user_messages()) == 1 and len(decisions.candidates) == 1
+    assert decisions.candidates[0].phase in ("speaking", "announce")
 
 
 async def test_late_announcement_speech_cannot_enter_the_raw_follow_up_path(rig_for: MakeRig) -> None:
     from tests.test_voice_mode import NEWS, news_rig
 
-    decisions = Decisions([("floor",)])
+    decisions = Decisions([("ignore",)])
     rig, [arrival] = await news_rig(rig_for, [Text(NEWS)], [Text("Must not run.")], recognition=decisions)
     rig.player.hold = True
     arrival.set()
@@ -387,4 +388,5 @@ async def test_late_announcement_speech_cannot_enter_the_raw_follow_up_path(rig_
     rig.audio.emit(SpeechStarted(rig.clock.now(), rig.audio.owner, candidate, onset))
     rig.audio.emit(Heard("Lena, change that.", None, rig.clock.now(), rig.audio.owner, candidate, onset))
     await rig.settle()
-    assert len(rig.user_messages()) == 1 and not decisions.candidates
+    assert len(rig.user_messages()) == 1 and len(decisions.candidates) == 1
+    assert decisions.candidates[0].phase in ("speaking", "announce")

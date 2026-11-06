@@ -372,20 +372,16 @@ async def test_a_typed_line_during_the_follow_up_window_is_not_spoken(rig_for: M
     assert rig.state == "idle"
 
 
-async def test_the_wake_word_while_jarvis_speaks_stops_it_and_listens(rig_for: MakeRig) -> None:
-    rig: Rig = await rig_for([Text("This is a very long answer, sir."), AwaitInterrupt()])
-
+async def test_raw_wake_hit_while_speaking_does_not_take_the_floor(rig_for: MakeRig) -> None:
+    rig = await rig_for([Text("This is a very long answer, sir."), AwaitInterrupt()])
     rig.audio.wake()
     rig.audio.say("Tell me a story")
     await until(lambda: rig.state == "speaking")
-    rig.clock.advance(1)
+    chimes = rig.player.voices.count("chime")
     rig.audio.wake()
-    await until(lambda: rig.state == "listening" and rig.player.events[-1] == "play ")
-
-    assert "stop" in rig.player.events
-    assert rig.player.voices[-1] == "chime"
-    talker = rig.backend.session("talker")
-    await until(lambda: not talker._sending)  # pyright: ignore[reportPrivateUsage]
+    await rig.settle()
+    assert rig.state == "speaking" and "stop" not in rig.player.events
+    assert rig.player.voices.count("chime") == chimes
 
 
 @pytest.mark.parametrize(
@@ -414,7 +410,7 @@ async def test_generated_farewell_finishes_before_idle_without_a_follow_up_windo
     assert len(rig.user_messages()) == 1
 
 
-async def test_capture_is_on_only_while_listening_for_a_turn(rig_for: MakeRig) -> None:
+async def test_capture_stays_on_through_thinking_playback_and_follow_up(rig_for: MakeRig) -> None:
     rig: Rig = await rig_for([Text("Hi, sir.")])
 
     rig.audio.wake()
@@ -422,7 +418,7 @@ async def test_capture_is_on_only_while_listening_for_a_turn(rig_for: MakeRig) -
     await until(lambda: rig.state == "follow_up")
     await rig.advance(6)
 
-    assert rig.audio.capturing == [True, False, True, False]
+    assert rig.audio.capturing == [True, False]
 
 
 FULL = Context(100_000, 200_000)
@@ -538,7 +534,7 @@ async def test_the_wake_word_does_not_stop_a_typed_reply(rig_for: MakeRig) -> No
     await until(lambda: "Typed answer, sir." in rig.output.replies)
     await rig.settle()
 
-    assert rig.output.replies == ["Typed answer, sir."]
+    assert rig.output.replies == ["Typed answer, sir.", "Spoken answer, sir."]
 
 
 async def test_a_reply_stopped_by_the_wake_word_does_not_end_the_next_turn(rig_for: MakeRig) -> None:
@@ -684,18 +680,17 @@ async def test_news_that_queued_up_meanwhile_is_one_announcement_in_arrival_orde
     assert talker_kinds(rig)[-1] == "event"
 
 
-async def test_a_wake_cuts_unheard_news_and_the_news_after_it_still_plays(rig_for: MakeRig) -> None:
-    rig, arrivals = await news_rig(rig_for, [Text(NEWS)], [Text("Green, sir.")], [Text(DOCS)], items=2)
+async def test_an_admitted_request_cuts_unheard_news_and_later_news_still_plays(rig_for: MakeRig) -> None:
+    rig, arrivals = await news_rig(rig_for, [Text(NEWS)], [Text("Green, sir.")], [Text(DOCS)], items=2, recognition=FollowUpDecision())
 
     rig.tts.hold.clear()
     await arrive(rig, arrivals[0])
     await until(lambda: rig.output.replies[-1:] == [NEWS])
     await arrive(rig, arrivals[1])
     await rig.advance(1)
-    rig.audio.wake()
-    await until(lambda: rig.state == "listening")
-    rig.tts.hold.set()
     rig.audio.say("Is the CI green?")
+    await until(lambda: "stop" in rig.player.events)
+    rig.tts.hold.set()
     await until(lambda: "Green, sir." in rig.player.texts and rig.state == "follow_up")
     await rig.advance(6)
     await until(lambda: DOCS in rig.player.texts and rig.state == "follow_up")
@@ -706,12 +701,12 @@ async def test_a_wake_cuts_unheard_news_and_the_news_after_it_still_plays(rig_fo
     assert spoken(rig)[-2:] == ["Green, sir.", DOCS]
 
 
-async def test_a_second_wake_stops_the_users_first_turn_and_leaves_waiting_news_whole(rig_for: MakeRig) -> None:
+async def test_an_admitted_correction_replaces_the_first_turn_and_leaves_waiting_news_whole(rig_for: MakeRig) -> None:
     rig, [arrival] = await news_rig(
         rig_for,
         [Text("Main is"), AwaitInterrupt()],
-        [Text("Green, sir.")],
-        [Text(NEWS), Text(" Shall I merge it?")],
+        [ResolveScope("preserve_tasks"), Text("Green, sir.")],
+        [Text(NEWS), Text(" Shall I merge it?")], recognition=LocalRelation("directed"),
     )
 
     rig.audio.wake()
@@ -720,8 +715,6 @@ async def test_a_second_wake_stops_the_users_first_turn_and_leaves_waiting_news_
     rig.audio.say("Is main green?")
     await until(lambda: rig.state == "thinking" and rig.output.log[-1] == ("reply", "Main is"))
     rig.clock.advance(1)
-    rig.audio.wake()
-    await until(lambda: rig.state == "listening")
     rig.audio.say("Is the CI green?")
     await until(lambda: "Green, sir." in rig.player.texts and rig.state == "follow_up")
     await rig.advance(6)
@@ -731,17 +724,14 @@ async def test_a_second_wake_stops_the_users_first_turn_and_leaves_waiting_news_
     assert spoken(rig)[-3:] == ["Green, sir.", NEWS, "Shall I merge it?"]
 
 
-async def test_news_the_user_wakes_over_is_stopped_and_not_said_again(rig_for: MakeRig) -> None:
-    rig, [arrival] = await news_rig(rig_for, [Text(NEWS)], [Text("Green, sir.")])
+async def test_news_an_admitted_request_interrupts_is_not_said_again(rig_for: MakeRig) -> None:
+    rig, [arrival] = await news_rig(rig_for, [Text(NEWS)], [Text("Green, sir.")], recognition=FollowUpDecision())
     rig.player.hold = True
 
     await arrive(rig, arrival)
     await until(lambda: rig.state == "announce")
     rig.clock.advance(1)
-    rig.audio.wake()
-    await until(lambda: rig.state == "listening" and rig.player.events[-1] == "play ")
     rig.player.hold = False
-    rig.player.finish()
     rig.audio.say("Is the CI green?")
     await until(lambda: rig.state == "follow_up")
     await rig.advance(7)
@@ -794,26 +784,20 @@ async def test_a_full_talker_restarts_before_waiting_news_and_the_news_goes_to_t
     assert new.received[-1].startswith('<event source="orchestrator" task="T1"')
 
 
-async def test_a_queued_spoken_turn_superseded_by_wake_is_not_admitted(rig_for: MakeRig) -> None:
+async def test_a_queued_spoken_turn_superseded_by_typed_replacement_is_not_admitted(rig_for: MakeRig) -> None:
     typed_done = asyncio.Event()
-    rig: Rig = await rig_for(
-        [Gate(typed_done), Text("Typed answer, sir.")], [Text("Green, sir.")]
-    )
-
+    rig = await rig_for([Gate(typed_done), Text("Typed answer, sir.")], [Text("Current status.")])
     rig.typist.type("Summarise the logs")
     await rig.settle()
     rig.audio.wake()
     rig.audio.say("Is main green?")
     await until(lambda: rig.state == "thinking")
-    rig.clock.advance(1)
-    rig.audio.wake()
-    rig.audio.say("Is the CI green?")
-    await until(lambda: rig.state == "thinking" and len(rig.user_messages()) == 1)
+    rig.typist.type("Show current status instead")
+    await rig.settle()
     typed_done.set()
-    await until(lambda: "Green, sir." in rig.player.texts and rig.state == "follow_up")
-
-    assert "Is main green?" not in "\n".join(rig.user_messages())
-    assert "Main is red, sir." not in rig.output.replies
+    await until(lambda: "Current status." in rig.output.replies)
+    assert "Is main green?" not in "\n".join(talker_got(rig))
+    assert "Current status." not in rig.player.texts
 
 
 async def test_news_after_the_input_ends_in_the_follow_up_window_is_shown_and_the_hub_stops(rig_for: MakeRig) -> None:
@@ -845,27 +829,21 @@ async def test_news_after_the_input_ends_while_idle_is_all_shown_and_the_hub_sto
     assert [r for r in rig.output.replies if r in (NEWS, DOCS)] == [NEWS, DOCS]
 
 
-async def test_a_wake_word_queued_as_news_claims_the_voice_interrupts_the_news(rig_for: MakeRig) -> None:
-    rig, [arrival] = await news_rig(rig_for, [Text(NEWS), AwaitInterrupt()], [Text("Green, sir.")])
+async def test_a_raw_wake_queued_as_news_claims_the_voice_needs_contextual_admission(rig_for: MakeRig) -> None:
+    rig, [arrival] = await news_rig(rig_for, [Text(NEWS + " "), AwaitInterrupt()], [Text("Green, sir.")], recognition=FollowUpDecision())
     announce = rig.voice.announce
-
     def wake_then_announce() -> bool:
         rig.audio.wake()
         return announce()
-
     rig.voice.announce = wake_then_announce  # type: ignore[method-assign]
-    rig.clock.advance(1)
     await arrive(rig, arrival)
-    await until(lambda: rig.state == "listening")
+    await until(lambda: rig.state == "announce" and NEWS in rig.player.texts)
     rig.voice.announce = announce  # type: ignore[method-assign]
+    assert "stop" not in rig.player.events
     rig.audio.say("Is the CI green?")
     await until(lambda: "Green, sir." in rig.player.texts and rig.state == "follow_up")
-    await rig.advance(7)
-
-    assert talker_kinds(rig)[-2:] == ["event", "user"]
-    assert NEWS not in rig.player.texts
-    assert rig.states()[-7:-4] == ["idle", "announce", "listening"]
-    assert "stop" in rig.player.events
+    assert rig.player.texts.count(NEWS) == 1
+    assert rig.player.events.count("stop") == 1
 
 
 async def test_news_from_a_check_that_comes_due_mid_exchange_waits_until_jarvis_is_quiet(rig_for: MakeRig) -> None:
@@ -1469,316 +1447,18 @@ def talker_got(rig: Rig) -> list[str]:
     return [m for m in rig.backend.session("talker").received if m != WARM_UP]
 
 
-async def test_okay_over_jarvis_pauses_it_and_it_resumes_a_little_back_within_a_second(rig_for: MakeRig) -> None:
-    rig = await rig_for(STORY)
-    await speaking(rig)
-
-    rig.audio.barge()
-    await until(lambda: rig.player.events[-1] == "pause")
-    await rig.advance(0.2)
-    rig.audio.partial("Okay")
-    await rig.advance(0.3)
-    assert rig.player.events[-1] == "pause"
-    rig.audio.partial("Okay.", silent=0.35)
-    await until(lambda: rig.player.events[-1] == "resume 300")
-
-    # 0.7 s from the onset of "okay", and the Backchannel is no turn.
-    assert rig.state == "speaking"
-    rig.player.finish()
-    await rig.advance(0.1)
-    assert rig.state == "follow_up"
-    assert talker_got(rig) == ['<user lang="en">Tell me a story</user>']
-
-
-async def test_mhm_twice_resumes_twice(rig_for: MakeRig) -> None:
-    rig = await rig_for(STORY)
-    await speaking(rig)
-
-    for _ in range(2):
-        rig.audio.barge()
-        await rig.advance(0.5)
-        rig.audio.partial("Mhm.", silent=0.3)
-        await rig.settle()
-        rig.player.finish(1)
-        await rig.advance(1.0)
-
-    assert [e for e in rig.player.events if not e.startswith("play")] == ["pause", "resume 300"] * 2
-    assert rig.state == "speaking"
-    assert rig.audio.watching[-1] is not None
-
-
-async def test_a_cough_pauses_jarvis_only_briefly(rig_for: MakeRig) -> None:
-    rig = await rig_for(STORY)
-    await speaking(rig)
-
-    rig.audio.barge(held=0.25)
-    await rig.advance(0.15)
-    rig.audio.partial("", silent=0.25)
-    await until(lambda: rig.player.events[-1] == "resume 300")
-
-    assert rig.state == "speaking"
-    assert "stop" not in rig.player.events
-
-
-async def test_wait_stop_stops_jarvis_and_listens_and_the_turn_says_what_was_heard(rig_for: MakeRig) -> None:
-    rig = await rig_for([*STORY, AwaitInterrupt()], [Text("Of course, sir.")])
-    await speaking(rig)
-    rig.player.finish(1)
-
-    rig.audio.barge()
-    await rig.advance(0.2)
-    rig.audio.partial("Wait, stop")
-    await until(lambda: rig.state == "listening")
-
-    assert rig.player.events[-2:] == ["pause", "stop"]
-    assert rig.player.voices[-1] != "chime"
-    talker = rig.backend.session("talker")
-    await until(lambda: not talker._sending)  # pyright: ignore[reportPrivateUsage]
-    assert rig.audio.capturing[-1] is True and rig.audio.watching[-1] is None
-
-    rig.audio.say("Wait, stop.")
-    await until(lambda: len(talker_got(rig)) == 2)
-    assert talker_got(rig)[1] == '<interrupted spoken="First sentence, sir."/>\n<user lang="en">Wait, stop.</user>'
-
-
-async def test_a_new_request_over_jarvis_stops_it_and_is_answered_with_what_was_heard(rig_for: MakeRig) -> None:
-    rig = await rig_for([*STORY, AwaitInterrupt()], [Text("Right away, sir.")])
-    await speaking(rig)
-    rig.player.finish(1)
-
-    rig.audio.barge()
-    await rig.advance(0.2)
-    rig.audio.partial("Actually, open")
-    await until(lambda: rig.state == "listening")
-    rig.audio.say("Actually, open an issue instead")
-    await until(lambda: rig.state == "speaking" and rig.player.texts[-1] == "Right away, sir.")
-
-    assert talker_got(rig)[1] == (
-        '<interrupted spoken="First sentence, sir."/>\n<user lang="en">Actually, open an issue instead</user>'
-    )
-    assert "Second sentence follows." not in rig.player.texts[rig.player.texts.index("Right away, sir.") :]
-
-
-async def test_jarvis_said_over_a_reply_always_stops_it(rig_for: MakeRig) -> None:
-    rig = await rig_for([*STORY, AwaitInterrupt()], [Text("Two Subagents, sir.")])
-    await speaking(rig)
-
-    rig.audio.barge()
-    await rig.advance(0.1)
-    rig.audio.wake()
-    await until(lambda: rig.state == "listening" and rig.player.voices[-1] == "chime")
-    rig.audio.say("What is running?")
-    await until(lambda: len(talker_got(rig)) == 2)
-
-    assert "stop" in rig.player.events
-    assert talker_got(rig)[1] == '<interrupted spoken=""/>\n<user lang="en">What is running?</user>'
-
-
-async def test_speech_inside_the_guard_is_ignored_and_a_later_barge_in_still_stops_jarvis(rig_for: MakeRig) -> None:
-    rig = await rig_for([*STORY, AwaitInterrupt()])
-    rig.audio.wake()
-    await until(lambda: rig.player.voices[-1:] == ["chime"])
-    rig.player.hold = True
-    rig.audio.say("Tell me a story")
-    await until(lambda: rig.state == "speaking")
-    started = rig.clock.now()
-    assert rig.audio.watching[-1] == pytest.approx(started + 0.25)  # pyright: ignore[reportUnknownMemberType]
-
-    rig.audio.barge(held=0.3)
-    await rig.advance(0.1)
-    rig.audio.partial("Stop")
-    await rig.advance(0.4)
-    assert "pause" not in rig.player.events and rig.state == "speaking"
-
-    rig.audio.barge()
-    await until(lambda: rig.player.events[-1:] == ["pause"])
-    rig.audio.partial("Stop")
-    await until(lambda: rig.state == "listening")
-    assert "stop" in rig.player.events
-
-
-async def test_barge_in_is_watched_only_while_jarvis_speaks(rig_for: MakeRig) -> None:
-    rig = await rig_for([Text("Hi, sir.")])
-
-    rig.audio.wake()
-    rig.audio.say("Hello")
-    await until(lambda: rig.state == "follow_up")
-
-    assert [since is not None for since in rig.audio.watching] == [True, False]
-
-
-def barge_rows(rig: Rig) -> list[dict[str, Any]]:
-    return [r for r in rig.metrics.records if r["kind"] == "bargein"]
-
-
-async def test_a_backchannel_resume_is_logged_with_its_partials_timing_and_what_had_been_said(rig_for: MakeRig) -> None:
-    rig = await rig_for(STORY)
-    await speaking(rig)
-    since = rig.audio.watching[-1]
-    assert since is not None
-
-    rig.audio.barge()
-    await until(lambda: rig.player.events[-1] == "pause")
-    await rig.advance(0.2)
-    rig.audio.partial("Okay.", silent=0.35)
-    await until(lambda: rig.player.events[-1] == "resume 300")
-    # A resume waits to learn whether the User repeats themselves.
-    assert barge_rows(rig) == []
-    await rig.voice.close()
-
-    [row] = barge_rows(rig)
-    assert row["since"] == pytest.approx(since, abs=1e-3)  # pyright: ignore[reportUnknownMemberType]
-    assert row["onset"] >= row["since"]
-    assert row["decision"] == "resume" and row["extended"] is False and row["wake_hits"] == []
-    assert row["detected_ms"] == 200
-    assert [p["text"] for p in row["partials"]] == ["Okay."]
-    assert row["partials"][0]["ms"] == row["decided_ms"] == 400
-    assert row["played"] == rig.player.played()
-    assert (row["repeated"], row["next"]) == (False, None)
-
-
-async def test_wait_stop_is_logged_as_a_stop_with_no_repeat_to_judge(rig_for: MakeRig) -> None:
-    rig = await rig_for([*STORY, AwaitInterrupt()], [Text("Of course, sir.")])
-    await speaking(rig)
-
-    rig.audio.barge()
-    await rig.advance(0.2)
-    rig.audio.partial("Wait, stop")
-    await until(lambda: rig.state == "listening")
-
-    [row] = barge_rows(rig)
-    assert (row["decision"], row["decided_ms"], row["repeated"], row["next"]) == ("stop", 400, None, None)
-
-
-async def test_the_wake_word_over_a_barge_in_is_logged_with_its_hit(rig_for: MakeRig) -> None:
-    rig = await rig_for([*STORY, AwaitInterrupt()], [Text("Two Subagents, sir.")])
-    await speaking(rig)
-
-    rig.audio.barge()
-    await rig.advance(0.1)
-    rig.audio.wake()
-    await until(lambda: rig.state == "listening")
-
-    [row] = barge_rows(rig)
-    assert (row["decision"], row["wake_hits"], row["partials"]) == ("wake", [300], [])
-
-
-async def test_a_decision_that_waited_past_its_deadline_for_one_more_partial_is_logged_as_extended(
-    rig_for: MakeRig,
-) -> None:
-    rig = await rig_for(STORY)
-    await speaking(rig)
-    rig.player.finish(1)
-
-    rig.audio.barge()
-    await rig.advance(0.2)
-    rig.audio.partial("Okay")
-    await rig.advance(0.7)
-    assert rig.player.events[-1] == "pause"
-    await rig.advance(0.6)
-    await rig.voice.close()
-
-    [row] = barge_rows(rig)
-    assert (row["decision"], row["extended"]) == ("resume", True)
-
-
-async def test_a_stop_by_an_interrupt_said_after_the_runs_last_barge_in_is_logged_as_overheard(
-    rig_for: MakeRig,
-) -> None:
-    rig = await rig_for([*STORY, AwaitInterrupt()], [Text("Of course, sir.")])
-    await speaking(rig)
-
-    rig.audio.overheard("okay okay okay")
-    await rig.advance(0.3)
-    assert barge_rows(rig) == []
-    rig.audio.overheard("okay okay okay wait stop")
-    await until(lambda: rig.state == "listening")
-
-    [row] = barge_rows(rig)
-    assert row["decision"] == "overheard-stop" and row["onset"] is None
-    assert [p["text"] for p in row["partials"]] == ["okay okay okay wait stop"]
-
-
-async def resumed_over(rig: Rig, text: str = "Okay.") -> None:
-    rig.audio.barge()
-    await rig.advance(0.2)
-    rig.audio.partial(text, silent=0.35)
-    await until(lambda: rig.player.events[-1] == "resume 300")
-
-
-async def test_a_new_barge_in_after_a_quiet_resume_marks_it_a_likely_wrong_resume(rig_for: MakeRig) -> None:
-    rig = await rig_for([*STORY, AwaitInterrupt()])
-    await speaking(rig)
-    await resumed_over(rig, "")
-    await rig.advance(1.0)
-
-    rig.audio.barge()
-    await until(lambda: len(barge_rows(rig)) == 1)
-
-    [row] = barge_rows(rig)
-    assert (row["decision"], row["repeated"], row["next"]) == ("resume", True, "bargein")
-
-
-async def test_speech_that_ran_on_through_the_resume_is_one_run_and_not_a_repeat(rig_for: MakeRig) -> None:
+@pytest.mark.parametrize("legacy", ["backchannel", "cough", "stop", "overheard"])
+async def test_retired_partial_barge_events_have_no_runtime_authority(rig_for: MakeRig, legacy: str) -> None:
     rig = await rig_for([*STORY, AwaitInterrupt()])
     await speaking(rig)
     rig.audio.barge()
-    await rig.advance(0.2)
-    rig.audio.partial("Okay okay")
-    await rig.advance(0.7)
-    await rig.advance(0.6)
-    await until(lambda: rig.player.events[-1] == "resume 300")
-
-    rig.audio.barge()
-    await rig.advance(0.1)
-    await rig.voice.close()
-
-    assert [(r["decision"], r["repeated"]) for r in barge_rows(rig)] == [("resume", False)]
-
-
-async def test_a_turn_that_cuts_jarvis_off_soon_after_a_resume_marks_it_a_likely_wrong_resume(
-    rig_for: MakeRig,
-) -> None:
-    rig = await rig_for([*STORY, AwaitInterrupt()], [Text("Sure, sir.")])
-    await speaking(rig)
-    await resumed_over(rig, "")
-
-    rig.audio.wake()
-    await until(lambda: rig.state == "listening")
-    rig.audio.say("Which is the second one?")
-    await until(lambda: len(barge_rows(rig)) == 1)
-
-    [row] = barge_rows(rig)
-    assert (row["decision"], row["repeated"], row["next"]) == ("resume", True, "turn")
-
-
-async def test_a_plain_follow_up_after_a_resume_is_no_repeat(
-    rig_for: MakeRig,
-) -> None:
-    rig = await rig_for(STORY, [Text("Sure, sir.")], [Text("Fine, sir.")], recognition=FollowUpDecision())
-    await speaking(rig)
-    await resumed_over(rig, "Okay.")
-    rig.player.finish()
-    await rig.advance(0.1)
-    rig.audio.say("Thanks, and what is the weather?")
-    await until(lambda: len(barge_rows(rig)) == 1)
-    assert [(r["repeated"], r["next"]) for r in barge_rows(rig)] == [(False, "turn")]
-
-
-async def test_a_turn_long_after_the_resume_is_no_repeat(rig_for: MakeRig) -> None:
-    rig = await rig_for(STORY, [Text("Sure, sir.")])
-    await speaking(rig)
-    await resumed_over(rig, "")
-    rig.player.finish()
-    await rig.advance(0.1)
-    await rig.advance(9.0)
-
-    rig.audio.wake()
-    rig.audio.say("Wait, which is the second one?")
-    await until(lambda: len(barge_rows(rig)) == 1)
-
-    [row] = barge_rows(rig)
-    assert (row["repeated"], row["next"]) == (False, None)
+    rig.audio.partial("" if legacy == "cough" else "Okay" if legacy == "backchannel" else "Wait stop")
+    rig.audio.overheard("Jarvis stop" if legacy == "overheard" else "Okay")
+    await rig.settle()
+    assert rig.state == "speaking"
+    assert not any(event == "pause" or event == "stop" or event.startswith("resume") for event in rig.player.events)
+    assert not any(row["kind"] == "bargein" for row in rig.metrics.records)
+    assert len(talker_got(rig)) == 1
 
 
 class LocalRelation:
@@ -1848,8 +1528,7 @@ class DelayedRelation(LocalRelation):
         return result
 
 
-@pytest.mark.parametrize('replacement', ['wake', 'typed'])
-async def test_a_delayed_relation_cannot_revise_a_replaced_owner(rig_for: MakeRig, replacement: str) -> None:
+async def test_a_delayed_relation_cannot_revise_a_typed_replacement(rig_for: MakeRig) -> None:
     relation = DelayedRelation()
     rig = await rig_for([AwaitInterrupt()], [Text('Fresh answer, sir.')], recognition=relation)
     rig.audio.wake()
@@ -1857,13 +1536,7 @@ async def test_a_delayed_relation_cannot_revise_a_replaced_owner(rig_for: MakeRi
     await until(lambda: len(rig.user_messages()) == 1)
     rig.audio.say('about the old scheduler')
     await until(lambda: len(relation.candidates) == 1)
-    if replacement == 'wake':
-        rig.clock.advance(1)
-        rig.audio.wake()
-        await until(lambda: rig.state == 'listening')
-        rig.audio.say('Check the current build')
-    else:
-        rig.typist.type('Check the current build')
+    rig.typist.type('Check the current build')
     await until(lambda: len(rig.user_messages()) == 2)
     relation.release.set()
     await rig.settle()
@@ -2086,8 +1759,8 @@ async def test_a_revised_task_cannot_reuse_or_recreate_the_old_pending_approval(
     assert len(rig.backend.session('orchestrator').received) == 2
 
 
-async def test_actual_post_audio_onset_does_not_revise_the_thinking_owner(rig_for: MakeRig) -> None:
-    relation = LocalRelation('amend')
+async def test_post_audio_onset_is_assessed_as_speaking_and_unrelated_speech_is_rejected(rig_for: MakeRig) -> None:
+    relation = LocalRelation('unrelated')
     rig = await rig_for([Text('The original answer, sir. '), AwaitInterrupt()], recognition=relation)
     rig.audio.wake()
     await until(lambda: rig.player.voices[-1:] == ['chime'])
@@ -2099,7 +1772,9 @@ async def test_actual_post_audio_onset_does_not_revise_the_thinking_owner(rig_fo
     rig.audio.emit(SpeechStarted(onset + 0.02, epoch, 2, onset))
     rig.audio.emit(Heard('A separate overlap', 'en', onset + 0.2, epoch, 2, onset))
     await rig.settle()
-    assert relation.candidates == []
+    assert len(relation.candidates) == 1
+    assert relation.candidates[0].phase == "speaking"
+    assert relation.candidates[0].started_before_reply is False
     assert len(rig.user_messages()) == 1
     assert rig.state == 'speaking'
 
@@ -2252,7 +1927,7 @@ async def test_local_stop_reply_silences_the_generation_without_admitting_a_new_
         speaking_gate.set()
         await until(lambda: rig.state == 'speaking')
     relation.release.set()
-    await until(lambda: rig.state == 'listening')
+    await until(lambda: rig.state == 'follow_up')
     await rig.settle()
     assert len(rig.user_messages()) == 1
     assert rig.player.pending() == 0
@@ -2270,7 +1945,7 @@ async def test_stop_reply_preserves_the_already_delegated_background_task(rig_fo
     rig.audio.say('Check build')
     await until(lambda: bool(rig.backend.all_sessions('orchestrator')))
     rig.audio.say('Please stop replying')
-    await until(lambda: rig.state == 'listening')
+    await until(lambda: rig.state == 'follow_up')
     finished.set()
     await until(lambda: bool(rig.backend.session('orchestrator').tool_results))
     [reported] = rig.backend.session('orchestrator').tool_results
@@ -2625,22 +2300,24 @@ async def test_capture_abort_discards_unadmitted_fragments_without_stopping_owne
 async def test_an_old_capture_abort_cannot_discard_a_replacement_owners_assessment(rig_for: MakeRig) -> None:
     from jarvis_hub.voice.state import CaptureAborted
     relation = DelayedRelation()
-    rig = await rig_for([AwaitInterrupt()], [AwaitInterrupt()],
+    rig = await rig_for([AwaitInterrupt()], [Text('Typed status.')], [AwaitInterrupt()],
                         [ResolveScope('preserve_tasks'), Text('Updated, sir.')], recognition=relation)
     rig.audio.wake()
     rig.audio.say('The old request')
     await until(lambda: len(rig.user_messages()) == 1)
     old_owner = rig.audio.owner
     await rig.advance(.6)
+    rig.typist.type('Typed status')
+    await until(lambda: 'Typed status.' in rig.output.replies)
     rig.audio.wake()
     await until(lambda: rig.state == 'listening')
     rig.audio.say('The fresh request')
-    await until(lambda: len(rig.user_messages()) == 2)
+    await until(lambda: len(rig.user_messages()) == 3)
     rig.audio.say('with its continuation')
     await until(lambda: len(relation.candidates) == 1)
     assert rig.audio.owner != old_owner
     rig.audio.emit(CaptureAborted(rig.clock.now(), 'overflow', old_owner, rig.audio.candidate))
     await rig.settle()
     relation.release.set()
-    await until(lambda: len(rig.user_messages()) == 3)
+    await until(lambda: len(rig.user_messages()) == 4)
     assert 'The fresh request with its continuation' in rig.user_messages()[-1]
