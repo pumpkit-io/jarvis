@@ -36,6 +36,7 @@ from jarvis_hub.voice.player import Player, Samples, SoundPlayer
 from jarvis_hub.voice.speech import Speech, SpeechClock
 from jarvis_hub.voice.state import Timing
 from jarvis_hub.voice.tts import KokoroSynthesizer, Synthesizer
+from jarvis_hub.voice.admission import configured_assessor
 from jarvis_hub.voice.voice_mode import AudioInput, VoiceMode, merge
 from jarvis_hub.waits import WaitSetup
 from jarvis_hub.workspace import default_workspace
@@ -346,6 +347,8 @@ async def voice_mode(
     except Exception as e:
         output.notice(f"Voice mode needs an audio output: {type(e).__name__}: {e}. Run `jarvis-hub --text` instead.")
         return
+    admission = configured_assessor(voice.admission_backend, voice.admission_model,
+                                    settings.repo_dir / "prompts" / "admission.md", notice=output.notice)
     conversation = VoiceMode(
         audio=listener,
         tts=ears.tts,
@@ -355,6 +358,7 @@ async def voice_mode(
         metrics=metrics,
         notice=output.notice,
         debug=debug,
+        recognition=admission,
     )
     hub = settings_hub(
         settings,
@@ -371,6 +375,8 @@ async def voice_mode(
     )
     try:
         output.notice("Model loading.")
+        if admission is not None:
+            admission.start()
         await hub.start()
         await asyncio.to_thread(language.warm_up)
         conversation.start()

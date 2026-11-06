@@ -398,7 +398,8 @@ class VoiceMode:
             self._owned = replace(self._owned, semantic_start=start)
 
     def typed_input(self) -> None:
-        if self._owned is None and self._voice.in_turn and self._voice.state in CAPTURING:
+        # STT can hold an initial recording before its queued onset reaches this state machine.
+        if self._owned is None and self._voice.state in CAPTURING:
             return
         before = self._voice.state
         self._voice = Voice()
@@ -452,16 +453,32 @@ class VoiceMode:
             return
         self._applying_fragments = ()
         verdict = related.result.verdict
+        reason = related.result.reason
         if related.result.candidate_id != related.candidate.candidate_id or related.result.turn_id != related.candidate.turn_id:
             self._retained.extend(related.fragments)
             return
+        selected = related.fragments
+        retained = related.fragments
+        actions = related.result.segment_actions
+        if actions is not None:
+            if len(actions) != len(related.fragments) or any(action not in ("floor", "stop", "ignore", "uncertain") for action in actions):
+                verdict = "uncertain"
+                reason = "invalid_segment_actions"
+                selected = ()
+            else:
+                selected = tuple(fragment for fragment, action in zip(related.fragments, actions) if action == "floor")
+                retained = tuple(fragment for fragment, action in zip(related.fragments, actions) if action != "ignore")
+                verdict = "directed" if selected else "stop_reply" if "stop" in actions else "uncertain" if "uncertain" in actions else "unrelated"
         self._metrics.record({"kind": "spoken_relation", "request_id": related.owner.id,
                               "revision": related.owner.revision, "candidate_id": related.candidate.candidate_id,
-                              "verdict": verdict, "reason": related.result.reason})
+                              "verdict": verdict, "reason": reason,
+                              "elapsed_ms": related.result.elapsed_ms,
+                              "observed_segments": len(related.fragments),
+                              "selected_segments": [index for index, fragment in enumerate(related.fragments) if fragment in selected] if verdict == "directed" else []})
         newer = self._waiting or (related.heard.candidate is not None and self._latest_candidate > related.heard.candidate)
         if newer:
             if verdict != "unrelated":
-                self._retained.extend(related.fragments)
+                self._retained.extend(retained)
             return
         if verdict == "stop_reply":
             self._heard_before_cut = self._speech.played().strip()
@@ -475,11 +492,12 @@ class VoiceMode:
             return
         if verdict not in ("directed", "amend", "new_request"):
             if verdict != "unrelated":
-                self._retained.extend(related.fragments)
+                self._retained.extend(retained)
             return
         try:
-            updated = related.owner.amended(related.candidate.transcript, related.heard.at, related.heard.lang,
-                                            segments=tuple(fragment.heard.text for fragment in related.fragments))
+            transcript = " ".join(fragment.heard.text for fragment in selected).strip()
+            updated = related.owner.amended(transcript, related.heard.at, related.heard.lang,
+                                            segments=tuple(fragment.heard.text for fragment in selected))
         except ValueError as error:
             self._notice(str(error))
             return

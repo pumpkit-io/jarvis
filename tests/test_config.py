@@ -277,3 +277,14 @@ def test_audio_clips_are_off_by_default_and_opt_in_with_retention_limits(checkou
 def test_audio_clips_must_be_on_or_off(checkout: Path) -> None:
     with pytest.raises(ConfigError, match="JARVIS_AUDIO_CLIPS"):
         load_settings(checkout, environ={"JARVIS_AUDIO_CLIPS": "yes"})
+
+
+def test_cloud_admission_is_explicit_and_ignored_in_text_mode(checkout: Path) -> None:
+    defaults = load_settings(checkout, {})
+    assert defaults.voice.admission_backend == "off"
+    configured = load_settings(checkout, {"JARVIS_ADMISSION_BACKEND": "claude", "JARVIS_ADMISSION_MODEL": "sonnet"})
+    assert configured.voice.admission_backend == "claude" and configured.voice.admission_model == "sonnet"
+    text = load_settings(checkout, {"JARVIS_ADMISSION_BACKEND": "claude"}, ignore_voice=lambda _message: None)
+    assert text.voice.admission_backend == "off"
+    with pytest.raises(ConfigError):
+        load_settings(checkout, {"JARVIS_ADMISSION_BACKEND": "codex"})
