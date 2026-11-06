@@ -28,7 +28,7 @@ WAKE_MODEL = "hey_jarvis"
 WORD_END_SLACK_S = 0.08
 
 AecMode = Literal["webrtc", "off"]
-WakeEngine = Literal["openwakeword"]
+WakeEngine = Literal["openwakeword", "apple-vad"]
 SttEngine = Literal["parakeet"]
 
 
@@ -196,11 +196,20 @@ STT_ENGINES: dict[SttEngine, Callable[[], Transcriber]] = {"parakeet": Parakeet}
 def load_engines(choice: EngineChoice) -> Engines:
     """Loads the chosen engines and runs each once, so the first turn does not pay for a warm-up. Blocking: seconds."""
     echo = WebRtcEchoCancellation() if choice.aec == "webrtc" else NoEchoCancellation()
-    wake, stt = WAKE_ENGINES[choice.wake](), STT_ENGINES[choice.stt]()
-    engines = Engines(echo=echo, wake=wake, vad=SileroVad(), turn=SmartTurn(), stt=stt, gate=EveryoneGate())
+    idle_wake = None
+    if choice.wake == "apple-vad":
+        from jarvis_hub.voice.apple_wake import AppleWake
+
+        idle_wake = AppleWake()
+        wake = None
+    else:
+        wake = WAKE_ENGINES[choice.wake]()
+    stt = STT_ENGINES[choice.stt]()
+    engines = Engines(echo=echo, wake=wake, vad=SileroVad(), turn=SmartTurn(), stt=stt, gate=EveryoneGate(), idle_wake=idle_wake)
     noise = np.random.default_rng(0).normal(0, 0.01, SAMPLE_RATE).astype(np.float32)
     pcm = (noise * 32767).astype(np.int16)
-    engines.wake.score(pcm[: engines.wake.chunk])
+    if engines.wake is not None:
+        engines.wake.score(pcm[: engines.wake.chunk])
     engines.vad.probability(pcm[: engines.vad.chunk])
     engines.turn.complete(noise)
     engines.stt.transcribe(noise)

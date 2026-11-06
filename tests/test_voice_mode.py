@@ -159,6 +159,46 @@ async def test_hey_jarvis_and_the_request_in_one_breath(rig_for: MakeRig) -> Non
     assert rig.user_messages() == ['<user lang="en">open a PR for the login bug.</user>']
 
 
+async def test_delayed_idle_wake_keeps_source_time_and_opens_a_fresh_listening_window(rig_for: MakeRig) -> None:
+    from jarvis_hub.voice.state import WakeWord
+
+    rig = await rig_for([Text("The checks passed, sir.")])
+    source_at = rig.clock.now()
+    await rig.advance(12)
+    rig.audio.emit(WakeWord(source_at, delivered_at=rig.clock.now(), owner=0, idle_candidate=1))
+    await rig.settle()
+    await rig.advance(5.9)
+    assert rig.state == "listening"
+
+    rig.audio.emit(SpeechStarted(source_at, owner=1, candidate=1, started_at=source_at))
+    rig.audio.emit(Heard("Jarvis, how did the checks finish?", "en", source_at + 2, owner=1, candidate=1))
+    await until(lambda: rig.state == "follow_up")
+
+    assert rig.user_messages() == ['<user lang="en">how did the checks finish?</user>']
+    assert rig.player.texts == ["", "The checks passed, sir."]
+
+
+@pytest.mark.parametrize("replacement", ["typed", "announcement"])
+async def test_idle_wake_confirmation_cannot_interrupt_a_replacement(rig_for: MakeRig, replacement: str) -> None:
+    from jarvis_hub.voice.state import WakeWord
+
+    rig = await rig_for([Text("The build is green, sir.")])
+    source_at = rig.clock.now()
+    if replacement == "typed":
+        rig.typist.type("Check the build")
+        await until(lambda: len(rig.user_messages()) == 1)
+    else:
+        assert rig.voice.announce()
+    await rig.advance(1)
+    before = rig.player.voices.count("chime")
+
+    rig.audio.emit(WakeWord(source_at, delivered_at=rig.clock.now(), owner=0, idle_candidate=1))
+    await rig.settle()
+
+    assert rig.player.voices.count("chime") == before
+    assert rig.state == ("idle" if replacement == "typed" else "announce")
+
+
 async def test_a_follow_up_inside_the_window_needs_no_wake_word(rig_for: MakeRig) -> None:
     rig: Rig = await rig_for([Text("Opened, sir.")], [Text("Green, sir.")])
 

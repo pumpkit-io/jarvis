@@ -12,6 +12,7 @@ import pytest
 from jarvis_hub.voice.clips import ClipSettings, ClipStore
 from jarvis_hub.voice.engines import NoEchoCancellation, ReferenceBuffer, WebRtcEchoCancellation
 from jarvis_hub.voice.input import Capture, Engines, Listening, Push
+from jarvis_hub.voice.idle_wake import WakeMatch
 from jarvis_hub.voice.player import Samples
 from jarvis_hub.voice.state import Heard
 from tests.fakes import until
@@ -60,6 +61,311 @@ class Source:
         assert self.push is not None
         for i in range(n):
             self.push(np.full(FRAME, value, np.int16), start + (i + 1) / 100)
+
+
+class DelayedIdleWake:
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.closed = False
+        self.finished = threading.Event()
+        self.phrase_only = False
+
+    def recognizes(self, audio: Samples) -> WakeMatch:
+        self.entered.set()
+        self.release.wait(timeout=5)
+        self.finished.set()
+        return WakeMatch(bool((audio == 1000 / 32768).any()), self.phrase_only)
+
+    def close(self) -> None:
+        self.closed = True
+        self.release.set()
+
+
+@pytest.mark.parametrize("wake_only_then_continued", [False, True])
+async def test_delayed_idle_confirmation_transfers_the_complete_utterance_through_ordinary_stt(wake_only_then_continued: bool) -> None:
+    from jarvis_hub.voice.state import WakeWord
+
+    source, wake, echo = Source(), DelayedIdleWake(), CountingEcho()
+    wake.phrase_only = wake_only_then_continued
+    stt = ScriptedStt(words={1000: "Jarvis", 1500: "check every result"})
+    capture = Capture(
+        lambda: Engines(echo, MarkerWake(), LoudVad(), ScriptedTurn(), stt, Everyone(), idle_wake=wake),
+        Listening(), lambda row: None, lambda text: None, source=source, backlog_s=10,
+    )
+    received: list[Any] = []
+
+    async def collect() -> None:
+        async for event in capture.events():
+            received.append(event)
+            if isinstance(event, WakeWord):
+                capture.capture(True, owner=1, idle=False, wake_candidate=event.idle_candidate)
+
+    capture.start()
+    collecting = asyncio.create_task(collect())
+    try:
+        await until(capture.ready.is_set)
+        capture.capture(False, owner=0, idle=True)
+        source.frames(80, value=1000)
+        if wake_only_then_continued:
+            source.frames(60, start=.8)
+        else:
+            source.frames(320, value=1500, start=.8)
+            source.frames(60, start=4)
+        assert await asyncio.to_thread(wake.entered.wait, 2)
+        if wake_only_then_continued:
+            source.frames(320, value=1500, start=1.4)
+            source.frames(360, start=4.6)
+        else:
+            source.frames(300, start=4.6)
+        capture.reference(np.zeros(240, np.float32), 24000)
+        assert echo.referenced == 240
+        assert received == []
+        wake.release.set()
+        await until(lambda: any(isinstance(event, Heard) for event in received))
+
+        heard = [event for event in received if isinstance(event, Heard)]
+        assert [event.text for event in heard] == ["Jarvis check every result"]
+        assert heard[0].owner == 1
+        assert len([event for event in received if isinstance(event, WakeWord)]) == 1
+        assert stt.after == [0.0]
+        assert len(stt.heard) == 1
+        assert (stt.heard[0][:80 * FRAME] == 1000 / 32768).all()
+    finally:
+        wake.release.set()
+        capture.close()
+        collecting.cancel()
+        await asyncio.gather(collecting, return_exceptions=True)
+
+
+@pytest.mark.parametrize("replacement", ["owner", "shutdown"])
+async def test_idle_wake_handoff_rejects_a_proposal_after_its_source_owner_changes(replacement: str) -> None:
+    from jarvis_hub.voice.state import WakeWord
+
+    source, wake = Source(), DelayedIdleWake()
+    stt = ScriptedStt()
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), LoudVad(), ScriptedTurn(), stt, Everyone(), idle_wake=wake),
+        Listening(), lambda row: None, lambda text: None, source=source, backlog_s=10,
+    )
+    capture.start()
+    try:
+        await until(capture.ready.is_set)
+        capture.capture(False, owner=0, idle=True)
+        source.frames(80, value=1000)
+        source.frames(60, start=.8)
+        assert await asyncio.to_thread(wake.entered.wait, 2)
+        wake.release.set()
+        event = await asyncio.wait_for(anext(capture.events()), 1)
+        assert isinstance(event, WakeWord)
+        if replacement == "shutdown":
+            capture.close()
+        else:
+            capture.capture(False, owner=2, idle=True)
+
+        accepted = capture.capture(True, owner=1, wake_candidate=event.idle_candidate)
+
+        assert accepted is False
+        assert stt.heard == []
+    finally:
+        capture.close()
+
+
+@pytest.mark.parametrize("replacement", ["typed", "playback", "loss", "shutdown"])
+async def test_pending_idle_recognition_has_no_authority_after_invalidation(replacement: str) -> None:
+    source, wake = Source(), DelayedIdleWake()
+    rows: list[dict[str, Any]] = []
+    stt = ScriptedStt()
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), LoudVad(), ScriptedTurn(), stt, Everyone(), idle_wake=wake),
+        Listening(), rows.append, lambda text: None, source=source, backlog_s=2,
+    )
+    received: list[Any] = []
+
+    async def collect() -> None:
+        async for event in capture.events():
+            received.append(event)
+
+    capture.start()
+    collecting = asyncio.create_task(collect())
+    try:
+        await until(capture.ready.is_set)
+        capture.capture(False, owner=0, idle=True)
+        source.frames(80, value=1000)
+        source.frames(60, start=.8)
+        assert await asyncio.to_thread(wake.entered.wait, 2)
+        if replacement == "shutdown":
+            capture.close()
+        elif replacement == "loss":
+            source.frames(1000, start=1.4)
+            await until(lambda: any(row.get("reason") == "overflow" for row in rows))
+        else:
+            capture.capture(False, owner=1 if replacement == "typed" else 0, idle=replacement == "typed")
+            await until(lambda: any(row.get("reason") == "mode_changed" for row in rows))
+        wake.release.set()
+        assert await asyncio.to_thread(wake.finished.wait, 2)
+        if replacement != "shutdown":
+            await until(lambda: any(row.get("stage") == "stale_result" for row in rows))
+        assert received == []
+        assert stt.heard == []
+        if replacement == "loss":
+            source.frames(80, value=1000, start=11.4)
+            source.frames(60, start=12.2)
+            await until(lambda: bool(received))
+            assert capture.capture(True, owner=1, wake_candidate=received[0].idle_candidate)
+            await until(lambda: len(stt.heard) == 1)
+    finally:
+        capture.close()
+        collecting.cancel()
+        await asyncio.gather(collecting, return_exceptions=True)
+
+
+@pytest.mark.parametrize("phrase_only", [False, True])
+async def test_delayed_idle_wake_through_the_hub_handles_one_breath_or_waits_without_a_turn(phrase_only: bool) -> None:
+    from jarvis_hub.voice.state import Timing
+    from jarvis_hub.voice.voice_mode import VoiceMode, merge
+    from tests.fakes import (FakeBackend, FakeClock, FakeTts, RecordingMetrics, RecordingOutput,
+                             RecordingPlayer, Text, Typist, make_hub)
+
+    clock, source, wake = FakeClock(), Source(), DelayedIdleWake()
+    wake.phrase_only = phrase_only
+    stt = ScriptedStt(text="A Jarvis" if phrase_only else "Hey Jarvis, inspect the current CI status.")
+    backend = FakeBackend(clock, [] if phrase_only else [[Text("The checks passed, sir.")]])
+    metrics, output, player = RecordingMetrics(), RecordingOutput(), RecordingPlayer()
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), LoudVad(), ScriptedTurn(), stt, Everyone(), idle_wake=wake),
+        Listening(), metrics.record, output.notice, source=source, backlog_s=10, clock=clock.now,
+    )
+    voice = VoiceMode(audio=capture, tts=FakeTts(), player=player, clock=clock,
+                      timing=Timing(6.0, 4.0, 6.0, .5), metrics=metrics, notice=output.notice)
+    hub = make_hub(backend, output, metrics, speech=voice.speech, speak_typed=False,
+                   on_end_conversation=voice.end_conversation, floor=voice)
+    typist = Typist(clock)
+    await hub.start()
+    capture.start()
+    voice.start()
+    running = asyncio.create_task(hub.run(merge(typist.lines(), voice.lines(hub.interrupt, hub.woke))))
+    try:
+        await until(capture.ready.is_set)
+        await until(lambda: player.voices == ["ready"])
+        began = clock.now()
+        source.frames(400, value=1000, start=began)
+        source.frames(60, start=began + 4)
+        assert await asyncio.to_thread(wake.entered.wait, 2)
+        clock.advance(12)
+        source.frames(300, start=began + 4.6)
+        wake.release.set()
+        if phrase_only:
+            await until(lambda: voice.state == "listening" and player.voices.count("chime") == 1)
+            clock.advance(5.9)
+            for _ in range(30):
+                await asyncio.sleep(0)
+            assert voice.state == "listening"
+        else:
+            await until(lambda: len(stt.heard) == 1)
+            await until(lambda: any(row.get("stage") == "committed" for row in metrics.records))
+            await until(lambda: voice.state == "follow_up")
+        messages = [m for session in backend.all_sessions("talker") for m in session.received if m.startswith("<user")]
+        assert messages == ([] if phrase_only else ['<user lang="en">inspect the current CI status.</user>'])
+        assert player.voices.count("chime") == 1
+        assert stt.after == ([] if phrase_only else [0.0])
+        assert backend.all_sessions("orchestrator") == []
+    finally:
+        wake.release.set()
+        typist.end()
+        await asyncio.wait([running], timeout=1)
+        await hub.close()
+        await voice.close()
+        capture.close()
+
+
+@pytest.mark.parametrize("bound", ["duration_limit", "retention_limit", "queue_limit"])
+async def test_idle_wake_limits_reject_audio_instead_of_admitting_a_partial_request(bound: str) -> None:
+    source, wake = Source(), DelayedIdleWake()
+    rows: list[dict[str, Any]] = []
+    stt = ScriptedStt()
+    capture = Capture(
+        lambda: Engines(CountingEcho(), None, LoudVad(), ScriptedTurn(), stt, Everyone(), idle_wake=wake),
+        Listening(), rows.append, lambda text: None, source=source, backlog_s=60,
+    )
+    capture.start()
+    try:
+        await until(capture.ready.is_set)
+        capture.capture(False, owner=0, idle=True)
+        if bound == "duration_limit":
+            source.frames(3100, value=1000)
+        else:
+            source.frames(80, value=1000)
+            source.frames(60, start=.8)
+            assert await asyncio.to_thread(wake.entered.wait, 2)
+            if bound == "retention_limit":
+                source.frames(4300, start=1.4)
+            else:
+                for i in range(3):
+                    source.frames(80, value=1000, start=1.4 * (i + 1))
+                    source.frames(60, start=1.4 * (i + 1) + .8)
+        await until(lambda: any(row.get("reason") == bound for row in rows), timeout=3)
+        assert stt.heard == []
+        if bound == "duration_limit":
+            assert not wake.entered.is_set()
+    finally:
+        capture.close()
+
+
+async def test_failed_idle_recognition_reports_a_repair_without_admitting_audio() -> None:
+    class FailedWake(DelayedIdleWake):
+        def recognizes(self, audio: Samples) -> WakeMatch:
+            raise RuntimeError("synthetic native failure")
+
+    source, wake, notices = Source(), FailedWake(), list[str]()
+    stt = ScriptedStt()
+    capture = Capture(
+        lambda: Engines(CountingEcho(), None, LoudVad(), ScriptedTurn(), stt, Everyone(), idle_wake=wake),
+        Listening(), lambda row: None, notices.append, source=source, backlog_s=10,
+    )
+    capture.start()
+    try:
+        await until(capture.ready.is_set)
+        source.frames(80, value=1000)
+        source.frames(60, start=.8)
+        await until(lambda: any("apple_wake --check" in text for text in notices))
+        assert wake.closed
+        assert stt.heard == []
+    finally:
+        capture.close()
+
+
+async def test_queued_wake_confirmation_cannot_revoke_the_first_unclaimed_activation() -> None:
+    from jarvis_hub.voice.state import WakeWord
+
+    source, wake = Source(), DelayedIdleWake()
+    rows: list[dict[str, Any]] = []
+    capture = Capture(
+        lambda: Engines(CountingEcho(), None, LoudVad(), ScriptedTurn(), ScriptedStt(), Everyone(), idle_wake=wake),
+        Listening(), rows.append, lambda text: None, source=source, backlog_s=10,
+    )
+    capture.start()
+    try:
+        await until(capture.ready.is_set)
+        capture.capture(False, owner=0, idle=True)
+        source.frames(80, value=1000)
+        source.frames(60, start=.8)
+        assert await asyncio.to_thread(wake.entered.wait, 2)
+        source.frames(80, value=1000, start=1.4)
+        source.frames(60, start=2.2)
+        await until(lambda: sum(row.get("stage") == "submitted" for row in rows) == 2)
+        wake.release.set()
+        await until(lambda: sum(row.get("stage") == "keyword_matched" for row in rows) == 2)
+        source.frames(80, value=1000, start=2.8)
+        source.frames(60, start=3.6)
+        await until(lambda: any(row.get("reason") == "queue_limit" for row in rows))
+        assert sum(row.get("stage") == "submitted" for row in rows) == 2
+        first = await asyncio.wait_for(anext(capture.events()), 1)
+        assert isinstance(first, WakeWord)
+
+        assert capture.capture(True, owner=1, wake_candidate=first.idle_candidate)
+    finally:
+        capture.close()
 
 
 def engines(echo: CountingEcho, wake: MarkerWake | None = None) -> Engines:
@@ -911,8 +1217,8 @@ async def test_stale_vad_start_cannot_take_ownership_of_replacement_listening() 
             self.queue: asyncio.Queue[InputEvent] = asyncio.Queue()
         def wake(self) -> None:
             self.queue.put_nowait(WakeWord(clock.now()))
-        def capture(self, on: bool, *, owner: int | None = None) -> None:
-            capture.capture(on, owner=owner)
+        def capture(self, on: bool, *, owner: int | None = None, idle: bool = False, wake_candidate: int | None = None) -> bool:
+            return capture.capture(on, owner=owner, idle=idle, wake_candidate=wake_candidate)
         def barge_in(self, since: float | None) -> None:
             capture.barge_in(since)
         async def events(self) -> AsyncIterator[InputEvent]:
