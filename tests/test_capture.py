@@ -4,7 +4,7 @@ import asyncio
 import threading
 from pathlib import Path
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -221,7 +221,9 @@ async def test_pending_idle_recognition_has_no_authority_after_invalidation(repl
 
 
 @pytest.mark.parametrize("phrase_only", [False, True])
-async def test_delayed_idle_wake_through_the_hub_handles_one_breath_or_waits_without_a_turn(phrase_only: bool) -> None:
+@pytest.mark.parametrize("phrase", ["Hey Jarvis", "Hi Jarvis", "Ehi Jarvis", "Jarvis"])
+@pytest.mark.parametrize("cumulative", [False, True])
+async def test_delayed_idle_wake_through_the_hub_handles_one_breath_or_waits_without_a_turn(phrase_only: bool, phrase: str, cumulative: bool) -> None:
     from jarvis_hub.voice.state import Timing
     from jarvis_hub.voice.voice_mode import VoiceMode, merge
     from tests.fakes import (FakeBackend, FakeClock, FakeTts, RecordingMetrics, RecordingOutput,
@@ -229,15 +231,18 @@ async def test_delayed_idle_wake_through_the_hub_handles_one_breath_or_waits_wit
 
     clock, source, wake = FakeClock(), Source(), DelayedIdleWake()
     wake.phrase_only = phrase_only
-    stt = ScriptedStt(text="A Jarvis" if phrase_only else "Hey Jarvis, inspect the current CI status.")
+    stt = ScriptedStt(text="A Jarvis" if phrase_only else f"{phrase}, inspect the current CI status.")
     backend = FakeBackend(clock, [] if phrase_only else [[Text("The checks passed, sir.")]])
     metrics, output, player = RecordingMetrics(), RecordingOutput(), RecordingPlayer()
     capture = Capture(
         lambda: Engines(CountingEcho(), MarkerWake(), LoudVad(), ScriptedTurn(), stt, Everyone(), idle_wake=wake),
-        Listening(), metrics.record, output.notice, source=source, backlog_s=10, clock=clock.now,
+        Listening(cumulative_stt=cumulative), metrics.record, output.notice, source=source, backlog_s=10, clock=clock.now,
     )
+    from tests.test_cumulative_voice import ScriptedJev
+    jev = ScriptedJev()
     voice = VoiceMode(audio=capture, tts=FakeTts(), player=player, clock=clock,
-                      timing=Timing(6.0, 4.0, 6.0, .5), metrics=metrics, notice=output.notice)
+                      timing=Timing(6.0, 4.0, 6.0, .5), metrics=metrics, notice=output.notice,
+                      recognition=cast(Any, jev) if cumulative else None)
     hub = make_hub(backend, output, metrics, speech=voice.speech, speak_typed=False,
                    on_end_conversation=voice.end_conversation, floor=voice)
     typist = Typist(clock)
@@ -270,6 +275,8 @@ async def test_delayed_idle_wake_through_the_hub_handles_one_breath_or_waits_wit
         assert player.voices.count("chime") == 1
         assert stt.after == ([] if phrase_only else [0.0])
         assert backend.all_sessions("orchestrator") == []
+        if phrase_only:
+            assert jev.initial_snapshots == jev.snapshots == []
     finally:
         wake.release.set()
         typist.end()

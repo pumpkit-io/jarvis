@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 from collections.abc import Callable, MutableMapping
@@ -21,7 +22,7 @@ from rich.markdown import Markdown
 
 from jarvis_hub.agents.backend import AgentBackend, SessionSpec
 from jarvis_hub.agents.sdk import SdkBackend
-from jarvis_hub.config import ConfigError, Settings, VoiceSettings, load_settings
+from jarvis_hub.config import ConfigError, Settings, VoiceSettings, load_settings, main_checkout
 from jarvis_hub.hub import Clock, Hub, Metrics, Output
 from jarvis_hub.orchestrator import orchestrator_spec
 from jarvis_hub.subagents import Subagent, SubagentSetup, subagent_session
@@ -319,6 +320,8 @@ async def voice_mode(
         metrics = JsonlMetrics(settings.runtime_dir / "metrics.jsonl")
         voice = settings.voice
         choice = EngineChoice(aec="off" if headphones else voice.aec, wake=voice.wake_engine, stt=voice.stt_engine)
+        output.notice(f"Wake configured: {choice.wake}; AEC={choice.aec}. Physical four-phrase qualification is pending. "
+                      "Use `./jarvis voice-status` for source/settings and setup.")
         clips = ClipStore(settings.runtime_dir / "clips", clip_settings(voice))
         listener = ears.open_listener(choice, listening(voice), metrics.record, output.notice, clips)
         try:
@@ -429,6 +432,35 @@ def print_stats(
     stdout.write(render(summarise(rows, start, end), start, end) + "\n")
 
 
+
+def voice_status(settings: Settings, *, headphones: bool = False) -> dict[str, Any]:
+    voice = settings.voice
+    checkout = settings.repo_dir
+    revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=checkout, capture_output=True, text=True, check=False)
+    launcher = shutil.which("jarvis")
+    modified = subprocess.run(["git", "diff", "--quiet", "HEAD"], cwd=checkout, check=False).returncode != 0
+    return {
+        "source": {"checkout": str(checkout), "revision": revision.stdout.strip() or "unknown", "modified": modified,
+                   "config_file": str(main_checkout(checkout) / ".env"),
+                   "path_launcher_target": str(Path(launcher).resolve()) if launcher else None},
+        "wake": {"engine": voice.wake_engine, "threshold": voice.wake_threshold if voice.wake_engine == "openwakeword" else None,
+                 "phrases": ["Hey Jarvis", "Hi Jarvis", "Ehi Jarvis", "Jarvis"],
+                 "locale": "en_US" if voice.wake_engine == "apple-vad" else "English hey_jarvis",
+                 "idle_only": True,
+                 "segmentation": {"vad_threshold": .5, "onset_pad_ms": 200, "end_silence_ms": 500, "max_turn_s": 30}
+                 if voice.wake_engine == "apple-vad" else None},
+        "audio": {"aec": "off" if headphones else voice.aec, "stt": voice.stt_engine,
+                  "vad_threshold": voice.vad_threshold, "preroll_ms": voice.preroll_ms,
+                  "max_turn_s": voice.max_turn_s, "wake_refractory_ms": voice.wake_refractory_ms},
+        "readiness": "not_checked", "physical_wake_gate": "unqualified",
+        "next_step": ("Check local assets: uv run python -m jarvis_hub.voice.apple_wake --check. "
+                      "Install missing assets explicitly with --install. Independent physical confirmation is pending."
+                      if voice.wake_engine == "apple-vad" else
+                      "The current threshold has no passing four-phrase qualification. See docs/notes/apple-vad-wake.md "
+                      "for the experimental local candidate; do not lower thresholds blindly."),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="jarvis-hub", description="Run the Jarvis Hub.",
@@ -439,7 +471,8 @@ def main() -> None:
     parser.add_argument("--speak", action="store_true", help="with --text, speak generated replies; readiness is nonverbal")
     parser.add_argument("--headphones", action="store_true", help="voice mode with echo cancellation off")
     parser.add_argument("--debug", action="store_true", help="show the voice state machine's transitions")
-    commands = parser.add_subparsers(dest="command", metavar="stats")
+    commands = parser.add_subparsers(dest="command", metavar="{stats,voice-status}")
+    commands.add_parser("voice-status", help="print nonsecret source/wake settings without loading models or opening devices")
     stats = commands.add_parser("stats", help="print usage and latency per role from the metrics log")
     stats.add_argument("--since", help="start of the range: a time ago like 24h or 7d, or a date like 2026-11-01")
     stats.add_argument(
@@ -451,6 +484,14 @@ def main() -> None:
     stats.add_argument("--voice", action="store_true", help="trace captured requests, recognition and meaningful audio")
     stats.add_argument("--bargein", action="store_true", help="report the Barge-in decision log instead")
     args = parser.parse_args()
+
+    if args.command == "voice-status":
+        try:
+            settings = load_settings(Path(__file__).resolve().parents[2], os.environ)
+            sys.stdout.write(json.dumps(voice_status(settings, headphones=args.headphones), indent=2) + "\n")
+        except ConfigError as error:
+            sys.exit(f"jarvis-hub: {error}")
+        return
 
     if args.command == "stats":
         try:

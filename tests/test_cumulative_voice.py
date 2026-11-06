@@ -275,3 +275,31 @@ async def test_failed_assessment_expires_retained_sources_without_another_provid
     await until(lambda: len(jev.snapshots) == 2)
     assert tuple(source.text for source in jev.snapshots[-1].sources) == ('Actually, explain the other repository.',)
     assert not any(event in ('pause', 'stop') for event in rig.player.events)
+
+
+async def test_playback_wake_hit_cannot_bypass_cumulative_floor_authority(rig_for: MakeRig) -> None:
+    jev = ScriptedJev()
+    rig = await rig_for([*STORY, AwaitInterrupt()], recognition=jev)
+    await speaking(rig)
+    rig.audio.wake()
+    await rig.settle()
+    assert len(rig.user_messages()) == 1
+    assert not any(event in ('stop', 'pause') for event in rig.player.events)
+    assert not jev.snapshots
+    assert rig.player.pending() > 0
+
+
+async def test_final_wake_only_transcript_restores_bounded_listening_without_a_talker_turn(rig_for: MakeRig) -> None:
+    jev = ScriptedJev()
+    rig = await rig_for([Text('Ready.')], recognition=jev)
+    rig.audio.wake()
+    await rig.settle()
+    rig.audio.say('Hey Jarvis')
+    await until(lambda: bool(jev.initial_snapshots))
+    await rig.settle()
+    assert rig.user_messages() == []
+    await rig.advance(6.1)
+    assert rig.state == 'idle'
+    rig.audio.wake()
+    await rig.settle()
+    assert rig.state == 'listening' and rig.player.voices.count('chime') == 2
