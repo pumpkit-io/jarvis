@@ -1,4 +1,4 @@
-"""Local assessment contract; no authority over conversational admission or playback."""
+"""Contextual assessment contract; no authority over conversational admission or playback."""
 
 import asyncio
 import multiprocessing
@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from typing import Literal
+
+SegmentAction = Literal["floor", "stop", "ignore", "uncertain"]
 
 Relation = Literal["stop_reply", "amend", "new_request", "unrelated", "uncertain"]
 Verdict = Literal["directed", "stop_reply", "amend", "new_request", "unrelated", "uncertain"]
@@ -33,6 +35,7 @@ class Assessment:
     verdict: Verdict
     reason: str
     elapsed_ms: float
+    segment_actions: tuple[SegmentAction, ...] | None = None
 
 
 def _serve(connection: Connection, recognize: Callable[[Candidate], str], prepare: Callable[[], None] | None) -> None:

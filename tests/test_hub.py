@@ -369,5 +369,5 @@ async def test_interrupt_lands_on_the_turn_running_when_it_was_called(
 def test_what_was_heard_before_an_interruption_keeps_apostrophes_and_escapes_quotes_and_markup() -> None:
     spoken = """I've opened "the PR" & <the issue>, sir."""
     assert interrupted_message(spoken) == (
-        """<interrupted spoken="I've opened &quot;the PR&quot; &amp; &lt;the issue&gt;, sir."/>"""
+        """<interrupted basis="queue_estimate" spoken="I've opened &quot;the PR&quot; &amp; &lt;the issue&gt;, sir."/>"""
     )

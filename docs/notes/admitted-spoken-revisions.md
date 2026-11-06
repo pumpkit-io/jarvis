@@ -1,6 +1,6 @@
 # Preserve Task authority across admitted spoken revisions
 
-#57 completes the mechanical contracts for revising speech that has already passed the local admission seam. #38 still requires a working production admission path and its original natural-continuation behavior. No production recognizer is selected or wired; this checkpoint establishes behavior with fake recognition decisions.
+#57 completes the mechanical contracts for revising speech that has already passed the local admission seam. #38 still requires a working production admission path and its original natural-continuation behavior. At the #57 checkpoint, no production recognizer was selected or wired; its evidence uses fake recognition decisions.
 
 Before this change, the Hub had no durable spoken scope connecting a revised request to its existing Tasks and their producer authority. For example, after “Open an issue” started T1, a later admitted “about the scheduler” needed to preserve both the opening and T1's identity. The new contract keeps an ordered source history and increasing revision, then holds T1's authority while the Talker explicitly resolves what changes. A local relation label alone cannot rewrite T1, discard earlier words or grant an Approval.
 
@@ -34,3 +34,5 @@ The existing injected seams establish these behaviors:
 - [Input and worker tests](../../tests/test_input_pipeline.py) retain capture identity and onset; [assessment tests](../../tests/test_assessment.py) exercise bounded readiness, timeouts, stale results and unavailable recognition without freezing the Hub.
 
 These checks establish the ownership mechanism after scripted local admission. Semantic model selection, production continuation admission, actual worker/model coexistence, physical audio/STT behavior and the #39/#40 admission/interruption gates remain unverified. Completing #57 does not close #38 or #26, and authorizes no cloud processing of background speech.
+
+Later #38 work adds a disabled-by-default [cloud admission seam](cloud-spoken-admission.md) under [ADR 0017](../adr/0017-opt-in-cloud-spoken-admission.md). The #57 checks here do not certify that adapter's semantic accuracy, availability or physical behavior.
