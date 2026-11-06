@@ -208,7 +208,7 @@ def chronology_data() -> tuple[dict[str, Any], dict[str, Any], list[object]]:
 @pytest.mark.parametrize("bad", ["audio_before_chunk", "backward_stt", "bad_speech_wall", "backward_hub",
                                     "backward_capture", "backward_endpoint", "stt_before_endpoint", "wrong_input_clock",
                                     "missing_input_clock", "bad_input_wall", "bad_stop_wall", "inconsistent_stt",
-                                    "inconsistent_wait", "inconsistent_chunk", "chunk_before_reply_start", "partial_hub_pair", "stop_before_audio"])
+                                    "inconsistent_wait", "inconsistent_chunk", "chunk_before_reply_start", "partial_hub_pair", "stop_before_reply_start"])
 def test_relevant_metric_chronology_invalidates_sample_and_physical_gate(bad: str) -> None:
     plan, observations, rows = chronology_data()
     user, speech, capture = cast(dict[str, Any], rows[0]), cast(dict[str, Any], rows[1]), cast(dict[str, Any], rows[-1])
@@ -228,7 +228,7 @@ def test_relevant_metric_chronology_invalidates_sample_and_physical_gate(bad: st
     elif bad == "inconsistent_chunk": speech["chunk_to_audio_ms"] = 110
     elif bad == "chunk_before_reply_start": speech["started_at"] = 1.95
     elif bad == "partial_hub_pair": user.pop("started_at")
-    else: rows.append(dict(speech, kind="speech_stop", stopped_at=1.9))
+    else: rows.append(dict(speech, kind="speech_stop", stopped_at=1.6))
     report = latency_report(plan, observations, rows, plan_sha256=DIGEST)
     assert report["counts"]["eligible"] == 30
     assert report["counts"]["invalid"] == 1
@@ -266,3 +266,15 @@ def test_missing_input_component_pairs_remain_unavailable_not_invented() -> None
     assert report["samples"][0]["components"]["stt_ms"] is None
     assert report["samples"][0]["components"]["endpoint_wait_ms"] is None
     assert report["counts"]["invalid"] == 0
+
+
+def test_canceled_future_queue_estimate_is_a_failed_sample_not_invalid_evidence() -> None:
+    plan, observations, rows = chronology_data()
+    speech = cast(dict[str, Any], rows[1])
+    rows.append(dict(speech, kind="speech_stop", stopped_at=1.7))
+    report = latency_report(plan, observations, rows, plan_sha256=DIGEST)
+    assert report["counts"]["failed"] == 1
+    assert report["counts"]["invalid"] == report["invalid_metric_rows"] == 0
+    assert report["samples"][0]["reason"] == "failed_superseded_or_not_request_specific"
+    assert report["physical"]["all"]["n"] == 29
+    assert report["physical_latency_targets"] == "unmet"

@@ -119,7 +119,7 @@ def _chronology(row: dict[str, Any]) -> None:
             if chunk < round((started - request) * 1000):
                 raise ValueError("Chunk precedes reply start.")
         stopped, audio = _optional(row, "stopped_at"), _optional(row, "first_meaningful_audio_ms")
-        if request is not None and stopped is not None and audio is not None:
+        if kind != "speech_stop" and request is not None and stopped is not None and audio is not None:
             if audio > round((stopped - request) * 1000):
                 raise ValueError("Audio follows reply stop.")
     else:
