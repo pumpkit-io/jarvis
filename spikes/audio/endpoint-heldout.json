@@ -1,0 +1,310 @@
+{
+  "schema_version": 1,
+  "purpose": "Independent held-out component cases for spec26 ticket34 endpoint evaluation",
+  "created_on": "2026-11-05",
+  "synthetic": true,
+  "authoring_conditions": {
+    "endpoint_model_output_inspected": false,
+    "endpoint_tuning_inspected": false,
+    "tts_generated": false,
+    "model_inference_run": false,
+    "personal_data_used": false
+  },
+  "label_meanings": {
+    "complete": "The presented text forms a complete request or question.",
+    "needhold": "The presented prefix is linguistically incomplete; preserve it for continuation.",
+    "cannotinfer": "The presented prefix is already plausible as a complete turn. Future continuation cannot be established from text alone; do not score the model as if it can predict future speech."
+  },
+  "evaluation_limits": [
+    "Text-only authoring does not establish prosody or physical endpoint accuracy.",
+    "Pauses and segmentation are synthetic scenario definitions, not measured recordings.",
+    "Freeze cases and labels before candidate inference. Keep this set separate from prompt or threshold tuning.",
+    "Report cannotinfer cases separately from clear completeness errors. A product grace policy may preserve their continuation without implying semantic prediction."
+  ],
+  "cases": [
+    {
+      "id": "endpoint-heldout-en01",
+      "lang": "en",
+      "kind": "completed_brief",
+      "full_text": "Is the CI green on Jarvis?",
+      "segments": [
+        {
+          "text": "Is the CI green on Jarvis?",
+          "endpoint_label": "complete",
+          "pause_after_s": null
+        }
+      ],
+      "rationale": "A complete direct question with its repo target.",
+      "prefix_text": null,
+      "resume_text": null,
+      "pause_durations_s": [],
+      "source": "independently_authored_synthetic_text"
+    },
+    {
+      "id": "endpoint-heldout-en02",
+      "lang": "en",
+      "kind": "completed_long",
+      "full_text": "Compare the API retry behavior before and after the latest change, then put the remaining risks on screen without modifying any files.",
+      "segments": [
+        {
+          "text": "Compare the API retry behavior before and after the latest change, then put the remaining risks on screen without modifying any files.",
+          "endpoint_label": "complete",
+          "pause_after_s": null
+        }
+      ],
+      "rationale": "A complete technical investigation request with an explicit scope boundary.",
+      "prefix_text": null,
+      "resume_text": null,
+      "pause_durations_s": [],
+      "source": "independently_authored_synthetic_text"
+    },
+    {
+      "id": "endpoint-heldout-en03",
+      "lang": "en",
+      "kind": "incomplete_prefix",
+      "full_text": "The failure I want you to investigate happens only when two webhook deliveries arrive together.",
+      "segments": [
+        {
+          "text": "The failure I want you to investigate",
+          "endpoint_label": "needhold",
+          "pause_after_s": 1.4
+        },
+        {
+          "text": "happens only when two webhook deliveries arrive together.",
+          "endpoint_label": "complete",
+          "pause_after_s": null
+        }
+      ],
+      "rationale": "The initial noun phrase has no main predicate; the continuation supplies the failure condition.",
+      "prefix_text": "The failure I want you to investigate",
+      "resume_text": "happens only when two webhook deliveries arrive together.",
+      "pause_durations_s": [
+        1.4
+      ],
+      "source": "independently_authored_synthetic_text"
+    },
+    {
+      "id": "endpoint-heldout-en04",
+      "lang": "en",
+      "kind": "incomplete_prefix",
+      "full_text": "Before you change the scheduler, show me which tests cover daylight saving time.",
+      "segments": [
+        {
+          "text": "Before you change the scheduler,",
+          "endpoint_label": "needhold",
+          "pause_after_s": 1.8
+        },
+        {
+          "text": "show me which tests cover daylight saving time.",
+          "endpoint_label": "complete",
+          "pause_after_s": null
+        }
+      ],
+      "rationale": "The opening subordinate clause waits for its main request.",
+      "prefix_text": "Before you change the scheduler,",
+      "resume_text": "show me which tests cover daylight saving time.",
+      "pause_durations_s": [
+        1.8
+      ],
+      "source": "independently_authored_synthetic_text"
+    },
+    {
+      "id": "endpoint-heldout-en05",
+      "lang": "en",
+      "kind": "ambiguous_continuation",
+      "full_text": "Review the repo, actually only the API changes in the latest pull request.",
+      "segments": [
+        {
+          "text": "Review the repo,",
+          "endpoint_label": "cannotinfer",
+          "pause_after_s": 1.2
+        },
+        {
+          "text": "actually only the API changes in the latest pull request.",
+          "endpoint_label": "complete",
+          "pause_after_s": null
+        }
+      ],
+      "rationale": "Review the repo is already a valid request; later scope narrowing cannot be known from that text alone.",
+      "prefix_text": "Review the repo,",
+      "resume_text": "actually only the API changes in the latest pull request.",
+      "pause_durations_s": [
+        1.2
+      ],
+      "source": "independently_authored_synthetic_text"
+    },
+    {
+      "id": "endpoint-heldout-en06",
+      "lang": "en",
+      "kind": "repeated_pauses",
+      "full_text": "Could you check whether the webhook retries are idempotent, especially when the first response times out?",
+      "segments": [
+        {
+          "text": "Could you check whether",
+          "endpoint_label": "needhold",
+          "pause_after_s": 1.1
+        },
+        {
+          "text": "the webhook retries are idempotent,",
+          "endpoint_label": "cannotinfer",
+          "pause_after_s": 1.7
+        },
+        {
+          "text": "especially when the first response times out?",
+          "endpoint_label": "complete",
+          "pause_after_s": null
+        }
+      ],
+      "rationale": "The first prefix is incomplete; the second already supports a complete question, so the added condition is intrinsically ambiguous.",
+      "prefix_text": "Could you check whether",
+      "resume_text": "the webhook retries are idempotent, especially when the first response times out?",
+      "pause_durations_s": [
+        1.1,
+        1.7
+      ],
+      "source": "independently_authored_synthetic_text"
+    },
+    {
+      "id": "endpoint-heldout-it01",
+      "lang": "it",
+      "kind": "completed_brief",
+      "full_text": "Quali PR sono ancora aperte?",
+      "segments": [
+        {
+          "text": "Quali PR sono ancora aperte?",
+          "endpoint_label": "complete",
+          "pause_after_s": null
+        }
+      ],
+      "rationale": "A complete brief question using technical terminology.",
+      "prefix_text": null,
+      "resume_text": null,
+      "pause_durations_s": [],
+      "source": "independently_authored_synthetic_text"
+    },
+    {
+      "id": "endpoint-heldout-it02",
+      "lang": "it",
+      "kind": "completed_long",
+      "full_text": "Controlla i log del webhook e confronta il numero di tentativi con il limite configurato, poi mostrami un riepilogo senza cambiare la configurazione.",
+      "segments": [
+        {
+          "text": "Controlla i log del webhook e confronta il numero di tentativi con il limite configurato, poi mostrami un riepilogo senza cambiare la configurazione.",
+          "endpoint_label": "complete",
+          "pause_after_s": null
+        }
+      ],
+      "rationale": "A complete technical investigation request with an explicit no-change boundary.",
+      "prefix_text": null,
+      "resume_text": null,
+      "pause_durations_s": [],
+      "source": "independently_authored_synthetic_text"
+    },
+    {
+      "id": "endpoint-heldout-it03",
+      "lang": "it",
+      "kind": "incomplete_prefix",
+      "full_text": "Il bug che vorrei farti analizzare compare solo quando il token OAuth scade durante il retry.",
+      "segments": [
+        {
+          "text": "Il bug che vorrei farti analizzare",
+          "endpoint_label": "needhold",
+          "pause_after_s": 1.5
+        },
+        {
+          "text": "compare solo quando il token OAuth scade durante il retry.",
+          "endpoint_label": "complete",
+          "pause_after_s": null
+        }
+      ],
+      "rationale": "The opening noun phrase lacks its main predicate and failure condition.",
+      "prefix_text": "Il bug che vorrei farti analizzare",
+      "resume_text": "compare solo quando il token OAuth scade durante il retry.",
+      "pause_durations_s": [
+        1.5
+      ],
+      "source": "independently_authored_synthetic_text"
+    },
+    {
+      "id": "endpoint-heldout-it04",
+      "lang": "it",
+      "kind": "incomplete_prefix",
+      "full_text": "Prima di aprire una nuova issue, verifica se esiste già una segnalazione per questo errore della CI.",
+      "segments": [
+        {
+          "text": "Prima di aprire una nuova issue,",
+          "endpoint_label": "needhold",
+          "pause_after_s": 2.0
+        },
+        {
+          "text": "verifica se esiste già una segnalazione per questo errore della CI.",
+          "endpoint_label": "complete",
+          "pause_after_s": null
+        }
+      ],
+      "rationale": "The introductory clause needs the main instruction that follows.",
+      "prefix_text": "Prima di aprire una nuova issue,",
+      "resume_text": "verifica se esiste già una segnalazione per questo errore della CI.",
+      "pause_durations_s": [
+        2.0
+      ],
+      "source": "independently_authored_synthetic_text"
+    },
+    {
+      "id": "endpoint-heldout-it05",
+      "lang": "it",
+      "kind": "ambiguous_continuation",
+      "full_text": "Rivedi la pull request, anzi soltanto le modifiche alla gestione dei permessi.",
+      "segments": [
+        {
+          "text": "Rivedi la pull request,",
+          "endpoint_label": "cannotinfer",
+          "pause_after_s": 1.3
+        },
+        {
+          "text": "anzi soltanto le modifiche alla gestione dei permessi.",
+          "endpoint_label": "complete",
+          "pause_after_s": null
+        }
+      ],
+      "rationale": "The first instruction is already complete; a future correction cannot be predicted from its transcript alone.",
+      "prefix_text": "Rivedi la pull request,",
+      "resume_text": "anzi soltanto le modifiche alla gestione dei permessi.",
+      "pause_durations_s": [
+        1.3
+      ],
+      "source": "independently_authored_synthetic_text"
+    },
+    {
+      "id": "endpoint-heldout-it06",
+      "lang": "it",
+      "kind": "repeated_pauses",
+      "full_text": "Mi puoi dire se il job della CI riparte automaticamente, anche quando il runner perde la connessione?",
+      "segments": [
+        {
+          "text": "Mi puoi dire se",
+          "endpoint_label": "needhold",
+          "pause_after_s": 1.6
+        },
+        {
+          "text": "il job della CI riparte automaticamente,",
+          "endpoint_label": "cannotinfer",
+          "pause_after_s": 1.9
+        },
+        {
+          "text": "anche quando il runner perde la connessione?",
+          "endpoint_label": "complete",
+          "pause_after_s": null
+        }
+      ],
+      "rationale": "An incomplete first prefix becomes a plausible complete question before the final qualifying condition.",
+      "prefix_text": "Mi puoi dire se",
+      "resume_text": "il job della CI riparte automaticamente, anche quando il runner perde la connessione?",
+      "pause_durations_s": [
+        1.6,
+        1.9
+      ],
+      "source": "independently_authored_synthetic_text"
+    }
+  ]
+}

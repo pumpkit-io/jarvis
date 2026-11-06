@@ -1,0 +1,268 @@
+{
+  "selected_for_runtime": false,
+  "status": "independent_false_complete_and_false_incomplete",
+  "input_boundary": "observed_text and available linguistic_context only; no case-specific punctuation provenance, labels, IDs or future continuation in model input",
+  "reference_status": "developer-authored synthetic linguistic references; human adjudication and physical pipeline acceptance pending",
+  "method_boundary": "Only matched runtime inputs compare raw labels. Native model/template/tokenizer and readout/instrumentation differences prevent capacity-only or end-to-end latency claims. Correlated identical-input scenarios counted separately. Late outputs never accepted.",
+  "series": [
+    {
+      "name": "0.6B DEV",
+      "model": "Qwen/Qwen3-0.6B-MLX-4bit@173234aa840d113125e9f2271100ddbaf16c9620",
+      "method": "stream generation; integrity checks inside decision",
+      "scenarios": 16,
+      "unique_observations": 14,
+      "deadline_ms": 150,
+      "statuses": {
+        "model": 15,
+        "timeout": 1
+      },
+      "raw_matrix_includes_late_diagnostics": {
+        "COMPLETE": {
+          "COMPLETE": 8,
+          "INCOMPLETE": 0,
+          "UNCERTAIN": 0
+        },
+        "INCOMPLETE": {
+          "COMPLETE": 4,
+          "INCOMPLETE": 0,
+          "UNCERTAIN": 0
+        },
+        "UNCERTAIN": {
+          "COMPLETE": 4,
+          "INCOMPLETE": 0,
+          "UNCERTAIN": 0
+        }
+      },
+      "effective_matrix": {
+        "COMPLETE": {
+          "COMPLETE": 7,
+          "INCOMPLETE": 0,
+          "UNCERTAIN": 1
+        },
+        "INCOMPLETE": {
+          "COMPLETE": 4,
+          "INCOMPLETE": 0,
+          "UNCERTAIN": 0
+        },
+        "UNCERTAIN": {
+          "COMPLETE": 4,
+          "INCOMPLETE": 0,
+          "UNCERTAIN": 0
+        }
+      },
+      "ipc_median_ms": 139.34012450044975,
+      "ipc_p95_ms": 151.37183299520984,
+      "result_sha256": "1242549c2177471302e7527a9571d78cdd7f69396df86eff9ea192824d55933e",
+      "worker_exitcode": 0
+    },
+    {
+      "name": "4B DEV instrumented",
+      "model": "mlx-community/Qwen3-4B-Instruct-2507-4bit@50d427756c6b1b2fe0c0a10f67fbda1fc8e82c1b",
+      "method": "stream generation; integrity checks inside decision",
+      "scenarios": 16,
+      "unique_observations": 14,
+      "deadline_ms": 150,
+      "statuses": {
+        "timeout": 16
+      },
+      "raw_matrix_includes_late_diagnostics": {
+        "COMPLETE": {
+          "COMPLETE": 8,
+          "INCOMPLETE": 0,
+          "UNCERTAIN": 0
+        },
+        "INCOMPLETE": {
+          "COMPLETE": 0,
+          "INCOMPLETE": 4,
+          "UNCERTAIN": 0
+        },
+        "UNCERTAIN": {
+          "COMPLETE": 0,
+          "INCOMPLETE": 1,
+          "UNCERTAIN": 3
+        }
+      },
+      "effective_matrix": {
+        "COMPLETE": {
+          "COMPLETE": 0,
+          "INCOMPLETE": 0,
+          "UNCERTAIN": 8
+        },
+        "INCOMPLETE": {
+          "COMPLETE": 0,
+          "INCOMPLETE": 0,
+          "UNCERTAIN": 4
+        },
+        "UNCERTAIN": {
+          "COMPLETE": 0,
+          "INCOMPLETE": 0,
+          "UNCERTAIN": 4
+        }
+      },
+      "ipc_median_ms": 255.3000835032435,
+      "ipc_p95_ms": 312.0899159985129,
+      "result_sha256": "e11336bbf6474161d62a5d0dd464b5b96a5ccbec929aeaaf62a90d4cc32465c1",
+      "worker_exitcode": 0
+    },
+    {
+      "name": "4B DEV production-shaped",
+      "model": "same4Bpin",
+      "method": "stream generation; integrity checks after decision",
+      "scenarios": 16,
+      "unique_observations": 14,
+      "deadline_ms": 150,
+      "statuses": {
+        "timeout": 4,
+        "model": 12
+      },
+      "raw_matrix_includes_late_diagnostics": {
+        "COMPLETE": {
+          "COMPLETE": 8,
+          "INCOMPLETE": 0,
+          "UNCERTAIN": 0
+        },
+        "INCOMPLETE": {
+          "COMPLETE": 0,
+          "INCOMPLETE": 4,
+          "UNCERTAIN": 0
+        },
+        "UNCERTAIN": {
+          "COMPLETE": 0,
+          "INCOMPLETE": 1,
+          "UNCERTAIN": 3
+        }
+      },
+      "effective_matrix": {
+        "COMPLETE": {
+          "COMPLETE": 6,
+          "INCOMPLETE": 0,
+          "UNCERTAIN": 2
+        },
+        "INCOMPLETE": {
+          "COMPLETE": 0,
+          "INCOMPLETE": 3,
+          "UNCERTAIN": 1
+        },
+        "UNCERTAIN": {
+          "COMPLETE": 0,
+          "INCOMPLETE": 1,
+          "UNCERTAIN": 3
+        }
+      },
+      "ipc_median_ms": 117.63570799666923,
+      "ipc_p95_ms": 173.6746249953285,
+      "result_sha256": "4d89a98180be203efabc32d591137488bd5b10cb3f0f84eb440fc1bfea10fd1a",
+      "worker_exitcode": 0
+    },
+    {
+      "name": "4B DEV last-position",
+      "model": "same4Bpin",
+      "method": "last-position readout; integrity checks after decision",
+      "scenarios": 16,
+      "unique_observations": 14,
+      "deadline_ms": 150,
+      "statuses": {
+        "model": 16
+      },
+      "raw_matrix_includes_late_diagnostics": {
+        "COMPLETE": {
+          "COMPLETE": 8,
+          "INCOMPLETE": 0,
+          "UNCERTAIN": 0
+        },
+        "INCOMPLETE": {
+          "COMPLETE": 0,
+          "INCOMPLETE": 4,
+          "UNCERTAIN": 0
+        },
+        "UNCERTAIN": {
+          "COMPLETE": 0,
+          "INCOMPLETE": 1,
+          "UNCERTAIN": 3
+        }
+      },
+      "effective_matrix": {
+        "COMPLETE": {
+          "COMPLETE": 8,
+          "INCOMPLETE": 0,
+          "UNCERTAIN": 0
+        },
+        "INCOMPLETE": {
+          "COMPLETE": 0,
+          "INCOMPLETE": 4,
+          "UNCERTAIN": 0
+        },
+        "UNCERTAIN": {
+          "COMPLETE": 0,
+          "INCOMPLETE": 1,
+          "UNCERTAIN": 3
+        }
+      },
+      "ipc_median_ms": 75.42154150723945,
+      "ipc_p95_ms": 133.58437499846332,
+      "result_sha256": "51e3134ffa254f6bcf3fd031b1c28c1daf227e9bb5d43db9ca69dc8c6434c314",
+      "worker_exitcode": 0
+    },
+    {
+      "name": "4B heldout last-position",
+      "model": "same4Bpin",
+      "method": "exact frozen DEVcandidate; one independent confirmation",
+      "scenarios": 16,
+      "unique_observations": 14,
+      "deadline_ms": 150,
+      "statuses": {
+        "model": 16
+      },
+      "raw_matrix_includes_late_diagnostics": {
+        "COMPLETE": {
+          "COMPLETE": 7,
+          "INCOMPLETE": 1,
+          "UNCERTAIN": 0
+        },
+        "INCOMPLETE": {
+          "COMPLETE": 1,
+          "INCOMPLETE": 3,
+          "UNCERTAIN": 0
+        },
+        "UNCERTAIN": {
+          "COMPLETE": 0,
+          "INCOMPLETE": 1,
+          "UNCERTAIN": 3
+        }
+      },
+      "effective_matrix": {
+        "COMPLETE": {
+          "COMPLETE": 7,
+          "INCOMPLETE": 1,
+          "UNCERTAIN": 0
+        },
+        "INCOMPLETE": {
+          "COMPLETE": 1,
+          "INCOMPLETE": 3,
+          "UNCERTAIN": 0
+        },
+        "UNCERTAIN": {
+          "COMPLETE": 0,
+          "INCOMPLETE": 1,
+          "UNCERTAIN": 3
+        }
+      },
+      "ipc_median_ms": 75.44164599676151,
+      "ipc_p95_ms": 134.77800000691786,
+      "result_sha256": "e1e8db0972bba0a990541c2d05ef664786a885ed5e307f3fc5bc822fbf80f2be",
+      "worker_exitcode": 0
+    }
+  ],
+  "last_position_freeze_sha256": "b9754a1ef39ad1941eb9e4c005971b4b7f3052528ddebb06420003b7724ae6ef",
+  "heldout_freeze_sha256": "867c8f53addcd404dbd9fe67b612bc95c844eca1d3c6ddce4e452928e6c12290",
+  "heldout_runtime_sha256": "272cf580a590d713108798b9cefde87c43d9c66a49008ccaa17db684aea30d30",
+  "last_position_heldout_full_diagnostic_cycle_ms": {
+    "median": 141.77766650391277,
+    "p95": 206.14504200057127
+  },
+  "last_position_heldout_resources": {
+    "mlx_peak_bytes": 3073737924,
+    "process_peak_rss_bytes": 2473082880,
+    "accounting": "separate overlapping component measures, not additive or whole-Hub acceptance"
+  }
+}
