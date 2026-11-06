@@ -9,18 +9,23 @@ import contextlib
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
 from jarvis_hub.hub import Line
 from jarvis_hub.voice.assessment import Assessment, Candidate
+from jarvis_hub.voice.followup import FollowUpWindow
+from jarvis_hub.voice.cumulative import CumulativeRecognition, Decision, Snapshot, Source, TalkingPeriod
 from jarvis_hub.voice.ownership import MAX_REQUEST_CHARACTERS, SpokenTurn
-from jarvis_hub.voice.bargein_log import BargeInLog
+from jarvis_hub.voice.bargein import Partial
 from jarvis_hub.voice.language import Lang
 from jarvis_hub.voice.player import Player
 from jarvis_hub.voice.speech import ClipName, Metrics, Speech, SpeechClock
 from jarvis_hub.voice.state import (
     CAPTURING,
+    VOICED,
+    BargeIn,
+    Overheard,
     Action,
     AnnouncementBegins,
     Chime,
@@ -30,6 +35,7 @@ from jarvis_hub.voice.state import (
     Event,
     InputEvent,
     Heard,
+    Hypothesis,
     SpeechStarted,
     WakeWord,
     Interrupt,
@@ -42,8 +48,8 @@ from jarvis_hub.voice.state import (
     Timing,
     Voice,
     VoiceState,
-    barge_in_from,
     step,
+    stop_phrase,
 )
 from jarvis_hub.voice.tts import Synthesizer
 
@@ -53,13 +59,12 @@ class AudioInput(Protocol):
 
     def events(self) -> AsyncIterator[InputEvent]: ...
 
-    def capture(self, on: bool, *, owner: int | None = None) -> None:
-        """Whether speech becomes turns. The Wake word is listened for either way."""
+    def capture(self, on: bool, *, owner: int | None = None, idle: bool = False, wake_candidate: int | None = None) -> bool:
+        """`idle` grants keyword proposals; a stale retained wake handoff returns False."""
         ...
 
     def barge_in(self, since: float | None) -> None:
-        """Report speech held from `since` on as a Barge-in, with partial transcripts, or nothing with None.
-        Each call forgets the Barge-in under way, so the next one needs speech held anew."""
+        """Legacy partial replay control; contextual playback admission always disables it with None."""
         ...
 
 
@@ -69,6 +74,14 @@ class RelationAssessment(Protocol):
     ) -> Assessment: ...
 
     async def close(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class _CumulativeResult:
+    period: TalkingPeriod
+    snapshot: Snapshot
+    version: int
+    decision: Decision
 
 
 @dataclass(frozen=True)
@@ -89,6 +102,15 @@ class _Related:
     @property
     def heard(self) -> Heard:
         return self.fragments[-1].heard
+
+
+@dataclass(frozen=True)
+class _FollowUpRelated:
+    window: FollowUpWindow
+    fragments: tuple[Heard, ...]
+    candidate: Candidate
+    version: int
+    result: Assessment
 
 
 class _ObservedSpeech:
@@ -177,8 +199,10 @@ class VoiceMode:
         self._metrics = metrics
         self._notice = notice
         self._debug = debug
-        self._voice = Voice()
+        self._voice: Voice = Voice()
         self._recognition = recognition
+        self._period: TalkingPeriod | None = None
+        self._period_query: asyncio.Task[None] | None = None
         self._epoch = 0
         self._request_sequence = 0
         self._request_namespace = uuid4().hex
@@ -187,8 +211,15 @@ class VoiceMode:
         self._reply_started: tuple[tuple[str, int], float] | None = None
         self._reply_finished: tuple[tuple[str, int], float] | None = None
         self._closed = False
-        self._capture_setting: tuple[bool, int] | None = None
+        self._typed_at = float("-inf")
+        self._follow_up: FollowUpWindow | None = None
+        self._follow_up_query: asyncio.Task[None] | None = None
+        self._capture_setting: tuple[bool, int, bool] | None = None
+        self._wake_candidate: int | None = None
         self._origins: dict[int | None, tuple[str, bool | None]] = {}
+        self._owned_capture_active: set[int | None] = set()
+        self._rejected_sources: set[int] = set()
+        self._reject_unknown_sources = False
         self._waiting: deque[_Fragment] = deque()
         self._retained: deque[_Fragment] = deque()
         self._inflight: tuple[_Fragment, ...] = ()
@@ -197,14 +228,12 @@ class VoiceMode:
         self._accepted_candidate = -1
         self._assessing: asyncio.Task[None] | None = None
         self._applying: set[asyncio.Task[None]] = set()
-        self._bargein_log = BargeInLog(metrics.record, notice, timing)
-        self._barge_in_from: float | None = None
         # What the User heard of the voice they last cut off, for their next turn.
         self._heard_before_cut = ""
         self._idle = asyncio.Event()
         self._idle.set()
         self._woke: Callable[[], None] = lambda: None
-        self._events: asyncio.Queue[Event | _Related] = asyncio.Queue()
+        self._events: asyncio.Queue[Event | _Related | _FollowUpRelated | _CumulativeResult] = asyncio.Queue()
         self._lines: asyncio.Queue[Line] = asyncio.Queue()
         self._speech = Speech(
             tts, player, clock, metrics=metrics, notice=notice, on_reply_audio=self._reply_audio, on_chime=self._chime_started, on_ready=self._ready
@@ -216,6 +245,7 @@ class VoiceMode:
         return self._voice.state
 
     def start(self) -> None:
+        self._audio.barge_in(None)
         self._notice("Speech loading.")
         self._speech.start()
 
@@ -251,17 +281,62 @@ class VoiceMode:
         while True:
             await self._idle.wait()
             await self._speech.idle()
-            if self._voice.state == "idle":
+            if self._voice.state == "idle" and not self._follow_up_pending():
                 return
 
-    def announce(self) -> bool:
-        """Moves an idle machine into an Announcement at once, so a Wake word from now on interrupts it.
+    def _follow_up_pending(self) -> bool:
+        window = self._follow_up
+        return window is not None and bool(window.active or window.waiting or window.inflight or self._owned_capture_pending())
 
-        Returns False, changing nothing, when Jarvis is not idle: the news waits for the next `quiet`.
-        """
-        if self._voice.state != "idle":
+    def _owned_capture_pending(self) -> bool:
+        return bool(self._owned_capture_active or self._waiting or self._inflight or self._applying_fragments or self._applying)
+
+    def _clear_owned_fragments(self) -> None:
+        self._owned_capture_active.clear()
+        self._waiting.clear()
+        self._retained.clear()
+        self._inflight = ()
+        self._applying_fragments = ()
+        self._origins.clear()
+
+    def _known_pending_source(self, candidate: int | None) -> bool:
+        if candidate is None:
             return False
-        for action in self._step(AnnouncementBegins(self._clock.now())):
+        window = self._follow_up
+        fragments = (*self._retained, *self._inflight, *self._applying_fragments, *self._waiting)
+        return (candidate in self._owned_capture_active or any(fragment.heard.candidate == candidate for fragment in fragments)
+                or window is not None and (candidate in window.active or any(fragment.candidate == candidate
+                    for fragment in (*window.retained, *window.inflight, *window.waiting))))
+
+    def _reject_source(self, candidate: int | None) -> None:
+        if candidate is not None and (candidate in self._rejected_sources or len(self._rejected_sources) < 64):
+            self._rejected_sources.add(candidate)
+        elif not self._reject_unknown_sources:
+            self._reject_unknown_sources = True
+            self._notice("Speech source tracking is unavailable. Use a fresh wake once Jarvis is idle.")
+
+    def _settle_expired_source(self) -> None:
+        if self._voice.state == "idle" and self._follow_up is not None and not self._owned_capture_pending():
+            self._retire(preserve_follow_up=True)
+        self._settle_idle()
+        self._sync_capture()
+
+    def _settle_idle(self) -> None:
+        if self._voice.state == "idle" and not self._follow_up_pending():
+            self._idle.set()
+        else:
+            self._idle.clear()
+
+    def announce(self) -> bool:
+        """Claim idle playback for news; captured speech still needs contextual admission."""
+        if self._voice.state != "idle" or self._follow_up_pending():
+            return False
+        self._retire()
+        began = self._clock.now()
+        actions = self._step(AnnouncementBegins(began))
+        self._follow_up = FollowUpWindow(f"announcement-{self._request_namespace}-{began}", self._epoch,
+                                        began, float("inf"), "", "", None, phase="announce")
+        for action in actions:
             if isinstance(action, Chime):
                 # Queued now, so it plays ahead of the news turn's first sentence.
                 self._speech.say("chime", "en")
@@ -270,14 +345,13 @@ class VoiceMode:
     async def close(self) -> None:
         self._closed = True
         self._retire()
-        pending = [task for task in [self._assessing, *self._applying] if task is not None]
+        pending = [task for task in [self._assessing, self._follow_up_query, self._period_query, *self._applying] if task is not None]
         for task in pending:
             task.cancel()
         if pending:
             await asyncio.wait(pending)
         if self._recognition is not None:
             await self._recognition.close()
-        self._bargein_log.close()
         await self._speech.close()
 
     def _reply_audio(self, heard_at: float | None, owner: tuple[str, int] | None = None) -> None:
@@ -308,6 +382,22 @@ class VoiceMode:
     async def _drive(self, interrupt: Callable[[], Awaitable[Any]]) -> None:
         while True:
             event = await self._next_event()
+            if await self._cumulative_event(event, interrupt):
+                continue
+            if isinstance(event, (Hypothesis, _CumulativeResult)):
+                continue
+            if isinstance(event, (BargeIn, Partial, Overheard)):
+                continue
+            if isinstance(event, WakeWord) and (self._voice.state != "idle" or self._follow_up_pending()):
+                continue
+            if isinstance(event, _FollowUpRelated):
+                self._follow_up_query = None
+                await self._apply_follow_up(event, interrupt)
+                self._start_follow_up_assessment()
+                continue
+            if (isinstance(event, WakeWord) and self._follow_up is not None and self._follow_up.includes(event.at)
+                    and (event.at < self._follow_up.expires or self._voice.state != "idle")):
+                continue
             if isinstance(event, _Related):
                 if event.fragments is self._inflight and self.owns(event.owner.token) and event.epoch == self._epoch:
                     self._applying_fragments = event.fragments
@@ -319,26 +409,50 @@ class VoiceMode:
                 if not self._applying:
                     self._start_assessment()
                 continue
+            if isinstance(event, CaptureAborted) and event.wake_handoff and event.owner != self._epoch:
+                continue
             if isinstance(event, (Heard, SpeechStarted, CaptureAborted)):
                 if event.owner is not None and event.owner != self._epoch:
+                    continue
+                if (
+                    event.candidate in self._rejected_sources
+                    or self._reject_unknown_sources and not self._known_pending_source(event.candidate)
+                ):
                     continue
                 if event.candidate is not None:
                     if event.candidate <= self._accepted_candidate:
                         continue
-                    self._latest_candidate = max(self._latest_candidate, event.candidate)
+            if isinstance(event, Heard):
+                self._owned_capture_active.discard(event.candidate)
+            if isinstance(event, (SpeechStarted, Heard)) and self._follow_up_event(event):
+                continue
+            if isinstance(event, (SpeechStarted, Heard)) and event.candidate is not None:
+                self._latest_candidate = max(self._latest_candidate, event.candidate)
+            if isinstance(event, CaptureAborted) and self._follow_up is not None:
+                window = self._follow_up
+                tracked = window.active | {fragment.candidate for fragment in (*window.retained, *window.waiting, *window.inflight)}
+                tracked |= set(self._origins) | {fragment.heard.candidate for fragment in (*self._retained, *self._inflight, *self._applying_fragments, *self._waiting)}
+                if event.candidate not in tracked:
+                    continue
+                window.active.clear()
+                window.retained, window.waiting, window.inflight = (), [], ()
+                window.version += 1
+                self._clear_owned_fragments()
+                self._accepted_candidate = max(self._accepted_candidate, event.candidate if event.candidate is not None else -1)
+                self._restore_follow_up(window)
+                continue
             if isinstance(event, CaptureAborted):
-                self._waiting.clear()
-                self._retained.clear()
-                self._inflight = ()
-                self._applying_fragments = ()
-                self._origins.clear()
+                self._clear_owned_fragments()
                 if event.candidate is not None:
                     self._accepted_candidate = max(self._accepted_candidate, event.candidate)
                 if self._owned is not None and self._voice.state == "thinking":
                     self._notice("That additional speech was lost. Say 'Hey Jarvis' and try again.")
             if isinstance(event, Heard) and event.limited:
                 self._notice("Spoken input reached its duration limit. Repeat or split the request.")
-                if self._voice.state in CAPTURING:
+                self._clear_owned_fragments()
+                if self._follow_up is not None:
+                    self._finish_follow_up(self._follow_up)
+                elif self._voice.state in CAPTURING:
                     before = self._voice.state
                     self._voice = Voice()
                     self._retire()
@@ -346,21 +460,394 @@ class VoiceMode:
                 continue
             if isinstance(event, SpeechStarted):
                 if len(self._origins) >= 64:
-                    self._origins.pop(next(iter(self._origins)))
+                    oldest = next(iter(self._origins))
+                    self._origins.pop(oldest)
+                    self._owned_capture_active.discard(oldest)
                 self._origins[event.candidate] = self._origin(event.started_at if event.started_at is not None else event.at)
+                if self._origins[event.candidate][0] in ("thinking", "speaking"):
+                    self._owned_capture_active.add(event.candidate)
             if isinstance(event, Heard) and self._owned is not None:
                 origin = self._origins.get(event.candidate, self._origin(event.started_at))
-                if origin[0] == "thinking" or self._retained or self._inflight or self._applying_fragments or self._waiting:
+                if origin[0] in ("thinking", "speaking") or self._retained or self._inflight or self._applying_fragments or self._waiting:
                     buffered = [*self._retained, *self._inflight, *self._applying_fragments, *self._waiting]
                     text = " ".join([self._owned.text, *(fragment.heard.text for fragment in buffered), event.text])
                     if len(buffered) >= 4 or len(text) > MAX_REQUEST_CHARACTERS:
                         self._notice("Spoken input reached its retention limit. Repeat or split the request.")
+                        self._clear_owned_fragments()
+                        self._settle_expired_source()
                     else:
                         self._waiting.append(_Fragment(event, *origin))
                         self._start_assessment()
                     continue
             for action in self._step(event):
                 await self._act(action, interrupt)
+
+    async def _cumulative_event(self, event: Event | _Related | _FollowUpRelated | _CumulativeResult,
+                                interrupt: Callable[[], Awaitable[Any]]) -> bool:
+        if not getattr(self._recognition, "cumulative", False):
+            return False
+        if self._period is not None and self._clock.now() >= self._period.opened + 30:
+            self._limit_cumulative(self._period)
+            if isinstance(event, Tick):
+                return True
+        if isinstance(event, _CumulativeResult):
+            self._period_query = None
+            period = event.period
+            if self._period is period and period.epoch == self._epoch and not self._closed:
+                if period.version == event.version and event.decision.snapshot_id == event.snapshot.id:
+                    await self._apply_cumulative(period, event.snapshot, event.decision, interrupt)
+                if self._period is period:
+                    self._assess_cumulative()
+            else:
+                self._assess_cumulative()
+            return True
+        period = self._period
+        if isinstance(event, Tick) and period is not None and event.at >= period.reassess_at:
+            period.reassess_at = event.at + .4
+            period.dirty = True
+            self._assess_cumulative()
+            return True
+        if not isinstance(event, (SpeechStarted, Hypothesis, Heard, CaptureAborted)):
+            return False
+        if period is None and self._voice.state not in ("thinking", "speaking", "announce", "follow_up"):
+            return False
+        if event.owner is not None and event.owner != self._epoch:
+            return True
+        candidate = event.candidate
+        if candidate is None or candidate <= self._accepted_candidate or candidate in self._rejected_sources or self._reject_unknown_sources:
+            return True
+        if period is None:
+            window = self._follow_up
+            preceding = self._owned.semantic_text if self._owned is not None else window.admitted_turn if window is not None else ""
+            period = self._period = TalkingPeriod(self._epoch, self._owned or (window.source if window is not None else None),
+                                                  self._voice.state, preceding, self._speech.played(), self._clock.now())
+        if isinstance(event, CaptureAborted) or isinstance(event, Heard) and event.limited:
+            self._limit_cumulative(period)
+            return True
+        if isinstance(event, SpeechStarted):
+            period.active.add(candidate)
+            period.version += 1
+            period.dirty = True
+            return True
+        previous = period.sources.get(candidate)
+        if isinstance(event, Hypothesis):
+            if previous is not None and (previous.final or previous.revision >= event.revision):
+                return True
+            source = Source(candidate, event.revision, event.text, event.started_at, event.speech_at, event.at,
+                            pauses=event.pauses)
+        else:
+            period.active.discard(candidate)
+            if previous is not None and previous.final:
+                return True
+            source = Source(candidate, previous.revision + 1 if previous is not None else 1, event.text,
+                            event.started_at if event.started_at is not None else event.at, event.at,
+                            event.delivered_at if event.delivered_at is not None else self._clock.now(), True,
+                            previous.pauses if previous is not None else (), event.lang)
+        period.sources[candidate] = source
+        period.version += 1
+        period.dirty = True
+        period.reassess_at = self._clock.now() + .4
+        if len(period.sources) > 4 or sum(len(item.text) for item in period.sources.values()) > MAX_REQUEST_CHARACTERS:
+            self._limit_cumulative(period)
+        else:
+            self._assess_cumulative()
+        return True
+
+    def _limit_cumulative(self, period: TalkingPeriod) -> None:
+        for candidate in set(period.sources) | period.active:
+            self._reject_source(candidate)
+        self._period = None
+        self._notice("Cumulative speech reached its retention limit or lost audio. Use a fresh wake or typed input.")
+        if period.stopped:
+            self._voice = Voice(state="follow_up", deadline=self._clock.now() + self._timing.follow_up_s)
+            self._sync_capture()
+
+    def _assess_cumulative(self) -> None:
+        period = self._period
+        if period is None or self._period_query is not None or not period.dirty or not period.sources or self._closed:
+            return
+        if period.sequence >= 80:
+            self._limit_cumulative(period)
+            return
+        period.dirty = False
+        period.sequence += 1
+        sources = tuple(source for source in period.sources.values() if source.text.strip())
+        if not sources:
+            return
+        snapshot = Snapshot(f"{period.epoch}:{period.opened}:{period.sequence}", sources, self._clock.now(),
+                            period.phase, period.preceding_request, period.played_text,
+                            period.owner.token if period.owner is not None else None)
+        version = period.version
+        recognition = cast(CumulativeRecognition, self._recognition)
+        async def assess() -> None:
+            try:
+                async with asyncio.timeout(.8):
+                    decision = await recognition.assess_snapshot(snapshot)
+            except Exception:
+                decision = Decision(snapshot.id, (), False, False, False, "unavailable")
+            self._events.put_nowait(_CumulativeResult(period, snapshot, version, decision))
+        self._period_query = asyncio.create_task(assess())
+
+    async def _apply_cumulative(self, period: TalkingPeriod, snapshot: Snapshot, decision: Decision,
+                                interrupt: Callable[[], Awaitable[Any]]) -> None:
+        keys = {source.key for source in snapshot.sources}
+        if (not set(decision.directed).issubset(keys) or not set(decision.unrelated).issubset(keys)
+                or set(decision.directed) & set(decision.unrelated)):
+            self._notice("Jev returned invalid source ownership; playback continues.")
+            return
+        self._metrics.record({"kind": "cumulative_assessment", "snapshot_id": snapshot.id,
+                              "reason": decision.reason, "floor": decision.floor, "ready": decision.ready,
+                              "sources": len(snapshot.sources), "time_basis": "perf_counter"})
+        if decision.reason != "assessed":
+            period.reassess_at = float("inf")
+            self._notice("Jev assessment unavailable; playback continues. Check Jev setup or use typed input.")
+            return
+        selected = tuple(source for source in snapshot.sources if source.key in decision.directed)
+        for source in snapshot.sources:
+            if source.key in decision.unrelated:
+                period.sources.pop(source.candidate, None)
+                period.active.discard(source.candidate)
+                self._reject_source(source.candidate)
+        if not period.sources and not period.active:
+            self._period = None
+            if period.stopped:
+                self._voice = replace(self._voice, in_turn=False, deadline=self._clock.now() + self._timing.follow_up_s)
+                self._sync_capture()
+            return
+        line: Line | None = None
+        if (decision.ready and selected and not period.active and all(source.final for source in selected)
+                and (period.stopped or decision.floor or self._voice.state in ("follow_up", "idle"))):
+            text = " ".join(source.text for source in selected)
+            last = selected[-1]
+            try:
+                if period.owner is not None:
+                    owned = period.owner.amended(text, last.speech_at, last.lang, segments=tuple(source.text for source in selected))
+                else:
+                    self._request_sequence += 1
+                    owned = SpokenTurn(f"spoken-{self._request_namespace}-{self._request_sequence}", 0, text,
+                                       last.speech_at, last.lang, tuple(source.text for source in selected))
+            except ValueError:
+                self._limit_cumulative(period)
+                return
+            self._owned = owned
+            self._reply_started = self._reply_finished = None
+            line = Line(owned.text, owned.arrived, owned.lang, typed=False, request_id=owned.id,
+                        revision=owned.revision, segments=owned.segments,
+                        interrupted=(period.played_text or None) if period.stopped or decision.floor else None)
+            self._admitted(line)
+        if decision.floor and selected and not period.stopped:
+            period.stopped = True
+            before = self._voice.state
+            self._voice = replace(self._voice, state="follow_up", deadline=None, in_turn=True,
+                                  voiced_at=None, awaiting=None, barge=None)
+            self._transition(before, "follow_up", Tick(self._clock.now()))
+            self._sync_capture()
+            self._metrics.record({"kind": "cumulative_stop", "snapshot_id": snapshot.id,
+                                  "source_onset_at": selected[0].started_at, "stop_requested_at": self._clock.now(),
+                                  "played_basis": snapshot.played_basis, "time_basis": "perf_counter"})
+            await interrupt()
+            if self._period is not period:
+                return
+        if decision.voice_only and period.stopped and selected:
+            for source in snapshot.sources:
+                self._reject_source(source.candidate)
+            self._period = None
+            self._voice = replace(self._voice, in_turn=False, deadline=self._clock.now() + self._timing.follow_up_s)
+            self._sync_capture()
+            return
+        if line is not None and self._owned is not None:
+            self._period = None
+            self._follow_up = None
+            for source in snapshot.sources:
+                self._accepted_candidate = max(self._accepted_candidate, source.candidate)
+            self._voice = Voice(state="thinking", awaiting=line.arrived)
+            self._sync_capture()
+            if line.request_id is not None and self.owns((line.request_id, line.revision)):
+                self._lines.put_nowait(line)
+
+    def _follow_up_event(self, event: SpeechStarted | Heard) -> bool:
+        window = self._follow_up
+        if window is None:
+            return False
+        onset = event.started_at
+        if onset is None:
+            onset = window.onsets.get(event.candidate, event.at)
+        if onset < window.opened:
+            origin = self._origins.get(event.candidate, self._origin(onset))
+            owned_pending = self._retained or self._inflight or self._applying_fragments or self._waiting
+            return not (self._owned is not None and (origin[0] in ("thinking", "speaking") or owned_pending))
+        if not window.includes(onset):
+            self._reject_source(event.candidate)
+            return True
+        if isinstance(event, SpeechStarted):
+            if len(window.onsets) >= 64:
+                oldest = next(iter(window.onsets))
+                window.onsets.pop(oldest)
+                window.active.discard(oldest)
+            window.onsets[event.candidate] = onset
+            window.active.add(event.candidate)
+            self._idle.clear()
+            if event.candidate is not None and (self._retained or self._inflight or self._applying_fragments or self._waiting):
+                self._latest_candidate = max(self._latest_candidate, event.candidate)
+            window.version += 1
+            if self._clock.now() < window.expires:
+                self._voice = replace(self._voice, in_turn=True)
+            return True
+        window.active.discard(event.candidate)
+        if not event.limited and (self._retained or self._inflight or self._applying_fragments or self._waiting):
+            return False
+        if event.limited:
+            self._notice("Spoken input reached its duration limit. Repeat or split the request.")
+            self._finish_follow_up(window, keep_playback=True)
+            return True
+        if not event.text.strip() or self._recognition is None:
+            self._restore_follow_up(window)
+            return True
+        buffered = (*window.retained, *window.inflight, *window.waiting, event)
+        if len(buffered) > 4 or len(" ".join(fragment.text for fragment in buffered)) > MAX_REQUEST_CHARACTERS:
+            self._notice("Spoken input reached its retention limit. Repeat or split the request.")
+            self._finish_follow_up(window, keep_playback=True)
+            return True
+        window.waiting.append(event)
+        self._start_follow_up_assessment()
+        return True
+
+    def _restore_follow_up(self, window: FollowUpWindow) -> None:
+        if self._follow_up is not window:
+            return
+        if self._voice.state == "announce" and window.phase == "announce":
+            self._voice = replace(self._voice, in_turn=bool(window.active))
+            self._sync_capture()
+            return
+        before = self._voice.state
+        expired = self._clock.now() >= window.expires
+        self._voice = replace(self._voice, state="idle" if expired else "follow_up", in_turn=False,
+                              window_ends=None, deadline=None if expired else window.expires)
+        if expired:
+            if not window.active and not window.waiting:
+                window.retained = ()
+            self._retire(preserve_follow_up=True)
+        if self._voice.state != before:
+            self._transition(before, self._voice.state, Tick(self._clock.now()))
+        self._settle_idle()
+        self._sync_capture()
+
+    def _finish_follow_up(self, window: FollowUpWindow, *, keep_playback: bool = False) -> None:
+        if self._follow_up is not window:
+            return
+        if keep_playback and self._voice.state == "announce":
+            window.retained, window.waiting, window.inflight = (), [], ()
+            window.active.clear()
+            window.version += 1
+            self._restore_follow_up(window)
+            return
+        before = self._voice.state
+        self._voice = Voice()
+        self._retire()
+        if before != "idle":
+            self._transition(before, "idle", Tick(self._clock.now()))
+        self._idle.set()
+
+    def _start_follow_up_assessment(self) -> None:
+        window = self._follow_up
+        if window is None or not window.waiting or self._follow_up_query is not None or self._recognition is None:
+            return
+        fragments = (*window.retained, *window.waiting)
+        window.retained, window.waiting, window.inflight = (), [], fragments
+        version = window.version
+        last = fragments[-1]
+        first = fragments[0]
+        onset = first.started_at if first.started_at is not None else window.onsets.get(first.candidate, first.at)
+        phase = window.phase if window.completed_at is None or onset < window.completed_at else "follow_up"
+        played = window.played_text
+        if self._voice.state == "announce":
+            played = self._speech.played().strip() if self._voice.voiced_at is not None else ""
+        candidate = Candidate(f"{window.token}:{last.candidate}:{last.at}", window.token,
+                              " ".join(fragment.text for fragment in fragments), window.admitted_turn,
+                              played, phase, None if phase == "announce" else False,
+                              tuple(fragment.text for fragment in fragments))
+        def current() -> tuple[str, str]:
+            return (candidate.candidate_id, candidate.turn_id) if self._follow_up is window and self._epoch == window.epoch and window.inflight is fragments and not self._closed else ("", "")
+        async def assess() -> None:
+            assert self._recognition is not None
+            try:
+                result = await self._recognition.assess(candidate, current=current)
+            except Exception:
+                result = Assessment(candidate.candidate_id, candidate.turn_id, "uncertain", "unavailable", 0)
+            self._events.put_nowait(_FollowUpRelated(window, fragments, candidate, version, result))
+        self._follow_up_query = asyncio.create_task(assess())
+
+    async def _apply_follow_up(self, related: _FollowUpRelated, interrupt: Callable[[], Awaitable[Any]]) -> None:
+        window, result = related.window, related.result
+        if self._follow_up is not window or self._epoch != window.epoch or window.inflight is not related.fragments or self._closed:
+            return
+        window.inflight = ()
+        actions = result.segment_actions
+        if (result.candidate_id, result.turn_id) != (related.candidate.candidate_id, related.candidate.turn_id):
+            actions = None
+        valid = actions is not None and len(actions) == len(related.fragments) and all(action in ("floor", "stop", "ignore", "uncertain") for action in actions)
+        if not valid:
+            actions = tuple("uncertain" for _ in related.fragments)
+        assert actions is not None
+        self._metrics.record({"kind": "follow_up_admission", "window": window.token,
+                              "phase": related.candidate.phase, "played_basis": "queue_estimate",
+                              "reason": result.reason if valid else "invalid", "elapsed_ms": result.elapsed_ms,
+                              "observed_segments": len(related.fragments), "selected_segments": [index for index, action in enumerate(actions) if action == "floor"]})
+        if window.version != related.version or window.waiting:
+            window.retained = tuple(fragment for fragment, action in zip(related.fragments, actions) if action != "ignore")
+            if not window.active and not window.waiting:
+                self._restore_follow_up(window)
+            return
+        selected = tuple(fragment for fragment, action in zip(related.fragments, actions) if action == "floor")
+        if selected:
+            text = " ".join(fragment.text for fragment in selected).strip()
+            if related.candidate.phase == "follow_up" and self._voice.state in ("follow_up", "idle") and stop_phrase(text) is not None:
+                self._finish_follow_up(window)
+                return
+            last = selected[-1]
+            before_voice = self._voice
+            before = before_voice.state
+            segments = tuple(fragment.text for fragment in selected)
+            if window.source is not None:
+                try:
+                    owned = window.source.amended(text, last.at, last.lang, segments=segments)
+                except ValueError as error:
+                    self._notice(str(error))
+                    self._finish_follow_up(window)
+                    return
+            else:
+                self._request_sequence += 1
+                owned = SpokenTurn(f"spoken-{self._request_namespace}-{self._request_sequence}", 0, text,
+                                   last.at, last.lang, segments)
+            self._retire()
+            self._owned = owned
+            self._accepted_candidate = last.candidate if last.candidate is not None else -1
+            self._voice = Voice(state="thinking", awaiting=last.at)
+            self._transition(before, "thinking", last)
+            self._sync_capture()
+            played = self._speech.played().strip() if before == "announce" and before_voice.voiced_at is not None else None
+            line = Line(owned.text, last.at, owned.lang, typed=False, request_id=owned.id,
+                        revision=owned.revision, segments=owned.segments, interrupted=played)
+            self._admitted(line)
+            if before == "announce":
+                self._record_stop_request(related.candidate, selected, "floor")
+                await interrupt()
+            if self.owns(owned.token):
+                self._lines.put_nowait(line)
+        elif "stop" in actions:
+            playing = self._voice.state == "announce"
+            if playing:
+                stopped = tuple(fragment for fragment, action in zip(related.fragments, actions) if action == "stop")
+                self._record_stop_request(related.candidate, stopped, "stop")
+            if playing:
+                played = self._speech.played().strip() if self._voice.voiced_at is not None else ""
+                self._after_voice_stop(None, played, related.fragments[-1])
+                await interrupt()
+            else:
+                self._finish_follow_up(window)
+        else:
+            window.retained = tuple(fragment for fragment, action in zip(related.fragments, actions) if action == "uncertain")
+            self._restore_follow_up(window)
 
     def _origin(self, at: float | None) -> tuple[str, bool | None]:
         if self._owned is not None and at is not None:
@@ -379,26 +866,32 @@ class VoiceMode:
     def owns(self, owner: tuple[str, int]) -> bool:
         return not self._closed and self._owned is not None and self._owned.token == owner
 
-    def _retire(self) -> None:
-        self._epoch += 1
+    def _retire(self, *, preserve_follow_up: bool = False) -> bool:
+        # Expiry ends eligibility for new onsets, not an already captured continuation.
+        if preserve_follow_up and self._owned_capture_pending():
+            return self._sync_capture()
+        if not preserve_follow_up:
+            self._period = None
+            self._epoch += 1
+            self._follow_up = None
+            self._rejected_sources.clear()
+            self._reject_unknown_sources = False
         self._owned = None
         self._reply_started = None
         self._reply_finished = None
         self._accepted_candidate = -1
-        self._waiting.clear()
-        self._retained.clear()
-        self._inflight = ()
-        self._applying_fragments = ()
+        self._clear_owned_fragments()
         self._latest_candidate = -1
-        self._origins.clear()
-        self._sync_capture()
+        return self._sync_capture()
 
     def semantic_context(self, owner: tuple[str, int], start: int) -> None:
         if self.owns(owner) and self._owned is not None and 0 <= start < len(self._owned.segments):
             self._owned = replace(self._owned, semantic_start=start)
 
     def typed_input(self) -> None:
-        if self._owned is None and self._voice.in_turn and self._voice.state in CAPTURING:
+        self._typed_at = self._clock.now()
+        # STT can hold an initial recording before its queued onset reaches this state machine.
+        if self._owned is None and self._follow_up is None and self._voice.state in CAPTURING:
             return
         before = self._voice.state
         self._voice = Voice()
@@ -407,16 +900,23 @@ class VoiceMode:
             self._transition(before, "idle", EndConversation(self._clock.now()))
         self._idle.set()
 
-    def _sync_capture(self) -> None:
-        setting = (not self._closed and (self._voice.state in CAPTURING or self._voice.state == "thinking"), self._epoch)
+    def _sync_capture(self) -> bool:
+        pending = self._follow_up_pending()
+        setting = (not self._closed and (self._voice.state in CAPTURING or self._voice.state in VOICED
+                                        or self._voice.state == "thinking" or pending),
+                   self._epoch, not self._closed and self._voice.state == "idle" and not pending)
         if setting != self._capture_setting:
             self._capture_setting = setting
-            self._audio.capture(setting[0], owner=setting[1])
+            accepted = self._audio.capture(setting[0], owner=setting[1], idle=setting[2], wake_candidate=self._wake_candidate)
+            self._wake_candidate = None
+            return accepted
+        return True
 
     def _applied(self, task: asyncio.Task[None]) -> None:
         self._applying.discard(task)
         self._applying_fragments = ()
         self._start_assessment()
+        self._settle_expired_source()
 
     def _start_assessment(self) -> None:
         if self._assessing is not None or self._applying or not self._waiting or self._owned is None or self._closed:
@@ -447,42 +947,81 @@ class VoiceMode:
             self._events.put_nowait(_Related(candidate, fragments, owner, epoch, result))
         self._assessing = asyncio.create_task(assess())
 
+    def _after_voice_stop(self, source: SpokenTurn | None, played: str, heard: Heard) -> None:
+        before = self._voice.state
+        opened = self._clock.now()
+        expires = opened + self._timing.listen_s
+        self._voice = Voice(state="follow_up", deadline=expires)
+        self._retire()
+        self._follow_up = FollowUpWindow(f"voice-stop-{self._request_namespace}-{opened}", self._epoch,
+                                        opened, expires, source.semantic_text if source is not None else "",
+                                        played, source)
+        self._transition(before, "follow_up", heard)
+        self._settle_idle()
+
+    def _record_stop_request(self, candidate: Candidate, fragments: tuple[Heard, ...], decision: str) -> None:
+        onset = fragments[0].started_at if fragments else None
+        requested = self._clock.now()
+        self._metrics.record({
+            "kind": "playback_admission", "candidate_id": candidate.candidate_id,
+            "phase": candidate.phase, "decision": decision, "source_onset_at": onset,
+            "stop_requested_at": requested, "time_basis": "perf_counter",
+            "onset_to_stop_request_ms": None if onset is None else round((requested - onset) * 1000),
+            "played_basis": "queue_estimate",
+        })
+
     async def _apply_related(self, related: _Related, interrupt: Callable[[], Awaitable[Any]]) -> None:
         if related.fragments is not self._applying_fragments or not self.owns(related.owner.token) or related.epoch != self._epoch:
             return
         self._applying_fragments = ()
         verdict = related.result.verdict
+        reason = related.result.reason
         if related.result.candidate_id != related.candidate.candidate_id or related.result.turn_id != related.candidate.turn_id:
             self._retained.extend(related.fragments)
             return
+        selected = related.fragments
+        retained = related.fragments
+        actions = related.result.segment_actions
+        if actions is not None:
+            if len(actions) != len(related.fragments) or any(action not in ("floor", "stop", "ignore", "uncertain") for action in actions):
+                verdict = "uncertain"
+                reason = "invalid_segment_actions"
+                selected = ()
+            else:
+                selected = tuple(fragment for fragment, action in zip(related.fragments, actions) if action == "floor")
+                retained = tuple(fragment for fragment, action in zip(related.fragments, actions) if action != "ignore")
+                verdict = "directed" if selected else "stop_reply" if "stop" in actions else "uncertain" if "uncertain" in actions else "unrelated"
         self._metrics.record({"kind": "spoken_relation", "request_id": related.owner.id,
                               "revision": related.owner.revision, "candidate_id": related.candidate.candidate_id,
-                              "verdict": verdict, "reason": related.result.reason})
+                              "verdict": verdict, "reason": reason,
+                              "elapsed_ms": related.result.elapsed_ms,
+                              "observed_segments": len(related.fragments),
+                              "selected_segments": [index for index, fragment in enumerate(related.fragments) if fragment in selected] if verdict == "directed" else []})
         newer = self._waiting or (related.heard.candidate is not None and self._latest_candidate > related.heard.candidate)
         if newer:
             if verdict != "unrelated":
-                self._retained.extend(related.fragments)
+                self._retained.extend(retained)
             return
         if verdict == "stop_reply":
-            self._heard_before_cut = self._speech.played().strip()
-            before = self._voice.state
-            self._voice = replace(self._voice, state="listening", in_turn=False, awaiting=None,
-                                  deadline=self._clock.now() + self._timing.listen_s, barge=None, cut_off=False)
-            self._retire()
-            self._transition(before, "listening", related.heard)
-            self.speech.stop()
+            stopped = tuple(fragment.heard for index, fragment in enumerate(related.fragments)
+                            if actions is None or actions[index] == "stop")
+            self._record_stop_request(related.candidate, stopped, "stop")
+            played = self._speech.played().strip()
+            self._after_voice_stop(related.owner, played, related.heard)
             await interrupt()
             return
         if verdict not in ("directed", "amend", "new_request"):
             if verdict != "unrelated":
-                self._retained.extend(related.fragments)
+                self._retained.extend(retained)
             return
         try:
-            updated = related.owner.amended(related.candidate.transcript, related.heard.at, related.heard.lang,
-                                            segments=tuple(fragment.heard.text for fragment in related.fragments))
+            transcript = " ".join(fragment.heard.text for fragment in selected).strip()
+            updated = related.owner.amended(transcript, related.heard.at, related.heard.lang,
+                                            segments=tuple(fragment.heard.text for fragment in selected))
         except ValueError as error:
             self._notice(str(error))
             return
+        self._follow_up = None
         self._owned = updated
         self._applying_fragments = ()
         self._reply_started = None
@@ -499,6 +1038,7 @@ class VoiceMode:
         line = Line(updated.text, updated.arrived, updated.lang, typed=False, interrupted=played or None,
                     request_id=updated.id, revision=updated.revision, segments=updated.segments, relation_hint=verdict)
         self._admitted(line)
+        self._record_stop_request(related.candidate, tuple(fragment.heard for fragment in selected), "floor")
         await interrupt()
         if self.owns(updated.token):
             self._lines.put_nowait(line)
@@ -507,11 +1047,23 @@ class VoiceMode:
     def _step(self, event: Event) -> list[Action]:
         before_voice = self._voice
         before, woke_at = before_voice.state, before_voice.woke_at
+        if isinstance(event, WakeWord) and event.at < self._typed_at:
+            return []
+        if isinstance(event, WakeWord) and event.idle_candidate is not None:
+            if event.owner != self._epoch or before != "idle":
+                return []
         if isinstance(event, (ReplyAudio, ReplyDone)) and event.owner is not None and not self.owns(event.owner):
             return []
         self._voice, actions = step(before_voice, event, self._timing)
-        if isinstance(event, WakeWord) and not before_voice.in_turn and event.at >= before_voice.chime_until:
-            self._retire()
+        if isinstance(event, SpeechStarted) and before == "follow_up" and self._follow_up is not None:
+            self._voice = replace(before_voice, in_turn=True)
+        delivered_at = event.delivered_at if isinstance(event, WakeWord) and event.delivered_at is not None else event.at
+        if isinstance(event, WakeWord) and not before_voice.in_turn and delivered_at >= before_voice.chime_until:
+            self._wake_candidate = event.idle_candidate
+            if not self._retire():
+                self._voice = before_voice
+                self._sync_capture()
+                return []
         if any(isinstance(action, SendTurn) for action in actions):
             heard = next(action for action in actions if isinstance(action, SendTurn))
             self._request_sequence += 1
@@ -520,30 +1072,47 @@ class VoiceMode:
             self._reply_finished = None
             if isinstance(event, Heard) and event.candidate is not None:
                 self._accepted_candidate = event.candidate
+        if self._voice.state == "follow_up" and isinstance(event, ReplyDone) and self._voice.deadline is not None:
+            if before == "announce" and self._follow_up is not None and self._follow_up.phase == "announce":
+                self._follow_up.expires = self._voice.deadline
+                self._follow_up.completed_at = event.at
+                self._follow_up.played_text = self._speech.played().strip()
+            else:
+                self._follow_up = FollowUpWindow(
+                    f"follow-up-{self._request_namespace}-{event.at}", self._epoch, event.at, self._voice.deadline,
+                    self._owned.semantic_text if self._owned is not None and before != "announce" else "",
+                    self._speech.played().strip(), self._owned if before != "announce" else None,
+                )
         if self._voice.state == "idle" and before_voice.state != "idle":
-            self._retire()
+            preserve = isinstance(event, Tick) and self._follow_up is not None
+            if preserve and self._follow_up is not None and not self._follow_up.active and not self._follow_up.inflight:
+                self._follow_up.retained = ()
+            self._retire(preserve_follow_up=preserve)
         self._sync_capture()
-        if isinstance(event, CaptureAborted) and before_voice.in_turn and before in CAPTURING:
-            reason = {
-                "retention_limit": "That request exceeded the retained audio limit.",
-                "overflow": "Audio was dropped while listening fell behind.",
-            }.get(event.reason, "That request could not be transcribed.")
+        if isinstance(event, CaptureAborted) and (before_voice.in_turn or event.wake_handoff) and before in CAPTURING:
+            if event.wake_handoff:
+                reason = "Audio was dropped while waking." if event.reason == "overflow" else "That wake request could not be retained."
+            else:
+                reason = {
+                    "retention_limit": "That request exceeded the retained audio limit.",
+                    "overflow": "Audio was dropped while listening fell behind.",
+                }.get(event.reason, "That request could not be transcribed.")
             self._notice(f"{reason} Say 'Hey Jarvis' and try again.")
-        self._bargein_log.observe(before_voice, event, self._voice, actions, self._speech.played)
         after = self._voice.state
         if after != before:
             self._transition(before, after, event)
-        # After capture: a turn that starts now keeps the speech of the Barge-in that stopped Jarvis.
-        if (since := barge_in_from(self._voice, self._timing)) != self._barge_in_from:
-            self._barge_in_from = since
-            self._audio.barge_in(since)
         if self._voice.woke_at != woke_at:
             self._woke()
         return actions
 
-    async def _next_event(self) -> Event | _Related:
+    async def _next_event(self) -> Event | _Related | _FollowUpRelated | _CumulativeResult:
         """The next event, or a Tick once the machine's deadline has come."""
         deadline = self._voice.deadline
+        if self._period is not None:
+            deadline = min(deadline if deadline is not None else float("inf"),
+                           self._period.reassess_at, self._period.opened + 30)
+            if deadline == float("inf"):
+                deadline = None
         if deadline is None:
             return await self._events.get()
         getting = asyncio.create_task(self._events.get())
@@ -561,10 +1130,7 @@ class VoiceMode:
         return Tick(self._clock.now())
 
     def _transition(self, before: VoiceState, after: VoiceState, event: Event) -> None:
-        if after == "idle":
-            self._idle.set()
-        else:
-            self._idle.clear()
+        self._settle_idle()
         try:
             self._metrics.record({
                 "kind": "voice", "from": before, "to": after, "on": type(event).__name__,

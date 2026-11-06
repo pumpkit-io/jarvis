@@ -166,7 +166,6 @@ def test_voice_settings_default_to_the_ticket_and_phase_0(checkout: Path) -> Non
     assert (voice.vad_threshold, voice.end_silence_ms, voice.end_extend_ms) == (0.5, 500, 1500)
     assert (voice.smart_turn_threshold, voice.preroll_ms) == (0.5, 1500)
     assert (voice.max_turn_s, voice.chime_guard_ms, voice.wake_refractory_ms, voice.onset_pad_ms) == (30.0, 500, 2000, 200)
-    assert (voice.bargein_min_speech_ms, voice.bargein_decide_ms, voice.bargein_guard_ms) == (200, 800, 250)
 
 
 def test_voice_settings_come_from_dotenv(checkout: Path) -> None:
@@ -175,14 +174,12 @@ def test_voice_settings_come_from_dotenv(checkout: Path) -> None:
         "JARVIS_END_EXTEND_MS=1000\nJARVIS_SMART_TURN_THRESHOLD=0.6\nJARVIS_VAD_THRESHOLD=0.4\n"
         "JARVIS_PREROLL_MS=1200\nJARVIS_LISTEN_SECONDS=5\nJARVIS_ANNOUNCE_FOLLOWUP_SECONDS=3\n"
         "JARVIS_MAX_TURN_SECONDS=20\nJARVIS_CHIME_GUARD_MS=700\nJARVIS_WAKE_REFRACTORY_MS=1500\nJARVIS_ONSET_PAD_MS=300\n"
-        "JARVIS_BARGEIN_MIN_SPEECH_MS=150\nJARVIS_BARGEIN_DECIDE_MS=600\nJARVIS_BARGEIN_GUARD_MS=400\n"
     )
     voice = load_settings(checkout, environ={}).voice
     assert (voice.follow_up_s, voice.announce_follow_up_s, voice.listen_s) == (8.0, 3.0, 5.0)
     assert (voice.wake_threshold, voice.aec, voice.vad_threshold) == (0.3, "off", 0.4)
     assert (voice.end_silence_ms, voice.end_extend_ms, voice.smart_turn_threshold, voice.preroll_ms) == (400, 1000, 0.6, 1200)
     assert (voice.max_turn_s, voice.chime_guard_ms, voice.wake_refractory_ms, voice.onset_pad_ms) == (20.0, 700, 1500, 300)
-    assert (voice.bargein_min_speech_ms, voice.bargein_decide_ms, voice.bargein_guard_ms) == (150, 600, 400)
 
 
 @pytest.mark.parametrize(
@@ -203,6 +200,11 @@ def test_voice_settings_out_of_range_are_refused(checkout: Path, line: str) -> N
     (checkout / ".env").write_text(line + "\n")
     with pytest.raises(ConfigError, match=line.split("=")[0]):
         load_settings(checkout, environ={})
+
+
+def test_apple_idle_wake_is_an_explicit_engine_choice(checkout: Path) -> None:
+    assert load_settings(checkout, environ={"JARVIS_WAKE_ENGINE": "apple-vad"}).voice.wake_engine == "apple-vad"
+    assert load_settings(checkout, environ={}).voice.wake_engine == "openwakeword"
 
 
 @pytest.mark.parametrize("name", ["JARVIS_FOLLOWUP_SECONDS", "JARVIS_END_SILENCE_MS", "JARVIS_CLIPS_MAX_MB"])
@@ -277,3 +279,32 @@ def test_audio_clips_are_off_by_default_and_opt_in_with_retention_limits(checkou
 def test_audio_clips_must_be_on_or_off(checkout: Path) -> None:
     with pytest.raises(ConfigError, match="JARVIS_AUDIO_CLIPS"):
         load_settings(checkout, environ={"JARVIS_AUDIO_CLIPS": "yes"})
+
+
+def test_cloud_admission_is_explicit_and_ignored_in_text_mode(checkout: Path) -> None:
+    defaults = load_settings(checkout, {})
+    assert defaults.voice.admission_backend == "off"
+    configured = load_settings(checkout, {"JARVIS_ADMISSION_BACKEND": "claude", "JARVIS_ADMISSION_MODEL": "sonnet"})
+    assert configured.voice.admission_backend == "claude" and configured.voice.admission_model == "sonnet"
+    text = load_settings(checkout, {"JARVIS_ADMISSION_BACKEND": "claude"}, ignore_voice=lambda _message: None)
+    assert text.voice.admission_backend == "off"
+    with pytest.raises(ConfigError):
+        load_settings(checkout, {"JARVIS_ADMISSION_BACKEND": "codex"})
+
+
+def test_obsolete_pause_first_settings_cannot_change_contextual_admission(checkout: Path) -> None:
+    (checkout / '.env').write_text(
+        'JARVIS_BARGEIN_MIN_SPEECH_MS=obsolete\nJARVIS_BARGEIN_DECIDE_MS=obsolete\nJARVIS_BARGEIN_GUARD_MS=obsolete\n'
+        'JARVIS_ONSET_PAD_MS=300\nJARVIS_MAX_TURN_SECONDS=20\n'
+    )
+    voice = load_settings(checkout, environ={}).voice
+    assert voice.admission_backend == 'off'
+    assert voice.onset_pad_ms == 300 and voice.max_turn_s == 20
+
+
+def test_jev_key_can_come_from_process_and_is_not_shown_in_settings(tmp_path: Path) -> None:
+    (tmp_path / '.env').write_text('JARVIS_ADMISSION_BACKEND=jev\nTYPESAFE_API_KEY=file-test-key\n')
+    settings = load_settings(tmp_path, {'TYPESAFE_API_KEY': 'process-test-key'})
+    assert settings.voice.admission_backend == 'jev'
+    assert settings.voice.jev_api_key == 'process-test-key'
+    assert 'process-test-key' not in repr(settings)
