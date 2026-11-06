@@ -38,12 +38,15 @@ if "--version" in sys.argv or "-v" in sys.argv:
     print("2.1.318 (Claude Code)")
     sys.exit(0)
 signal.signal(signal.SIGTERM,signal.SIG_IGN)
-with open({str(marker)!r},"w") as f:
-    json.dump(dict(pid=os.getpid(),parent=os.getppid(),group=os.getpgrp()),f)
+def publish(value):
+    pending={str(marker) + ".tmp"!r}
+    with open(pending,"w") as f:
+        json.dump(value,f)
+    os.replace(pending,{str(marker)!r})
+publish(dict(pid=os.getpid(),parent=os.getppid(),group=os.getpgrp()))
 for line in sys.stdin:
     item=json.loads(line)
-    with open({str(marker)!r},"w") as f:
-        json.dump(dict(pid=os.getpid(),parent=os.getppid(),group=os.getpgrp(),stage=item.get("type"),subtype=item.get("request",{{}}).get("subtype")),f)
+    publish(dict(pid=os.getpid(),parent=os.getppid(),group=os.getpgrp(),stage=item.get("type"),subtype=item.get("request",{{}}).get("subtype")))
     if item.get("type")=="control_request":
         print(json.dumps(dict(type="control_response",response=dict(subtype="success",request_id=item["request_id"],response=dict(hook_on_failure_supported=True,hooks_applied=True)))),flush=True)
     elif item.get("type")=="user":

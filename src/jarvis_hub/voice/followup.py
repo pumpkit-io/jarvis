@@ -17,6 +17,7 @@ class FollowUpWindow:
     source: SpokenTurn | None
     phase: str = "follow_up"
     completed_at: float | None = None
+    reply_started_at: float | None = None
     retained: tuple[Heard, ...] = ()
     waiting: list[Heard] = field(default_factory=lambda: list[Heard]())
     inflight: tuple[Heard, ...] = ()
