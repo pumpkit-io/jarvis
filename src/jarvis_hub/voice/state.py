@@ -40,6 +40,9 @@ class Timing:
 @dataclass(frozen=True)
 class WakeWord:
     at: float
+    delivered_at: float | None = None
+    owner: int | None = None
+    idle_candidate: int | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +68,7 @@ class CaptureAborted:
     reason: str
     owner: int | None = None
     candidate: int | None = None
+    wake_handoff: bool = False
 
 
 @dataclass(frozen=True)
@@ -94,6 +98,7 @@ class Heard:
     candidate: int | None = None
     started_at: float | None = None
     limited: bool = False
+    delivered_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -296,8 +301,10 @@ def step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Action
 
 def _step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Action]]:
     match event:
-        case WakeWord(at):
-            return _wake(voice, at, timing)
+        case WakeWord(_, _, _, idle_candidate) if idle_candidate is not None and voice.state != "idle":
+            return voice, []
+        case WakeWord(at, delivered_at):
+            return _wake(voice, at, timing, delivered_at)
         case ChimeStarted(at):
             return replace(voice, chime_until=max(voice.chime_until, at + timing.chime_s)), []
         case SpeechStarted(at):
@@ -306,7 +313,9 @@ def _step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Actio
                 return replace(voice, state="listening", deadline=None, in_turn=True, window_ends=ends), []
             return voice, []
         case Heard(text, lang, at):
-            return _heard(voice, text, lang, at, timing)
+            return _heard(voice, text, lang, at, timing, event.delivered_at)
+        case CaptureAborted(_, _, _, _, True) if voice.state == "listening":
+            return replace(voice, state="idle", deadline=None, in_turn=False, window_ends=None), []
         case CaptureAborted(at):
             if voice.state in CAPTURING and voice.in_turn:
                 return _heard(voice, "", None, at, timing)
@@ -384,14 +393,15 @@ def _stop(voice: Voice, at: float, timing: Timing) -> tuple[Voice, list[Action]]
     return listening, [Interrupt()]
 
 
-def _wake(voice: Voice, at: float, timing: Timing) -> tuple[Voice, list[Action]]:
+def _wake(voice: Voice, at: float, timing: Timing, delivered_at: float | None = None) -> tuple[Voice, list[Action]]:
+    delivered = at if delivered_at is None else delivered_at
     # A hit inside the User's turn is "Jarvis" said in it, or the phrase that opened it: the turn goes on.
-    if at < voice.chime_until or voice.in_turn:
+    if delivered < voice.chime_until or voice.in_turn:
         return voice, []
     listening = replace(
         voice,
         state="listening",
-        deadline=at + timing.listen_s,
+        deadline=delivered + timing.listen_s,
         ending=False,
         awaiting=None,
         woke_at=at,
@@ -399,13 +409,13 @@ def _wake(voice: Voice, at: float, timing: Timing) -> tuple[Voice, list[Action]]
     )
     if voice.state == "listening":
         return listening, []
-    chimed = replace(listening, chime_until=at + timing.chime_s)
+    chimed = replace(listening, chime_until=delivered + timing.chime_s)
     if voice.state in ("thinking", "speaking", "announce"):
         return chimed, [Interrupt(), Chime()]
     return chimed, [Chime()]
 
 
-def _heard(voice: Voice, text: str, lang: Lang | None, at: float, timing: Timing) -> tuple[Voice, list[Action]]:
+def _heard(voice: Voice, text: str, lang: Lang | None, at: float, timing: Timing, delivered_at: float | None = None) -> tuple[Voice, list[Action]]:
     if voice.state not in CAPTURING:
         return voice, []
     heard = replace(voice, in_turn=False, window_ends=None)
@@ -415,7 +425,7 @@ def _heard(voice: Voice, text: str, lang: Lang | None, at: float, timing: Timing
         if voice.window_ends is not None and _is_noise(text):
             return replace(heard, state="follow_up", deadline=voice.window_ends), []
         # The wake phrase alone, or noise after the Wake word, waits for the request as the Wake word would.
-        return replace(heard, state="listening", deadline=at + timing.listen_s), []
+        return replace(heard, state="listening", deadline=(at if delivered_at is None else delivered_at) + timing.listen_s), []
     if stop_phrase(turn) is not None:
         return replace(heard, state="idle", deadline=None, ending=False), []
     sent = SendTurn(turn, lang, at, interrupted=voice.cut_off)

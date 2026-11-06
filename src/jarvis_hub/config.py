@@ -41,7 +41,7 @@ class VoiceSettings:
     follow_up_s: float = 6.0
     announce_follow_up_s: float = 4.0
     listen_s: float = 6.0
-    wake_engine: Literal["openwakeword"] = "openwakeword"
+    wake_engine: Literal["openwakeword", "apple-vad"] = "openwakeword"
     wake_threshold: float = 0.5
     stt_engine: Literal["parakeet"] = "parakeet"
     tts_engine: Literal["kokoro"] = "kokoro"
@@ -169,7 +169,7 @@ def load_settings(
             follow_up_s=number("JARVIS_FOLLOWUP_SECONDS", 6.0, 0, 120, low_open=True),
             announce_follow_up_s=number("JARVIS_ANNOUNCE_FOLLOWUP_SECONDS", 4.0, 0, 120, low_open=True),
             listen_s=number("JARVIS_LISTEN_SECONDS", 6.0, 0, 120, low_open=True),
-            wake_engine=choice("JARVIS_WAKE_ENGINE", "openwakeword", ("openwakeword",)),
+            wake_engine=choice("JARVIS_WAKE_ENGINE", "openwakeword", ("openwakeword", "apple-vad")),
             wake_threshold=number("JARVIS_WAKE_THRESHOLD", 0.5, 0, 1, low_open=True),
             stt_engine=choice("JARVIS_STT_ENGINE", "parakeet", ("parakeet",)),
             tts_engine=choice("JARVIS_TTS_ENGINE", "kokoro", ("kokoro",)),

@@ -53,8 +53,8 @@ class AudioInput(Protocol):
 
     def events(self) -> AsyncIterator[InputEvent]: ...
 
-    def capture(self, on: bool, *, owner: int | None = None) -> None:
-        """Whether speech becomes turns. The Wake word is listened for either way."""
+    def capture(self, on: bool, *, owner: int | None = None, idle: bool = False, wake_candidate: int | None = None) -> bool:
+        """`idle` grants keyword proposals; a stale retained wake handoff returns False."""
         ...
 
     def barge_in(self, since: float | None) -> None:
@@ -187,7 +187,8 @@ class VoiceMode:
         self._reply_started: tuple[tuple[str, int], float] | None = None
         self._reply_finished: tuple[tuple[str, int], float] | None = None
         self._closed = False
-        self._capture_setting: tuple[bool, int] | None = None
+        self._capture_setting: tuple[bool, int, bool] | None = None
+        self._wake_candidate: int | None = None
         self._origins: dict[int | None, tuple[str, bool | None]] = {}
         self._waiting: deque[_Fragment] = deque()
         self._retained: deque[_Fragment] = deque()
@@ -319,6 +320,8 @@ class VoiceMode:
                 if not self._applying:
                     self._start_assessment()
                 continue
+            if isinstance(event, CaptureAborted) and event.wake_handoff and event.owner != self._epoch:
+                continue
             if isinstance(event, (Heard, SpeechStarted, CaptureAborted)):
                 if event.owner is not None and event.owner != self._epoch:
                     continue
@@ -379,7 +382,7 @@ class VoiceMode:
     def owns(self, owner: tuple[str, int]) -> bool:
         return not self._closed and self._owned is not None and self._owned.token == owner
 
-    def _retire(self) -> None:
+    def _retire(self) -> bool:
         self._epoch += 1
         self._owned = None
         self._reply_started = None
@@ -391,7 +394,7 @@ class VoiceMode:
         self._applying_fragments = ()
         self._latest_candidate = -1
         self._origins.clear()
-        self._sync_capture()
+        return self._sync_capture()
 
     def semantic_context(self, owner: tuple[str, int], start: int) -> None:
         if self.owns(owner) and self._owned is not None and 0 <= start < len(self._owned.segments):
@@ -408,11 +411,15 @@ class VoiceMode:
             self._transition(before, "idle", EndConversation(self._clock.now()))
         self._idle.set()
 
-    def _sync_capture(self) -> None:
-        setting = (not self._closed and (self._voice.state in CAPTURING or self._voice.state == "thinking"), self._epoch)
+    def _sync_capture(self) -> bool:
+        setting = (not self._closed and (self._voice.state in CAPTURING or self._voice.state == "thinking"),
+                   self._epoch, not self._closed and self._voice.state == "idle")
         if setting != self._capture_setting:
             self._capture_setting = setting
-            self._audio.capture(setting[0], owner=setting[1])
+            accepted = self._audio.capture(setting[0], owner=setting[1], idle=setting[2], wake_candidate=self._wake_candidate)
+            self._wake_candidate = None
+            return accepted
+        return True
 
     def _applied(self, task: asyncio.Task[None]) -> None:
         self._applying.discard(task)
@@ -525,11 +532,19 @@ class VoiceMode:
     def _step(self, event: Event) -> list[Action]:
         before_voice = self._voice
         before, woke_at = before_voice.state, before_voice.woke_at
+        if isinstance(event, WakeWord) and event.idle_candidate is not None:
+            if event.owner != self._epoch or before != "idle":
+                return []
         if isinstance(event, (ReplyAudio, ReplyDone)) and event.owner is not None and not self.owns(event.owner):
             return []
         self._voice, actions = step(before_voice, event, self._timing)
-        if isinstance(event, WakeWord) and not before_voice.in_turn and event.at >= before_voice.chime_until:
-            self._retire()
+        delivered_at = event.delivered_at if isinstance(event, WakeWord) and event.delivered_at is not None else event.at
+        if isinstance(event, WakeWord) and not before_voice.in_turn and delivered_at >= before_voice.chime_until:
+            self._wake_candidate = event.idle_candidate
+            if not self._retire():
+                self._voice = before_voice
+                self._sync_capture()
+                return []
         if any(isinstance(action, SendTurn) for action in actions):
             heard = next(action for action in actions if isinstance(action, SendTurn))
             self._request_sequence += 1
@@ -541,11 +556,14 @@ class VoiceMode:
         if self._voice.state == "idle" and before_voice.state != "idle":
             self._retire()
         self._sync_capture()
-        if isinstance(event, CaptureAborted) and before_voice.in_turn and before in CAPTURING:
-            reason = {
-                "retention_limit": "That request exceeded the retained audio limit.",
-                "overflow": "Audio was dropped while listening fell behind.",
-            }.get(event.reason, "That request could not be transcribed.")
+        if isinstance(event, CaptureAborted) and (before_voice.in_turn or event.wake_handoff) and before in CAPTURING:
+            if event.wake_handoff:
+                reason = "Audio was dropped while waking." if event.reason == "overflow" else "That wake request could not be retained."
+            else:
+                reason = {
+                    "retention_limit": "That request exceeded the retained audio limit.",
+                    "overflow": "Audio was dropped while listening fell behind.",
+                }.get(event.reason, "That request could not be transcribed.")
             self._notice(f"{reason} Say 'Hey Jarvis' and try again.")
         self._bargein_log.observe(before_voice, event, self._voice, actions, self._speech.played)
         after = self._voice.state

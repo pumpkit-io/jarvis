@@ -783,9 +783,10 @@ class ScriptedAudio:
         """What STT made of the rest of a run that has made all the Barge-ins it may."""
         self._queue.put_nowait(Overheard(text, self._clock.now()))
 
-    def capture(self, on: bool, *, owner: int | None = None) -> None:
+    def capture(self, on: bool, *, owner: int | None = None, idle: bool = False, wake_candidate: int | None = None) -> bool:
         self.owner = owner
         self.capturing.append(on)
+        return True
 
     def barge_in(self, since: float | None) -> None:
         self.watching.append(since)
