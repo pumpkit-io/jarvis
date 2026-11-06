@@ -60,7 +60,7 @@ Replies start with generated content about the request; slow generation stays si
 
 The [voice trace](docs/notes/voice-tracing.md) correlates captured requests, endpointing, transcription, Hub turns and estimated meaningful playback. It distinguishes missing measurements from zero delay.
 
-Type into the same terminal during voice mode for a text-only reply. Details appear on screen and in `.jarvis/show.log`. Ctrl-D or Ctrl-C stops the Hub. Each launch starts a fresh conversation; saved Tasks and waits survive restart, and interrupted Subagents keep their branches.
+Type into the same terminal during voice mode for a text-only reply. In an interactive voice terminal, Ctrl-G immediately stops the spoken reply without Enter and keeps the text you are editing. Background Tasks continue. Details appear on screen and in `.jarvis/show.log`. Ctrl-D at an empty prompt ends input; Ctrl-C exits the Hub. Each launch starts a fresh conversation; saved Tasks and waits survive restart, and interrupted Subagents keep their branches.
 
 Startup shows loading and ready notices for the conversation model, speech and listening. The short readiness tone means speech output is ready; check the model and listening notices before speaking. There is no prerecorded greeting.
 
@@ -68,7 +68,7 @@ The Talker warms in the background at startup, using one hidden subscription tur
 
 Ask for status or to cancel a Task by name. Quiet mode holds routine Announcements until the next Wake word; news that needs you can still be announced. A Boundary action asks for one recorded Approval. The Hub runs approved merges and branch deletions; other approved actions go to a Subagent. See [ADR 0013](docs/adr/0013-approvals-checked-by-the-hub.md) for the rules and limits.
 
-For cumulative directed stops, opt in with `JARVIS_ADMISSION_BACKEND=jev` and `TYPESAFE_API_KEY`. This sends bounded candidate text, pause timings and recent context to Jev; raw audio stays local. See [cumulative voice assessment](docs/notes/cumulative-voice-assessment.md) for limits and unmeasured live gates.
+For cumulative directed stops, opt in with `JARVIS_ADMISSION_BACKEND=jev` and `TYPESAFE_API_KEY`. This sends bounded candidate text, pause timings and recent context to Jev; raw audio stays local. See [voice controls and status](docs/notes/voice-control-and-status.md) for setup, failure states, usage and local control, and [cumulative voice assessment](docs/notes/cumulative-voice-assessment.md) for unmeasured live gates.
 
 ## Settings
 

@@ -184,10 +184,11 @@ def configured_assessor(backend: str, model: str, prompt_path: Path, *, notice: 
     if backend == "jev":
         return JevAssessor(api_key, notice=notice, record=record)
     if backend == "off":
-        notice("Cloud admission disabled.")
+        notice("Contextual voice assessment disabled (JARVIS_ADMISSION_BACKEND=off). Select jev and set TYPESAFE_API_KEY to enable it; keyboard stop stays local.")
         return None
     if backend != "claude":
         raise ValueError("Unsupported admission backend; no fallback was selected.")
+    notice(f"Contextual voice provider: Claude {model} (legacy endpoint-only); Jev is not selected.")
     cli = shutil.which("claude")
     if cli is None:
         notice("Cloud admission unavailable: install Claude Code and sign in with your subscription, then restart.")

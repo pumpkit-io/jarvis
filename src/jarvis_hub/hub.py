@@ -309,6 +309,21 @@ class _TurnGate:
     def __init__(self) -> None:
         self.turn: int | None = None
         self._lock = asyncio.Lock()
+        self._pending: dict[int, asyncio.Task[bool]] = {}
+
+    def request_interrupt(self, session: AgentSession, turn: int) -> asyncio.Task[bool]:
+        if turn not in self._pending:
+            task = asyncio.create_task(self.interrupt(session, turn))
+            self._pending[turn] = task
+            task.add_done_callback(lambda done: self._pending.pop(turn, None))
+        return self._pending[turn]
+
+    async def close(self) -> None:
+        pending = tuple(self._pending.values())
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def interrupt(self, session: AgentSession, turn: int) -> bool:
         if self.turn != turn:
@@ -318,6 +333,8 @@ class _TurnGate:
         return True
 
     async def before_next_turn(self) -> None:
+        if self._pending:
+            await asyncio.gather(*self._pending.values(), return_exceptions=True)
         # Taking the lock waits out an interrupt still on its way to a turn that has ended.
         async with self._lock:
             pass
@@ -428,6 +445,7 @@ class Hub:
         # Only the reply to the User's own spoken turn ends the conversation; news never does.
         self._turn_answers_user = False
         self._interrupted_turn: int | None = None
+        self._local_interrupts: set[asyncio.Task[bool]] = set()
         self._orchestrator_gate = _TurnGate()
         # The Tasks of the running Orchestrator turn: one, or every open one in the recovery turn after a restart.
         self._turn_tasks: tuple[str, ...] = ()
@@ -505,6 +523,23 @@ class Hub:
         await asyncio.wait([settling, talking], return_when=asyncio.FIRST_COMPLETED)
         settling.cancel()
 
+    def request_interrupt(self) -> asyncio.Task[bool] | None:
+        self._speech.stop()
+        turn = self._talker_gate.turn
+        if turn is None or self._talker is None or not self._turn_spoken:
+            return None
+        self._interrupted_turn = turn
+        task = self._talker_gate.request_interrupt(self._talker, turn)
+        if task not in self._local_interrupts:
+            self._local_interrupts.add(task)
+            task.add_done_callback(self._local_stop_done)
+        return task
+
+    def _local_stop_done(self, task: asyncio.Task[bool]) -> None:
+        self._local_interrupts.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            self._output.notice("Audio stopped locally; the generation stop was not confirmed. Check the model connection; typed input remains available.")
+
     async def interrupt(self) -> bool:
         """Stop whatever is being said, and the Talker turn under way if its reply is spoken; a typed line's reply
         goes on. Returns whether a Talker turn was interrupted."""
@@ -518,6 +553,7 @@ class Hub:
     async def close(self) -> None:
         """Stops everything; Tasks, their waits and the Subagents it interrupts are saved for the next launch."""
         self._closing = True
+        await self._talker_gate.close()
         await self._scopes.close()
         await self._waits.close()
         await self._subagents.close()

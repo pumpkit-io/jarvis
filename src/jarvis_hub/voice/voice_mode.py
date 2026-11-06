@@ -255,6 +255,21 @@ class VoiceMode:
         self._notice("Speech ready.")
         self._speech.say("ready", "en")
 
+    def local_stop(self, interrupt: Callable[[], object]) -> None:
+        if self._closed:
+            return
+        window = self._follow_up
+        source = self._owned or (window.source if window is not None else None)
+        period = self._period or TalkingPeriod(self._epoch, source, self._voice.state,
+                                               source.semantic_text if source is not None else "",
+                                               self._speech.played(), self._clock.now())
+        self._voice = Voice()
+        self._retire()
+        self._cumulative_follow_up(period)
+        self._sync_capture()
+        interrupt()
+        self._notice("Spoken reply stopped locally. Tasks continue; typed input stays available.")
+
     def end_conversation(self) -> None:
         self._events.put_nowait(EndConversation(self._clock.now()))
 
@@ -701,7 +716,10 @@ class VoiceMode:
         if decision.reason != "assessed":
             period.failed_at = self._clock.now()
             period.reassess_at = float("inf")
-            self._notice("Jev assessment unavailable; playback continues. Check Jev setup or use typed input.")
+            reasons = {"timeout": "timed out", "throttled": "was throttled", "malformed": "returned malformed data",
+                       "missing_credentials": "needs TYPESAFE_API_KEY", "authentication_required": "needs valid credentials",
+                       "context_limit": "reached its input limit", "busy": "is already running"}
+            self._notice(f"Voice assessment {reasons.get(decision.reason, 'is unavailable')}; playback continues. Use Ctrl-G locally or typed input.")
             return
         period.failed_at = None
         for source in snapshot.sources:
