@@ -54,17 +54,19 @@ The launcher follows symlinks before entering its checkout. In a git worktree, c
 ./jarvis stats --voice --since 24h
 ```
 
-Say “Hey Jarvis” and your request, in one breath if you wish. “Hi Jarvis”, “Ehi Jarvis” and “Jarvis” are intended wake phrases; recall for the User's voice is still awaiting measurement. After a reply, the Follow-up window lets you continue without the Wake word. A whole end control such as “that's all”, “stand by” or “basta così” returns to idle silently. A longer utterance containing those words remains a request. When a conversational reply is appropriate, Jarvis generates its farewell and finishes speaking before returning idle.
+Say “Hey Jarvis” and your request, in one breath if you wish. “Hi Jarvis”, “Ehi Jarvis” and “Jarvis” are intended wake phrases; recall for the User's voice is still awaiting measurement.
+
+Wake-free Follow-up and voice stops during playback require explicitly enabled speech admission; both are unavailable with the default `JARVIS_ADMISSION_BACKEND=off`. With admission enabled, the Follow-up window lets clearly directed speech continue without the Wake word. An admitted whole end control such as “that's all”, “stand by” or “basta così” returns to idle silently. A longer utterance containing those words remains a request. When a conversational reply is appropriate, Jarvis generates its farewell and finishes speaking before returning idle.
 
 Replies start with generated content about the request; slow generation stays silent without a holding sentence. Background work is acknowledged before it starts.
 
 The [voice trace](docs/notes/voice-tracing.md) correlates captured requests, endpointing, transcription, Hub turns and estimated meaningful playback. It distinguishes missing measurements from zero delay.
 
-Type into the same terminal during voice mode for a text-only reply. Details appear on screen and in `.jarvis/show.log`. Ctrl-D or Ctrl-C stops the Hub. Each launch starts a fresh conversation; saved Tasks and waits survive restart, and interrupted Subagents keep their branches.
+Type into the same terminal during voice mode for a text-only reply. Details appear on screen and in `.jarvis/show.log`. Ctrl-D or Ctrl-C stops the Hub, including when speech admission is off. Each launch starts a fresh conversation; saved Tasks and waits survive restart, and interrupted Subagents keep their branches.
 
 Startup shows loading and ready notices for the conversation model, speech and listening. The short readiness tone means speech output is ready; check the model and listening notices before speaking. There is no prerecorded greeting.
 
-The Talker warms in the background at startup, using one hidden subscription turn ([ADR 0006](docs/adr/0006-warm-up-in-the-background.md)). The Orchestrator connects without a prompt. Idle listening and stop phrases use no model call; pending work and Announcements may still need agent turns.
+The Talker warms in the background at startup, using one hidden subscription turn ([ADR 0006](docs/adr/0006-warm-up-in-the-background.md)). The Orchestrator connects without a prompt. Idle wake detection remains local and creates no conversational turn. Opt-in speech admission makes classifier calls even for rejected background candidates; pending work and Announcements may also need agent turns.
 
 Ask for status or to cancel a Task by name. Quiet mode holds routine Announcements until the next Wake word; news that needs you can still be announced. A Boundary action asks for one recorded Approval. The Hub runs approved merges and branch deletions; other approved actions go to a Subagent. See [ADR 0013](docs/adr/0013-approvals-checked-by-the-hub.md) for the rules and limits.
 
@@ -75,9 +77,10 @@ Ask for status or to cancel a Task by name. Quiet mode holds routine Announcemen
 - Identity: `JARVIS_USER_NAME` and `JARVIS_GITHUB_ORG`.
 - Agents: `JARVIS_TALKER_MODEL`, `JARVIS_ORCHESTRATOR_MODEL`, `JARVIS_ORCHESTRATOR_EFFORT`, `JARVIS_MAX_EFFORT`, `JARVIS_MAX_SUBAGENTS` and `JARVIS_TALKER_RESTART_AT`. Talker effort stays low with thinking off; Sonnet is its default after the latency tests (ADR 0005). Subagent `xhigh` or `max` also requires the User's explicit request.
 - Listening windows: `JARVIS_FOLLOWUP_SECONDS`, `JARVIS_ANNOUNCE_FOLLOWUP_SECONDS`, `JARVIS_LISTEN_SECONDS`, `JARVIS_END_SILENCE_MS`, `JARVIS_END_EXTEND_MS`, `JARVIS_PREROLL_MS`, `JARVIS_ONSET_PAD_MS` and `JARVIS_MAX_TURN_SECONDS`.
-- Engines: `JARVIS_WAKE_ENGINE=openwakeword`, `JARVIS_STT_ENGINE=parakeet`, `JARVIS_TTS_ENGINE=kokoro` and `JARVIS_AEC=webrtc` or `off`. These are the currently supported choices; Porcupine and Whisper are not runtime alternatives yet. `--headphones` overrides echo cancellation to off.
+- Engines: wake detection defaults to `JARVIS_WAKE_ENGINE=openwakeword`; `apple-vad` is an experimental opt-in with [explicit local setup](docs/notes/apple-vad-wake.md), pending independent detection and physical Hub checks. `JARVIS_STT_ENGINE=parakeet`, `JARVIS_TTS_ENGINE=kokoro` and `JARVIS_AEC=webrtc` or `off` retain their existing choices. Porcupine and Whisper are not runtime alternatives. `--headphones` overrides echo cancellation to off.
+- Admission: `JARVIS_ADMISSION_BACKEND=off` is the default; explicitly setting `claude` permits candidate transcripts, including possible background speech, and bounded conversation context through the existing first-party subscription. Raw audio stays local. `JARVIS_ADMISSION_MODEL` defaults to `sonnet`. See [admission setup and limits](docs/notes/cloud-spoken-admission.md); enabling it spends classifier usage without establishing semantic or physical readiness.
 - Detection: `JARVIS_WAKE_THRESHOLD`, `JARVIS_VAD_THRESHOLD`, `JARVIS_SMART_TURN_THRESHOLD`, `JARVIS_CHIME_GUARD_MS` and `JARVIS_WAKE_REFRACTORY_MS`. Lower wake thresholds trade fewer missed wakes for more false wakes.
-- Playback admission keeps replies and Announcements running until a current contextual decision accepts a correction or voice-only stop. The former `JARVIS_BARGEIN_*` pause/decision/guard switches are no longer used; see [playback admission](docs/notes/playback-admission.md). Capture onset, turn duration and retention bounds remain active.
+- With admission enabled, playback continues until a current contextual decision accepts a correction or voice-only stop. The former `JARVIS_BARGEIN_*` pause/decision/guard switches are no longer used; see [playback admission](docs/notes/playback-admission.md). Capture onset, turn duration and retention bounds remain active.
 - Audio clips: `JARVIS_AUDIO_CLIPS=on` opts in to WAVs and JSON sidecars in `.jarvis/clips/`. `JARVIS_CLIPS_MAX_COUNT`, `JARVIS_CLIPS_MAX_DAYS` and `JARVIS_CLIPS_MAX_MB` prune the oldest clips while saving is enabled. Saving is off by default; turning it off leaves existing clips in place. Logs contain transcripts even when clips are off. There is no voice-speed setting; speed stays at 1.0.
 
 ## Troubleshooting
@@ -106,4 +109,4 @@ uv run pyright
 
 Default tests use fake agents, clock and audio and do not spend subscription quota. Real-model and real-GitHub tests are opt-in. [AGENTS.md](AGENTS.md), also loaded by `CLAUDE.md`, contains developer instructions; runtime prompts live in `prompts/`. Domain terms are in [GLOSSARY.md](GLOSSARY.md).
 
-[Spike notes](docs/notes/phase-0-spikes.md) record versions, measurements and accepted limits. [The final verification checklist](docs/notes/voice-hub-verification.md) covers the recording session, model comparison and remaining release gates. The automated suite alone does not establish wake recall, speaker behavior or real-world latency.
+[Spike notes](docs/notes/phase-0-spikes.md) record versions, measurements and accepted limits. [The final verification checklist](docs/notes/voice-hub-verification.md) covers the recording session, model comparison and remaining release gates. The automated suite alone does not establish wake recall, speaker behavior or real-world latency. The [Spec #26 acceptance session](docs/notes/spec26-acceptance-session.md) prepares the missing targeted checks and separates physical results from development evidence.

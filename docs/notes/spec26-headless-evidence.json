@@ -1,0 +1,267 @@
+{
+  "schema": "spec26-headless-evidence-v1",
+  "source_commit": "01b996bf35ac2d8e32dde61e00589c60b93fa2e2",
+  "date": "2026-11-06",
+  "scope": "Explicitly authorized bounded real-model tests with no microphone or speaker; not final voice acceptance",
+  "idle": {
+    "mode": "actual Hub text_mode; fresh isolated runtime; no pending work/news/input",
+    "measured_idle_s": 1800.002279917011,
+    "completed_warmups_in_measured_run": 1,
+    "post_warmup_role_metric_rows": 0,
+    "post_warmup_metric_rows": 0,
+    "hub_alive_through_end": true,
+    "stdout_unchanged": true,
+    "stderr_unchanged": true,
+    "attempts": {
+      "total": 2,
+      "first": "Observer rejected the canonical completed success label because it incorrectly expected ok; aborted before idle. Preserved locally; not a model failure or idle sample.",
+      "second": "Corrected observer, one fresh warm-up, full measured idle interval."
+    },
+    "cleanup": "All observed PID/start identities absent after Hub close",
+    "freeze_sha256": "23c1a852231b9832a4fe532f72849c799efb08c9024fb1773d80e65be8dfe2f8"
+  },
+  "text_process_resources": {
+    "duration_s": 1500.0263128750084,
+    "requested_interval_s": 1.0,
+    "startup_included": false,
+    "sampled_peak_tree_rss_bytes": 489308160,
+    "sampled_peak_root_rss_bytes": 90767360,
+    "observed_mean_cpu_percent_one_core": 0.5219992791336104,
+    "observed_processes": 34,
+    "tools": {
+      "python": "3.14.4",
+      "os": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+      "machine": "arm64",
+      "ps": "/bin/ps",
+      "ps_fields": "pid,ppid,lstart,rss,time"
+    },
+    "samples": 1490
+  },
+  "two_readonly_tasks": {
+    "scope": "One approved bounded two-Task read-only text-mode test; not full #44 acceptance",
+    "result": "passed",
+    "tasks": [
+      {
+        "task_id": "T1",
+        "repo": "jarvis",
+        "reported": true,
+        "lifetime_s": 7.125796125008492
+      },
+      {
+        "task_id": "T2",
+        "repo": "sdlc",
+        "reported": true,
+        "lifetime_s": 10.6187551250041
+      }
+    ],
+    "overlap_s": 1.7996082500030752,
+    "session_sends": 7,
+    "completed_turns": 7,
+    "warmups": 1,
+    "read_toolcall_repos": [
+      "jarvis",
+      "sdlc"
+    ],
+    "roles": [
+      {
+        "role": "talker",
+        "configured_model": "sonnet"
+      },
+      {
+        "role": "orchestrator",
+        "configured_model": "sonnet"
+      }
+    ],
+    "subscription_guard": "existing first-party guard succeeded before model construction",
+    "watchdog": {
+      "returncode": 0,
+      "timeout": false,
+      "elapsed_s": 23.627778082998702,
+      "owned_group_alive_at_check": false
+    },
+    "freeze_sha256": "ef7eeafcceb2bc82a9f5af215a47e7209290b30edab5a628fe0ec960f521885e",
+    "watchdog_sha256": "f204e91023593d2230bbeaf8efa47c7ba6b712041d71622d1795080bd5928d34",
+    "limits": [
+      "Read results not surfaced; read calls attempted, not independently verified outputs",
+      "One Orchestrator serializes turns; overlap means both Tasks live",
+      "No Subagents, watchers, approvals, GitHub operations, audio or physical gate evidence",
+      "Restricted test-only tool inventory and max_turns4 differ from full production configuration"
+    ]
+  },
+  "factory_smoke": {
+    "requested_model": "sonnet",
+    "source": "Reviewed off-default Claude admission factory; public synthetic text only",
+    "cases": [
+      {
+        "expected": [
+          "ignore"
+        ],
+        "actions": [
+          "ignore"
+        ],
+        "elapsed_ms": 1760.8947920089122,
+        "reason": "assessed"
+      },
+      {
+        "expected": [
+          "floor"
+        ],
+        "actions": [
+          "floor"
+        ],
+        "elapsed_ms": 1806.7512499983422,
+        "reason": "assessed"
+      }
+    ],
+    "prepare_ms": 453.4237909829244,
+    "closed": true,
+    "freeze_sha256": "b8ce6d023ea54de1891de331ad72594f63f2ca68220154b6c00eb0deade5e24a",
+    "scope": "Two smoke observations; not independent semantic/latency acceptance"
+  },
+  "limitations": [
+    "Text-only idle cannot establish voice capture/admission idleness or speaker behavior.",
+    "Resource attachment covers 25 minutes after startup, not the full 30-minute idle interval, startup peak or audio-stack footprint.",
+    "RSS sums can double-count shared mappings; CPU is an observed lower bound; no RSS/Metal/cache totals are added.",
+    "Concurrent development and other bounded tests ran on the machine; this is not an isolated-load CPU benchmark.",
+    "Model names are requested aliases, not independently captured resolved model identities.",
+    "Task Read calls were attempted; native results are not exposed through AgentEvents; no Subagents ran.",
+    "Independent wake/command references, complete thoughts, integrated interruptions and physical latency/resources remain open."
+  ],
+  "reserved_semantic_confirmation": {
+    "source_commit": "01b996bf35ac2d8e32dde61e00589c60b93fa2e2",
+    "scope": "One frozen synthetic EN/IT production-factory confirmation, stopped on first non-assessed result; not semantic or physical acceptance",
+    "configured_model": "sonnet",
+    "resolved_model": "unavailable_from_production_interface",
+    "deadline_ms": 2000,
+    "planned": {
+      "sequences": 48,
+      "segments": 102,
+      "en_sequences": 24,
+      "it_sequences": 24,
+      "floor_segments": 44,
+      "stop_segments": 4,
+      "negative_segments": 54
+    },
+    "outcomes": {
+      "attempted": 3,
+      "assessed": 2,
+      "timeout": 1,
+      "unattempted": 45,
+      "stop_reason": "timeout",
+      "retries": 0,
+      "usage_limit_response_observed": false,
+      "timeout_cause": "unestablished"
+    },
+    "raw_returned_only": {
+      "sequences": 2,
+      "segments": 5,
+      "floor_references": 2,
+      "floor_hits": 2,
+      "negative_references": 3,
+      "background_floor_admissions": 0,
+      "false_voice_stops": 0,
+      "true_stop_references": 0,
+      "exact_action_arrays": 1,
+      "matching_floor_stop_selection_sets": 2,
+      "uncertain_labelled_ignore": 1,
+      "partial_indivisible_joint_admissions": 0,
+      "missing_dependency_admissions": 0
+    },
+    "raw_missingness": {
+      "timed_out_segments": 2,
+      "unattempted_segments": 95,
+      "total_segments_without_output": 97,
+      "unknown_or_unattempted_actions_imputed_as_model_observations": false
+    },
+    "timing_ms": {
+      "returned_decisions": {
+        "n": 2,
+        "p50": 1866.3006669958122,
+        "p90": 1915.527416014811,
+        "max": 1915.527416014811
+      },
+      "attempted_including_timeout": {
+        "n": 3,
+        "p50": 1915.527416014811,
+        "p90": 2000.5167499766685,
+        "max": 2000.5167499766685
+      },
+      "preparation": 481.6,
+      "cleanup": 15.4
+    },
+    "lifecycle": {
+      "external_wall_s": 6.695,
+      "leader_reaped": true,
+      "owned_groups_alive": false,
+      "permission_errors": false
+    },
+    "nontrivial_safety_screen": "unmet_or_unmeasured",
+    "full_semantic_acceptance": "not_assessed",
+    "production_selection": false,
+    "artifact_sha256": {
+      "freeze.json": "de78aa301fb881dcedd2d3aaaeec8d3fb2bbd891d06e1c98344352b04919899c",
+      "metrics.json": "f05c77148cbcd2c3be8defbf2da8656cf7a03928257ae7b68d5c5e81571acf9d",
+      "OUTCOME.md": "5dc092cf07801d7977022d85186e14694e8b2d6fbe9510b0148e4eb985c213fa"
+    },
+    "limits": [
+      "Only two English thinking-origin cases with empty played context returned; no Italian, true-stop, nonempty-played or supplement output was observed.",
+      "Two floor hits and zero false admissions among three returned negatives do not establish positive recall, background safety or stop recall.",
+      "The timeout and 45 unattempted cases have no usable raw actions; mechanical uncertain substitution is not measured model accuracy, safety or observed misses.",
+      "The synthetic agent-authored oracle was frozen after blind pre-output QC; it is correlated evidence, not independently adjudicated human or physical truth.",
+      "No usage-limit response was observed before cutoff; this does not establish the cause of the timeout.",
+      "No audio device, raw audio, Hub/Talker admission or Task authority was exercised; the final integrated configuration remains unqualified."
+    ]
+  },
+  "zero_query_transport_profile": {
+    "scope": "Zero-user-message strict production-option SDK connection profile; no classification or heldout retry",
+    "connections": 3,
+    "completed": 3,
+    "initialize_frames": 3,
+    "user_frames": 0,
+    "query_calls": 0,
+    "inference_frames_observed": 0,
+    "stages_ms": {
+      "auth_ms": [
+        124.853,
+        101.237,
+        104.022
+      ],
+      "connect_ms": [
+        181.537,
+        182.132,
+        171.383
+      ],
+      "disconnect_ms": [
+        25.947,
+        26.717,
+        25.435
+      ]
+    },
+    "connect_plus_disconnect_ms": [
+      207.484,
+      208.85,
+      196.818
+    ],
+    "owned_groups_alive": false,
+    "watchdog_timeouts": 0,
+    "first_party_auth": "guard succeeded for each connection; no account metadata retained",
+    "heldout_timeout_cause": "unestablished",
+    "production_change": false,
+    "source_commit": "01b996bf35ac2d8e32dde61e00589c60b93fa2e2",
+    "configured_model": "sonnet",
+    "resolved_model": "unavailable_no_inference_response",
+    "permission_errors": false,
+    "artifact_sha256": {
+      "freeze.json": "2f09b5c0be855fe1b79919520ff644216da83a313fb0ae593673bf5e06554d7f",
+      "aggregate.json": "be10d9dbb25f8bbbace8a0d9032be30430969a9e9c443740d91a2774b4a9c6a0",
+      "results.json": "a354d2a859fbdc7b8145360ffa71461b5181e4a7b6a6e7b7d7710f21670eae11",
+      "OUTCOME.md": "5a2400cd4495ac727f33fc4644de72c37e5bf5706a93293b97c4a7c91a4cd97e"
+    },
+    "limits": [
+      "Observed no user/query/inference frames; SDK source and wire guard establish no requested user turn, not independently audited provider billing.",
+      "Initialization-only connections measure transport, not classification latency, semantic quality or readiness of a preconnected production backend.",
+      "Auth already occurs during production preparation; these stage observations must not be subtracted from unrelated candidate timings to claim timeout recovery.",
+      "All connections used fresh serial processes; no production lifecycle, model, prompt or deadline was changed."
+    ]
+  }
+}
