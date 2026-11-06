@@ -199,6 +199,55 @@ async def test_idle_wake_confirmation_cannot_interrupt_a_replacement(rig_for: Ma
     assert rig.state == ("idle" if replacement == "typed" else "announce")
 
 
+async def test_failed_current_wake_handoff_returns_idle_and_allows_a_fresh_wake(rig_for: MakeRig) -> None:
+    from jarvis_hub.voice.state import CaptureAborted, WakeWord
+
+    rig = await rig_for([Text("The checks passed, sir.")])
+    now = rig.clock.now()
+    rig.audio.emit(WakeWord(now, delivered_at=now, owner=0, idle_candidate=1))
+    await rig.settle()
+    assert rig.state == "listening"
+
+    rig.audio.emit(CaptureAborted(now, 'overflow', owner=1, candidate=1, wake_handoff=True))
+    await rig.settle()
+
+    assert rig.state == "idle"
+    assert rig.user_messages() == []
+    assert any('while waking' in notice for notice in rig.output.notices)
+    await asyncio.wait_for(rig.voice.quiet(), 1)
+    rig.audio.emit(Heard('lost partial words', 'en', now, owner=1, candidate=2))
+    await rig.settle()
+    assert rig.user_messages() == []
+    await rig.advance(.6)
+    rig.audio.wake()
+    rig.audio.say('Check the current build')
+    await until(lambda: rig.state == "follow_up")
+    assert rig.user_messages() == ['<user lang="en">Check the current build</user>']
+
+
+@pytest.mark.parametrize("source_owner", [1, None])
+async def test_stale_wake_handoff_failure_does_not_reset_or_notify_a_replacement(rig_for: MakeRig, source_owner: int | None) -> None:
+    from jarvis_hub.voice.state import CaptureAborted, WakeWord
+
+    rig = await rig_for([Text("The replacement is current, sir.")])
+    now = rig.clock.now()
+    rig.audio.emit(WakeWord(now, delivered_at=now, owner=0, idle_candidate=1))
+    await rig.settle()
+    await rig.advance(6)
+    assert rig.state == "idle"
+    rig.audio.wake()
+    rig.audio.say('Check the replacement')
+    await until(lambda: rig.state == "follow_up")
+    notices = rig.output.notices.copy()
+
+    rig.audio.emit(CaptureAborted(now, 'overflow', owner=source_owner, candidate=99, wake_handoff=True))
+    await rig.settle()
+
+    assert rig.state == "follow_up"
+    assert rig.output.notices == notices
+    assert rig.user_messages() == ['<user lang="en">Check the replacement</user>']
+
+
 async def test_a_follow_up_inside_the_window_needs_no_wake_word(rig_for: MakeRig) -> None:
     rig: Rig = await rig_for([Text("Opened, sir.")], [Text("Green, sir.")])
 

@@ -368,6 +368,77 @@ async def test_queued_wake_confirmation_cannot_revoke_the_first_unclaimed_activa
         capture.close()
 
 
+async def test_audio_loss_after_wake_acknowledgment_aborts_the_new_owner_before_partial_input() -> None:
+    from jarvis_hub.voice.state import CaptureAborted, WakeWord
+
+    class PausedVad(LoudVad):
+        def __init__(self) -> None:
+            self.pause = False
+            self.entered, self.release = threading.Event(), threading.Event()
+
+        def probability(self, chunk: np.ndarray) -> float:
+            if self.pause:
+                self.pause = False
+                self.entered.set()
+                assert self.release.wait(timeout=3)
+            return super().probability(chunk)
+
+    source, wake, vad = Source(), DelayedIdleWake(), PausedVad()
+    records, notices, received = list[dict[str, Any]](), list[str](), list[Any]()
+    stt = ScriptedStt()
+    capture = Capture(
+        lambda: Engines(CountingEcho(), None, vad, ScriptedTurn(), stt, Everyone(), idle_wake=wake),
+        Listening(), records.append, notices.append, source=source, backlog_s=5,
+    )
+
+    async def collect() -> None:
+        async for event in capture.events():
+            received.append(event)
+
+    capture.start()
+    collecting = asyncio.create_task(collect())
+    try:
+        await until(capture.ready.is_set)
+        capture.capture(False, owner=0, idle=True)
+        source.frames(80, value=1000)
+        source.frames(320, value=1500, start=.8)
+        source.frames(60, start=4)
+        assert await asyncio.to_thread(wake.entered.wait, 2)
+        wake.release.set()
+        await until(lambda: any(isinstance(event, WakeWord) for event in received))
+        proposal = next(event for event in received if isinstance(event, WakeWord))
+        vad.pause = True
+        source.frames(4, start=4.6)
+        assert await asyncio.to_thread(vad.entered.wait, 2)
+        assert capture.capture(True, owner=1, wake_candidate=proposal.idle_candidate)
+        source.frames(1000, start=4.64)
+        await until(lambda: any('dropping audio' in text for text in notices))
+        vad.release.set()
+
+        await until(lambda: any(isinstance(event, CaptureAborted) for event in received))
+        aborted = next(event for event in received if isinstance(event, CaptureAborted))
+        assert aborted.owner == 1 and aborted.reason == 'overflow' and aborted.wake_handoff
+        source.frames(80, value=1000, start=14.64)
+        source.frames(60, start=15.44)
+        await until(lambda: any(row.get('captured_through_at', 0) >= 16.03 for row in records))
+        assert not any(isinstance(event, Heard) for event in received)
+
+        capture.capture(False, owner=2, idle=True)
+        source.frames(80, value=1000, start=16.04)
+        source.frames(60, start=16.84)
+        await until(lambda: sum(isinstance(event, WakeWord) for event in received) == 2)
+        retry = [event for event in received if isinstance(event, WakeWord)][-1]
+        assert capture.capture(True, owner=3, wake_candidate=retry.idle_candidate)
+        await until(lambda: any(isinstance(event, Heard) for event in received))
+        assert [event.owner for event in received if isinstance(event, Heard)] == [3]
+        assert len(stt.heard) == 1
+    finally:
+        vad.release.set()
+        capture.close()
+        collecting.cancel()
+        await asyncio.gather(collecting, return_exceptions=True)
+
+
 def engines(echo: CountingEcho, wake: MarkerWake | None = None) -> Engines:
     return Engines(
         echo=echo, wake=wake or MarkerWake(), vad=LoudVad(), turn=ScriptedTurn(), stt=ScriptedStt(), gate=Everyone()

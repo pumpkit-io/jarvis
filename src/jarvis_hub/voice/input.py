@@ -238,6 +238,11 @@ class InputPipeline:
             events.append(heard)
         return events
 
+    def abort_idle(self, owner: int | None, reason: str) -> CaptureAborted:
+        self.discard_endpoint(reason, block=True)
+        self._turn_sequence += 1
+        return CaptureAborted(self._clock(), reason, owner, self._turn_sequence, wake_handoff=True)
+
     def discard_endpoint(self, reason: str, *, block: bool = False) -> CaptureAborted | None:
         abandoned = self._turn
         pending = self._pending
@@ -548,6 +553,7 @@ class _Capture:
     owner: int | None = None
     idle: bool = False
     wake_candidate: int | None = None
+    loss_epoch: int = 0
 
 
 @dataclass(frozen=True)
@@ -653,7 +659,7 @@ class Capture:
             if not phase_change:
                 self._capture_epoch += 1
             self._capture_owner, self._capture_on = owner, on
-            self._frames.put(_Capture(on, self._capture_epoch, owner, idle, wake_candidate))
+            self._frames.put(_Capture(on, self._capture_epoch, owner, idle, wake_candidate, self._loss_epoch))
         return True
 
     def barge_in(self, since: float | None) -> None:
@@ -791,17 +797,28 @@ class Capture:
             if isinstance(item, _Capture):
                 epoch = item.epoch
                 retained = None
+                handoff_failure = None
                 idle_wake = self._idle_wake
                 if idle_wake is not None:
                     with self._backlog_lock:
                         current = item.epoch == self._capture_epoch
+                        lost = item.loss_epoch != self._loss_epoch
                     if current and item.on and item.wake_candidate is not None:
                         retained = idle_wake.take(item.wake_candidate)
-                        if retained is not None and retained.loss_epoch != self._loss_epoch:
+                        if lost or (retained is not None and retained.loss_epoch != self._loss_epoch):
+                            handoff_failure = "overflow"
                             retained = None
+                        elif retained is None:
+                            handoff_failure = "retention_limit"
                     idle_wake.mode(item.idle, epoch, item.owner, self._loss_epoch)
                 pipeline.capture(item.on, owner=item.owner)
-                if retained is not None and not retained.wake_only:
+                if handoff_failure is not None:
+                    aborted = pipeline.abort_idle(item.owner, handoff_failure)
+                    self._on_loop(lambda event, owner=epoch: self._publish(event, owner), aborted)
+                    self._on_loop(self._record, {"kind": "idle_wake", "stage": "handoff_rejected",
+                                                "reason": handoff_failure, "source_owner": item.owner,
+                                                "capture_epoch": epoch})
+                elif retained is not None and not retained.wake_only:
                     for event in pipeline.activate_idle(retained, item.owner):
                         self._on_loop(lambda event, owner=epoch: self._publish(event, owner), event)
                     self._fence(pipeline, epoch, self._loss_epoch)

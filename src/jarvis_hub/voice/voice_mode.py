@@ -320,6 +320,8 @@ class VoiceMode:
                 if not self._applying:
                     self._start_assessment()
                 continue
+            if isinstance(event, CaptureAborted) and event.wake_handoff and event.owner != self._epoch:
+                continue
             if isinstance(event, (Heard, SpeechStarted, CaptureAborted)):
                 if event.owner is not None and event.owner != self._epoch:
                     continue
@@ -536,11 +538,14 @@ class VoiceMode:
         if self._voice.state == "idle" and before_voice.state != "idle":
             self._retire()
         self._sync_capture()
-        if isinstance(event, CaptureAborted) and before_voice.in_turn and before in CAPTURING:
-            reason = {
-                "retention_limit": "That request exceeded the retained audio limit.",
-                "overflow": "Audio was dropped while listening fell behind.",
-            }.get(event.reason, "That request could not be transcribed.")
+        if isinstance(event, CaptureAborted) and (before_voice.in_turn or event.wake_handoff) and before in CAPTURING:
+            if event.wake_handoff:
+                reason = "Audio was dropped while waking." if event.reason == "overflow" else "That wake request could not be retained."
+            else:
+                reason = {
+                    "retention_limit": "That request exceeded the retained audio limit.",
+                    "overflow": "Audio was dropped while listening fell behind.",
+                }.get(event.reason, "That request could not be transcribed.")
             self._notice(f"{reason} Say 'Hey Jarvis' and try again.")
         self._bargein_log.observe(before_voice, event, self._voice, actions, self._speech.played)
         after = self._voice.state

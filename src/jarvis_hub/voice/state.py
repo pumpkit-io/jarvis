@@ -68,6 +68,7 @@ class CaptureAborted:
     reason: str
     owner: int | None = None
     candidate: int | None = None
+    wake_handoff: bool = False
 
 
 @dataclass(frozen=True)
@@ -313,6 +314,8 @@ def _step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Actio
             return voice, []
         case Heard(text, lang, at):
             return _heard(voice, text, lang, at, timing, event.delivered_at)
+        case CaptureAborted(_, _, _, _, True) if voice.state == "listening":
+            return replace(voice, state="idle", deadline=None, in_turn=False, window_ends=None), []
         case CaptureAborted(at):
             if voice.state in CAPTURING and voice.in_turn:
                 return _heard(voice, "", None, at, timing)
