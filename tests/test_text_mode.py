@@ -343,3 +343,42 @@ async def test_startup_failure_shows_cause_and_recovery_step_without_ready_or_sp
     assert "Model unavailable" in stderr and "authentication failed" in stderr
     assert "restart Jarvis" in stderr and "Model ready." not in stderr
     assert stdout == ""
+
+
+def test_text_only_launch_never_constructs_or_loads_audio_engines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+    import jarvis_hub.main as entry
+    import jarvis_hub.voice.engines as engines
+
+    def unexpected_audio(*args: object, **kwargs: object) -> None:
+        pytest.fail("--text must not construct or load audio engines")
+
+    config = settings(tmp_path)
+    clock = FakeClock()
+    backend = FakeBackend(clock)
+    stdout, stderr = io.StringIO(), io.StringIO()
+    monkeypatch.setattr(sys, "argv", ["jarvis-hub", "--text"])
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+    def fake_cli(_: str) -> str:
+        return "/fake/claude"
+
+    def fake_settings(*args: object, **kwargs: object) -> Settings:
+        return config
+
+    def fake_backend(_: str) -> FakeBackend:
+        return backend
+
+    monkeypatch.setattr(entry.shutil, "which", fake_cli)
+    monkeypatch.setattr(entry, "load_settings", fake_settings)
+    monkeypatch.setattr(entry, "SdkBackend", fake_backend)
+    monkeypatch.setattr(entry, "KokoroSynthesizer", unexpected_audio)
+    monkeypatch.setattr(entry, "SoundPlayer", unexpected_audio)
+    monkeypatch.setattr(entry, "_open_listener", unexpected_audio)
+    monkeypatch.setattr(engines, "load_engines", unexpected_audio)
+    entry.main()
+    assert "Model loading." in stderr.getvalue()
+    assert "Speech loading." not in stderr.getvalue()
+    assert "Listening loading." not in stderr.getvalue()
+    assert stdout.getvalue() == ""
