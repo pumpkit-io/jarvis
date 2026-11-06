@@ -202,6 +202,9 @@ class VoiceMode:
         self._capture_setting: tuple[bool, int, bool] | None = None
         self._wake_candidate: int | None = None
         self._origins: dict[int | None, tuple[str, bool | None]] = {}
+        self._thinking_active: set[int | None] = set()
+        self._rejected_sources: set[int] = set()
+        self._reject_unknown_sources = False
         self._waiting: deque[_Fragment] = deque()
         self._retained: deque[_Fragment] = deque()
         self._inflight: tuple[_Fragment, ...] = ()
@@ -269,7 +272,40 @@ class VoiceMode:
 
     def _follow_up_pending(self) -> bool:
         window = self._follow_up
-        return window is not None and bool(window.active or window.waiting or window.inflight)
+        return window is not None and bool(window.active or window.waiting or window.inflight or self._thinking_pending())
+
+    def _thinking_pending(self) -> bool:
+        return bool(self._thinking_active or self._waiting or self._inflight or self._applying_fragments or self._applying)
+
+    def _clear_thinking_fragments(self) -> None:
+        self._thinking_active.clear()
+        self._waiting.clear()
+        self._retained.clear()
+        self._inflight = ()
+        self._applying_fragments = ()
+        self._origins.clear()
+
+    def _known_pending_source(self, candidate: int | None) -> bool:
+        if candidate is None:
+            return False
+        window = self._follow_up
+        fragments = (*self._retained, *self._inflight, *self._applying_fragments, *self._waiting)
+        return (candidate in self._thinking_active or any(fragment.heard.candidate == candidate for fragment in fragments)
+                or window is not None and (candidate in window.active or any(fragment.candidate == candidate
+                    for fragment in (*window.retained, *window.inflight, *window.waiting))))
+
+    def _reject_source(self, candidate: int | None) -> None:
+        if candidate is not None and (candidate in self._rejected_sources or len(self._rejected_sources) < 64):
+            self._rejected_sources.add(candidate)
+        elif not self._reject_unknown_sources:
+            self._reject_unknown_sources = True
+            self._notice("Speech source tracking is unavailable. Use a fresh wake once Jarvis is idle.")
+
+    def _settle_expired_source(self) -> None:
+        if self._voice.state == "idle" and self._follow_up is not None and not self._thinking_pending():
+            self._retire(preserve_follow_up=True)
+        self._settle_idle()
+        self._sync_capture()
 
     def _settle_idle(self) -> None:
         if self._voice.state == "idle" and not self._follow_up_pending():
@@ -356,9 +392,16 @@ class VoiceMode:
             if isinstance(event, (Heard, SpeechStarted, CaptureAborted)):
                 if event.owner is not None and event.owner != self._epoch:
                     continue
+                if (
+                    event.candidate in self._rejected_sources
+                    or self._reject_unknown_sources and not self._known_pending_source(event.candidate)
+                ):
+                    continue
                 if event.candidate is not None:
                     if event.candidate <= self._accepted_candidate:
                         continue
+            if isinstance(event, Heard):
+                self._thinking_active.discard(event.candidate)
             if isinstance(event, (SpeechStarted, Heard)) and self._follow_up_event(event):
                 continue
             if isinstance(event, (SpeechStarted, Heard)) and event.candidate is not None:
@@ -372,27 +415,22 @@ class VoiceMode:
                 window.active.clear()
                 window.retained, window.waiting, window.inflight = (), [], ()
                 window.version += 1
-                self._waiting.clear()
-                self._retained.clear()
-                self._inflight = ()
-                self._applying_fragments = ()
-                self._origins.clear()
+                self._clear_thinking_fragments()
                 self._accepted_candidate = max(self._accepted_candidate, event.candidate if event.candidate is not None else -1)
                 self._restore_follow_up(window)
                 continue
             if isinstance(event, CaptureAborted):
-                self._waiting.clear()
-                self._retained.clear()
-                self._inflight = ()
-                self._applying_fragments = ()
-                self._origins.clear()
+                self._clear_thinking_fragments()
                 if event.candidate is not None:
                     self._accepted_candidate = max(self._accepted_candidate, event.candidate)
                 if self._owned is not None and self._voice.state == "thinking":
                     self._notice("That additional speech was lost. Say 'Hey Jarvis' and try again.")
             if isinstance(event, Heard) and event.limited:
                 self._notice("Spoken input reached its duration limit. Repeat or split the request.")
-                if self._voice.state in CAPTURING:
+                self._clear_thinking_fragments()
+                if self._follow_up is not None:
+                    self._finish_follow_up(self._follow_up)
+                elif self._voice.state in CAPTURING:
                     before = self._voice.state
                     self._voice = Voice()
                     self._retire()
@@ -400,8 +438,12 @@ class VoiceMode:
                 continue
             if isinstance(event, SpeechStarted):
                 if len(self._origins) >= 64:
-                    self._origins.pop(next(iter(self._origins)))
+                    oldest = next(iter(self._origins))
+                    self._origins.pop(oldest)
+                    self._thinking_active.discard(oldest)
                 self._origins[event.candidate] = self._origin(event.started_at if event.started_at is not None else event.at)
+                if self._origins[event.candidate][0] == "thinking":
+                    self._thinking_active.add(event.candidate)
             if isinstance(event, Heard) and self._owned is not None:
                 origin = self._origins.get(event.candidate, self._origin(event.started_at))
                 if origin[0] == "thinking" or self._retained or self._inflight or self._applying_fragments or self._waiting:
@@ -409,6 +451,8 @@ class VoiceMode:
                     text = " ".join([self._owned.text, *(fragment.heard.text for fragment in buffered), event.text])
                     if len(buffered) >= 4 or len(text) > MAX_REQUEST_CHARACTERS:
                         self._notice("Spoken input reached its retention limit. Repeat or split the request.")
+                        self._clear_thinking_fragments()
+                        self._settle_expired_source()
                     else:
                         self._waiting.append(_Fragment(event, *origin))
                         self._start_assessment()
@@ -428,6 +472,7 @@ class VoiceMode:
             thinking_pending = self._retained or self._inflight or self._applying_fragments or self._waiting
             return not (self._owned is not None and (origin[0] == "thinking" or thinking_pending))
         if not window.includes(onset):
+            self._reject_source(event.candidate)
             return True
         if isinstance(event, SpeechStarted):
             if len(window.onsets) >= 64:
@@ -527,6 +572,8 @@ class VoiceMode:
                               "observed_segments": len(related.fragments), "selected_segments": [index for index, action in enumerate(actions) if action == "floor"]})
         if window.version != related.version or window.waiting:
             window.retained = tuple(fragment for fragment, action in zip(related.fragments, actions) if action != "ignore")
+            if not window.active and not window.waiting:
+                self._restore_follow_up(window)
             return
         selected = tuple(fragment for fragment, action in zip(related.fragments, actions) if action == "floor")
         if selected:
@@ -581,19 +628,20 @@ class VoiceMode:
         return not self._closed and self._owned is not None and self._owned.token == owner
 
     def _retire(self, *, preserve_follow_up: bool = False) -> bool:
+        # Expiry ends eligibility for new onsets, not an already captured continuation.
+        if preserve_follow_up and self._thinking_pending():
+            return self._sync_capture()
         if not preserve_follow_up:
             self._epoch += 1
             self._follow_up = None
+            self._rejected_sources.clear()
+            self._reject_unknown_sources = False
         self._owned = None
         self._reply_started = None
         self._reply_finished = None
         self._accepted_candidate = -1
-        self._waiting.clear()
-        self._retained.clear()
-        self._inflight = ()
-        self._applying_fragments = ()
+        self._clear_thinking_fragments()
         self._latest_candidate = -1
-        self._origins.clear()
         return self._sync_capture()
 
     def semantic_context(self, owner: tuple[str, int], start: int) -> None:
@@ -612,8 +660,9 @@ class VoiceMode:
         self._idle.set()
 
     def _sync_capture(self) -> bool:
-        setting = (not self._closed and (self._voice.state in CAPTURING or self._voice.state == "thinking"),
-                   self._epoch, not self._closed and self._voice.state == "idle")
+        pending = self._follow_up_pending()
+        setting = (not self._closed and (self._voice.state in CAPTURING or self._voice.state == "thinking" or pending),
+                   self._epoch, not self._closed and self._voice.state == "idle" and not pending)
         if setting != self._capture_setting:
             self._capture_setting = setting
             accepted = self._audio.capture(setting[0], owner=setting[1], idle=setting[2], wake_candidate=self._wake_candidate)
@@ -625,6 +674,7 @@ class VoiceMode:
         self._applying.discard(task)
         self._applying_fragments = ()
         self._start_assessment()
+        self._settle_expired_source()
 
     def _start_assessment(self) -> None:
         if self._assessing is not None or self._applying or not self._waiting or self._owned is None or self._closed:
