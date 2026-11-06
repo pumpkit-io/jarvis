@@ -47,6 +47,7 @@ from jarvis_hub.voice.state import (
     Voice,
     VoiceState,
     step,
+    stop_phrase,
 )
 from jarvis_hub.voice.tts import Synthesizer
 
@@ -601,6 +602,9 @@ class VoiceMode:
         selected = tuple(fragment for fragment, action in zip(related.fragments, actions) if action == "floor")
         if selected:
             text = " ".join(fragment.text for fragment in selected).strip()
+            if related.candidate.phase == "follow_up" and self._voice.state in ("follow_up", "idle") and stop_phrase(text) is not None:
+                self._finish_follow_up(window)
+                return
             last = selected[-1]
             before_voice = self._voice
             before = before_voice.state
