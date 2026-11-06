@@ -126,5 +126,142 @@
     "Model names are requested aliases, not independently captured resolved model identities.",
     "Task Read calls were attempted; native results are not exposed through AgentEvents; no Subagents ran.",
     "Independent wake/command references, complete thoughts, integrated interruptions and physical latency/resources remain open."
-  ]
+  ],
+  "reserved_semantic_confirmation": {
+    "source_commit": "01b996bf35ac2d8e32dde61e00589c60b93fa2e2",
+    "scope": "One frozen synthetic EN/IT production-factory confirmation, stopped on first non-assessed result; not semantic or physical acceptance",
+    "configured_model": "sonnet",
+    "resolved_model": "unavailable_from_production_interface",
+    "deadline_ms": 2000,
+    "planned": {
+      "sequences": 48,
+      "segments": 102,
+      "en_sequences": 24,
+      "it_sequences": 24,
+      "floor_segments": 44,
+      "stop_segments": 4,
+      "negative_segments": 54
+    },
+    "outcomes": {
+      "attempted": 3,
+      "assessed": 2,
+      "timeout": 1,
+      "unattempted": 45,
+      "stop_reason": "timeout",
+      "retries": 0,
+      "usage_limit_response_observed": false,
+      "timeout_cause": "unestablished"
+    },
+    "raw_returned_only": {
+      "sequences": 2,
+      "segments": 5,
+      "floor_references": 2,
+      "floor_hits": 2,
+      "negative_references": 3,
+      "background_floor_admissions": 0,
+      "false_voice_stops": 0,
+      "true_stop_references": 0,
+      "exact_action_arrays": 1,
+      "matching_floor_stop_selection_sets": 2,
+      "uncertain_labelled_ignore": 1,
+      "partial_indivisible_joint_admissions": 0,
+      "missing_dependency_admissions": 0
+    },
+    "raw_missingness": {
+      "timed_out_segments": 2,
+      "unattempted_segments": 95,
+      "total_segments_without_output": 97,
+      "unknown_or_unattempted_actions_imputed_as_model_observations": false
+    },
+    "timing_ms": {
+      "returned_decisions": {
+        "n": 2,
+        "p50": 1866.3006669958122,
+        "p90": 1915.527416014811,
+        "max": 1915.527416014811
+      },
+      "attempted_including_timeout": {
+        "n": 3,
+        "p50": 1915.527416014811,
+        "p90": 2000.5167499766685,
+        "max": 2000.5167499766685
+      },
+      "preparation": 481.6,
+      "cleanup": 15.4
+    },
+    "lifecycle": {
+      "external_wall_s": 6.695,
+      "leader_reaped": true,
+      "owned_groups_alive": false,
+      "permission_errors": false
+    },
+    "nontrivial_safety_screen": "unmet_or_unmeasured",
+    "full_semantic_acceptance": "not_assessed",
+    "production_selection": false,
+    "artifact_sha256": {
+      "freeze.json": "de78aa301fb881dcedd2d3aaaeec8d3fb2bbd891d06e1c98344352b04919899c",
+      "metrics.json": "f05c77148cbcd2c3be8defbf2da8656cf7a03928257ae7b68d5c5e81571acf9d",
+      "OUTCOME.md": "5dc092cf07801d7977022d85186e14694e8b2d6fbe9510b0148e4eb985c213fa"
+    },
+    "limits": [
+      "Only two English thinking-origin cases with empty played context returned; no Italian, true-stop, nonempty-played or supplement output was observed.",
+      "Two floor hits and zero false admissions among three returned negatives do not establish positive recall, background safety or stop recall.",
+      "The timeout and 45 unattempted cases have no usable raw actions; mechanical uncertain substitution is not measured model accuracy, safety or observed misses.",
+      "The synthetic agent-authored oracle was frozen after blind pre-output QC; it is correlated evidence, not independently adjudicated human or physical truth.",
+      "No usage-limit response was observed before cutoff; this does not establish the cause of the timeout.",
+      "No audio device, raw audio, Hub/Talker admission or Task authority was exercised; the final integrated configuration remains unqualified."
+    ]
+  },
+  "zero_query_transport_profile": {
+    "scope": "Zero-user-message strict production-option SDK connection profile; no classification or heldout retry",
+    "connections": 3,
+    "completed": 3,
+    "initialize_frames": 3,
+    "user_frames": 0,
+    "query_calls": 0,
+    "inference_frames_observed": 0,
+    "stages_ms": {
+      "auth_ms": [
+        124.853,
+        101.237,
+        104.022
+      ],
+      "connect_ms": [
+        181.537,
+        182.132,
+        171.383
+      ],
+      "disconnect_ms": [
+        25.947,
+        26.717,
+        25.435
+      ]
+    },
+    "connect_plus_disconnect_ms": [
+      207.484,
+      208.85,
+      196.818
+    ],
+    "owned_groups_alive": false,
+    "watchdog_timeouts": 0,
+    "first_party_auth": "guard succeeded for each connection; no account metadata retained",
+    "heldout_timeout_cause": "unestablished",
+    "production_change": false,
+    "source_commit": "01b996bf35ac2d8e32dde61e00589c60b93fa2e2",
+    "configured_model": "sonnet",
+    "resolved_model": "unavailable_no_inference_response",
+    "permission_errors": false,
+    "artifact_sha256": {
+      "freeze.json": "2f09b5c0be855fe1b79919520ff644216da83a313fb0ae593673bf5e06554d7f",
+      "aggregate.json": "be10d9dbb25f8bbbace8a0d9032be30430969a9e9c443740d91a2774b4a9c6a0",
+      "results.json": "a354d2a859fbdc7b8145360ffa71461b5181e4a7b6a6e7b7d7710f21670eae11",
+      "OUTCOME.md": "5a2400cd4495ac727f33fc4644de72c37e5bf5706a93293b97c4a7c91a4cd97e"
+    },
+    "limits": [
+      "Observed no user/query/inference frames; SDK source and wire guard establish no requested user turn, not independently audited provider billing.",
+      "Initialization-only connections measure transport, not classification latency, semantic quality or readiness of a preconnected production backend.",
+      "Auth already occurs during production preparation; these stage observations must not be subtracted from unrelated candidate timings to claim timeout recovery.",
+      "All connections used fresh serial processes; no production lifecycle, model, prompt or deadline was changed."
+    ]
+  }
 }

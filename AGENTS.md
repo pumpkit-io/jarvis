@@ -16,7 +16,7 @@ Use `./jarvis --text` for a terminal conversation without audio. `./jarvis` star
 
 Run `uv run pytest -q` and `uv run pyright` before reporting a change complete. Tests inject fake agents, clock and audio through the Hub seam and never spend model quota. Real-model and real-GitHub tests are opt-in; leave them off unless explicitly authorized. Runtime state and logs live under the gitignored `.jarvis/` folder. See `docs/notes/phase-0-spikes.md` for measurements and manual voice checks.
 
-The Talker warms in the background at launch (ADR 0006). That hidden turn spends subscription usage; idle listening and stop phrases need no model call. Preserve `strict_mcp_config` and the Hub's tool guards when changing the SDK adapter; see ADRs 0007, 0008 and 0013.
+The Talker warms in the background at launch (ADR 0006). That hidden turn spends subscription usage. Idle wake detection remains local. Wake-free Follow-up and playback voice stops require opt-in admission, off by default; classifier calls spend subscription usage even on rejected background candidates. See [admission setup](docs/notes/cloud-spoken-admission.md) for its transcript boundary. Preserve `strict_mcp_config` and the Hub's tool guards when changing the SDK adapter; see ADRs 0007, 0008 and 0013.
 
 ## Skills
 
