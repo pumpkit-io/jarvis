@@ -18,6 +18,7 @@ dependencies = [
     "onnxruntime>=1.20",
     "livekit==1.2.0",
     "httpx>=0.28,<1",
+    "prompt-toolkit>=3.0.52,<4",
 ]
 
 [project.scripts]

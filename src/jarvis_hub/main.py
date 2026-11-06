@@ -4,14 +4,12 @@ import argparse
 import asyncio
 import contextlib
 import hashlib
-import io
 import json
 import os
 import shutil
 import sys
-import threading
 import time
-from collections.abc import AsyncIterator, Callable, MutableMapping
+from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,11 +22,12 @@ from rich.markdown import Markdown
 from jarvis_hub.agents.backend import AgentBackend, SessionSpec
 from jarvis_hub.agents.sdk import SdkBackend
 from jarvis_hub.config import ConfigError, Settings, VoiceSettings, load_settings
-from jarvis_hub.hub import Clock, Hub, Line, Metrics, Output
+from jarvis_hub.hub import Clock, Hub, Metrics, Output
 from jarvis_hub.orchestrator import orchestrator_spec
 from jarvis_hub.subagents import Subagent, SubagentSetup, subagent_session
 from jarvis_hub.stats import parse_rows, parse_when, read_rows, render, render_bargein, render_voice_trace, summarise, summarise_bargein
 from jarvis_hub.talker import talker_spec
+from jarvis_hub.terminal_input import PROMPT, TerminalInput, typed_lines as _typed_lines
 from jarvis_hub.voice import language
 from jarvis_hub.voice.clips import ClipSettings, ClipStore
 from jarvis_hub.voice.engines import EngineChoice
@@ -42,7 +41,6 @@ from jarvis_hub.voice.voice_mode import AudioInput, VoiceMode, merge
 from jarvis_hub.waits import WaitSetup
 from jarvis_hub.workspace import default_workspace
 
-PROMPT = "› "
 # Marks what the User said aloud, as transcribed, apart from what they typed.
 SAID = "» "
 
@@ -146,10 +144,11 @@ class _Console(Console):
 class TerminalOutput:
     """Replies and notices as plain text; shown details rendered as markdown and appended to the show log."""
 
-    def __init__(self, stdout: TextIO, stderr: TextIO, prompt: bool, show_log: Path) -> None:
+    def __init__(self, stdout: TextIO, stderr: TextIO, prompt: bool, show_log: Path, *, managed_prompt: bool = False) -> None:
         self._stdout = stdout
         self._stderr = stderr
         self._prompt = prompt
+        self._managed_prompt = managed_prompt
         self._show_log = show_log
         self._console = _Console(file=stdout, highlight=False)
         self._mid_reply = False
@@ -168,7 +167,7 @@ class TerminalOutput:
         self._mid_reply = True
 
     def reply_end(self) -> None:
-        self._stdout.write("\n" + (PROMPT if self._prompt else ""))
+        self._stdout.write("\n" + (PROMPT if self._prompt and not self._managed_prompt else ""))
         self._stdout.flush()
         self._mid_reply = False
 
@@ -206,27 +205,6 @@ def _guard_billing(environ: MutableMapping[str, str], stderr: TextIO) -> None:
             f"The Hub removed it from its own environment for this run; unset it in your shell profile.{reset}\n"
         )
     stderr.flush()
-
-
-async def _typed_lines(stdin: TextIO, clock: Clock) -> AsyncIterator[Line]:
-    # A daemon thread, so a blocked read never keeps the process alive at exit.
-    loop = asyncio.get_running_loop()
-    queue: asyncio.Queue[Line | None] = asyncio.Queue()
-    if isinstance(stdin, io.TextIOWrapper):
-        stdin.reconfigure(errors="replace")
-
-    def read() -> None:
-        try:
-            for line in stdin:
-                loop.call_soon_threadsafe(queue.put_nowait, Line(line.rstrip("\n"), clock.now()))
-        except OSError:
-            pass  # A terminal that went away ends the conversation like the end of input.
-        finally:
-            loop.call_soon_threadsafe(queue.put_nowait, None)
-
-    threading.Thread(target=read, daemon=True).start()
-    while (line := await queue.get()) is not None:
-        yield line
 
 
 def subagent_setup(settings: Settings) -> SubagentSetup:
@@ -335,63 +313,63 @@ async def voice_mode(
     Ends with the typed input (Ctrl-D) or Ctrl-C.
     """
     _guard_billing(environ, stderr)
-    output = TerminalOutput(stdout, stderr, prompt=stdin.isatty(), show_log=settings.runtime_dir / "show.log")
-    metrics = JsonlMetrics(settings.runtime_dir / "metrics.jsonl")
-    voice = settings.voice
-    choice = EngineChoice(aec="off" if headphones else voice.aec, wake=voice.wake_engine, stt=voice.stt_engine)
-    clips = ClipStore(settings.runtime_dir / "clips", clip_settings(voice))
-    listener = ears.open_listener(choice, listening(voice), metrics.record, output.notice, clips)
-    try:
-        player = ears.open_player(ears.tts.sample_rate, listener.reference)
-    except Exception as e:
-        output.notice(f"Voice mode needs an audio output: {type(e).__name__}: {e}. Run `jarvis-hub --text` instead.")
-        return
-    admission = configured_assessor(voice.admission_backend, voice.admission_model,
-                                    settings.repo_dir / "prompts" / "admission.md", notice=output.notice,
-                                    api_key=voice.jev_api_key, record=metrics.record)
-    conversation = VoiceMode(
-        audio=listener,
-        tts=ears.tts,
-        player=player,
-        clock=clock,
-        timing=timing(voice),
-        metrics=metrics,
-        notice=output.notice,
-        debug=debug,
-        recognition=admission,
-    )
-    hub = settings_hub(
-        settings,
-        backend=backend,
-        clock=clock,
-        output=output,
-        metrics=metrics,
-        speech=conversation.speech,
-        speak_typed=False,
-        on_end_conversation=conversation.end_conversation,
-        floor=conversation,
-        preconnect_orchestrator=True,
-        on_model_ready=lambda: output.notice("Model ready."),
-    )
-    try:
-        output.notice("Model loading.")
-        if admission is not None:
-            admission.start()
-        await hub.start()
-        await asyncio.to_thread(language.warm_up)
-        conversation.start()
-        output.notice("Listening loading.")
-        listener.start()
-        if stdin.isatty():
-            stdout.write(PROMPT)
-            stdout.flush()
-        await hub.run(merge(_typed_lines(stdin, clock), conversation.lines(hub.interrupt, hub.woke, hub.admit_spoken_revision)))
-    finally:
+    with TerminalInput(stdin, stdout, stderr, clock) as terminal:
+        stdout, stderr = terminal.stdout, terminal.stderr
+        output = TerminalOutput(stdout, stderr, prompt=terminal.interactive, show_log=settings.runtime_dir / "show.log", managed_prompt=terminal.interactive)
+        metrics = JsonlMetrics(settings.runtime_dir / "metrics.jsonl")
+        voice = settings.voice
+        choice = EngineChoice(aec="off" if headphones else voice.aec, wake=voice.wake_engine, stt=voice.stt_engine)
+        clips = ClipStore(settings.runtime_dir / "clips", clip_settings(voice))
+        listener = ears.open_listener(choice, listening(voice), metrics.record, output.notice, clips)
         try:
-            await hub.close()
+            player = ears.open_player(ears.tts.sample_rate, listener.reference)
+        except Exception as e:
+            output.notice(f"Voice mode needs an audio output: {type(e).__name__}: {e}. Run `jarvis-hub --text` instead.")
+            return
+        admission = configured_assessor(voice.admission_backend, voice.admission_model,
+                                        settings.repo_dir / "prompts" / "admission.md", notice=output.notice,
+                                        api_key=voice.jev_api_key, record=metrics.record)
+        conversation = VoiceMode(
+            audio=listener,
+            tts=ears.tts,
+            player=player,
+            clock=clock,
+            timing=timing(voice),
+            metrics=metrics,
+            notice=output.notice,
+            debug=debug,
+            recognition=admission,
+        )
+        hub = settings_hub(
+            settings,
+            backend=backend,
+            clock=clock,
+            output=output,
+            metrics=metrics,
+            speech=conversation.speech,
+            speak_typed=False,
+            on_end_conversation=conversation.end_conversation,
+            floor=conversation,
+            preconnect_orchestrator=True,
+            on_model_ready=lambda: output.notice("Model ready."),
+        )
+        try:
+            output.notice("Interactive terminal: Ctrl-G stops the spoken reply and keeps typed text. Ctrl-C exits; Ctrl-D ends input.")
+            output.notice("Model loading.")
+            if admission is not None:
+                admission.start()
+            await hub.start()
+            await asyncio.to_thread(language.warm_up)
+            conversation.start()
+            output.notice("Listening loading.")
+            listener.start()
+            await hub.run(merge(terminal.lines(lambda: conversation.local_stop(hub.request_interrupt)), conversation.lines(hub.interrupt, hub.woke, hub.admit_spoken_revision)))
         finally:
-            listener.close()
-            await conversation.close()
+            try:
+                await hub.close()
+            finally:
+                listener.close()
+                await conversation.close()
 
 
 def _open_listener(
@@ -452,7 +430,11 @@ def print_stats(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="jarvis-hub", description="Run the Jarvis Hub.")
+    parser = argparse.ArgumentParser(
+        prog="jarvis-hub", description="Run the Jarvis Hub.",
+        epilog="Interactive voice: Ctrl-G stops the spoken reply without Enter and keeps typed text. "
+               "Ctrl-C exits; Ctrl-D at an empty prompt ends input.",
+    )
     parser.add_argument("--text", action="store_true", help="talk by typing, with no audio")
     parser.add_argument("--speak", action="store_true", help="with --text, speak generated replies; readiness is nonverbal")
     parser.add_argument("--headphones", action="store_true", help="voice mode with echo cancellation off")

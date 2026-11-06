@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 import httpx
+import pytest
 
 from jarvis_hub.voice.cumulative import Snapshot, Source
 from jarvis_hub.voice.jev import JevAssessor
@@ -33,7 +34,8 @@ async def test_one_jev_request_asks_independent_questions_binds_sources_and_reco
     assert result.floor and not result.ready and not result.voice_only
     assert len(requests) == 1 and requests[0]['model'] == 'jev-1.14.0'
     assert set(requests[0]['questions']) == {'source_4_2_0_3', 'source_4_2_4_9', 'source_4_2_10_11', 'source_4_2_12_17', 'floor', 'readiness'}
-    assert rows[0]['input_tokens'] == 123 and rows[0]['output_tokens'] == 9
+    [usage] = [row for row in rows if row['kind'] == 'jev_usage']
+    assert usage['input_tokens'] == 123 and usage['output_tokens'] == 9
     assert 'No, wait' not in str(rows)
 
 
@@ -66,7 +68,7 @@ async def test_absent_credentials_make_no_http_request_and_report_setup() -> Non
     result = await assessor.assess_snapshot(Snapshot('s', (Source(1, 1, 'Stop', 1, 2, 2),), 2,
                                                     'speaking', '', '', None))
     await assessor.close()
-    assert calls == 0 and result.reason == 'unavailable'
+    assert calls == 0 and result.reason == 'missing_credentials'
     assert any('TYPESAFE_API_KEY' in notice for notice in notices)
 
 
@@ -147,3 +149,89 @@ async def test_retired_prefix_is_context_but_gets_no_new_admission_questions() -
     await assessor.close()
     assert names and all(int(name.split('_')[3]) >= boundary for name in names)
     assert result.directed == ((1, 2),) and result.ready
+
+
+async def test_jev_status_distinguishes_timeouts_throttling_and_recovery_and_totals_unknown_usage() -> None:
+    notices: list[str] = []
+    rows: list[dict[str, object]] = []
+    calls = 0
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ReadTimeout('PRIVATE_KEY PRIVATE_CANDIDATE', request=request)
+        if calls == 2:
+            return httpx.Response(429, json={'detail': 'PRIVATE_KEY PRIVATE_CANDIDATE'})
+        body = json.loads(request.content)
+        answers: dict[str, Any] = {}
+        for name, question in body['questions'].items():
+            label = 'keep' if name == 'floor' else 'unfinished' if name == 'readiness' else 'directed'
+            answers[name] = dict(type='choice', choice=label, confidence=.95,
+                                 probabilities={choice: .9 if choice == label else .1 / (len(question['criteria']) - 1)
+                                                for choice in question['criteria']})
+        return httpx.Response(200, json=dict(model='jev-1.14.0', answers=answers, usage=dict(input_tokens=123, output_tokens=9)))
+    assessor = JevAssessor('PRIVATE_KEY', notice=notices.append, record=rows.append, transport=httpx.MockTransport(respond))
+    assessor.start()
+    assert assessor.status == 'configured' and not assessor.ready
+    snapshot = Snapshot('s', (Source(1, 1, 'PRIVATE_CANDIDATE', 1, 2, 2),), 3, 'speaking', '', '', None)
+    assert (await assessor.assess_snapshot(snapshot)).reason == 'timeout'
+    assert assessor.status == 'timeout' and not assessor.ready
+    assert (await assessor.assess_snapshot(snapshot)).reason == 'throttled'
+    assert assessor.status == 'throttled'
+    assert (await assessor.assess_snapshot(snapshot)).reason == 'assessed'
+    assert assessor.status == 'ready' and assessor.ready
+    assert assessor.usage['requests'] == 3 and assessor.usage['failed'] == 2
+    assert assessor.usage['unknown_usage'] == 2 and assessor.usage['input_tokens'] == 123
+    assert any('jev-1.14.0' in notice for notice in notices)
+    assert any('3 requests' in notice for notice in notices)
+    assert not any('PRIVATE_KEY' in str(value) or 'PRIVATE_CANDIDATE' in str(value) for value in (*notices, *rows))
+    await assessor.close()
+
+
+async def test_malformed_reply_preserves_reported_usage_without_exposing_response_text() -> None:
+    notices: list[str] = []
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=dict(model='jev-1.14.0', answers={'PRIVATE_RESPONSE': {'bad': 'PRIVATE_KEY'}},
+                                           usage=dict(input_tokens=88, output_tokens=4)))
+    assessor = JevAssessor('PRIVATE_KEY', notice=notices.append, record=lambda row: None,
+                           transport=httpx.MockTransport(respond))
+    result = await assessor.assess_snapshot(Snapshot('s', (Source(1, 1, 'PRIVATE_CANDIDATE', 1, 2, 2),),
+                                                    3, 'speaking', '', '', None))
+    assert result.reason == 'malformed' and assessor.status == 'malformed' and not assessor.ready
+    assert assessor.usage['failed'] == 1 and assessor.usage['input_tokens'] == 88
+    assert assessor.usage['unknown_usage'] == 0
+    assert any('malformed response' in notice for notice in notices)
+    assert not any('PRIVATE' in notice for notice in notices)
+    await assessor.close()
+
+
+async def test_request_recorder_failure_releases_busy_state_without_inventing_provider_usage() -> None:
+    rejected = False
+    calls = 0
+    def record(row: dict[str, Any]) -> None:
+        nonlocal rejected
+        if row['kind'] == 'jev_request' and not rejected:
+            rejected = True
+            raise OSError('disk full')
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        body = json.loads(request.content)
+        answers: dict[str, Any] = {}
+        for name, question in body['questions'].items():
+            label = 'keep' if name == 'floor' else 'unfinished' if name == 'readiness' else 'unrelated'
+            answers[name] = dict(type='choice', choice=label, confidence=.95,
+                                 probabilities={choice: .9 if choice == label else .1 / (len(question['criteria']) - 1)
+                                                for choice in question['criteria']})
+        return httpx.Response(200, json=dict(model='jev-1.14.0', answers=answers, usage=dict(input_tokens=80, output_tokens=4)))
+    assessor = JevAssessor('fake-key', notice=lambda message: None, record=record, transport=httpx.MockTransport(respond))
+    snapshot = Snapshot('s', (Source(1, 1, 'Background speech.', 1, 2, 2),), 3, 'speaking', '', '', None)
+    with pytest.raises(OSError, match='disk full'):
+        await assessor.assess_snapshot(snapshot)
+    assert calls == 0
+    assert assessor.usage['requests'] == 0 and assessor.usage['unknown_usage'] == 0
+    recovered = await assessor.assess_snapshot(snapshot)
+    assert recovered.reason == 'assessed' and calls == 1
+    assert assessor.usage['requests'] == 1 and assessor.usage['succeeded'] == 1
+    assert assessor.usage['input_tokens'] == 80 and assessor.usage['unknown_usage'] == 0
+    await assessor.close()
