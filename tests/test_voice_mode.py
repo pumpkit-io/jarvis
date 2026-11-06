@@ -1437,7 +1437,7 @@ async def test_wait_stop_stops_jarvis_and_listens_and_the_turn_says_what_was_hea
 
     rig.audio.say("Wait, stop.")
     await until(lambda: len(talker_got(rig)) == 2)
-    assert talker_got(rig)[1] == '<interrupted spoken="First sentence, sir."/>\n<user lang="en">Wait, stop.</user>'
+    assert talker_got(rig)[1] == '<interrupted basis="queue_estimate" spoken="First sentence, sir."/>\n<user lang="en">Wait, stop.</user>'
 
 
 async def test_a_new_request_over_jarvis_stops_it_and_is_answered_with_what_was_heard(rig_for: MakeRig) -> None:
@@ -1453,7 +1453,7 @@ async def test_a_new_request_over_jarvis_stops_it_and_is_answered_with_what_was_
     await until(lambda: rig.state == "speaking" and rig.player.texts[-1] == "Right away, sir.")
 
     assert talker_got(rig)[1] == (
-        '<interrupted spoken="First sentence, sir."/>\n<user lang="en">Actually, open an issue instead</user>'
+        '<interrupted basis="queue_estimate" spoken="First sentence, sir."/>\n<user lang="en">Actually, open an issue instead</user>'
     )
     assert "Second sentence follows." not in rig.player.texts[rig.player.texts.index("Right away, sir.") :]
 
@@ -1470,7 +1470,7 @@ async def test_jarvis_said_over_a_reply_always_stops_it(rig_for: MakeRig) -> Non
     await until(lambda: len(talker_got(rig)) == 2)
 
     assert "stop" in rig.player.events
-    assert talker_got(rig)[1] == '<interrupted spoken=""/>\n<user lang="en">What is running?</user>'
+    assert talker_got(rig)[1] == '<interrupted basis="queue_estimate" spoken=""/>\n<user lang="en">What is running?</user>'
 
 
 async def test_speech_inside_the_guard_is_ignored_and_a_later_barge_in_still_stops_jarvis(rig_for: MakeRig) -> None:

@@ -187,6 +187,7 @@ class VoiceMode:
         self._reply_started: tuple[tuple[str, int], float] | None = None
         self._reply_finished: tuple[tuple[str, int], float] | None = None
         self._closed = False
+        self._typed_at = float("-inf")
         self._capture_setting: tuple[bool, int] | None = None
         self._origins: dict[int | None, tuple[str, bool | None]] = {}
         self._waiting: deque[_Fragment] = deque()
@@ -398,6 +399,7 @@ class VoiceMode:
             self._owned = replace(self._owned, semantic_start=start)
 
     def typed_input(self) -> None:
+        self._typed_at = self._clock.now()
         # STT can hold an initial recording before its queued onset reaches this state machine.
         if self._owned is None and self._voice.state in CAPTURING:
             return
@@ -525,6 +527,8 @@ class VoiceMode:
     def _step(self, event: Event) -> list[Action]:
         before_voice = self._voice
         before, woke_at = before_voice.state, before_voice.woke_at
+        if isinstance(event, WakeWord) and event.at < self._typed_at:
+            return []
         if isinstance(event, (ReplyAudio, ReplyDone)) and event.owner is not None and not self.owns(event.owner):
             return []
         self._voice, actions = step(before_voice, event, self._timing)

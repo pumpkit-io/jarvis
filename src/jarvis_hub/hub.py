@@ -178,7 +178,7 @@ def user_message(text: str, lang: Lang, *, typed: bool = True) -> str:
 def interrupted_message(spoken: str) -> str:
     # In a double-quoted attribute only `"` and markup need escaping; apostrophes stay as spoken.
     attribute = escape(spoken, quote=False).replace('"', "&quot;")
-    return f'<interrupted spoken="{attribute}"/>'
+    return f'<interrupted basis="queue_estimate" spoken="{attribute}"/>'
 
 
 def event_message(
