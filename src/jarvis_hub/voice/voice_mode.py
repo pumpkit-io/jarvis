@@ -633,7 +633,9 @@ class VoiceMode:
             self._period = None
             if period.stopped:
                 self._voice = replace(self._voice, in_turn=False, deadline=self._clock.now() + self._timing.follow_up_s)
-                self._sync_capture()
+            elif self._voice.state == "listening":
+                self._voice = replace(self._voice, in_turn=False, deadline=self._clock.now() + self._timing.listen_s)
+            self._sync_capture()
             return
         line: Line | None = None
         if (decision.ready and selected and not period.active and all(source.final for source in selected)

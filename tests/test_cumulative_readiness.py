@@ -194,3 +194,29 @@ async def test_initial_whole_end_controls_finish_silently_without_a_talker_reque
     await rig.settle()
     assert rig.state == 'idle' and not talker_got(rig)
     assert not jev.snapshots
+
+
+async def test_unrelated_initial_speech_restores_bounded_listening_and_fresh_wake_recovery(rig_for: MakeRig) -> None:
+    from jarvis_hub.voice.cumulative import Decision
+
+    jev = ScriptedJev(auto_initial=False)
+    rig = await rig_for([Text('Understood.')], recognition=jev)
+    rig.audio.wake()
+    await rig.settle()
+    rig.audio.say('Lena, please close the door.')
+    await until(lambda: len(jev.snapshots) == 1)
+    snapshot = jev.snapshots[-1]
+    jev.replies.put_nowait(Decision(snapshot.id, (), False, False, False, 'assessed',
+                                   tuple(source.key for source in snapshot.sources)))
+    await rig.settle()
+    await rig.advance(120)
+    assert not talker_got(rig) and rig.state == 'idle'
+    before = rig.player.voices.count('chime')
+    rig.audio.wake()
+    await rig.settle()
+    assert rig.state == 'listening' and rig.player.voices.count('chime') == before + 1
+    rig.audio.say('Explain the build result.')
+    await until(lambda: len(jev.snapshots) == 2)
+    jev.answer(ready=True)
+    await until(lambda: len(talker_got(rig)) == 1)
+    assert rig.user_messages() == ['<user lang="en">Explain the build result.</user>']
