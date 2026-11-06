@@ -36,6 +36,8 @@ class RoleModel:
 class VoiceSettings:
     """Voice mode's windows, engines and thresholds; Phase 0 measured the defaults (docs/notes/phase-0-spikes.md)."""
 
+    admission_backend: Literal["off", "claude"] = "off"
+    admission_model: str = "sonnet"
     follow_up_s: float = 6.0
     announce_follow_up_s: float = 4.0
     listen_s: float = 6.0
@@ -162,6 +164,8 @@ def load_settings(
 
     def voice_settings() -> VoiceSettings:
         return VoiceSettings(
+            admission_backend=choice("JARVIS_ADMISSION_BACKEND", "off", ("off", "claude")),
+            admission_model=get("JARVIS_ADMISSION_MODEL", "sonnet"),
             follow_up_s=number("JARVIS_FOLLOWUP_SECONDS", 6.0, 0, 120, low_open=True),
             announce_follow_up_s=number("JARVIS_ANNOUNCE_FOLLOWUP_SECONDS", 4.0, 0, 120, low_open=True),
             listen_s=number("JARVIS_LISTEN_SECONDS", 6.0, 0, 120, low_open=True),
