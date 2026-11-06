@@ -758,6 +758,8 @@ class VoiceMode:
             if self._period is not period or period.version != version or self._closed:
                 return
         if decision.voice_only and period.stopped and selected:
+            if period.active or any(not source.final for source in snapshot.sources):
+                return
             for source in snapshot.sources:
                 self._reject_source(source.candidate)
             self._period = None

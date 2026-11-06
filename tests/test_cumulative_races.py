@@ -442,3 +442,56 @@ async def test_incompatible_retired_prefix_rewrite_is_visible_and_cannot_admit_a
     await until(lambda: len(talker_got(rig)) == 2)
     assert 'Jarvis, explain the retry.' in talker_got(rig)[-1]
     assert 'orphan' not in talker_got(rig)[-1]
+
+
+async def test_partial_voice_only_stop_keeps_the_same_source_for_a_later_directed_continuation(rig_for: MakeRig) -> None:
+    from tests.fakes import AwaitInterrupt
+    from tests.test_voice_mode import STORY, speaking
+
+    jev = ScriptedJev()
+    rig = await rig_for([*STORY, AwaitInterrupt()], [ResolveScope('preserve_tasks'), Text('Explained.')], recognition=jev)
+    await speaking(rig)
+    rig.audio.speech()
+    source, owner, onset = rig.audio.candidate, rig.audio.owner, rig.clock.now()
+    rig.audio.emit(Hypothesis('Stop your voice', onset, owner, source, 1, onset, onset))
+    await until(lambda: len(jev.snapshots) == 1)
+    jev.answer(floor=True, voice_only=True)
+    await until(lambda: rig.player.pending() == 0 and rig.player.events.count('stop') == 1)
+    assert len(talker_got(rig)) == 1 and rig.audio.capturing[-1] is True
+    status = next(tool.handler for tool in rig.backend.session('talker').spec.tools if tool.name == 'status')
+    assert 'No Tasks' in await status({})
+    raw = 'Stop your voice, and explain the skipped test instead.'
+    final = Heard(raw, 'en', rig.clock.now(), owner, source, onset)
+    rig.audio.emit(final)
+    await until(lambda: len(jev.snapshots) == 2)
+    assert jev.snapshots[-1].sources[0].text == raw
+    jev.answer(ready=True)
+    await until(lambda: len(talker_got(rig)) == 2)
+    assert raw in talker_got(rig)[-1]
+    assert rig.player.events.count('stop') == 1
+    rig.audio.emit(final)
+    await rig.settle()
+    assert len(talker_got(rig)) == 2
+
+
+async def test_partial_voice_only_stop_confirmed_final_opens_a_finite_follow_up(rig_for: MakeRig) -> None:
+    from tests.fakes import AwaitInterrupt
+    from tests.test_voice_mode import STORY, speaking
+
+    jev = ScriptedJev()
+    rig = await rig_for([*STORY, AwaitInterrupt()], recognition=jev)
+    await speaking(rig)
+    rig.audio.speech()
+    source, owner, onset = rig.audio.candidate, rig.audio.owner, rig.clock.now()
+    rig.audio.emit(Hypothesis('Stop your voice', onset, owner, source, 1, onset, onset))
+    await until(lambda: len(jev.snapshots) == 1)
+    jev.answer(floor=True, voice_only=True)
+    await until(lambda: rig.player.events.count('stop') == 1)
+    rig.audio.emit(Heard('Stop your voice.', 'en', rig.clock.now(), owner, source, onset))
+    await until(lambda: len(jev.snapshots) == 2)
+    jev.answer(voice_only=True)
+    await rig.settle()
+    await rig.advance(7)
+    assert rig.state == 'idle' and rig.audio.capturing[-1] is False
+    assert len(jev.snapshots) == 2 and len(talker_got(rig)) == 1
+    assert rig.player.events.count('stop') == 1
