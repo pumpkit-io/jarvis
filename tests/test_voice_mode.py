@@ -398,7 +398,7 @@ async def test_generated_farewell_finishes_before_idle_without_a_follow_up_windo
     rig.audio.say(utterance)
     await until(lambda: rig.player.texts[-1:] == [farewell])
     await until(lambda: any(t.name == "end_conversation" for t in rig.backend.session("talker").tool_results))
-    assert rig.state == "speaking"
+    await until(lambda: rig.state == "speaking")
     assert rig.player.voices[-1] == voice
     rig.player.finish()
     await rig.advance(0.1)

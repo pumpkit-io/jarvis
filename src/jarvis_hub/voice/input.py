@@ -23,7 +23,7 @@ from jarvis_hub.voice.clips import ClipKind, ClipStore
 from jarvis_hub.voice.language import detect_language
 from jarvis_hub.voice.idle_wake import IdleRecognizer, IdleResult, IdleUtterance, IdleWake
 from jarvis_hub.voice.player import Samples
-from jarvis_hub.voice.state import BargeIn, CaptureAborted, Heard, InputEvent, Overheard, SpeechStarted, WakeWord
+from jarvis_hub.voice.state import BargeIn, CaptureAborted, Heard, Hypothesis, InputEvent, Overheard, SpeechStarted, WakeWord
 
 SAMPLE_RATE = 16_000
 FRAME = SAMPLE_RATE // 100
@@ -98,6 +98,8 @@ class Engines:
 class Listening:
     """Capture thresholds and bounds, with internal legacy partial-replay parameters."""
 
+    cumulative_stt: bool = False
+    hypothesis_every_s: float = 0.4
     wake_threshold: float = 0.5
     vad_threshold: float = 0.5
     end_silence_s: float = 0.5
@@ -134,6 +136,10 @@ class _Turn:
     candidate: int = 0
     owner: int | None = None
     onset: float | None = None
+    hypothesis_at: float = float("-inf")
+    hypothesis_revision: int = 0
+    hypothesis_speech_at: float = float("-inf")
+    pauses: list[tuple[float, float]] = field(default_factory=lambda: list[tuple[float, float]]())
 
 
 @dataclass(frozen=True)
@@ -346,6 +352,9 @@ class InputPipeline:
             probability = self._e.vad.probability(chunk)
             idle_vad.append((ends, probability >= .5))
             if probability >= self._s.vad_threshold:
+                if self._turn is not None and ends - self._last_speech > .1:
+                    self._turn.pauses.append((self._last_speech, ends - len(chunk) / SAMPLE_RATE))
+                    self._turn.pauses = self._turn.pauses[-32:]
                 if self._onset is None:
                     self._onset = ends - len(chunk) / SAMPLE_RATE
                 if self._run is None:
@@ -367,6 +376,13 @@ class InputPipeline:
         if self._capturing and not self._blocked and not self._limited_run and self._turn is None and self._onset is not None:
             self._turn = self._begin_turn(self._onset)
             events.append(SpeechStarted(at, self._turn.owner, self._turn.candidate, self._turn.onset))
+        if self._turn is not None and self._s.cumulative_stt and self._pending is None:
+            turn = self._turn
+            if (at - (turn.onset if turn.onset is not None else turn.start) >= self._s.hypothesis_every_s
+                    and at - turn.hypothesis_at >= self._s.hypothesis_every_s
+                    and self._last_speech > turn.hypothesis_speech_at):
+                if (hypothesis := self._hypothesis(turn, at)) is not None:
+                    events.append(hypothesis)
         if self._turn is not None and (heard := self._end_of_turn(self._turn, at)) is not None:
             events.append(heard)
         return events
@@ -441,6 +457,26 @@ class InputPipeline:
         self._turn_sequence += 1
         return _Turn(first, frames, [], wake=self._activation_wake if self._activation_wake > first else None,
                      candidate=self._turn_sequence, owner=self._owner, onset=onset)
+
+    def _hypothesis(self, turn: _Turn, at: float) -> Hypothesis | None:
+        turn.hypothesis_at = at
+        audio = self._audio(turn)
+        if not self._e.gate.admits(audio):
+            return None
+        began = self._clock()
+        text = self._e.stt.transcribe(audio, after=max(0.0, turn.wake - turn.start) if turn.wake is not None else 0.0).strip()
+        completed = self._clock()
+        turn.hypothesis_revision += 1
+        turn.hypothesis_speech_at = self._last_speech
+        self._record({"kind": "cumulative_stt", "mechanism": "repeated_batch", "candidate": turn.candidate,
+                      "revision": turn.hypothesis_revision, "captured_through_at": at,
+                      "stt_started_at": began, "stt_completed_at": completed,
+                      "stt_ms": round((completed - began) * 1000, 1), "audio_s": len(audio) / SAMPLE_RATE,
+                      "time_basis": "perf_counter"})
+        if not text:
+            return None
+        return Hypothesis(text, at, turn.owner, turn.candidate, turn.hypothesis_revision,
+                          turn.onset if turn.onset is not None else turn.start, self._last_speech, tuple(turn.pauses))
 
     def _end_of_turn(self, turn: _Turn, at: float) -> Heard | None:
         if self._pending is not None:

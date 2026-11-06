@@ -112,6 +112,7 @@ def clip_settings(voice: VoiceSettings) -> ClipSettings:
 
 def listening(voice: VoiceSettings) -> Listening:
     return Listening(
+        cumulative_stt=voice.admission_backend == "jev",
         wake_threshold=voice.wake_threshold,
         vad_threshold=voice.vad_threshold,
         end_silence_s=voice.end_silence_ms / 1000,
@@ -346,7 +347,8 @@ async def voice_mode(
         output.notice(f"Voice mode needs an audio output: {type(e).__name__}: {e}. Run `jarvis-hub --text` instead.")
         return
     admission = configured_assessor(voice.admission_backend, voice.admission_model,
-                                    settings.repo_dir / "prompts" / "admission.md", notice=output.notice)
+                                    settings.repo_dir / "prompts" / "admission.md", notice=output.notice,
+                                    api_key=voice.jev_api_key, record=metrics.record)
     conversation = VoiceMode(
         audio=listener,
         tts=ears.tts,

@@ -449,6 +449,7 @@ source = { editable = "." }
 dependencies = [
     { name = "claude-agent-sdk", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "en-core-web-sm", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
+    { name = "httpx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "kokoro-mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "lingua-language-detector", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "livekit", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
@@ -472,6 +473,7 @@ dev = [
 requires-dist = [
     { name = "claude-agent-sdk", specifier = ">=0.2.177,<0.3" },
     { name = "en-core-web-sm", url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" },
+    { name = "httpx", specifier = ">=0.28,<1" },
     { name = "kokoro-mlx", specifier = ">=0.1.4,<0.2" },
     { name = "lingua-language-detector", specifier = ">=2.2" },
     { name = "livekit", specifier = "==1.2.0" },

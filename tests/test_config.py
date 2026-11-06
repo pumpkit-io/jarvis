@@ -300,3 +300,11 @@ def test_obsolete_pause_first_settings_cannot_change_contextual_admission(checko
     voice = load_settings(checkout, environ={}).voice
     assert voice.admission_backend == 'off'
     assert voice.onset_pad_ms == 300 and voice.max_turn_s == 20
+
+
+def test_jev_key_can_come_from_process_and_is_not_shown_in_settings(tmp_path: Path) -> None:
+    (tmp_path / '.env').write_text('JARVIS_ADMISSION_BACKEND=jev\nTYPESAFE_API_KEY=file-test-key\n')
+    settings = load_settings(tmp_path, {'TYPESAFE_API_KEY': 'process-test-key'})
+    assert settings.voice.admission_backend == 'jev'
+    assert settings.voice.jev_api_key == 'process-test-key'
+    assert 'process-test-key' not in repr(settings)

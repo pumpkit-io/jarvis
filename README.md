@@ -64,9 +64,11 @@ Type into the same terminal during voice mode for a text-only reply. Details app
 
 Startup shows loading and ready notices for the conversation model, speech and listening. The short readiness tone means speech output is ready; check the model and listening notices before speaking. There is no prerecorded greeting.
 
-The Talker warms in the background at startup, using one hidden subscription turn ([ADR 0006](docs/adr/0006-warm-up-in-the-background.md)). The Orchestrator connects without a prompt. Idle listening and stop phrases use no model call; pending work and Announcements may still need agent turns.
+The Talker warms in the background at startup, using one hidden subscription turn ([ADR 0006](docs/adr/0006-warm-up-in-the-background.md)). The Orchestrator connects without a prompt. Idle wake listening uses no model call; opted-in Jev voice control sends bounded text assessments; pending work and Announcements may still need agent turns.
 
 Ask for status or to cancel a Task by name. Quiet mode holds routine Announcements until the next Wake word; news that needs you can still be announced. A Boundary action asks for one recorded Approval. The Hub runs approved merges and branch deletions; other approved actions go to a Subagent. See [ADR 0013](docs/adr/0013-approvals-checked-by-the-hub.md) for the rules and limits.
+
+For cumulative directed stops, opt in with `JARVIS_ADMISSION_BACKEND=jev` and `TYPESAFE_API_KEY`. This sends bounded candidate text, pause timings and recent context to Jev; raw audio stays local. See [cumulative voice assessment](docs/notes/cumulative-voice-assessment.md) for limits and unmeasured live gates.
 
 ## Settings
 

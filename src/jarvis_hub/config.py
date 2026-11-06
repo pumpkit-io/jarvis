@@ -4,7 +4,7 @@ import math
 import re
 import subprocess
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TypeGuard, TypeVar, get_args
 
@@ -36,8 +36,9 @@ class RoleModel:
 class VoiceSettings:
     """Voice mode's windows, engines and thresholds; Phase 0 measured the defaults (docs/notes/phase-0-spikes.md)."""
 
-    admission_backend: Literal["off", "claude"] = "off"
+    admission_backend: Literal["off", "claude", "jev"] = "off"
     admission_model: str = "sonnet"
+    jev_api_key: str = field(default="", repr=False)
     follow_up_s: float = 6.0
     announce_follow_up_s: float = 4.0
     listen_s: float = 6.0
@@ -129,7 +130,7 @@ def load_settings(
     main = main_checkout(repo_dir)
     env_file = main / ".env"
     values = parse_env(env_file.read_bytes()) if env_file.is_file() else {}
-    values.update({k: v for k, v in environ.items() if k.startswith("JARVIS_") and v})
+    values.update({k: v for k, v in environ.items() if (k.startswith("JARVIS_") or k == "TYPESAFE_API_KEY") and v})
 
     def get(name: str, default: str) -> str:
         return values.get(name) or default
@@ -161,8 +162,9 @@ def load_settings(
 
     def voice_settings() -> VoiceSettings:
         return VoiceSettings(
-            admission_backend=choice("JARVIS_ADMISSION_BACKEND", "off", ("off", "claude")),
+            admission_backend=choice("JARVIS_ADMISSION_BACKEND", "off", ("off", "claude", "jev")),
             admission_model=get("JARVIS_ADMISSION_MODEL", "sonnet"),
+            jev_api_key=get("TYPESAFE_API_KEY", ""),
             follow_up_s=number("JARVIS_FOLLOWUP_SECONDS", 6.0, 0, 120, low_open=True),
             announce_follow_up_s=number("JARVIS_ANNOUNCE_FOLLOWUP_SECONDS", 4.0, 0, 120, low_open=True),
             listen_s=number("JARVIS_LISTEN_SECONDS", 6.0, 0, 120, low_open=True),

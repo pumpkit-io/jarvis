@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable
 from typing import Protocol, cast
 
+from jarvis_hub.voice.jev import JevAssessor
 from jarvis_hub.voice.assessment import Assessment, Candidate, SegmentAction, Verdict
 
 
@@ -178,7 +179,10 @@ class CloudAssessor:
         self._query = None
 
 
-def configured_assessor(backend: str, model: str, prompt_path: Path, *, notice: Callable[[str], None]) -> CloudAssessor | None:
+def configured_assessor(backend: str, model: str, prompt_path: Path, *, notice: Callable[[str], None],
+                        api_key: str = "", record: Callable[[dict[str, object]], None] = lambda row: None) -> CloudAssessor | JevAssessor | None:
+    if backend == "jev":
+        return JevAssessor(api_key, notice=notice, record=record)
     if backend == "off":
         notice("Cloud admission disabled.")
         return None

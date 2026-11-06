@@ -102,6 +102,20 @@ class Heard:
 
 
 @dataclass(frozen=True)
+class Hypothesis:
+    """A replacement transcript for one still-captured source, never an admitted request."""
+
+    text: str
+    at: float
+    owner: int | None
+    candidate: int
+    revision: int
+    started_at: float
+    speech_at: float
+    pauses: tuple[tuple[float, float], ...] = ()
+
+
+@dataclass(frozen=True)
 class ReplyAudio:
     """A reply's first audio started playing. `answers` is the `SendTurn.at` of the turn it answers, if any."""
 
@@ -140,9 +154,10 @@ class Tick:
 
 
 # What the audio input reports.
-InputEvent = WakeWord | SpeechStarted | CaptureAborted | Heard | BargeIn | Partial | Overheard
+InputEvent = Hypothesis | WakeWord | SpeechStarted | CaptureAborted | Heard | BargeIn | Partial | Overheard
 Event = (
-    WakeWord
+    Hypothesis
+    | WakeWord
     | ChimeStarted
     | SpeechStarted
     | CaptureAborted
@@ -301,6 +316,8 @@ def step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Action
 
 def _step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Action]]:
     match event:
+        case Hypothesis():
+            return voice, []
         case WakeWord(_, _, _, idle_candidate) if idle_candidate is not None and voice.state != "idle":
             return voice, []
         case WakeWord(at, delivered_at):
