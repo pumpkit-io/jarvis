@@ -15,7 +15,7 @@ from uuid import uuid4
 from jarvis_hub.hub import Line
 from jarvis_hub.voice.assessment import Assessment, Candidate
 from jarvis_hub.voice.followup import FollowUpWindow
-from jarvis_hub.voice.cumulative import CumulativeRecognition, Decision, Snapshot, Source, TalkingPeriod
+from jarvis_hub.voice.cumulative import MAX_ASSESSMENTS, MAX_PERIOD_SOURCES, CumulativeRecognition, Decision, Snapshot, Source, TalkingPeriod, after_retired_prefix, retired_prefix, selected_sources
 from jarvis_hub.voice.ownership import MAX_REQUEST_CHARACTERS, SpokenTurn
 from jarvis_hub.voice.bargein import Partial
 from jarvis_hub.voice.language import Lang
@@ -204,6 +204,7 @@ class VoiceMode:
         self._recognition = recognition
         self._period: TalkingPeriod | None = None
         self._period_query: asyncio.Task[None] | None = None
+        self._period_applying: asyncio.Task[None] | None = None
         self._epoch = 0
         self._request_sequence = 0
         self._request_namespace = uuid4().hex
@@ -287,10 +288,10 @@ class VoiceMode:
 
     def _follow_up_pending(self) -> bool:
         window = self._follow_up
-        return window is not None and bool(window.active or window.waiting or window.inflight or self._owned_capture_pending())
+        return self._period is not None or window is not None and bool(window.active or window.waiting or window.inflight or self._owned_capture_pending())
 
     def _owned_capture_pending(self) -> bool:
-        return bool(self._owned_capture_active or self._waiting or self._inflight or self._applying_fragments or self._applying)
+        return bool(self._period is not None or self._owned_capture_active or self._waiting or self._inflight or self._applying_fragments or self._applying)
 
     def _clear_owned_fragments(self) -> None:
         self._owned_capture_active.clear()
@@ -305,7 +306,9 @@ class VoiceMode:
             return False
         window = self._follow_up
         fragments = (*self._retained, *self._inflight, *self._applying_fragments, *self._waiting)
-        return (candidate in self._owned_capture_active or any(fragment.heard.candidate == candidate for fragment in fragments)
+        period = self._period
+        return (period is not None and (candidate in period.sources or candidate in period.active)
+                or candidate in self._owned_capture_active or any(fragment.heard.candidate == candidate for fragment in fragments)
                 or window is not None and (candidate in window.active or any(fragment.candidate == candidate
                     for fragment in (*window.retained, *window.inflight, *window.waiting))))
 
@@ -346,7 +349,7 @@ class VoiceMode:
     async def close(self) -> None:
         self._closed = True
         self._retire()
-        pending = [task for task in [self._assessing, self._follow_up_query, self._period_query, *self._applying] if task is not None]
+        pending = [task for task in [self._assessing, self._follow_up_query, self._period_query, self._period_applying, *self._applying] if task is not None]
         for task in pending:
             task.cancel()
         if pending:
@@ -487,7 +490,9 @@ class VoiceMode:
                                 interrupt: Callable[[], Awaitable[Any]]) -> bool:
         if not getattr(self._recognition, "cumulative", False):
             return False
-        if self._period is not None and self._clock.now() >= self._period.opened + 30:
+        if self._closed:
+            return True
+        if self._period is not None and self._clock.now() >= self._period.expires_at:
             self._limit_cumulative(self._period)
             if isinstance(event, Tick):
                 return True
@@ -496,7 +501,9 @@ class VoiceMode:
             period = event.period
             if self._period is period and period.epoch == self._epoch and not self._closed:
                 if period.version == event.version and event.decision.snapshot_id == event.snapshot.id:
-                    await self._apply_cumulative(period, event.snapshot, event.decision, interrupt)
+                    applying = asyncio.create_task(self._apply_cumulative(period, event.snapshot, event.decision, interrupt, event.version))
+                    self._period_applying = applying
+                    applying.add_done_callback(self._cumulative_applied)
                 if self._period is period:
                     self._assess_cumulative()
             else:
@@ -510,12 +517,16 @@ class VoiceMode:
             return True
         if not isinstance(event, (SpeechStarted, Hypothesis, Heard, CaptureAborted)):
             return False
-        if period is None and self._voice.state not in ("listening", "thinking", "speaking", "announce", "follow_up"):
+        window = self._follow_up
+        if period is None and self._voice.state not in ("listening", "thinking", "speaking", "announce", "follow_up") and window is None:
             return False
         if event.owner is not None and event.owner != self._epoch:
             return True
         candidate = event.candidate
-        if candidate is None or candidate <= self._accepted_candidate or candidate in self._rejected_sources or self._reject_unknown_sources:
+        if candidate in self._rejected_sources and period is not None and isinstance(event, (Hypothesis, Heard)):
+            speech_at = event.speech_at if isinstance(event, Hypothesis) else event.at
+            period.last_speech_at = max(period.last_speech_at if period.last_speech_at is not None else speech_at, speech_at)
+        if candidate is None or candidate <= self._accepted_candidate or candidate in self._rejected_sources or self._reject_unknown_sources and not self._known_pending_source(candidate):
             return True
         if (isinstance(event, Heard) and self._voice.state == "listening" and self._owned is None
                 and stop_phrase(without_wake_phrase(event.text)) is not None):
@@ -524,11 +535,27 @@ class VoiceMode:
                 await self._act(action, interrupt)
             return True
         if period is None:
-            window = self._follow_up
+            if isinstance(event, CaptureAborted):
+                return False
+            onset = event.started_at if event.started_at is not None else event.at
+            if window is not None and self._voice.state in ("idle", "follow_up"):
+                earliest = window.source.arrived if window.source is not None else window.opened
+                if not earliest <= onset <= window.expires:
+                    self._reject_source(candidate)
+                    return True
+                phase = ("announce" if window.phase == "announce" and (window.completed_at is None or onset < window.completed_at)
+                         else "thinking" if onset < window.opened and (window.reply_started_at is None or onset < window.reply_started_at)
+                         else "speaking" if onset < window.opened else "follow_up")
+                played = window.played_text
+            else:
+                phase = self._origin(onset)[0]
+                played = self._speech.played() if self._voice.state != "announce" or self._voice.voiced_at is not None else ""
             preceding = self._owned.semantic_text if self._owned is not None else window.admitted_turn if window is not None else ""
             period = self._period = TalkingPeriod(self._epoch, self._owned or (window.source if window is not None else None),
-                                                  self._voice.state, preceding, self._speech.played(), self._clock.now())
+                                                  phase, preceding, played, self._clock.now())
+            self._sync_capture()
         if isinstance(event, CaptureAborted) or isinstance(event, Heard) and event.limited:
+            self._reject_source(candidate)
             self._limit_cumulative(period)
             return True
         if isinstance(event, SpeechStarted):
@@ -544,7 +571,7 @@ class VoiceMode:
             return True
         previous = period.sources.get(candidate)
         if isinstance(event, Hypothesis):
-            if previous is not None and (previous.final or previous.revision >= event.revision):
+            if previous is not None and previous.final or period.source_revisions.get(candidate, 0) >= event.revision:
                 return True
             source = Source(candidate, event.revision, event.text, event.started_at, event.speech_at, event.at,
                             pauses=event.pauses)
@@ -552,21 +579,60 @@ class VoiceMode:
             period.active.discard(candidate)
             if previous is not None and previous.final:
                 return True
-            source = Source(candidate, previous.revision + 1 if previous is not None else 1, event.text,
+            source = Source(candidate, period.source_revisions.get(candidate, 0) + 1, event.text,
                             event.started_at if event.started_at is not None else event.at, event.at,
                             event.delivered_at if event.delivered_at is not None else self._clock.now(), True,
                             previous.pauses if previous is not None else (), event.lang)
+        period.source_revisions[candidate] = source.revision
+        if candidate in period.retired_prefixes:
+            reconciled = after_retired_prefix(source, period.retired_prefixes[candidate])
+            if reconciled is None:
+                self._reject_source(candidate)
+                period.sources.pop(candidate, None)
+                period.active.discard(candidate)
+                period.retired_prefixes.pop(candidate, None)
+                period.version += 1
+                self._notice("Speech changed across a retired background prefix. Pause, then repeat the directed request, or use typed input.")
+                self._settle_empty_cumulative(period)
+                return True
+            source = reconciled
         period.sources[candidate] = source
         period.last_speech_at = max(period.last_speech_at if period.last_speech_at is not None else source.speech_at,
                                     source.speech_at)
         period.version += 1
         period.dirty = True
         period.reassess_at = self._clock.now() + .4
-        if len(period.sources) > 4 or sum(len(item.text) for item in period.sources.values()) > MAX_REQUEST_CHARACTERS:
+        if not source.text[source.allowed_from:].strip():
+            period.sources.pop(candidate, None)
+            if source.final:
+                self._reject_source(candidate)
+            if self._settle_empty_cumulative(period):
+                return True
+        if len(period.sources) > MAX_PERIOD_SOURCES or sum(len(item.text) for item in period.sources.values()) > MAX_REQUEST_CHARACTERS:
             self._limit_cumulative(period)
         else:
             self._assess_cumulative()
         return True
+
+    def _settle_empty_cumulative(self, period: TalkingPeriod) -> bool:
+        if period.sources or period.active:
+            return False
+        self._period = None
+        if period.stopped:
+            self._cumulative_follow_up(period)
+        elif self._voice.state == "listening":
+            self._voice = replace(self._voice, in_turn=False, deadline=self._clock.now() + self._timing.listen_s)
+        self._sync_capture()
+        return True
+
+    def _cumulative_follow_up(self, period: TalkingPeriod) -> None:
+        opened = self._clock.now()
+        expires = opened + self._timing.follow_up_s
+        source = period.admitted or period.owner
+        self._voice = Voice(state="follow_up", deadline=expires)
+        self._follow_up = FollowUpWindow(f"voice-stop-{self._request_namespace}-{opened}", self._epoch,
+                                        opened, expires, source.semantic_text if source is not None else period.preceding_request,
+                                        period.played_text, source)
 
     def _limit_cumulative(self, period: TalkingPeriod) -> None:
         for candidate in set(period.sources) | period.active:
@@ -574,28 +640,39 @@ class VoiceMode:
         self._period = None
         self._notice("Cumulative speech reached its retention limit or lost audio. Use a fresh wake or typed input.")
         if period.stopped:
-            self._voice = Voice(state="follow_up", deadline=self._clock.now() + self._timing.follow_up_s)
+            self._cumulative_follow_up(period)
         elif self._voice.state == "listening":
             before = self._voice.state
             self._voice = Voice()
             self._transition(before, "idle", Tick(self._clock.now()))
         self._sync_capture()
 
+    def _cumulative_applied(self, task: asyncio.Task[None]) -> None:
+        if self._period_applying is task:
+            self._period_applying = None
+        if not task.cancelled() and (error := task.exception()) is not None:
+            self._notice(f"Could not apply cumulative speech: {type(error).__name__}.")
+        self._assess_cumulative()
+        self._sync_capture()
+
     def _assess_cumulative(self) -> None:
         period = self._period
-        if period is None or self._period_query is not None or not period.dirty or not period.sources or self._closed:
+        if period is None or self._period_query is not None or self._period_applying is not None or not period.dirty or not period.sources or self._closed:
             return
-        if period.sequence >= 80:
+        if period.sequence >= MAX_ASSESSMENTS:
             self._limit_cumulative(period)
             return
         period.dirty = False
         period.sequence += 1
-        sources = tuple(source for source in period.sources.values() if source.text.strip())
+        sources = tuple(source for source in period.sources.values() if source.text[source.allowed_from:].strip())
         if not sources:
             return
+        owner = period.admitted or period.owner
+        if not period.stopped and self._voice.state in ("speaking", "announce"):
+            period.played_text = self._speech.played() if self._voice.voiced_at is not None else ""
         snapshot = Snapshot(f"{period.epoch}:{period.opened}:{period.sequence}", sources, self._clock.now(),
                             period.phase, period.preceding_request, period.played_text,
-                            period.owner.token if period.owner is not None else None,
+                            owner.token if owner is not None else None,
                             pauses=tuple(sorted(set(period.pauses) | {pause for source in sources for pause in source.pauses})),
                             active_sources=tuple(sorted(period.active)))
         version = period.version
@@ -610,32 +687,36 @@ class VoiceMode:
         self._period_query = asyncio.create_task(assess())
 
     async def _apply_cumulative(self, period: TalkingPeriod, snapshot: Snapshot, decision: Decision,
-                                interrupt: Callable[[], Awaitable[Any]]) -> None:
-        keys = {source.key for source in snapshot.sources}
-        if (not set(decision.directed).issubset(keys) or not set(decision.unrelated).issubset(keys)
-                or set(decision.directed) & set(decision.unrelated)):
+                                interrupt: Callable[[], Awaitable[Any]], version: int) -> None:
+        if self._period is not period or period.epoch != self._epoch or period.version != version or self._closed:
+            return
+        try:
+            selected = selected_sources(snapshot, decision)
+        except ValueError:
             self._notice("Jev returned invalid source ownership; playback continues.")
             return
         self._metrics.record({"kind": "cumulative_assessment", "snapshot_id": snapshot.id,
                               "reason": decision.reason, "floor": decision.floor, "ready": decision.ready,
                               "sources": len(snapshot.sources), "time_basis": "perf_counter"})
         if decision.reason != "assessed":
+            period.failed_at = self._clock.now()
             period.reassess_at = float("inf")
             self._notice("Jev assessment unavailable; playback continues. Check Jev setup or use typed input.")
             return
-        selected = tuple(source for source in snapshot.sources if source.key in decision.directed)
+        period.failed_at = None
         for source in snapshot.sources:
             if source.key in decision.unrelated:
-                period.sources.pop(source.candidate, None)
-                period.active.discard(source.candidate)
-                self._reject_source(source.candidate)
-        if not period.sources and not period.active:
-            self._period = None
-            if period.stopped:
-                self._voice = replace(self._voice, in_turn=False, deadline=self._clock.now() + self._timing.follow_up_s)
-            elif self._voice.state == "listening":
-                self._voice = replace(self._voice, in_turn=False, deadline=self._clock.now() + self._timing.listen_s)
-            self._sync_capture()
+                if source.final:
+                    period.sources.pop(source.candidate, None)
+                    period.active.discard(source.candidate)
+                    period.retired_prefixes.pop(source.candidate, None)
+                    self._reject_source(source.candidate)
+                else:
+                    period.retired_prefixes[source.candidate] = retired_prefix(source)
+                    period.sources[source.candidate] = replace(source, allowed_from=len(source.text))
+                    period.version += 1
+        version = period.version
+        if self._settle_empty_cumulative(period):
             return
         line: Line | None = None
         if (decision.ready and selected and not period.active and all(source.final for source in selected)
@@ -647,12 +728,15 @@ class VoiceMode:
                     owned = period.owner.amended(text, last.speech_at, last.lang, segments=tuple(source.text for source in selected))
                 else:
                     self._request_sequence += 1
-                    owned = SpokenTurn(f"spoken-{self._request_namespace}-{self._request_sequence}", 0, text,
+                    owned = SpokenTurn(period.admitted.id if period.admitted is not None else f"spoken-{self._request_namespace}-{self._request_sequence}", 0, text,
                                        last.speech_at, last.lang, tuple(source.text for source in selected))
+                if period.admitted is not None:
+                    owned = replace(owned, revision=period.admitted.revision + 1)
             except ValueError:
                 self._limit_cumulative(period)
                 return
             self._owned = owned
+            period.admitted = owned
             self._reply_started = self._reply_finished = None
             line = Line(owned.text, owned.arrived, owned.lang, typed=False, request_id=owned.id,
                         revision=owned.revision, segments=owned.segments,
@@ -661,6 +745,7 @@ class VoiceMode:
         if (selected and not period.stopped and self._voice.state in ("thinking", "speaking", "announce")
                 and (decision.floor or line is not None)):
             period.stopped = True
+            self._follow_up = None
             before = self._voice.state
             self._voice = replace(self._voice, state="follow_up", deadline=None, in_turn=True,
                                   voiced_at=None, awaiting=None, barge=None)
@@ -670,13 +755,15 @@ class VoiceMode:
                                   "source_onset_at": selected[0].started_at, "stop_requested_at": self._clock.now(),
                                   "played_basis": snapshot.played_basis, "time_basis": "perf_counter"})
             await interrupt()
-            if self._period is not period:
+            if self._period is not period or period.version != version or self._closed:
                 return
         if decision.voice_only and period.stopped and selected:
+            if period.active or any(not source.final for source in snapshot.sources):
+                return
             for source in snapshot.sources:
                 self._reject_source(source.candidate)
             self._period = None
-            self._voice = replace(self._voice, in_turn=False, deadline=self._clock.now() + self._timing.follow_up_s)
+            self._cumulative_follow_up(period)
             self._sync_capture()
             return
         if line is not None and self._owned is not None:
@@ -934,6 +1021,7 @@ class VoiceMode:
         self._idle.set()
 
     def _sync_capture(self) -> bool:
+        self._settle_idle()
         pending = self._follow_up_pending()
         setting = (not self._closed and (self._voice.state in CAPTURING or self._voice.state in VOICED
                                         or self._voice.state == "thinking" or pending),
@@ -1115,9 +1203,11 @@ class VoiceMode:
                     f"follow-up-{self._request_namespace}-{event.at}", self._epoch, event.at, self._voice.deadline,
                     self._owned.semantic_text if self._owned is not None and before != "announce" else "",
                     self._speech.played().strip(), self._owned if before != "announce" else None,
+                    reply_started_at=self._reply_started[1] if self._reply_started is not None else None,
                 )
         if self._voice.state == "idle" and before_voice.state != "idle":
-            preserve = isinstance(event, Tick) and self._follow_up is not None
+            preserve = (isinstance(event, Tick) and self._follow_up is not None
+                        or isinstance(event, ReplyDone) and self._period is not None)
             if preserve and self._follow_up is not None and not self._follow_up.active and not self._follow_up.inflight:
                 self._follow_up.retained = ()
             self._retire(preserve_follow_up=preserve)
@@ -1143,7 +1233,7 @@ class VoiceMode:
         deadline = self._voice.deadline
         if self._period is not None:
             deadline = min(deadline if deadline is not None else float("inf"),
-                           self._period.reassess_at, self._period.opened + 30)
+                           self._period.reassess_at, self._period.expires_at)
             if deadline == float("inf"):
                 deadline = None
         if deadline is None:

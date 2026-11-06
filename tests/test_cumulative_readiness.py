@@ -110,7 +110,7 @@ async def test_initial_retention_limit_reports_recovery_instead_of_submitting_a_
     await until(lambda: len(jev.snapshots) == 1)
     jev.answer(ready=False)
     await rig.settle()
-    await rig.advance(31)
+    await rig.advance(121)
     assert any('retention limit' in notice for notice in rig.output.notices)
     assert not talker_got(rig)
     assert rig.state == 'idle'
