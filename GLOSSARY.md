@@ -107,3 +107,11 @@ _Avoid_: filler, acknowledgment
 **Interruption**:
 A Barge-in that clearly addresses Jarvis and asks to take the floor. Jarvis stops speaking and listens; speech length or particular words alone do not establish an Interruption.
 _Avoid_: cancel, abort
+
+**User floor**:
+The User's opportunity to finish speaking while Jarvis listens. Taking the User floor does not mean the thought is complete or cancel any Task.
+_Avoid_: treating floor-taking as a finished request
+
+**Reply readiness**:
+The point at which the User's accumulated speech and pauses indicate that Jarvis can answer the thought. A complete-sounding sentence alone does not establish Reply readiness.
+_Avoid_: treating every speech endpoint as a finished thought
