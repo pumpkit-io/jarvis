@@ -1,6 +1,7 @@
 """Cumulative decisions stop output before a correction is ready to submit."""
 
 import asyncio
+from pathlib import Path
 
 import pytest
 from collections.abc import Callable
@@ -201,3 +202,70 @@ async def test_only_observed_directed_sources_enter_a_revision(rig_for: MakeRig)
     await until(lambda: len(talker_got(rig)) == 2)
     assert 'Actually, use the other repository.' in rig.user_messages()[-1]
     assert 'Lena' not in rig.user_messages()[-1]
+
+
+async def test_ready_revision_holds_task_authority_before_blocked_interruption_returns(rig_for: MakeRig, tmp_path: Path) -> None:
+    import json
+    from tests.fakes import Gate, Tool
+
+    interruption, report, choose = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    path = tmp_path / 'state.json'
+    jev = ScriptedJev()
+    rig = await rig_for(
+        [Tool('delegate', {'request': 'Check build'}), *STORY, AwaitInterrupt()],
+        [Gate(choose), ResolveScope('preserve_tasks'), Text('Corrected.')],
+        orchestrator=[[Gate(report), Tool('report', {'task_id': 'T1', 'spoken': 'Old report', 'needs_user': False})]],
+        interrupt_gate=interruption, recognition=jev, state_path=path,
+    )
+    await speaking(rig)
+    await until(lambda: bool(rig.backend.all_sessions('orchestrator')))
+    rig.audio.say('Actually, include tests before reporting.')
+    await until(lambda: len(jev.snapshots) == 1)
+    jev.answer(floor=True, ready=True)
+    await until(lambda: 'stop' in rig.player.events)
+    report.set()
+    await rig.settle()
+    saved = json.loads(path.read_text())
+    try:
+        assert rig.backend.session('orchestrator').tool_results == []
+        assert saved['spoken_scopes'][0]['pending'] is True
+        assert saved['spoken_scopes'][0]['task_ids'] == ['T1']
+        assert len(rig.user_messages()) == 1
+    finally:
+        interruption.set()
+        choose.set()
+
+
+async def test_complete_directed_follow_up_submits_without_taking_a_playback_floor(rig_for: MakeRig) -> None:
+    jev = ScriptedJev()
+    rig = await rig_for([Text('The build is green, sir.')], [ResolveScope('preserve_tasks'), Text('Yes, sir.')], recognition=jev)
+    rig.audio.wake()
+    rig.audio.say('Check the build')
+    await until(lambda: rig.state == 'follow_up')
+    before = rig.player.events.count('stop')
+    rig.audio.say('And explain the result.')
+    await until(lambda: len(jev.snapshots) == 1)
+    jev.answer(floor=False, ready=True)
+    await until(lambda: len(rig.user_messages()) == 2)
+    assert 'And explain the result.' in rig.user_messages()[-1]
+    assert rig.player.events.count('stop') == before
+
+
+async def test_failed_assessment_expires_retained_sources_without_another_provider_call(rig_for: MakeRig) -> None:
+    jev = ScriptedJev()
+    rig = await rig_for([*STORY, AwaitInterrupt()], recognition=jev)
+    await speaking(rig)
+    rig.audio.speech()
+    old_source, now, owner = rig.audio.candidate, rig.clock.now(), rig.audio.owner
+    rig.audio.emit(Hypothesis('Uncertain old words', now, owner, old_source, 1, now, now))
+    await until(lambda: len(jev.snapshots) == 1)
+    jev.replies.put_nowait(Decision(jev.snapshots[-1].id, (), False, False, False, 'unavailable'))
+    await rig.settle()
+    await rig.advance(60)
+    assert len(jev.snapshots) == 1
+    assert any('retention limit' in notice for notice in rig.output.notices)
+    rig.audio.emit(Heard('The old orphaned tail', 'en', rig.clock.now(), owner, old_source, now))
+    rig.audio.say('Actually, explain the other repository.')
+    await until(lambda: len(jev.snapshots) == 2)
+    assert tuple(source.text for source in jev.snapshots[-1].sources) == ('Actually, explain the other repository.',)
+    assert not any(event in ('pause', 'stop') for event in rig.player.events)

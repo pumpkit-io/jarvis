@@ -486,6 +486,10 @@ class VoiceMode:
                                 interrupt: Callable[[], Awaitable[Any]]) -> bool:
         if not getattr(self._recognition, "cumulative", False):
             return False
+        if self._period is not None and self._clock.now() >= self._period.opened + 30:
+            self._limit_cumulative(self._period)
+            if isinstance(event, Tick):
+                return True
         if isinstance(event, _CumulativeResult):
             self._period_query = None
             period = event.period
@@ -500,11 +504,8 @@ class VoiceMode:
         period = self._period
         if isinstance(event, Tick) and period is not None and event.at >= period.reassess_at:
             period.reassess_at = event.at + .4
-            if event.at - period.opened > 30:
-                self._limit_cumulative(period)
-            else:
-                period.dirty = True
-                self._assess_cumulative()
+            period.dirty = True
+            self._assess_cumulative()
             return True
         if not isinstance(event, (SpeechStarted, Hypothesis, Heard, CaptureAborted)):
             return False
@@ -613,6 +614,27 @@ class VoiceMode:
                 self._voice = replace(self._voice, in_turn=False, deadline=self._clock.now() + self._timing.follow_up_s)
                 self._sync_capture()
             return
+        line: Line | None = None
+        if (decision.ready and selected and not period.active and all(source.final for source in selected)
+                and (period.stopped or decision.floor or self._voice.state in ("follow_up", "idle"))):
+            text = " ".join(source.text for source in selected)
+            last = selected[-1]
+            try:
+                if period.owner is not None:
+                    owned = period.owner.amended(text, last.speech_at, last.lang, segments=tuple(source.text for source in selected))
+                else:
+                    self._request_sequence += 1
+                    owned = SpokenTurn(f"spoken-{self._request_namespace}-{self._request_sequence}", 0, text,
+                                       last.speech_at, last.lang, tuple(source.text for source in selected))
+            except ValueError:
+                self._limit_cumulative(period)
+                return
+            self._owned = owned
+            self._reply_started = self._reply_finished = None
+            line = Line(owned.text, owned.arrived, owned.lang, typed=False, request_id=owned.id,
+                        revision=owned.revision, segments=owned.segments,
+                        interrupted=(period.played_text or None) if period.stopped or decision.floor else None)
+            self._admitted(line)
         if decision.floor and selected and not period.stopped:
             period.stopped = True
             before = self._voice.state
@@ -633,31 +655,14 @@ class VoiceMode:
             self._voice = replace(self._voice, in_turn=False, deadline=self._clock.now() + self._timing.follow_up_s)
             self._sync_capture()
             return
-        if decision.ready and period.stopped and selected and not period.active and all(source.final for source in selected):
-            text = " ".join(source.text for source in selected)
-            last = selected[-1]
-            try:
-                if period.owner is not None:
-                    owned = period.owner.amended(text, last.speech_at, last.lang, segments=tuple(source.text for source in selected))
-                else:
-                    self._request_sequence += 1
-                    owned = SpokenTurn(f"spoken-{self._request_namespace}-{self._request_sequence}", 0, text,
-                                       last.speech_at, last.lang, tuple(source.text for source in selected))
-            except ValueError:
-                self._limit_cumulative(period)
-                return
+        if line is not None and self._owned is not None:
             self._period = None
             self._follow_up = None
-            self._owned = owned
-            self._reply_started = self._reply_finished = None
             for source in snapshot.sources:
                 self._accepted_candidate = max(self._accepted_candidate, source.candidate)
-            self._voice = Voice(state="thinking", awaiting=owned.arrived)
+            self._voice = Voice(state="thinking", awaiting=line.arrived)
             self._sync_capture()
-            line = Line(owned.text, owned.arrived, owned.lang, typed=False, request_id=owned.id,
-                        revision=owned.revision, segments=owned.segments, interrupted=period.played_text or None)
-            self._admitted(line)
-            if self.owns(owned.token):
+            if line.request_id is not None and self.owns((line.request_id, line.revision)):
                 self._lines.put_nowait(line)
 
     def _follow_up_event(self, event: SpeechStarted | Heard) -> bool:
@@ -1104,7 +1109,8 @@ class VoiceMode:
         """The next event, or a Tick once the machine's deadline has come."""
         deadline = self._voice.deadline
         if self._period is not None:
-            deadline = min(deadline if deadline is not None else float("inf"), self._period.reassess_at)
+            deadline = min(deadline if deadline is not None else float("inf"),
+                           self._period.reassess_at, self._period.opened + 30)
             if deadline == float("inf"):
                 deadline = None
         if deadline is None:
