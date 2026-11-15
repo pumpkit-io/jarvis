@@ -170,8 +170,12 @@ class VoiceMode:
         notice: Callable[[str], None],
         debug: bool = False,
         recognition: RelationAssessment | None = None,
+        ready_when: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._audio = audio
+        # What else must be ready, beyond the voice, before the ready sound says Jarvis can take a request.
+        self._ready_when = ready_when
+        self._readying: asyncio.Task[None] | None = None
         self._player = player
         self._clock = clock
         self._timing = timing
@@ -227,6 +231,15 @@ class VoiceMode:
 
     def _ready(self) -> None:
         self._notice("Speech ready.")
+        if self._ready_when is None:
+            self._speech.say("ready", "en")
+            return
+        self._readying = asyncio.create_task(self._ready_once_all_are())
+
+    async def _ready_once_all_are(self) -> None:
+        assert self._ready_when is not None
+        await self._ready_when()
+        self._notice("Ready.")
         self._speech.say("ready", "en")
 
     def end_conversation(self) -> None:
@@ -279,7 +292,7 @@ class VoiceMode:
     async def close(self) -> None:
         self._closed = True
         self._retire()
-        pending = [task for task in [self._assessing, *self._applying] if task is not None]
+        pending = [task for task in [self._assessing, self._readying, *self._applying] if task is not None]
         for task in pending:
             task.cancel()
         if pending:

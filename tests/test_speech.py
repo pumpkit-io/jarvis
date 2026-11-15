@@ -176,11 +176,13 @@ async def test_the_next_sentence_is_synthesised_while_the_one_before_plays(
     await speech.close()
 
 
-async def test_loading_prepares_only_reusable_nonverbal_cues(
+async def test_loading_warms_each_voice_unheard_and_prepares_reusable_nonverbal_cues(
     clock: FakeClock, speech: Speech, tts: FakeTts, player: RecordingPlayer
 ) -> None:
     await speech.idle()
-    assert tts.calls == []
+    assert tts.calls == [("Good evening, sir.", "am_liam"), ("Buonasera, signore.", "im_nicola")]
+    assert player.clips == []
+    tts.calls.clear()
 
     speech.say("ready", "en")
     speech.say("ready", "en")

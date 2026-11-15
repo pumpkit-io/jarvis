@@ -35,9 +35,11 @@ class ScriptedMicrophone(ScriptedAudio):
     def __init__(self, clock: FakeClock) -> None:
         super().__init__(clock)
         self.started = self.closed = False
+        self.ready = threading.Event()
 
     def start(self) -> None:
         self.started = True
+        self.ready.set()
 
     def close(self) -> None:
         self.closed = True

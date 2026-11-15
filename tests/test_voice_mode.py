@@ -2644,3 +2644,21 @@ async def test_a_spoken_wake_alone_listens_for_the_request(rig_for: MakeRig) -> 
     rig.audio.say('What time is it?')
     await until(lambda: len(rig.user_messages()) == 1)
     assert rig.user_messages() == ['<user lang="en">What time is it?</user>']
+
+
+async def test_the_ready_sound_waits_for_everything_else_to_be_ready() -> None:
+    clock, player, output = FakeClock(), RecordingPlayer(), RecordingOutput()
+    rest = asyncio.Event()
+    voice = VoiceMode(
+        audio=ScriptedAudio(clock), tts=FakeTts(), player=player, clock=clock, timing=TIMING,
+        metrics=RecordingMetrics(), notice=output.notice, ready_when=lambda: until(rest.is_set, timeout=5),
+    )
+    voice.start()
+    await until(lambda: "Speech ready." in output.notices)
+    await asyncio.sleep(0.02)
+    assert player.voices == []
+
+    rest.set()
+    await until(lambda: player.voices == ["ready"])
+    assert output.notices[-1] == "Ready."
+    await voice.close()

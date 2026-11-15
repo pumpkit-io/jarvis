@@ -22,6 +22,9 @@ from jarvis_hub.voice.tts import Synthesizer
 
 ClipName = Literal["chime", "ready", "closing"]
 
+# Said to the engine at load and never played.
+WARM_UP: dict[Lang, str] = {"en": "Good evening, sir.", "it": "Buonasera, signore."}
+
 # With queued audio this long unplayed, as from a paused player or a device that stopped pulling, `idle` gives up.
 STALLED = 2.0
 
@@ -250,6 +253,9 @@ class Speech:
 
     def _load(self) -> None:
         self._tts.load()
+        # The first synthesis per voice is seconds slower than the rest, so it is paid here, not by the first reply.
+        for lang, phrase in WARM_UP.items():
+            self._tts.synthesize(phrase, voice_for(lang))
         tone = chime(self._tts.sample_rate)
         for lang in ("en", "it"):
             self._cache["chime", lang] = Clip("", "chime", tone, self._tts.sample_rate)
