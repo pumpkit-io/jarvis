@@ -895,3 +895,66 @@ def test_transcript_wake_can_be_turned_off() -> None:
     r.feed("silence", 0.6)
     assert r.events == []
     assert r.stt.heard == []
+
+
+class AnyVad:
+    """Hears speech in any sound at all, as Silero does in faint room noise and echo residue."""
+
+    chunk = 512
+
+    def probability(self, chunk: np.ndarray) -> float:
+        return 1.0 if chunk.any() else 0.0
+
+
+class AlwaysWake:
+    chunk = 1280
+
+    def score(self, chunk: np.ndarray) -> float:
+        return 1.0 if chunk.any() else 0.0
+
+
+def faint_rig(**settings: Any) -> Rig:
+    turn, stt, echo = ScriptedTurn(), ScriptedStt(), PassThrough()
+    engines = Engines(echo=echo, wake=AlwaysWake(), vad=AnyVad(), turn=turn, stt=stt, gate=Everyone())
+    records: list[dict[str, object]] = []
+    return Rig(InputPipeline(engines, Listening(**settings), record=records.append), turn, stt, echo, records=records)
+
+
+def test_sound_quieter_than_speech_is_no_turn_no_wake_and_no_barge_in() -> None:
+    r = faint_rig()
+    r.pipeline.capture(True)
+    r.pipeline.barge_in(T0)
+    # 30 counts RMS is about 30 dB: the level of echo residue and distant speech, far below the User's ~60 dB.
+    r.feed("speech", 2.0, 30)
+    r.feed("silence", 1.0)
+    assert r.events == []
+    assert r.stt.heard == []
+
+
+def test_speech_as_loud_as_the_user_is_a_turn_and_its_level_is_recorded() -> None:
+    r = faint_rig()
+    r.pipeline.capture(True)
+    r.feed("speech", 1.0, 1000)
+    r.feed("silence", 0.6)
+    assert [type(e) for e in r.events if not isinstance(e, WakeWord)] == [SpeechStarted, Heard]
+    [turn] = [row for row in r.records if row["kind"] == "turn"]
+    assert turn["speech_db"] == pytest.approx(60.0, abs=0.5)  # pyright: ignore[reportUnknownMemberType]
+
+
+def test_a_quieter_word_inside_loud_speech_still_counts() -> None:
+    r = faint_rig()
+    r.pipeline.capture(True)
+    r.feed("speech", 0.5, 1000)
+    r.feed("speech", 0.2, 30)
+    r.feed("speech", 0.5, 1000)
+    r.feed("silence", 0.6)
+    assert len(r.heard()) == 1
+    assert [type(e) for e in r.events].count(SpeechStarted) == 1
+
+
+def test_the_loudness_gate_is_a_setting() -> None:
+    r = faint_rig(min_speech_db=0.0)
+    r.pipeline.capture(True)
+    r.feed("speech", 1.0, 30)
+    r.feed("silence", 0.6)
+    assert len(r.heard()) == 1

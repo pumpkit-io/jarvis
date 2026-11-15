@@ -63,11 +63,17 @@ TABLE: list[tuple[str, list[Partial], Decision]] = [
     ("a cough STT names", [heard("(coughs)", 700, 300, 400)], "resume"),
     ("music", [heard("[Music]", 400, 380, 20)], "wait"),
     ("okay among marks", [heard("[BLANK_AUDIO] Okay. (coughs)", 700, 350, 350)], "resume"),
-    # Taking the floor: three words or more of something else.
+    # A request opened with an interrupt takes the floor.
     ("actually, open an issue", [heard("Actually", 400, 380, 20), heard("Actually, open an", 700, 680, 20)], "stop"),
     ("anzi, apri una issue", [heard("Anzi, apri una", 700, 680, 20)], "stop"),
-    ("okay but what about", [heard("Okay but what", 700, 680, 20)], "stop"),
-    # A word or two that is no Backchannel: undecided while it goes on, too uncertain to stop once it has stopped.
+    ("shut up", [heard("Shut up.", 700, 400, 300)], "stop"),
+    ("excuse me", [heard("Excuse me", 400, 380, 20)], "stop"),
+    ("zitto", [heard("Zitto!", 400, 300, 100)], "stop"),
+    # Without an interrupt, words are not enough to stop Jarvis (ADR 0014): undecided while they go on, then on.
+    ("okay but what about", [heard("Okay but what", 700, 680, 20)], "wait"),
+    ("okay but what about, then quiet", [heard("Okay but what about.", 700, 680, 220)], "resume"),
+    ("echo heard as words", [heard("I'm just catching up.", 700, 600, 250)], "resume"),
+    ("room speech heard as words", [heard("They can't do it.", 700, 650, 210)], "resume"),
     ("the build", [heard("The build", 400, 380, 20)], "wait"),
     ("the build, then quiet", [heard("The build.", 700, 450, 250)], "resume"),
     ("quale PR", [heard("Quale PR?", 700, 450, 250)], "resume"),
@@ -75,10 +81,8 @@ TABLE: list[tuple[str, list[Partial], Decision]] = [
     ("a stray word", [heard("Two.", 700, 480, 208)], "resume"),
     ("two stray words", [heard("So we", 460, 256, 204)], "resume"),
     ("a hesitation", [heard("Um", 752, 544, 208)], "resume"),
-    # Long speech that is still going takes the floor even before STT has the words.
-    ("a long word still going", [heard("Supercali", 700, 700, 20)], "stop"),
-    # VAD reports speech a chunk short, so at the 700 ms partial speech held throughout reads a little under.
-    ("a long word, as VAD reports it", [heard("Supercali", 695, 670, 20)], "stop"),
+    # Long speech still going is undecided until it says an interrupt or ends.
+    ("a long word still going", [heard("Supercali", 700, 700, 20)], "wait"),
 ]
 
 
@@ -87,17 +91,17 @@ def test_decision_on_each_partial(said: str, partials: list[Partial], expected: 
     assert decide(partials, final=False) == expected
 
 
-# At the deadline nothing waits: still talking with words other than Backchannels is an Interruption, anything else
-# resumes.
+# At the deadline nothing waits: only an interrupt stops Jarvis, anything else carries on.
 DEADLINE: list[tuple[str, list[Partial], Decision]] = [
     ("no partial came in time", [], "resume"),
-    ("a stretched okay still going", [heard("Okaaay", 700, 680, 20)], "stop"),
+    ("a stretched okay still going", [heard("Okaaay", 700, 680, 20)], "resume"),
     ("a word still going", [heard("The build", 700, 450, 20)], "resume"),
     ("noise still going", [heard("", 700, 680, 20)], "resume"),
     ("a Backchannel, done", [heard("Mhm", 700, 300, 400)], "resume"),
     ("sì, certo, said slowly", [heard("Sì, certo", 700, 600, 30)], "resume"),
     ("okay so, said slowly", [heard("Okay so", 700, 600, 30)], "resume"),
-    ("three words, said slowly", [heard("Okay so the", 700, 600, 30)], "stop"),
+    ("three words, said slowly", [heard("Okay so the", 700, 600, 30)], "resume"),
+    ("wait, said slowly", [heard("Okay so wait", 700, 600, 30)], "stop"),
 ]
 
 

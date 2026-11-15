@@ -430,7 +430,7 @@ def test_an_interruption_with_nothing_said_after_it_is_forgotten_once_idle() -> 
     assert actions[-1] == SendTurn("Hello", "en", 31.0)
 
 
-def test_undecided_at_the_deadline_a_word_or_two_resumes_after_a_last_call() -> None:
+def test_undecided_at_the_deadline_words_without_an_interrupt_carry_on_after_a_last_call() -> None:
     judging, _ = run(*SPEAKING, BargeIn(20.0, 20.2), said("The build", 20.4, 0.38, 0.02))
     assert judging.deadline == pytest.approx(21.0)  # pyright: ignore[reportUnknownMemberType]
     voice, actions = run(Tick(20.99), start=judging)
@@ -438,6 +438,8 @@ def test_undecided_at_the_deadline_a_word_or_two_resumes_after_a_last_call() -> 
     voice, actions = run(Tick(21.0), Tick(21.5), start=judging)
     assert (voice.state, actions) == ("speaking", [CARRIED_ON])
     voice, actions = run(Tick(21.0), said("The build is", 21.2, 0.6, 0.02), start=judging)
+    assert (voice.state, actions) == ("speaking", [CARRIED_ON])
+    voice, actions = run(Tick(21.0), said("The build, wait", 21.2, 0.6, 0.02), start=judging)
     assert (voice.state, actions) == ("listening", [Interrupt()])
 
     noise, _ = run(*SPEAKING, BargeIn(20.0, 20.2), said("", 20.4, 0.38, 0.02))
@@ -512,7 +514,7 @@ def test_backchannels_still_going_at_the_deadline_wait_for_one_more_partial() ->
     assert (voice.state, actions) == ("speaking", [])
     assert voice.deadline == pytest.approx(21.5)  # pyright: ignore[reportUnknownMemberType]
 
-    stopped, actions = run(said("okay so the", 21.0, 0.98, 0.02), start=voice)
+    stopped, actions = run(said("okay so wait", 21.0, 0.98, 0.02), start=voice)
     assert (stopped.state, actions) == ("listening", [Interrupt()])
     resumed, actions = run(said("okay okay", 21.0, 0.98, 0.02), start=voice)
     assert (resumed.state, actions) == ("speaking", [CARRIED_ON])
@@ -600,3 +602,22 @@ def test_a_spoken_wake_over_jarvis_interrupts_it(state: VoiceState) -> None:
     voice, actions = run(SpokenWake("check the build", "en", 10.0), start=Voice(state=state, voiced_at=5.0))
     assert voice.state == "thinking"
     assert actions == [Interrupt(), Chime(), SendTurn("check the build", "en", 10.0, interrupted=True)]
+
+
+def test_a_turn_begun_in_the_echo_tail_of_a_reply_is_dropped() -> None:
+    timing = Timing(follow_up_s=6.0, announce_follow_up_s=4.0, listen_s=6.0, chime_s=0.5, tail_s=0.3)
+    voice = Voice()
+    for event in [WakeWord(10.0), Heard("Hi", "en", 11.0), ReplyDone(12.0, 11.0), SpeechStarted(12.25, started_at=12.1)]:
+        voice, _ = step(voice, event, timing)
+    voice, actions = step(voice, Heard("Two.", "en", 12.6, started_at=12.1), timing)
+    assert (voice.state, actions) == ("follow_up", [])
+    assert voice.deadline == pytest.approx(18.0)  # pyright: ignore[reportUnknownMemberType]
+
+
+def test_a_turn_begun_after_the_echo_tail_is_sent() -> None:
+    timing = Timing(follow_up_s=6.0, announce_follow_up_s=4.0, listen_s=6.0, chime_s=0.5, tail_s=0.3)
+    voice = Voice()
+    for event in [WakeWord(10.0), Heard("Hi", "en", 11.0), ReplyDone(12.0, 11.0), SpeechStarted(12.5, started_at=12.4)]:
+        voice, _ = step(voice, event, timing)
+    voice, actions = step(voice, Heard("And the build?", "en", 13.5, started_at=12.4), timing)
+    assert actions == [SendTurn("And the build?", "en", 13.5)]

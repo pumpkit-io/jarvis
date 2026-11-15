@@ -35,6 +35,8 @@ class Timing:
     last_partial_s: float = 0.5
     # From when Jarvis's voice starts or resumes, how long echo cancellation gets to settle before speech counts.
     guard_s: float = 0.25
+    # Speech that began before a reply finished playing, or this soon after, is its echo and room tail.
+    tail_s: float = 0.3
 
 
 @dataclass(frozen=True)
@@ -224,6 +226,8 @@ class Voice:
     barge: Barge | None = None
     # The User cut Jarvis off and their next turn has not been sent yet.
     cut_off: bool = False
+    # A turn whose speech began before this is Jarvis's own echo tail.
+    tail_until: float = float("-inf")
 
 
 # Said on their own, after punctuation and the wake phrase are gone. Anything longer goes to the Talker.
@@ -328,7 +332,9 @@ def _step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Actio
                 ends = voice.deadline if voice.state == "follow_up" else None
                 return replace(voice, state="listening", deadline=None, in_turn=True, window_ends=ends), []
             return voice, []
-        case Heard(text, lang, at):
+        case Heard(text, lang, at, started_at=started_at):
+            if voice.state in CAPTURING and started_at is not None and started_at < voice.tail_until:
+                return _heard(voice, "", lang, at, timing)
             return _heard(voice, text, lang, at, timing)
         case CaptureAborted(at):
             if voice.state in CAPTURING and voice.in_turn:
@@ -350,7 +356,7 @@ def _step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Actio
             if voice.ending:
                 return replace(voice, state="idle", deadline=None, ending=False), []
             window = timing.announce_follow_up_s if voice.state == "announce" else timing.follow_up_s
-            return replace(voice, state="follow_up", deadline=at + window), []
+            return replace(voice, state="follow_up", deadline=at + window, tail_until=at + timing.tail_s), []
         case BargeIn(onset, at):
             if barge_in_from(voice, timing) is None or voice.barge is not None:
                 return voice, []

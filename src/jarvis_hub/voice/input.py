@@ -33,6 +33,15 @@ Pcm = NDArray[np.int16]
 STAMP_SLACK_S = 0.005
 # A Barge-in is decided within 1.3 s; a clip stops growing at 5 s, in case the decision never comes.
 MAX_BARGE_CLIP_FRAMES = 500
+# Within speech, quieter chunks this soon after a loud one still count: soft consonants and trailing syllables.
+SPEECH_HANGOVER_S = 0.3
+# A Wake word hit counts only with sound as loud as speech this recently: the phrase that scored it.
+WAKE_LOUDNESS_WINDOW_S = 1.5
+
+
+def level_db(pcm: Pcm) -> float:
+    """RMS level in dB of 16-bit samples, where full scale is about 90 dB."""
+    return float(10 * np.log10(np.mean(pcm.astype(np.float64) ** 2) + 1e-9))
 
 
 class EchoCanceller(Protocol):
@@ -108,6 +117,9 @@ class Listening:
     wake_refractory_s: float = 2.0
     # VAD fires a little after the true onset, so a turn keeps this much from before it.
     onset_pad_s: float = 0.2
+    # Sound quieter than this is not speech, whatever VAD says: echo residue and distant voices sit at 15-27 dB on the
+    # built-in microphone, the User at 57-64 dB (docs/notes/speaker-echo.md). 0 turns the gate off.
+    min_speech_db: float = 35.0
     # Unbroken speech over Jarvis this long is a Barge-in; shorter is a cough or a click.
     bargein_min_speech_s: float = 0.2
     # From a Barge-in's onset, when its speech is transcribed for the decision.
@@ -178,6 +190,9 @@ class InputPipeline:
         self._wake_buf = np.zeros(0, np.int16)
         self._vad_buf = np.zeros(0, np.int16)
         self._last_wake = float("-inf")
+        # The latest frame loud enough to be speech, and the end of the latest such chunk VAD also called speech.
+        self._last_loud = float("-inf")
+        self._last_loud_speech = float("-inf")
         # The current stretch of speech, whether or not it is a turn: its onset and the end of its latest speech.
         self._onset: float | None = None
         self._last_speech = 0.0
@@ -312,11 +327,16 @@ class InputPipeline:
             if self._retained_frame_limit is not None and len(self._turn.frames) > self._retained_frame_limit:
                 if (aborted := self.discard_endpoint("retention_limit", block=True)) is not None:
                     return [aborted]
+        if level_db(frame) >= self._s.min_speech_db:
+            self._last_loud = at
         self._wake_buf = np.concatenate([self._wake_buf, frame])
         while len(self._wake_buf) >= self._e.wake.chunk:
             chunk, self._wake_buf = self._wake_buf[: self._e.wake.chunk], self._wake_buf[self._e.wake.chunk :]
             ends = at - len(self._wake_buf) / SAMPLE_RATE
-            if self._e.wake.score(chunk) >= self._s.wake_threshold and ends - self._last_wake >= self._s.wake_refractory_s:
+            # Scored on every chunk, since the model keeps a running window of the stream.
+            hit = self._e.wake.score(chunk) >= self._s.wake_threshold
+            loud = self._s.min_speech_db <= 0 or ends - self._last_loud <= WAKE_LOUDNESS_WINDOW_S
+            if hit and loud and ends - self._last_wake >= self._s.wake_refractory_s:
                 self._last_wake = ends
                 if self._blocked:
                     self._blocked = False
@@ -326,7 +346,10 @@ class InputPipeline:
         while len(self._vad_buf) >= self._e.vad.chunk:
             chunk, self._vad_buf = self._vad_buf[: self._e.vad.chunk], self._vad_buf[self._e.vad.chunk :]
             ends = at - len(self._vad_buf) / SAMPLE_RATE
-            if self._e.vad.probability(chunk) >= self._s.vad_threshold:
+            voiced = self._e.vad.probability(chunk) >= self._s.vad_threshold
+            if voiced and level_db(chunk) >= self._s.min_speech_db:
+                self._last_loud_speech = ends
+            if voiced and ends - self._last_loud_speech <= SPEECH_HANGOVER_S:
                 if self._onset is None:
                     self._onset = ends - len(chunk) / SAMPLE_RATE
                 if self._run is None:
@@ -474,6 +497,15 @@ class InputPipeline:
         """The turn from its start to `end_silence_s` past its latest speech: what Smart Turn was trained to judge."""
         return self._pcm(turn).astype(np.float32) / 32768.0
 
+    @staticmethod
+    def _speech_db(audio: Samples) -> float | None:
+        """The level of the turn's louder chunks, for calibrating `min_speech_db` to a microphone."""
+        chunks = len(audio) // 512
+        if not chunks:
+            return None
+        pcm = (audio[: chunks * 512] * 32768).astype(np.int16).reshape(chunks, 512)
+        return round(float(np.percentile([level_db(c) for c in pcm], 90)), 1)
+
     def _finish(self, turn: _Turn, at: float) -> Heard | None:
         audio = self._audio(turn)
         text, stt_ms = "", 0.0
@@ -504,6 +536,7 @@ class InputPipeline:
                 "smart_turn_ms": round(turn.smart_turn_ms, 1),
                 "stt_ms": round(stt_ms, 1),
                 "words": len(text.split()),
+                "speech_db": self._speech_db(audio),
             }
         limited = at - turn.start >= self._s.max_turn_s
         self._limited_run = limited

@@ -38,7 +38,8 @@ from tests.fakes import (
     until,
 )
 
-TIMING = Timing(follow_up_s=6.0, announce_follow_up_s=4.0, listen_s=6.0, chime_s=0.5)
+# Scripted turns can start the instant a reply ends; the echo tail guard has tests of its own.
+TIMING = Timing(follow_up_s=6.0, announce_follow_up_s=4.0, listen_s=6.0, chime_s=0.5, tail_s=0.0)
 
 
 @dataclass
@@ -2575,7 +2576,7 @@ async def test_follow_up_and_wake_still_work_after_unassessed_thinking_speech(ri
     assert rig.user_messages()[-1] == '<user lang="en">What time is it?</user>'
 
 
-async def test_a_follow_up_turn_with_an_onset_before_the_reply_is_still_sent(rig_for: MakeRig) -> None:
+async def test_a_follow_up_turn_begun_before_the_reply_ended_is_echo_and_listening_goes_on(rig_for: MakeRig) -> None:
     finish = asyncio.Event()
     rig = await rig_for([Gate(finish), Text('The first answer, sir.')], [Text('The second answer, sir.')])
     rig.audio.wake()
@@ -2590,7 +2591,10 @@ async def test_a_follow_up_turn_with_an_onset_before_the_reply_is_still_sent(rig
     rig.audio.candidate += 1
     rig.audio.emit(SpeechStarted(rig.clock.now(), None, rig.audio.candidate, onset))
     await until(lambda: rig.state == 'listening')
-    rig.audio.emit(Heard('And the worker?', 'en', rig.clock.now(), None, rig.audio.candidate, onset))
+    rig.audio.emit(Heard('Two.', 'en', rig.clock.now(), None, rig.audio.candidate, onset))
+    await until(lambda: rig.state == 'follow_up')
+    await rig.advance(0.5)
+    rig.audio.say('And the worker?')
     await until(lambda: len(rig.user_messages()) == 2)
     assert rig.user_messages()[-1] == '<user lang="en">And the worker?</user>'
 

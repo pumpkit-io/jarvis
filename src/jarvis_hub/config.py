@@ -56,6 +56,8 @@ class VoiceSettings:
     bargein_min_speech_ms: int = 200
     bargein_decide_ms: int = 800
     bargein_guard_ms: int = 250
+    echo_tail_ms: int = 300
+    min_speech_db: float = 35.0
     # Opt-in audio clips of Barge-ins and turns under `.jarvis/clips/`, pruned to these limits (voice/clips.py).
     audio_clips: bool = False
     clips_max_count: int = 500
@@ -182,6 +184,8 @@ def load_settings(
             bargein_min_speech_ms=round(number("JARVIS_BARGEIN_MIN_SPEECH_MS", 200, 0, 2000, low_open=True)),
             bargein_decide_ms=round(number("JARVIS_BARGEIN_DECIDE_MS", 800, 0, 5000, low_open=True)),
             bargein_guard_ms=round(number("JARVIS_BARGEIN_GUARD_MS", 250, 0, 5000)),
+            echo_tail_ms=round(number("JARVIS_ECHO_TAIL_MS", 300, 0, 5000)),
+            min_speech_db=number("JARVIS_MIN_SPEECH_DB", 35.0, 0, 90),
             audio_clips=choice("JARVIS_AUDIO_CLIPS", "off", ("off", "on")) == "on",
             clips_max_count=round(number("JARVIS_CLIPS_MAX_COUNT", 500, 1, 1_000_000)),
             clips_max_days=number("JARVIS_CLIPS_MAX_DAYS", 14, 0, 3650, low_open=True),
