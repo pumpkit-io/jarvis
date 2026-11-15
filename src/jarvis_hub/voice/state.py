@@ -261,7 +261,7 @@ def _words(text: str) -> list[str]:
 
 
 # What is left of "Jarvis" when the Wake word fired before STT's end of the word: "Harvis", "Jarvid", "Jorvis".
-_FIRST_WORD = re.compile(r"^(\w+)(?!')\W+(?=\w)")
+_FIRST_WORD = re.compile(r"^(\w+)(?!')(?:\W+(?=\w)|\W*$)")
 
 
 def _sounds_like_jarvis(word: str) -> bool:

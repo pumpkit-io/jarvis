@@ -67,10 +67,14 @@ TABLE: list[tuple[str, list[Partial], Decision]] = [
     ("actually, open an issue", [heard("Actually", 400, 380, 20), heard("Actually, open an", 700, 680, 20)], "stop"),
     ("anzi, apri una issue", [heard("Anzi, apri una", 700, 680, 20)], "stop"),
     ("okay but what about", [heard("Okay but what", 700, 680, 20)], "stop"),
-    # A word or two that is no Backchannel: undecided while it goes on, the floor once it has stopped.
+    # A word or two that is no Backchannel: undecided while it goes on, too uncertain to stop once it has stopped.
     ("the build", [heard("The build", 400, 380, 20)], "wait"),
-    ("the build, then quiet", [heard("The build.", 700, 450, 250)], "stop"),
-    ("quale PR", [heard("Quale PR?", 700, 450, 250)], "stop"),
+    ("the build, then quiet", [heard("The build.", 700, 450, 250)], "resume"),
+    ("quale PR", [heard("Quale PR?", 700, 450, 250)], "resume"),
+    # Fragments STT made of residual echo or room noise in a silent room.
+    ("a stray word", [heard("Two.", 700, 480, 208)], "resume"),
+    ("two stray words", [heard("So we", 460, 256, 204)], "resume"),
+    ("a hesitation", [heard("Um", 752, 544, 208)], "resume"),
     # Long speech that is still going takes the floor even before STT has the words.
     ("a long word still going", [heard("Supercali", 700, 700, 20)], "stop"),
     # VAD reports speech a chunk short, so at the 700 ms partial speech held throughout reads a little under.
@@ -88,11 +92,12 @@ def test_decision_on_each_partial(said: str, partials: list[Partial], expected: 
 DEADLINE: list[tuple[str, list[Partial], Decision]] = [
     ("no partial came in time", [], "resume"),
     ("a stretched okay still going", [heard("Okaaay", 700, 680, 20)], "stop"),
-    ("a word still going", [heard("The build", 700, 450, 20)], "stop"),
+    ("a word still going", [heard("The build", 700, 450, 20)], "resume"),
     ("noise still going", [heard("", 700, 680, 20)], "resume"),
     ("a Backchannel, done", [heard("Mhm", 700, 300, 400)], "resume"),
     ("sì, certo, said slowly", [heard("Sì, certo", 700, 600, 30)], "resume"),
-    ("okay so, said slowly", [heard("Okay so", 700, 600, 30)], "stop"),
+    ("okay so, said slowly", [heard("Okay so", 700, 600, 30)], "resume"),
+    ("three words, said slowly", [heard("Okay so the", 700, 600, 30)], "stop"),
 ]
 
 

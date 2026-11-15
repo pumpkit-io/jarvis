@@ -114,7 +114,9 @@ def decide(partials: Sequence[Partial], *, final: bool, lexicons: Lexicons = LEX
         return "stop"
     talking = still_talking(latest)
     if said and not lexicons.only_backchannel(said):
-        floor = len(said) >= FLOOR_WORDS or latest.speech_s >= LONG_SPEECH_S
-        return "stop" if floor or not talking or final else "wait"
+        if len(said) >= FLOOR_WORDS or latest.speech_s >= LONG_SPEECH_S:
+            return "stop"
+        # A short stray word is as often echo or noise as the User: not enough to stop (ADR 0014).
+        return "resume" if not talking or final else "wait"
     # Backchannels or noise still going at the deadline: a slow "sì, certo" more often than the start of a sentence.
     return "resume" if not talking or final else "wait"

@@ -1169,3 +1169,21 @@ async def test_replacement_after_reply_phase_off_drops_the_old_retained_turn() -
         capture.close()
         collecting.cancel()
         await asyncio.gather(collecting, return_exceptions=True)
+
+
+async def test_moving_to_another_microphone_closes_and_reopens_the_source() -> None:
+    source = Source()
+    capture = Capture(lambda: engines(CountingEcho()), Listening(), lambda row: None, lambda text: None, source=source)
+    capture.detach()
+    assert not source.closed
+    capture.start()
+    await asyncio.to_thread(capture.ready.wait, 5)
+    try:
+        capture.detach()
+        assert source.closed
+        source.opened = False
+        capture.attach()
+        capture.attach()
+        assert source.opened
+    finally:
+        capture.close()

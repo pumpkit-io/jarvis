@@ -545,9 +545,10 @@ class Microphone:
         self._stream.start()
 
     def close(self) -> None:
-        if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            stream.stop()
+            stream.close()
 
 
 @dataclass(frozen=True)
@@ -639,6 +640,7 @@ class Capture:
         self._closed = False
         # Set once the source is open; until then, and after close, nothing is captured to cancel echo from.
         self._echo: EchoCanceller | None = None
+        self._detached = False
         self.ready = threading.Event()
 
     def start(self) -> None:
@@ -675,6 +677,19 @@ class Capture:
     async def events(self) -> AsyncIterator[InputEvent]:
         while True:
             yield await self._events.get()
+
+    def detach(self) -> None:
+        """Close the frame source, keeping the engines and the pipeline, until `attach` opens it again."""
+        with self._source_lock:
+            if self._echo is not None and not self._detached:
+                self._detached = True
+                self._source.close()
+
+    def attach(self) -> None:
+        with self._source_lock:
+            if self._detached and not self._closed:
+                self._detached = False
+                self._source.open(self._push)
 
     def close(self) -> None:
         with self._source_lock:

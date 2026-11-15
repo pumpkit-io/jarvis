@@ -11,7 +11,7 @@ import shutil
 import sys
 import threading
 import time
-from collections.abc import AsyncIterator, Callable, MutableMapping
+from collections.abc import AsyncIterator, Callable, Coroutine, MutableMapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,6 +94,8 @@ class Ears:
     open_listener: Callable[
         [EngineChoice, Listening, Callable[[dict[str, Any]], None], Callable[[str], None], ClipStore], Listener
     ]
+    # Moves the listener and player onto the system's default devices whenever they change.
+    follow_devices: Callable[[Listener, Player, Callable[[str], None]], Coroutine[Any, Any, None]] | None = None
 
 
 def timing(voice: VoiceSettings) -> Timing:
@@ -347,6 +349,7 @@ async def voice_mode(
     except Exception as e:
         output.notice(f"Voice mode needs an audio output: {type(e).__name__}: {e}. Run `jarvis-hub --text` instead.")
         return
+    following: asyncio.Task[None] | None = None
     conversation = VoiceMode(
         audio=listener,
         tts=ears.tts,
@@ -377,11 +380,16 @@ async def voice_mode(
         conversation.start()
         output.notice("Listening loading.")
         listener.start()
+        if ears.follow_devices is not None:
+            following = asyncio.create_task(ears.follow_devices(listener, player, output.notice))
         if stdin.isatty():
             stdout.write(PROMPT)
             stdout.flush()
         await hub.run(merge(_typed_lines(stdin, clock), conversation.lines(hub.interrupt, hub.woke, hub.admit_spoken_revision)))
     finally:
+        if following is not None:
+            following.cancel()
+            await asyncio.gather(following, return_exceptions=True)
         try:
             await hub.close()
         finally:
@@ -404,6 +412,17 @@ def _open_listener(
 
 def _open_player(rate: int, on_played: PlayedTap) -> Player:
     return SoundPlayer(rate, on_played=on_played)
+
+
+async def _follow_devices(listener: Any, player: Any, notice: Callable[[str], None]) -> None:
+    from jarvis_hub.voice.devices import DeviceRoute, device_names
+
+    # The capture thread opens the microphone once its engines load; PortAudio must not restart under it.
+    ready: threading.Event = listener.ready
+    while not ready.is_set():
+        await asyncio.sleep(0.2)
+    notice(f"Audio: {device_names()}.")
+    await DeviceRoute([listener, player], notice).follow()
 
 
 def _ignored_in_text(error: str) -> None:
@@ -510,7 +529,7 @@ def main() -> None:
                     stdin=sys.stdin,
                     stdout=sys.stdout,
                     stderr=sys.stderr,
-                    ears=Ears(KokoroSynthesizer(), _open_player, _open_listener),
+                    ears=Ears(KokoroSynthesizer(), _open_player, _open_listener, _follow_devices),
                     headphones=args.headphones,
                     debug=args.debug,
                 )

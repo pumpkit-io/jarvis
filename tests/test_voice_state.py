@@ -311,6 +311,12 @@ def test_the_wake_phrase_alone_in_the_follow_up_window_listens_as_after_the_wake
     assert run(Tick(24.5), start=voice)[0].state == "idle"
 
 
+@pytest.mark.parametrize("heard", ["Jervis.", "Harvis", "Jarvis!", "hey jarvis"])
+def test_the_tail_of_the_wake_phrase_alone_is_no_request(heard: str) -> None:
+    voice, actions = run(WakeWord(10.0), SpeechStarted(10.1), Heard(heard, "en", 11.0))
+    assert (voice.state, actions) == ("listening", [Chime()])
+
+
 def test_the_chime_guard_counts_from_when_the_chime_starts_playing() -> None:
     voice, _ = run(WakeWord(10.0), ChimeStarted(11.0), WakeWord(11.4))
     # The hit at 11.4 s is the late chime's echo: it does not restart the wait.
@@ -398,12 +404,14 @@ def test_an_interruption_with_nothing_said_after_it_is_forgotten_once_idle() -> 
     assert actions[-1] == SendTurn("Hello", "en", 31.0)
 
 
-def test_undecided_at_the_deadline_still_talking_stops_and_quiet_resumes() -> None:
+def test_undecided_at_the_deadline_a_word_or_two_resumes_after_a_last_call() -> None:
     paused, _ = run(*SPEAKING, BargeIn(20.0, 20.2), said("The build", 20.4, 0.38, 0.02))
     assert paused.deadline == pytest.approx(21.0)  # pyright: ignore[reportUnknownMemberType]
     voice, actions = run(Tick(20.99), start=paused)
     assert (voice.state, actions) == ("speaking", [])
-    voice, actions = run(Tick(21.0), start=paused)
+    voice, actions = run(Tick(21.0), Tick(21.5), start=paused)
+    assert (voice.state, actions) == ("speaking", [Resume()])
+    voice, actions = run(Tick(21.0), said("The build is", 21.2, 0.6, 0.02), start=paused)
     assert (voice.state, actions) == ("listening", [Interrupt()])
 
     noise, _ = run(*SPEAKING, BargeIn(20.0, 20.2), said("", 20.4, 0.38, 0.02))
