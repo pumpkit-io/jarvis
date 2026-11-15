@@ -80,11 +80,11 @@ async def test_one_talker_session_with_one_prompt_carries_the_whole_launch(tmp_p
         False,
         None,
     )
-    assert "J.A.R.V.I.S." in spec.system_prompt
+    assert "## Persona" in spec.system_prompt
     assert '"sir"' in spec.system_prompt and '"signore"' in spec.system_prompt
     assert "Ada" in spec.system_prompt and "{" not in spec.system_prompt
-    # About four characters per token: well under the 1,000-token budget.
-    assert len(spec.system_prompt) < 3600
+    # About four characters per token: well under the 2,000-token budget.
+    assert len(spec.system_prompt) < 7600
 
 
 async def test_the_prompt_says_when_the_user_name_is_not_known(tmp_path: Path) -> None:
@@ -180,6 +180,17 @@ async def test_input_ending_during_the_warm_up_closes_the_session(tmp_path: Path
 
     assert stdout == ""
     assert [s.closed for s in backend.sessions] == [True]
+
+
+async def test_the_talker_speaks_with_the_persona_beside_its_rules(tmp_path: Path) -> None:
+    backend = FakeBackend(FakeClock(), [[Text("Evening, sir.")]])
+
+    await converse(backend, io.StringIO("Good evening.\n"), config=settings(tmp_path))
+
+    prompt = backend.session("talker").spec.system_prompt
+    prompts = Path(__file__).parents[1] / "prompts"
+    assert (prompts / "persona.md").read_text() in prompt
+    assert (prompts / "talker.md").read_text().replace("{user}", "Ada") in prompt
 
 
 async def test_the_orchestrator_works_read_only_in_the_org_folder_with_the_boundary(tmp_path: Path) -> None:
