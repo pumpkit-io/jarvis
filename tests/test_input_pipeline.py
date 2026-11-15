@@ -22,9 +22,7 @@ from jarvis_hub.voice.state import (
     Heard,
     Interrupt,
     Overheard,
-    Pause,
     ReplyAudio,
-    Resume,
     SendTurn,
     SpeechStarted,
     SpokenWake,
@@ -35,6 +33,7 @@ from jarvis_hub.voice.state import (
     barge_in_from,
     step,
 )
+from tests.test_voice_state import CARRIED_ON, JUDGING, barge_markers
 
 RATE = 16_000
 FRAME = 160
@@ -546,8 +545,9 @@ class Duet:
         self.actions.clear()
 
     def step(self, event: Event) -> None:
+        before = self.voice
         self.voice, actions = step(self.voice, event, TIMING)
-        self.actions += actions
+        self.actions += [*actions, *barge_markers(before, self.voice, list(actions))]
         if (capturing := self.voice.state in CAPTURING) != self.capturing:
             self.capturing = capturing
             self.r.pipeline.capture(capturing)
@@ -573,8 +573,8 @@ class Duet:
         self.r.stt.words[marker] = words
         self.feed("speech", seconds, marker)
 
-    def pauses(self) -> list[object]:
-        return [a for a in self.actions if a in (Pause(), Resume())]
+    def judgements(self) -> list[object]:
+        return [a for a in self.actions if a in (JUDGING, CARRIED_ON)]
 
     def sent(self) -> list[SendTurn]:
         return [a for a in self.actions if isinstance(a, SendTurn)]
@@ -587,7 +587,7 @@ def test_echo_inside_the_guard_does_not_stop_a_later_barge_in() -> None:
     d.feed("silence", 0.3)
     d.feed("speech", 1.5)
 
-    assert Pause() in d.actions
+    assert JUDGING in d.actions
 
 
 def test_the_user_still_talking_as_a_reply_starts_is_a_barge_in_once_the_guard_has_passed() -> None:
@@ -596,21 +596,21 @@ def test_the_user_still_talking_as_a_reply_starts_is_a_barge_in_once_the_guard_h
     d.speak()
     d.feed("speech", 1.5)
 
-    assert Pause() in d.actions
+    assert JUDGING in d.actions
 
 
-def test_a_second_barge_in_just_after_a_resume_still_pauses() -> None:
+def test_a_second_barge_in_just_after_carrying_on_is_judged_again() -> None:
     d = Duet()
     d.speak()
     d.feed("silence", 0.5)
     d.r.stt.text = "Mhm."
     d.feed("speech", 0.3)
     d.feed("silence", 0.2)
-    assert d.actions[-2:] == [Pause(), Resume()]
+    assert d.actions[-2:] == [JUDGING, CARRIED_ON]
     d.r.stt.text = "Wait"
     d.feed("speech", 1.0)
 
-    assert [a for a in d.actions if a in (Pause(), Resume())] == [Pause(), Resume(), Pause()]
+    assert [a for a in d.actions if a in (JUDGING, CARRIED_ON)] == [JUDGING, CARRIED_ON, JUDGING]
 
 
 def test_an_interrupt_said_on_from_a_backchannel_in_one_breath_stops_jarvis_and_is_the_next_turn() -> None:
@@ -642,16 +642,16 @@ def test_an_interrupt_after_jarvis_resumed_over_the_same_breath_still_stops_it()
     d.speak()
     d.feed("silence", 0.5)
     d.say("okay okay okay,", 1.6)
-    assert d.pauses() == [Pause(), Resume()]
+    assert d.judgements() == [JUDGING, CARRIED_ON]
     d.say("actually open an issue instead.", 1.5)
     d.feed("silence", 1.0)
 
-    assert d.pauses()[-1] == Pause() and Interrupt() in d.actions
+    assert d.judgements()[-1] == JUDGING and Interrupt() in d.actions
     assert d.sent()[-1].text == "okay okay okay, actually open an issue instead."
 
 
 @pytest.mark.parametrize("seconds", [2.5, 8.0])
-def test_a_long_run_of_pure_backchannels_pauses_and_resumes_jarvis_at_most_twice(seconds: float) -> None:
+def test_a_long_run_of_pure_backchannels_is_judged_at_most_twice(seconds: float) -> None:
     d = Duet()
     d.speak()
     d.feed("silence", 0.5)
@@ -659,7 +659,7 @@ def test_a_long_run_of_pure_backchannels_pauses_and_resumes_jarvis_at_most_twice
     d.feed("silence", 1.0)
 
     assert Interrupt() not in d.actions and d.sent() == []
-    assert d.pauses() == [Pause(), Resume(), Pause(), Resume()]
+    assert d.judgements() == [JUDGING, CARRIED_ON, JUDGING, CARRIED_ON]
     assert d.voice.state == "speaking" and d.voice.barge is None
 
 
@@ -668,11 +668,11 @@ def test_an_interrupt_after_the_second_barge_in_of_a_run_still_stops_jarvis() ->
     d.speak()
     d.feed("silence", 0.5)
     d.say("okay okay okay okay", 3.5)
-    assert d.pauses() == [Pause(), Resume(), Pause(), Resume()]
+    assert d.judgements() == [JUDGING, CARRIED_ON, JUDGING, CARRIED_ON]
     d.say("wait, stop", 0.6)
     d.feed("silence", 1.0)
 
-    assert Interrupt() in d.actions and d.pauses() == [Pause(), Resume(), Pause(), Resume()]
+    assert Interrupt() in d.actions and d.judgements() == [JUDGING, CARRIED_ON, JUDGING, CARRIED_ON]
     assert d.sent()[-1].interrupted and d.sent()[-1].text.endswith("wait, stop")
 
 

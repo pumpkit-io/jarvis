@@ -192,11 +192,11 @@ class InputPipeline:
         self._endpoint_sequence = 0
         self._blocked = False
         # The start of the current unbroken speech, whether it has already made a Barge-in, and whether a resume while
-        # it went on has let it make one more, which it may only once, so Backchannels cannot pause and resume forever.
+        # it went on has let it make one more, which it may only once, so Backchannels cannot be judged over and over.
         self._run: float | None = None
         self._run_spent = False
         self._run_rearmed = False
-        # Once the run has made its last Barge-in, still transcribed from that onset, without pausing, for interrupts.
+        # Once the run has made its last Barge-in, still transcribed from that onset, for interrupts.
         self._overheard: float | None = None
         # From when speech counts toward a Barge-in; None while not watching.
         self._barge_from: float | None = None

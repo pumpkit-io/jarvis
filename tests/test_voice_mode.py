@@ -1368,18 +1368,19 @@ def talker_got(rig: Rig) -> list[str]:
     return [m for m in rig.backend.session("talker").received if m != WARM_UP]
 
 
-async def test_okay_over_jarvis_pauses_it_and_it_resumes_a_little_back_within_a_second(rig_for: MakeRig) -> None:
+async def test_okay_over_jarvis_is_judged_while_it_talks_on_without_a_gap(rig_for: MakeRig) -> None:
     rig = await rig_for(STORY)
     await speaking(rig)
 
     rig.audio.barge()
-    await until(lambda: rig.player.events[-1] == "pause")
+    await until(lambda: rig.voice.judging)
     await rig.advance(0.2)
     rig.audio.partial("Okay")
     await rig.advance(0.3)
-    assert rig.player.events[-1] == "pause"
+    assert rig.voice.judging
     rig.audio.partial("Okay.", silent=0.35)
-    await until(lambda: rig.player.events[-1] == "resume 300")
+    await until(lambda: not rig.voice.judging)
+    assert [e for e in rig.player.events if not e.startswith("play")] == []
 
     # 0.7 s from the onset of "okay", and the Backchannel is no turn.
     assert rig.state == "speaking"
@@ -1389,7 +1390,7 @@ async def test_okay_over_jarvis_pauses_it_and_it_resumes_a_little_back_within_a_
     assert talker_got(rig) == ['<user lang="en">Tell me a story</user>']
 
 
-async def test_mhm_twice_resumes_twice(rig_for: MakeRig) -> None:
+async def test_mhm_twice_never_breaks_the_reply(rig_for: MakeRig) -> None:
     rig = await rig_for(STORY)
     await speaking(rig)
 
@@ -1401,22 +1402,24 @@ async def test_mhm_twice_resumes_twice(rig_for: MakeRig) -> None:
         rig.player.finish(1)
         await rig.advance(1.0)
 
-    assert [e for e in rig.player.events if not e.startswith("play")] == ["pause", "resume 300"] * 2
+    assert [e for e in rig.player.events if not e.startswith("play")] == []
+    assert [r["decision"] for r in barge_rows(rig)] == ["resume"]
     assert rig.state == "speaking"
     assert rig.audio.watching[-1] is not None
 
 
-async def test_a_cough_pauses_jarvis_only_briefly(rig_for: MakeRig) -> None:
+async def test_a_cough_never_breaks_the_reply(rig_for: MakeRig) -> None:
     rig = await rig_for(STORY)
     await speaking(rig)
 
     rig.audio.barge(held=0.25)
     await rig.advance(0.15)
+    assert rig.voice.judging
     rig.audio.partial("", silent=0.25)
-    await until(lambda: rig.player.events[-1] == "resume 300")
+    await until(lambda: not rig.voice.judging)
 
     assert rig.state == "speaking"
-    assert "stop" not in rig.player.events
+    assert [e for e in rig.player.events if not e.startswith("play")] == []
 
 
 async def test_wait_stop_stops_jarvis_and_listens_and_the_turn_says_what_was_heard(rig_for: MakeRig) -> None:
@@ -1429,7 +1432,7 @@ async def test_wait_stop_stops_jarvis_and_listens_and_the_turn_says_what_was_hea
     rig.audio.partial("Wait, stop")
     await until(lambda: rig.state == "listening")
 
-    assert rig.player.events[-2:] == ["pause", "stop"]
+    assert rig.player.events[-1] == "stop" and "pause" not in rig.player.events
     assert rig.player.voices[-1] != "chime"
     talker = rig.backend.session("talker")
     await until(lambda: not talker._sending)  # pyright: ignore[reportPrivateUsage]
@@ -1487,10 +1490,10 @@ async def test_speech_inside_the_guard_is_ignored_and_a_later_barge_in_still_sto
     await rig.advance(0.1)
     rig.audio.partial("Stop")
     await rig.advance(0.4)
-    assert "pause" not in rig.player.events and rig.state == "speaking"
+    assert barge_rows(rig) == [] and not rig.voice.judging and rig.state == "speaking"
 
     rig.audio.barge()
-    await until(lambda: rig.player.events[-1:] == ["pause"])
+    await until(lambda: rig.voice.judging)
     rig.audio.partial("Stop")
     await until(lambda: rig.state == "listening")
     assert "stop" in rig.player.events
@@ -1517,10 +1520,10 @@ async def test_a_backchannel_resume_is_logged_with_its_partials_timing_and_what_
     assert since is not None
 
     rig.audio.barge()
-    await until(lambda: rig.player.events[-1] == "pause")
+    await until(lambda: rig.voice.judging)
     await rig.advance(0.2)
     rig.audio.partial("Okay.", silent=0.35)
-    await until(lambda: rig.player.events[-1] == "resume 300")
+    await until(lambda: not rig.voice.judging)
     # A resume waits to learn whether the User repeats themselves.
     assert barge_rows(rig) == []
     await rig.voice.close()
@@ -1573,7 +1576,7 @@ async def test_a_decision_that_waited_past_its_deadline_for_one_more_partial_is_
     await rig.advance(0.2)
     rig.audio.partial("Okay")
     await rig.advance(0.7)
-    assert rig.player.events[-1] == "pause"
+    assert rig.voice.judging
     await rig.advance(0.6)
     await rig.voice.close()
 
@@ -1602,7 +1605,7 @@ async def resumed_over(rig: Rig, text: str = "Okay.") -> None:
     rig.audio.barge()
     await rig.advance(0.2)
     rig.audio.partial(text, silent=0.35)
-    await until(lambda: rig.player.events[-1] == "resume 300")
+    await until(lambda: not rig.voice.judging)
 
 
 async def test_a_new_barge_in_after_a_quiet_resume_marks_it_a_likely_wrong_resume(rig_for: MakeRig) -> None:
@@ -1626,7 +1629,7 @@ async def test_speech_that_ran_on_through_the_resume_is_one_run_and_not_a_repeat
     rig.audio.partial("Okay okay")
     await rig.advance(0.7)
     await rig.advance(0.6)
-    await until(lambda: rig.player.events[-1] == "resume 300")
+    await until(lambda: not rig.voice.judging)
 
     rig.audio.barge()
     await rig.advance(0.1)

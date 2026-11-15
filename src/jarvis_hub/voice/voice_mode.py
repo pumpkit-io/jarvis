@@ -34,10 +34,8 @@ from jarvis_hub.voice.state import (
     SpokenWake,
     WakeWord,
     Interrupt,
-    Pause,
     ReplyAudio,
     ReplyDone,
-    Resume,
     SendTurn,
     Tick,
     Timing,
@@ -215,6 +213,11 @@ class VoiceMode:
     @property
     def state(self) -> VoiceState:
         return self._voice.state
+
+    @property
+    def judging(self) -> bool:
+        """Whether speech over Jarvis is being judged as a Backchannel or an Interruption while Jarvis talks on."""
+        return self._voice.barge is not None
 
     def start(self) -> None:
         self._notice("Speech loading.")
@@ -538,6 +541,10 @@ class VoiceMode:
             self._notice(f"{reason} Say 'Hey Jarvis' and try again.")
         self._bargein_log.observe(before_voice, event, self._voice, actions, self._speech.played)
         after = self._voice.state
+        if before_voice.barge is None and self._voice.barge is not None:
+            self._debug_notice("voice: speech over Jarvis, judging it while talking on")
+        elif before_voice.barge is not None and self._voice.barge is None and after == before:
+            self._debug_notice("voice: speech over Jarvis was no interruption")
         if after != before:
             self._transition(before, after, event)
         # After capture: a turn that starts now keeps the speech of the Barge-in that stopped Jarvis.
@@ -597,12 +604,6 @@ class VoiceMode:
                                            request_id=self._owned.id if self._owned else None,
                                            revision=self._owned.revision if self._owned else 0,
                                            segments=self._owned.segments if self._owned else (text,)))
-            case Pause():
-                self._player.pause()
-                self._debug_notice("voice: paused for a Barge-in")
-            case Resume():
-                self._player.resume()
-                self._debug_notice("voice: resumed after a Backchannel")
             case Interrupt():
                 if self._voice.cut_off:
                     self._heard_before_cut = self._speech.played()

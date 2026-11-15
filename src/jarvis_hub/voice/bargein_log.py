@@ -10,11 +10,11 @@ input clock, so they line up with a clip's sidecar):
     onset, since       the Barge-in's onset, and the end of the guard it counted from (None for "overheard-stop")
     detected_ms        when the minimum speech had been held
     partials           [{text, ms, speech_s, silent_s}], as the decision saw them
-    decision           resume | stop | wake | overheard-stop | ended (the reply finished while paused)
+    decision           resume | stop | wake | overheard-stop | ended (the reply finished while it was judged)
     decided_ms         onset to decision; decided_at is the same moment on the clock
     extended           the decision waited past its deadline for one more partial
     wake_hits          Wake word hits while it was open
-    played             what Jarvis had said when the pause began
+    played             what Jarvis had said when the Barge-in began
     repeated, next     for a resume, whether the User likely repeated themselves, and what came next (`bargein` or
                        `turn`); the rule is `repeated_themselves` and `BargeInLog.observe`
 """
@@ -79,7 +79,7 @@ class BargeInLog:
         self._resumed: _Resumed | None = None
 
     def observe(self, before: Voice, event: Event, after: Voice, actions: Sequence[Action], played: Callable[[], str]) -> None:
-        """Call after every `step`, with the voice before and after it. `played` is read only when a pause begins."""
+        """Call after every `step`, with the voice before and after it. `played` is read only when a Barge-in begins."""
         if self._resumed is not None and event.at - self._resumed.at > REPEAT_WINDOW_S:
             self._flush(repeated=False, nxt=None)
         match event:

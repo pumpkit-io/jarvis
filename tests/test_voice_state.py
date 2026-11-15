@@ -14,10 +14,8 @@ from jarvis_hub.voice.state import (
     Heard,
     Interrupt,
     Overheard,
-    Pause,
     ReplyAudio,
     ReplyDone,
-    Resume,
     SendTurn,
     SpeechStarted,
     SpokenWake,
@@ -34,12 +32,25 @@ from jarvis_hub.voice.state import (
 TIMING = Timing(follow_up_s=6.0, announce_follow_up_s=4.0, listen_s=6.0, chime_s=0.5)
 
 
+# Markers for a Barge-in opening, and closing without an Interrupt: Jarvis talks on through both.
+JUDGING, CARRIED_ON = "judging", "carried on"
+
+
+def barge_markers(before: Voice, after: Voice, actions: list[object]) -> list[object]:
+    if before.barge is None and after.barge is not None:
+        return [JUDGING]
+    if before.barge is not None and after.barge is None and Interrupt() not in actions:
+        return [CARRIED_ON]
+    return []
+
+
 def run(*events: Event, start: Voice | None = None) -> tuple[Voice, list[object]]:
     voice = start or Voice()
     actions: list[object] = []
     for event in events:
+        before = voice
         voice, out = step(voice, event, TIMING)
-        actions += out
+        actions += [*out, *barge_markers(before, voice, list(out))]
     return voice, actions
 
 
@@ -373,20 +384,20 @@ def said(text: str, at: float, speech_s: float, silent_s: float) -> Partial:
     return Partial(text, at, speech_s, silent_s)
 
 
-def test_speech_held_over_jarvis_pauses_it_and_a_backchannel_resumes_it() -> None:
+def test_speech_held_over_jarvis_is_judged_while_it_talks_and_a_backchannel_lets_it_go_on() -> None:
     voice, actions = run(*SPEAKING, BargeIn(20.0, 20.2))
-    assert (voice.state, actions[-1]) == ("speaking", Pause())
+    assert (voice.state, actions[-1]) == ("speaking", JUDGING)
 
     voice, actions = run(said("okay", 20.4, 0.35, 0.05), start=voice)
     assert actions == []
     voice, actions = run(said("okay", 20.7, 0.35, 0.35), start=voice)
-    assert (voice.state, actions) == ("speaking", [Resume()])
+    assert (voice.state, actions) == ("speaking", [CARRIED_ON])
 
 
 def test_a_hard_interrupt_stops_jarvis_and_listens_without_a_chime() -> None:
     voice, actions = run(*SPEAKING, BargeIn(20.0, 20.2), said("Wait", 20.4, 0.35, 0.0))
     assert voice.state == "listening"
-    assert actions[-2:] == [Pause(), Interrupt()]
+    assert actions[-2:] == [JUDGING, Interrupt()]
 
 
 def test_the_turn_after_an_interruption_is_sent_marked_as_one() -> None:
@@ -405,24 +416,24 @@ def test_an_interruption_with_nothing_said_after_it_is_forgotten_once_idle() -> 
 
 
 def test_undecided_at_the_deadline_a_word_or_two_resumes_after_a_last_call() -> None:
-    paused, _ = run(*SPEAKING, BargeIn(20.0, 20.2), said("The build", 20.4, 0.38, 0.02))
-    assert paused.deadline == pytest.approx(21.0)  # pyright: ignore[reportUnknownMemberType]
-    voice, actions = run(Tick(20.99), start=paused)
+    judging, _ = run(*SPEAKING, BargeIn(20.0, 20.2), said("The build", 20.4, 0.38, 0.02))
+    assert judging.deadline == pytest.approx(21.0)  # pyright: ignore[reportUnknownMemberType]
+    voice, actions = run(Tick(20.99), start=judging)
     assert (voice.state, actions) == ("speaking", [])
-    voice, actions = run(Tick(21.0), Tick(21.5), start=paused)
-    assert (voice.state, actions) == ("speaking", [Resume()])
-    voice, actions = run(Tick(21.0), said("The build is", 21.2, 0.6, 0.02), start=paused)
+    voice, actions = run(Tick(21.0), Tick(21.5), start=judging)
+    assert (voice.state, actions) == ("speaking", [CARRIED_ON])
+    voice, actions = run(Tick(21.0), said("The build is", 21.2, 0.6, 0.02), start=judging)
     assert (voice.state, actions) == ("listening", [Interrupt()])
 
     noise, _ = run(*SPEAKING, BargeIn(20.0, 20.2), said("", 20.4, 0.38, 0.02))
     voice, actions = run(Tick(21.0), Tick(21.5), start=noise)
-    assert (voice.state, actions) == ("speaking", [Resume()])
+    assert (voice.state, actions) == ("speaking", [CARRIED_ON])
 
 
 def test_the_wake_word_during_a_barge_in_stops_jarvis() -> None:
     voice, actions = run(*SPEAKING, BargeIn(20.0, 20.2), said("okay", 20.4, 0.3, 0.1), WakeWord(20.5))
     assert voice.state == "listening"
-    assert actions[-3:] == [Pause(), Interrupt(), Chime()]
+    assert actions[-3:] == [JUDGING, Interrupt(), Chime()]
     _, actions = run(Heard("What is running?", "en", 22.0), start=voice)
     assert actions == [SendTurn("What is running?", "en", 22.0, interrupted=True)]
 
@@ -431,9 +442,9 @@ def test_barge_ins_count_from_a_quarter_second_after_each_reply_starts_and_each_
     voice, _ = run(*SPEAKING)
     assert barge_in_from(voice, TIMING) == pytest.approx(11.75)  # pyright: ignore[reportUnknownMemberType]
     voice, actions = run(BargeIn(11.75, 11.95), start=voice)
-    assert actions == [Pause()]
+    assert actions == [JUDGING]
     voice, actions = run(said("mhm", 12.2, 0.3, 0.3), start=voice)
-    assert actions == [Resume()]
+    assert actions == [CARRIED_ON]
     assert barge_in_from(voice, TIMING) == pytest.approx(12.45)  # pyright: ignore[reportUnknownMemberType]
 
 
@@ -443,7 +454,7 @@ def test_barge_ins_do_not_count_while_jarvis_is_not_heard(state: VoiceState) -> 
     assert barge_in_from(Voice(state="announce"), TIMING) is None
 
 
-def test_a_second_backchannel_pauses_and_resumes_again() -> None:
+def test_a_second_backchannel_is_judged_again() -> None:
     voice, actions = run(
         *SPEAKING,
         BargeIn(20.0, 20.2),
@@ -452,7 +463,7 @@ def test_a_second_backchannel_pauses_and_resumes_again() -> None:
         said("Mhm.", 22.7, 0.3, 0.4),
     )
     assert voice.state == "speaking"
-    assert actions[-4:] == [Pause(), Resume(), Pause(), Resume()]
+    assert actions[-4:] == [JUDGING, CARRIED_ON, JUDGING, CARRIED_ON]
 
 
 @pytest.mark.parametrize("state", ["idle", "listening", "thinking", "follow_up"])
@@ -467,36 +478,36 @@ def test_partials_after_the_decision_change_nothing() -> None:
     assert (voice.state, actions) == ("speaking", [])
 
 
-def test_an_announcement_is_paused_and_stopped_like_a_reply() -> None:
+def test_an_announcement_is_judged_and_stopped_like_a_reply() -> None:
     voice, actions = run(AnnouncementBegins(10.0), ReplyAudio(10.5), BargeIn(11.0, 11.2), said("No", 11.4, 0.2, 0.2))
     assert voice.state == "listening"
-    assert actions == [Chime(), Pause(), Interrupt()]
+    assert actions == [Chime(), JUDGING, Interrupt()]
 
 
-def test_a_reply_that_ends_while_paused_unpauses_the_player() -> None:
+def test_a_reply_that_ends_while_a_barge_in_is_judged_closes_it() -> None:
     voice, actions = run(*SPEAKING, BargeIn(20.0, 20.2), ReplyDone(20.3, 11.0))
     assert voice.state == "follow_up"
-    assert actions[-1] == Resume()
+    assert actions[-1] == CARRIED_ON
     assert voice.deadline == pytest.approx(26.3)  # pyright: ignore[reportUnknownMemberType]
 
 
 def test_backchannels_still_going_at_the_deadline_wait_for_one_more_partial() -> None:
-    paused, _ = run(*SPEAKING, BargeIn(20.0, 20.2), said("okay", 20.7, 0.68, 0.02))
-    voice, actions = run(Tick(21.0), start=paused)
+    judging, _ = run(*SPEAKING, BargeIn(20.0, 20.2), said("okay", 20.7, 0.68, 0.02))
+    voice, actions = run(Tick(21.0), start=judging)
     assert (voice.state, actions) == ("speaking", [])
     assert voice.deadline == pytest.approx(21.5)  # pyright: ignore[reportUnknownMemberType]
 
     stopped, actions = run(said("okay so the", 21.0, 0.98, 0.02), start=voice)
     assert (stopped.state, actions) == ("listening", [Interrupt()])
     resumed, actions = run(said("okay okay", 21.0, 0.98, 0.02), start=voice)
-    assert (resumed.state, actions) == ("speaking", [Resume()])
+    assert (resumed.state, actions) == ("speaking", [CARRIED_ON])
     resumed, actions = run(Tick(21.5), start=voice)
-    assert (resumed.state, actions) == ("speaking", [Resume()])
+    assert (resumed.state, actions) == ("speaking", [CARRIED_ON])
 
 
 def test_backchannels_said_and_done_by_the_deadline_resume_at_once() -> None:
     voice, actions = run(*SPEAKING, BargeIn(20.0, 20.2), said("okay", 20.7, 0.4, 0.3))
-    assert (voice.state, actions[-1]) == ("speaking", Resume())
+    assert (voice.state, actions[-1]) == ("speaking", CARRIED_ON)
 
 
 def test_overheard_speech_stops_jarvis_only_on_a_hard_interrupt_or_the_wake_word() -> None:

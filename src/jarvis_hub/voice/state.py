@@ -29,7 +29,7 @@ class Timing:
     listen_s: float
     # Wake word hits this soon after the chime starts are the chime's own echo or the same phrase, and are ignored.
     chime_s: float
-    # From the pause, how long a Barge-in has to be told apart as a Backchannel or an Interruption.
+    # From a Barge-in, how long it has to be told apart as a Backchannel or an Interruption while Jarvis talks on.
     decide_s: float = 0.8
     # Past that deadline, how long to wait for one more partial when the User is still talking over Backchannels.
     last_partial_s: float = 0.5
@@ -79,7 +79,7 @@ class CaptureAborted:
 
 @dataclass(frozen=True)
 class BargeIn:
-    """The User's speech over Jarvis has held long enough to pause it: it began at `onset`."""
+    """The User's speech over Jarvis has held long enough to be judged: it began at `onset`."""
 
     onset: float
     at: float
@@ -185,22 +185,12 @@ class Interrupt:
     """Stop the reply in progress, both the Talker's turn and its audio."""
 
 
-@dataclass(frozen=True)
-class Pause:
-    """Hold Jarvis's voice where it is while a Barge-in is decided."""
-
-
-@dataclass(frozen=True)
-class Resume:
-    """Go on with Jarvis's voice from a little before the pause."""
-
-
-Action = Chime | SendTurn | Interrupt | Pause | Resume
+Action = Chime | SendTurn | Interrupt
 
 
 @dataclass(frozen=True)
 class Barge:
-    """A Barge-in being decided: Jarvis is paused, and each partial transcript may settle it."""
+    """A Barge-in being decided: Jarvis talks on, and each partial transcript may settle it (ADR 0014)."""
 
     onset: float
     partials: tuple[Partial, ...] = ()
@@ -351,17 +341,15 @@ def _step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Actio
                 return voice, []
             if voice.state == "thinking" and answers != voice.awaiting:
                 return voice, []
-            # Nothing is left to resume, but the player must not stay paused for the next reply.
-            unpause: list[Action] = [Resume()] if voice.barge is not None else []
             voice = replace(voice, awaiting=None)
             if voice.ending:
-                return replace(voice, state="idle", deadline=None, ending=False), unpause
+                return replace(voice, state="idle", deadline=None, ending=False), []
             window = timing.announce_follow_up_s if voice.state == "announce" else timing.follow_up_s
-            return replace(voice, state="follow_up", deadline=at + window), unpause
+            return replace(voice, state="follow_up", deadline=at + window), []
         case BargeIn(onset, at):
             if barge_in_from(voice, timing) is None or voice.barge is not None:
                 return voice, []
-            return replace(voice, barge=Barge(onset), deadline=at + timing.decide_s), [Pause()]
+            return replace(voice, barge=Barge(onset), deadline=at + timing.decide_s), []
         case Partial(_, at):
             if voice.barge is None:
                 return voice, []
@@ -400,7 +388,7 @@ def _decide(voice: Voice, at: float, timing: Timing, *, final: bool) -> tuple[Vo
         case "wait":
             return voice, []
         case "resume":
-            return replace(voice, barge=None, deadline=None, voiced_at=at), [Resume()]
+            return replace(voice, barge=None, deadline=None, voiced_at=at), []
         case "stop":
             return _stop(voice, at, timing)
 
