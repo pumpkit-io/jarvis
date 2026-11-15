@@ -20,6 +20,7 @@ from jarvis_hub.voice.state import (
     Resume,
     SendTurn,
     SpeechStarted,
+    SpokenWake,
     Tick,
     Timing,
     Voice,
@@ -27,6 +28,7 @@ from jarvis_hub.voice.state import (
     WakeWord,
     barge_in_from,
     step,
+    wake_in,
 )
 
 TIMING = Timing(follow_up_s=6.0, announce_follow_up_s=4.0, listen_s=6.0, chime_s=0.5)
@@ -502,3 +504,65 @@ def test_overheard_speech_changes_nothing_while_jarvis_is_not_heard() -> None:
     done, _ = run(*SPEAKING, ReplyDone(20.0, 11.0))
     voice, actions = run(Overheard("wait", 20.5), start=done)
     assert (voice.state, actions) == ("follow_up", [])
+
+
+@pytest.mark.parametrize(
+    ("text", "request_"),
+    [
+        ("Hey Jarvis, what time is it?", "what time is it?"),
+        ("Jarvis", ""),
+        ("Hey Jervis.", ""),
+        ("A Jarvis open the PR", "open the PR"),
+        ("E i Jarvis, su cosa stai lavorando?", "su cosa stai lavorando?"),
+        ("Okay Javis check the build", "check the build"),
+        ("Harvis what's up", "what's up"),
+    ],
+)
+def test_the_transcript_names_jarvis_however_misheard(text: str, request_: str) -> None:
+    assert wake_in(text) == request_
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["What's the weather?", "I told Jarvis to stop", "The service is down", "Charles called", "", "Davis said hi"],
+)
+def test_a_transcript_without_a_leading_jarvis_is_not_a_wake(text: str) -> None:
+    assert wake_in(text) is None
+
+
+def test_a_spoken_wake_alone_chimes_and_listens() -> None:
+    voice, actions = run(SpokenWake("", "en", 10.0))
+    assert (voice.state, voice.deadline, voice.woke_at) == ("listening", 10.0 + TIMING.listen_s, 10.0)
+    assert actions == [Chime()]
+
+
+def test_a_spoken_wake_with_a_request_chimes_and_sends_it() -> None:
+    voice, actions = run(SpokenWake("what time is it", "en", 10.0))
+    assert (voice.state, voice.awaiting, voice.woke_at) == ("thinking", 10.0, 10.0)
+    assert actions == [Chime(), SendTurn("what time is it", "en", 10.0)]
+
+
+def test_a_spoken_wake_with_only_noise_listens() -> None:
+    voice, actions = run(SpokenWake("um", "en", 10.0))
+    assert voice.state == "listening"
+    assert actions == [Chime()]
+
+
+def test_a_spoken_wake_with_a_stop_phrase_stays_idle() -> None:
+    voice, actions = run(SpokenWake("that's all", "en", 10.0))
+    assert voice.state == "idle"
+    assert actions == []
+
+
+def test_a_spoken_wake_inside_the_chime_or_a_turn_is_ignored() -> None:
+    chiming = Voice(chime_until=11.0)
+    assert run(SpokenWake("check the build", "en", 10.0), start=chiming) == (chiming, [])
+    talking = Voice(state="listening", in_turn=True)
+    assert run(SpokenWake("check the build", "en", 10.0), start=talking) == (talking, [])
+
+
+@pytest.mark.parametrize("state", ["speaking", "announce"])
+def test_a_spoken_wake_over_jarvis_interrupts_it(state: VoiceState) -> None:
+    voice, actions = run(SpokenWake("check the build", "en", 10.0), start=Voice(state=state, voiced_at=5.0))
+    assert voice.state == "thinking"
+    assert actions == [Interrupt(), Chime(), SendTurn("check the build", "en", 10.0, interrupted=True)]

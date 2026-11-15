@@ -14,7 +14,7 @@ from jarvis_hub.agents.backend import Context, SessionSpec
 from jarvis_hub.subagents import Subagent
 from jarvis_hub.hub import WARM_UP, Hub
 from jarvis_hub.voice.assessment import Verdict
-from jarvis_hub.voice.state import Heard, SpeechStarted, Timing
+from jarvis_hub.voice.state import Heard, SpeechStarted, SpokenWake, Timing
 from jarvis_hub.voice.voice_mode import VoiceMode, merge
 from tests.fakes import (
     AwaitInterrupt,
@@ -2543,3 +2543,66 @@ async def test_an_old_capture_abort_cannot_discard_a_replacement_owners_assessme
     relation.release.set()
     await until(lambda: len(rig.user_messages()) == 3)
     assert 'The fresh request with its continuation' in rig.user_messages()[-1]
+
+
+async def test_follow_up_and_wake_still_work_after_unassessed_thinking_speech(rig_for: MakeRig) -> None:
+    finish = asyncio.Event()
+    rig = await rig_for([Gate(finish), Text('The first answer, sir.')], [Text('The second answer, sir.')],
+                        [Text('The third answer, sir.')])
+    rig.audio.wake()
+    rig.audio.say('Explain the scheduler')
+    await until(lambda: len(rig.user_messages()) == 1)
+    rig.audio.say('Please pass the salt')
+    await rig.settle()
+    finish.set()
+    await until(lambda: rig.state == 'follow_up')
+    rig.audio.say('And the worker?')
+    await until(lambda: len(rig.user_messages()) == 2)
+    assert rig.user_messages()[-1] == '<user lang="en">And the worker?</user>'
+    await until(lambda: rig.state == 'follow_up')
+    await rig.advance(TIMING.follow_up_s)
+    assert rig.state == 'idle'
+    rig.audio.wake()
+    await rig.settle()
+    rig.audio.say('What time is it?')
+    await until(lambda: len(rig.user_messages()) == 3)
+    assert rig.user_messages()[-1] == '<user lang="en">What time is it?</user>'
+
+
+async def test_a_follow_up_turn_with_an_onset_before_the_reply_is_still_sent(rig_for: MakeRig) -> None:
+    finish = asyncio.Event()
+    rig = await rig_for([Gate(finish), Text('The first answer, sir.')], [Text('The second answer, sir.')])
+    rig.audio.wake()
+    rig.audio.say('Explain the scheduler')
+    await until(lambda: len(rig.user_messages()) == 1)
+    rig.audio.say('Please pass the salt')
+    await rig.settle()
+    onset = rig.clock.now()
+    await rig.advance(1)
+    finish.set()
+    await until(lambda: rig.state == 'follow_up')
+    rig.audio.candidate += 1
+    rig.audio.emit(SpeechStarted(rig.clock.now(), None, rig.audio.candidate, onset))
+    await until(lambda: rig.state == 'listening')
+    rig.audio.emit(Heard('And the worker?', 'en', rig.clock.now(), None, rig.audio.candidate, onset))
+    await until(lambda: len(rig.user_messages()) == 2)
+    assert rig.user_messages()[-1] == '<user lang="en">And the worker?</user>'
+
+
+async def test_a_spoken_wake_with_a_request_is_answered_and_followed_up(rig_for: MakeRig) -> None:
+    rig = await rig_for([Text('It is half past nine, sir.')], [Text('Green, sir.')])
+    rig.audio.emit(SpokenWake('what time is it?', 'en', rig.clock.now()))
+    await until(lambda: rig.state == 'follow_up')
+    assert rig.user_messages() == ['<user lang="en">what time is it?</user>']
+    assert rig.player.voices[0] == 'chime'
+    rig.audio.say('And the build?')
+    await until(lambda: len(rig.user_messages()) == 2)
+
+
+async def test_a_spoken_wake_alone_listens_for_the_request(rig_for: MakeRig) -> None:
+    rig = await rig_for([Text('It is half past nine, sir.')])
+    rig.audio.emit(SpokenWake('', 'en', rig.clock.now()))
+    await until(lambda: rig.state == 'listening')
+    rig.audio.say('What time is it?')
+    await until(lambda: len(rig.user_messages()) == 1)
+    assert rig.user_messages() == ['<user lang="en">What time is it?</user>']

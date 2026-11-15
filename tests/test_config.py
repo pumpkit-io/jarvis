@@ -162,7 +162,7 @@ def test_unknown_effort_is_refused(checkout: Path) -> None:
 def test_voice_settings_default_to_the_ticket_and_phase_0(checkout: Path) -> None:
     voice = load_settings(checkout, environ={}).voice
     assert (voice.follow_up_s, voice.announce_follow_up_s, voice.listen_s) == (6.0, 4.0, 6.0)
-    assert (voice.wake_engine, voice.wake_threshold, voice.stt_engine, voice.aec) == ("openwakeword", 0.5, "parakeet", "webrtc")
+    assert (voice.wake_engine, voice.wake_threshold, voice.stt_engine, voice.aec) == ("openwakeword", 0.2, "parakeet", "webrtc")
     assert (voice.vad_threshold, voice.end_silence_ms, voice.end_extend_ms) == (0.5, 500, 1500)
     assert (voice.smart_turn_threshold, voice.preroll_ms) == (0.5, 1500)
     assert (voice.max_turn_s, voice.chime_guard_ms, voice.wake_refractory_ms, voice.onset_pad_ms) == (30.0, 500, 2000, 200)

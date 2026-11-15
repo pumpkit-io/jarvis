@@ -22,7 +22,7 @@ from jarvis_hub.voice.bargein import TALKING_GAP_S, Partial
 from jarvis_hub.voice.clips import ClipKind, ClipStore
 from jarvis_hub.voice.language import detect_language
 from jarvis_hub.voice.player import Samples
-from jarvis_hub.voice.state import BargeIn, CaptureAborted, Heard, InputEvent, Overheard, SpeechStarted, WakeWord
+from jarvis_hub.voice.state import BargeIn, CaptureAborted, Heard, InputEvent, Overheard, SpeechStarted, SpokenWake, WakeWord, wake_in
 
 SAMPLE_RATE = 16_000
 FRAME = SAMPLE_RATE // 100
@@ -96,7 +96,7 @@ class Engines:
 class Listening:
     """Thresholds, each a `JARVIS_*` setting."""
 
-    wake_threshold: float = 0.5
+    wake_threshold: float = 0.2
     vad_threshold: float = 0.5
     end_silence_s: float = 0.5
     end_extend_s: float = 1.5
@@ -116,6 +116,10 @@ class Listening:
     bargein_partial_every_s: float = 0.3
     # Partials start this long before the onset, which VAD finds late, so the first word is whole.
     bargein_lead_s: float = 0.3
+    # Idle speech the Wake word missed is transcribed, and wakes Jarvis when it opens with "Jarvis".
+    transcript_wake: bool = True
+    # Idle speech longer than this is not transcribed, so a talking room costs no STT.
+    idle_wake_max_s: float = 6.0
 
 
 @dataclass
@@ -167,7 +171,10 @@ class InputPipeline:
         # Times Smart Turn and STT for the metrics.
         self._clock = clock
         self._clips = clips
-        self._ring: deque[tuple[Pcm, float]] = deque(maxlen=max(1, round(settings.preroll_s * 100)))
+        held_s = settings.preroll_s
+        if settings.transcript_wake:
+            held_s = max(held_s, settings.onset_pad_s + settings.idle_wake_max_s + settings.end_silence_s + 0.1)
+        self._ring: deque[tuple[Pcm, float]] = deque(maxlen=max(1, round(held_s * 100)))
         self._wake_buf = np.zeros(0, np.int16)
         self._vad_buf = np.zeros(0, np.int16)
         self._last_wake = float("-inf")
@@ -330,6 +337,8 @@ class InputPipeline:
         if self._turn is None or self._capturing:
             events += self._barge_events(at)
         if self._onset is not None and self._turn is None and at - self._last_speech >= self._s.end_silence_s:
+            if self._transcript_wake_due(self._onset):
+                events += self._transcript_wake(self._onset)
             self._onset = None
             self._barge = None
         if at - self._last_speech >= self._s.end_silence_s:
@@ -373,6 +382,28 @@ class InputPipeline:
             events.append(self._partial(self._barge, at))
         return events
 
+    def _transcript_wake_due(self, onset: float) -> bool:
+        idle = not self._capturing and self._barge_from is None and not self._blocked
+        heard_wake = self._last_wake >= onset - self._s.onset_pad_s
+        short = self._last_speech - onset <= self._s.idle_wake_max_s
+        return self._s.transcript_wake and idle and not heard_wake and short
+
+    def _transcript_wake(self, onset: float) -> list[InputEvent]:
+        start = onset - self._s.onset_pad_s
+        frames = [f for f, t in self._ring if t - 0.01 >= start - STAMP_SLACK_S]
+        if not frames:
+            return []
+        began = self._clock()
+        text = self._e.stt.transcribe(np.concatenate(frames).astype(np.float32) / 32768.0).strip()
+        completed = self._clock()
+        request = wake_in(text)
+        self._record({"kind": "spoken_wake", "woke": request is not None, "speech_at": self._last_speech,
+                      "stt_started_at": began, "stt_completed_at": completed,
+                      "stt_ms": round((completed - began) * 1000, 1), "time_basis": "perf_counter"})
+        if request is None:
+            return []
+        return [SpokenWake(request, detect_language(text, "en"), self._last_speech, onset)]
+
     def _save_barge_clip(self) -> None:
         if self._clip is None or self._clips is None:
             return
@@ -404,7 +435,7 @@ class InputPipeline:
         return Partial(text, at, max(0.0, self._last_speech - onset), at - self._last_speech)
 
     def _begin_turn(self, onset: float) -> _Turn:
-        start = onset - self._s.onset_pad_s
+        start = max(onset - self._s.onset_pad_s, self._at - self._s.preroll_s)
         # A frame's stamp is the time of its last sample, so it starts 10 ms earlier.
         frames = [f for f, t in self._ring if t - 0.01 >= start - STAMP_SLACK_S]
         first = self._ring[-len(frames)][1] - 0.01 if frames else self._ring[-1][1]
@@ -654,7 +685,7 @@ class Capture:
             self._frames.put(None)
 
     def _publish(self, event: InputEvent, epoch: int) -> None:
-        if not self._closed and (isinstance(event, WakeWord) or epoch == self._capture_epoch):
+        if not self._closed and (isinstance(event, (WakeWord, SpokenWake)) or epoch == self._capture_epoch):
             self._events.put_nowait(event)
 
     def _abandon(self, pipeline: InputPipeline, reason: str, epoch: int) -> None:

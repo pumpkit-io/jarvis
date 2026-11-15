@@ -31,6 +31,7 @@ from jarvis_hub.voice.state import (
     InputEvent,
     Heard,
     SpeechStarted,
+    SpokenWake,
     WakeWord,
     Interrupt,
     Pause,
@@ -348,7 +349,10 @@ class VoiceMode:
                 if len(self._origins) >= 64:
                     self._origins.pop(next(iter(self._origins)))
                 self._origins[event.candidate] = self._origin(event.started_at if event.started_at is not None else event.at)
-            if isinstance(event, Heard) and self._owned is not None:
+            if isinstance(event, Heard) and self._voice.state in CAPTURING:
+                # A turn the machine opened must reach it, or it waits in that turn forever; older fragments lapse.
+                self._drop_fragments()
+            elif isinstance(event, Heard) and self._owned is not None:
                 origin = self._origins.get(event.candidate, self._origin(event.started_at))
                 if origin[0] == "thinking" or self._retained or self._inflight or self._applying_fragments or self._waiting:
                     buffered = [*self._retained, *self._inflight, *self._applying_fragments, *self._waiting]
@@ -385,13 +389,16 @@ class VoiceMode:
         self._reply_started = None
         self._reply_finished = None
         self._accepted_candidate = -1
+        self._drop_fragments()
+        self._latest_candidate = -1
+        self._origins.clear()
+        self._sync_capture()
+
+    def _drop_fragments(self) -> None:
         self._waiting.clear()
         self._retained.clear()
         self._inflight = ()
         self._applying_fragments = ()
-        self._latest_candidate = -1
-        self._origins.clear()
-        self._sync_capture()
 
     def semantic_context(self, owner: tuple[str, int], start: int) -> None:
         if self.owns(owner) and self._owned is not None and 0 <= start < len(self._owned.segments):
@@ -510,7 +517,7 @@ class VoiceMode:
         if isinstance(event, (ReplyAudio, ReplyDone)) and event.owner is not None and not self.owns(event.owner):
             return []
         self._voice, actions = step(before_voice, event, self._timing)
-        if isinstance(event, WakeWord) and not before_voice.in_turn and event.at >= before_voice.chime_until:
+        if isinstance(event, (WakeWord, SpokenWake)) and not before_voice.in_turn and event.at >= before_voice.chime_until:
             self._retire()
         if any(isinstance(action, SendTurn) for action in actions):
             heard = next(action for action in actions if isinstance(action, SendTurn))

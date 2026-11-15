@@ -27,6 +27,7 @@ from jarvis_hub.voice.state import (
     Resume,
     SendTurn,
     SpeechStarted,
+    SpokenWake,
     Tick,
     Timing,
     Voice,
@@ -816,3 +817,81 @@ def test_captured_onset_is_separate_from_retained_pre_roll() -> None:
     capture_start = record['capture_start_at']
     assert isinstance(capture_start, float)
     assert capture_start < T0 + 0.3
+
+
+def test_idle_speech_that_names_jarvis_wakes_from_its_transcript() -> None:
+    r = rig()
+    r.stt.text = "Hey Jervis, what time is it?"
+    r.feed("silence", 0.5)
+    r.feed("speech", 1.5)
+    r.feed("silence", 0.45)
+    assert r.events == []
+    r.feed("silence", 0.1)
+
+    [wake] = r.events
+    assert isinstance(wake, SpokenWake)
+    assert (wake.text, wake.lang) == ("what time is it?", "en")
+    assert wake.at == pytest.approx(T0 + 2.0, abs=0.04)  # pyright: ignore[reportUnknownMemberType]
+    # From 200 ms before the onset to 500 ms past the last speech.
+    assert len(r.stt.heard[0]) / RATE == pytest.approx(0.2 + 1.5 + 0.5, abs=0.06)  # pyright: ignore[reportUnknownMemberType]
+    assert [row["kind"] for row in r.records] == ["spoken_wake"]
+
+
+def test_jarvis_alone_wakes_with_no_request() -> None:
+    r = rig()
+    r.stt.text = "Harvis."
+    r.feed("speech", 0.6)
+    r.feed("silence", 0.6)
+    [wake] = r.events
+    assert isinstance(wake, SpokenWake) and wake.text == ""
+
+
+def test_idle_speech_without_jarvis_wakes_nothing() -> None:
+    r = rig()
+    r.stt.text = "What's the weather?"
+    r.feed("speech", 1.0)
+    r.feed("silence", 0.6)
+    assert r.events == []
+    assert len(r.stt.heard) == 1
+
+
+def test_long_idle_speech_is_not_transcribed() -> None:
+    r = rig(idle_wake_max_s=2.0)
+    r.stt.text = "Jarvis"
+    r.feed("speech", 2.5)
+    r.feed("silence", 0.6)
+    assert r.events == []
+    assert r.stt.heard == []
+
+
+def test_idle_speech_the_wake_word_heard_is_not_transcribed() -> None:
+    r = rig()
+    r.stt.text = "Jarvis"
+    r.feed("speech", 0.5)
+    r.feed("wake", 0.2)
+    r.feed("silence", 0.6)
+    assert [type(e) for e in r.events] == [WakeWord]
+    assert r.stt.heard == []
+
+
+def test_no_transcript_wake_while_capturing_or_watching_for_barge_ins() -> None:
+    r = rig()
+    r.stt.text = "Jarvis"
+    r.pipeline.barge_in(T0)
+    r.feed("speech", 0.1)
+    r.feed("silence", 0.6)
+    assert not any(isinstance(e, SpokenWake) for e in r.events)
+    r.pipeline.barge_in(None)
+    r.pipeline.capture(True)
+    r.feed("speech", 0.5)
+    r.feed("silence", 0.6)
+    assert not any(isinstance(e, SpokenWake) for e in r.events)
+
+
+def test_transcript_wake_can_be_turned_off() -> None:
+    r = rig(transcript_wake=False)
+    r.stt.text = "Jarvis"
+    r.feed("speech", 0.5)
+    r.feed("silence", 0.6)
+    assert r.events == []
+    assert r.stt.heard == []

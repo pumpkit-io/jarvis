@@ -43,6 +43,16 @@ class WakeWord:
 
 
 @dataclass(frozen=True)
+class SpokenWake:
+    """Idle speech whose transcript opens with "Jarvis", which the Wake word missed: `text` is what followed it."""
+
+    text: str
+    lang: Lang | None
+    at: float
+    started_at: float | None = None
+
+
+@dataclass(frozen=True)
 class ChimeStarted:
     """The chime the Wake word asked for started playing."""
 
@@ -135,9 +145,10 @@ class Tick:
 
 
 # What the audio input reports.
-InputEvent = WakeWord | SpeechStarted | CaptureAborted | Heard | BargeIn | Partial | Overheard
+InputEvent = WakeWord | SpokenWake | SpeechStarted | CaptureAborted | Heard | BargeIn | Partial | Overheard
 Event = (
     WakeWord
+    | SpokenWake
     | ChimeStarted
     | SpeechStarted
     | CaptureAborted
@@ -257,6 +268,21 @@ def _sounds_like_jarvis(word: str) -> bool:
     return SequenceMatcher(None, word.lower(), "jarvis").ratio() >= 0.8
 
 
+# Words STT makes of a greeting before "Jarvis": "Hey", "Ehi" as "E i", "Hey" as "A".
+_GREETINGS = frozenset("hey hi ehi ehy ey hello ok okay oh ciao a e i".split())
+
+
+def wake_in(text: str) -> str | None:
+    """What follows "Jarvis" when the transcript opens with it, after greetings if any; None when it does not."""
+    for word in list(_WORDS.finditer(text))[:3]:
+        name = word[0].lower()
+        if name == "jarvis" or _sounds_like_jarvis(name):
+            return text[word.end() :].lstrip(" ,.;:!?-").strip()
+        if name not in _GREETINGS:
+            return None
+    return None
+
+
 def without_wake_phrase(text: str) -> str:
     text = text.strip()
     if wake := _WAKE_PHRASE.match(text):
@@ -298,6 +324,8 @@ def _step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Actio
     match event:
         case WakeWord(at):
             return _wake(voice, at, timing)
+        case SpokenWake(text, lang, at):
+            return _spoken_wake(voice, text, lang, at, timing)
         case ChimeStarted(at):
             return replace(voice, chime_until=max(voice.chime_until, at + timing.chime_s)), []
         case SpeechStarted(at):
@@ -403,6 +431,17 @@ def _wake(voice: Voice, at: float, timing: Timing) -> tuple[Voice, list[Action]]
     if voice.state in ("thinking", "speaking", "announce"):
         return chimed, [Interrupt(), Chime()]
     return chimed, [Chime()]
+
+
+def _spoken_wake(voice: Voice, text: str, lang: Lang | None, at: float, timing: Timing) -> tuple[Voice, list[Action]]:
+    woken, actions = _wake(voice, at, timing)
+    if woken is voice or _is_noise(text):
+        return woken, actions
+    replying: list[Action] = [action for action in actions if isinstance(action, Interrupt)]
+    if stop_phrase(text) is not None:
+        return replace(woken, state="idle", deadline=None, chime_until=voice.chime_until), replying
+    sent = SendTurn(text, lang, at, interrupted=woken.cut_off)
+    return replace(woken, state="thinking", deadline=None, awaiting=at, cut_off=False), [*actions, sent]
 
 
 def _heard(voice: Voice, text: str, lang: Lang | None, at: float, timing: Timing) -> tuple[Voice, list[Action]]:
