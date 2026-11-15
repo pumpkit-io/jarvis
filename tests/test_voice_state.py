@@ -9,6 +9,7 @@ from jarvis_hub.voice.state import (
     BargeIn,
     Chime,
     ChimeStarted,
+    Closing,
     EndConversation,
     Event,
     Heard,
@@ -72,7 +73,7 @@ def test_the_wake_word_chimes_and_listens() -> None:
     assert actions == [Chime()]
 
 
-def test_a_full_exchange_ends_in_the_follow_up_window_then_idles_silently() -> None:
+def test_a_full_exchange_ends_in_the_follow_up_window_then_idles_with_the_closing_sound() -> None:
     events = [
         WakeWord(10.0),
         SpeechStarted(10.5),
@@ -84,7 +85,7 @@ def test_a_full_exchange_ends_in_the_follow_up_window_then_idles_silently() -> N
     ]
     assert states(*events) == ["listening", "listening", "thinking", "speaking", "follow_up", "follow_up", "idle"]
     _, actions = run(*events)
-    assert actions == [Chime(), SendTurn("What time is it?", "en", 12.0)]
+    assert actions == [Chime(), SendTurn("What time is it?", "en", 12.0), Closing()]
 
 
 def test_speech_in_the_follow_up_window_is_a_turn_without_the_wake_word() -> None:
@@ -108,12 +109,26 @@ def test_the_follow_up_window_is_a_setting() -> None:
     assert voice.state == "idle"
 
 
-def test_after_the_wake_word_silence_goes_idle_without_a_word() -> None:
+def test_after_the_wake_word_silence_goes_idle_with_the_closing_sound() -> None:
     voice, actions = run(WakeWord(10.0), Tick(15.9))
     assert voice.state == "listening"
     voice, actions = run(Tick(16.0), start=voice)
     assert voice.state == "idle"
-    assert actions == []
+    assert actions == [Closing()]
+
+
+def test_the_follow_up_window_closes_with_the_closing_sound() -> None:
+    voice, _ = run(WakeWord(10.0), Heard("Hi", "en", 11.0), ReplyDone(12.0, 11.0), Tick(17.9))
+    assert voice.state == "follow_up"
+    voice, actions = run(Tick(18.0), start=voice)
+    assert (voice.state, actions) == ("idle", [Closing()])
+
+
+def test_going_idle_by_a_stop_phrase_or_end_of_conversation_plays_no_closing_sound() -> None:
+    _, actions = run(WakeWord(10.0), Heard("That's all", "en", 11.0))
+    assert Closing() not in actions
+    _, actions = run(WakeWord(10.0), Heard("Hi", "en", 11.0), EndConversation(11.5), ReplyDone(12.0, 11.0))
+    assert Closing() not in actions
 
 
 def test_a_turn_in_progress_holds_the_window_open() -> None:

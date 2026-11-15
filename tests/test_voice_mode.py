@@ -125,7 +125,7 @@ async def rig_for() -> AsyncIterator[MakeRig]:
         await rig.voice.close()
 
 
-async def test_wake_ask_hear_the_answer_then_idle_silently(rig_for: MakeRig) -> None:
+async def test_wake_ask_hear_the_answer_then_idle_with_the_closing_sound(rig_for: MakeRig) -> None:
     rig: Rig = await rig_for([Text("It is half past nine, sir.")])
 
     rig.audio.wake()
@@ -143,7 +143,8 @@ async def test_wake_ask_hear_the_answer_then_idle_silently(rig_for: MakeRig) -> 
     await rig.advance(0.1)
     assert rig.state == "idle"
     await rig.advance(60)
-    assert rig.player.texts == ["", "It is half past nine, sir."]
+    assert rig.player.texts == ["", "It is half past nine, sir.", ""]
+    assert rig.player.voices[-1] == "closing"
     assert rig.states() == ["listening", "thinking", "speaking", "follow_up", "idle"]
     assert len(rig.user_messages()) == 1
 
@@ -187,7 +188,7 @@ async def test_nothing_said_while_idle_reaches_the_model(rig_for: MakeRig) -> No
     assert rig.state == "idle"
 
 
-async def test_after_the_wake_word_silence_idles_without_a_word(rig_for: MakeRig) -> None:
+async def test_after_the_wake_word_silence_idles_with_only_the_closing_sound(rig_for: MakeRig) -> None:
     rig: Rig = await rig_for()
 
     rig.audio.wake()
@@ -195,7 +196,7 @@ async def test_after_the_wake_word_silence_idles_without_a_word(rig_for: MakeRig
 
     assert rig.state == "idle"
     assert rig.user_messages() == []
-    assert rig.player.voices == ["chime"]
+    assert rig.player.voices == ["chime", "closing"]
 
 
 async def test_a_noise_only_turn_is_dropped(rig_for: MakeRig) -> None:
@@ -345,7 +346,7 @@ async def test_a_full_talker_restarts_only_once_jarvis_is_idle(rig_for: MakeRig)
 
     assert rig.states()[-1] == "idle"
     assert talker_kinds(rig) == ["warm_up", "user", "restart"]
-    assert rig.player.texts == ["", "Half past nine, sir."]
+    assert rig.player.texts == ["", "Half past nine, sir.", ""]
 
 
 async def test_a_follow_up_said_before_idle_is_answered_on_the_old_talker_then_it_restarts(rig_for: MakeRig) -> None:
@@ -577,7 +578,9 @@ async def test_news_that_queued_up_meanwhile_is_one_announcement_in_arrival_orde
         '<event source="orchestrator" task="T1" needs_user="false">',
         '<event source="orchestrator" task="T2" needs_user="false">',
     ]
-    assert rig.player.texts[-3:] == ["Green, sir.", "", both]
+    # The follow-up window closing, then the Announcement's chime.
+    assert rig.player.texts[-4:] == ["Green, sir.", "", "", both]
+    assert rig.player.voices[-3:-1] == ["closing", "chime"]
     await rig.advance(4)
     assert rig.state == "idle"
     assert talker_kinds(rig)[-1] == "event"

@@ -36,9 +36,9 @@ class RoleModel:
 class VoiceSettings:
     """Voice mode's windows, engines and thresholds; Phase 0 measured the defaults (docs/notes/phase-0-spikes.md)."""
 
-    follow_up_s: float = 6.0
-    announce_follow_up_s: float = 4.0
-    listen_s: float = 6.0
+    follow_up_s: float = 10.0
+    announce_follow_up_s: float = 10.0
+    listen_s: float = 10.0
     wake_engine: Literal["openwakeword"] = "openwakeword"
     wake_threshold: float = 0.2
     stt_engine: Literal["parakeet"] = "parakeet"
@@ -162,9 +162,9 @@ def load_settings(
 
     def voice_settings() -> VoiceSettings:
         return VoiceSettings(
-            follow_up_s=number("JARVIS_FOLLOWUP_SECONDS", 6.0, 0, 120, low_open=True),
-            announce_follow_up_s=number("JARVIS_ANNOUNCE_FOLLOWUP_SECONDS", 4.0, 0, 120, low_open=True),
-            listen_s=number("JARVIS_LISTEN_SECONDS", 6.0, 0, 120, low_open=True),
+            follow_up_s=number("JARVIS_FOLLOWUP_SECONDS", 10.0, 0, 120, low_open=True),
+            announce_follow_up_s=number("JARVIS_ANNOUNCE_FOLLOWUP_SECONDS", 10.0, 0, 120, low_open=True),
+            listen_s=number("JARVIS_LISTEN_SECONDS", 10.0, 0, 120, low_open=True),
             wake_engine=choice("JARVIS_WAKE_ENGINE", "openwakeword", ("openwakeword",)),
             wake_threshold=number("JARVIS_WAKE_THRESHOLD", 0.2, 0, 1, low_open=True),
             stt_engine=choice("JARVIS_STT_ENGINE", "parakeet", ("parakeet",)),

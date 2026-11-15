@@ -25,6 +25,7 @@ from jarvis_hub.voice.state import (
     AnnouncementBegins,
     Chime,
     ChimeStarted,
+    Closing,
     CaptureAborted,
     EndConversation,
     Event,
@@ -598,6 +599,8 @@ class VoiceMode:
         match action:
             case Chime():
                 self._speech.say("chime", "en")
+            case Closing():
+                self._speech.say("closing", "en")
             case SendTurn(text, lang, at, interrupted):
                 heard = self._heard_before_cut if interrupted else None
                 self._lines.put_nowait(Line(text, at, lang, typed=False, interrupted=heard,

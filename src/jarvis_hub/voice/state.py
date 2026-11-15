@@ -185,7 +185,12 @@ class Interrupt:
     """Stop the reply in progress, both the Talker's turn and its audio."""
 
 
-Action = Chime | SendTurn | Interrupt
+@dataclass(frozen=True)
+class Closing:
+    """The sound that says Jarvis has stopped listening and waits for the Wake word again."""
+
+
+Action = Chime | SendTurn | Interrupt | Closing
 
 
 @dataclass(frozen=True)
@@ -378,7 +383,7 @@ def _step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Actio
                     return replace(voice, barge=last_call, deadline=at + timing.last_partial_s), []
                 return _decide(voice, at, timing, final=True)
             if voice.deadline is not None and at >= voice.deadline:
-                return replace(voice, state="idle", deadline=None), []
+                return replace(voice, state="idle", deadline=None), [Closing()]
             return voice, []
 
 
