@@ -1,13 +1,13 @@
 # Jarvis
 
-Jarvis is a voice-first orchestrator agent that talks with one person about the repos of one GitHub organization and gets work done on them through subagents.
+Jarvis is a voice-first personal assistant for one person. It talks with them about whatever they bring up, and gets work done on the repos of their GitHub organization through subagents.
 
 ## Language
 
 ### People and agents
 
 **Jarvis**:
-The whole system as the User experiences it: one voice and one persona that talks with the User and gets work done in the Org. The Hub, the Talker and the Orchestrator are its parts.
+The whole system as the User experiences it: one voice and one persona that talks with the User about anything and gets work done in the Org. The Hub, the Talker and the Orchestrator are its parts.
 _Avoid_: assistant, bot, main agent
 
 **User**:
@@ -95,6 +95,10 @@ _Avoid_: notification, alert, ping
 **Quiet mode**:
 A state the User sets in which Announcements wait until the next Wake word, except those that need the User.
 _Avoid_: do not disturb, mute
+
+**Backlog**:
+News left from the last session: what the User had not heard when Jarvis stopped, and what the recovery turn reports at launch. Jarvis never announces it; it opens the User's next turn as context for the Talker, which tells it only when the User asks.
+_Avoid_: catch-up, recap, briefing
 
 **Barge-in**:
 Speech heard while Jarvis is speaking. It may address Jarvis, acknowledge what it says, or belong to another conversation; hearing it alone does not make Jarvis pause or stop.

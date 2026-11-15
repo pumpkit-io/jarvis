@@ -32,7 +32,7 @@ from jarvis_hub.agents.backend import (
 from jarvis_hub.approvals import HUB_ACTIONS, Approval, Approvals, approval_event
 from jarvis_hub.config import DEFAULT_TALKER_RESTART_AT
 from jarvis_hub.limits import SavedLimit, UsageLimit, reset_sentence, update_sentence
-from jarvis_hub.news import Leaf, News, fresh
+from jarvis_hub.news import Leaf, News, backlog_message, fresh
 from jarvis_hub.orchestrator import orchestrator_tools
 from jarvis_hub.state import Fields, StateFile, UnreadableState
 from jarvis_hub.spoken import SpokenScopes
@@ -248,10 +248,12 @@ class _TalkerInput:
     revision: int = 0
     # The news this turn tells: all of a news turn, or the away opener a User's spoken turn opens with.
     news: News | None = None
+    # The Backlog a User's turn opens with: context for the Talker, never told or counted as news.
+    backlog: str = ""
 
     @property
     def message(self) -> str:
-        return "\n".join(part for part in (self.news.message if self.news else "", self.said) if part)
+        return "\n".join(part for part in (self.backlog, self.news.message if self.news else "", self.said) if part)
 
     @property
     def details(self) -> str | None:
@@ -403,6 +405,8 @@ class Hub:
         # Quiet mode, and the news it holds for the next Wake word.
         self._quiet_mode = False
         self._held: list[Leaf] = []
+        # The last session's news, kept silent and handed to the Talker with the User's next turn (ADR 0017).
+        self._backlog: list[Leaf] = []
         # Per Task, the needs_user news last let through: the same again waits out Quiet mode.
         self._needs_user: dict[str, str] = {}
         # Held news on the Talker in the turn under way, saved until that turn ends.
@@ -431,6 +435,8 @@ class Hub:
         self._orchestrator_gate = _TurnGate()
         # The Tasks of the running Orchestrator turn: one, or every open one in the recovery turn after a restart.
         self._turn_tasks: tuple[str, ...] = ()
+        # Whether the running Orchestrator turn is the recovery turn, whose reports go to the Backlog.
+        self._turn_restart = False
         # Tasks the running Orchestrator turn started Subagents on: their completion events bring the next turn.
         self._spawned: set[str] = set()
         self._state = StateFile(state_path) if state_path is not None else None
@@ -600,6 +606,7 @@ class Hub:
         needs_user: bool = False,
         details: str | None = None,
         approval: str | None = None,
+        backlog: bool = False,
     ) -> None:
         message = event_message(
             source, text, task, needs_user=needs_user, details=details is not None, approval=approval
@@ -613,10 +620,13 @@ class Hub:
             else:
                 self._needs_user.pop(task, None)
         recorded_task = self._tasks.get(task)
-        self._queue_news(
-            Leaf(message, self._clock.now(), f"{task}: {text}", details, urgent=urgent, approval=approval,
-                 task_id=task or None, revision=recorded_task.revision if recorded_task is not None else 0)
-        )
+        leaf = Leaf(message, self._clock.now(), f"{task}: {text}", details, urgent=urgent, approval=approval,
+                    task_id=task or None, revision=recorded_task.revision if recorded_task is not None else 0)
+        if backlog:
+            self._backlog.append(leaf)
+            self._persist()
+            return
+        self._queue_news(leaf)
 
     def _queue_news(self, leaf: Leaf) -> None:
         """News for the Talker: in voice mode an Announcement once Jarvis is quiet, or held while Quiet mode is on."""
@@ -731,6 +741,17 @@ class Hub:
         self._news.popleft()
         return replace(item, news=away)
 
+    def _with_backlog(self, item: _TalkerInput) -> _TalkerInput:
+        """The User's next turn opens with the Backlog, less news on a Task revised since."""
+        if item.kind != "user" or not self._backlog or self._limit.blocks("talker"):
+            return item
+        leaves, self._backlog = self._backlog, []
+        leaves = [leaf for leaf in leaves if leaf.task_id is None or (task := self._tasks.get(leaf.task_id)) is None
+                  or leaf.revision == task.revision]
+        if not leaves:
+            return item
+        return replace(item, backlog="\n".join([backlog_message(len(leaves)), *(leaf.message for leaf in leaves)]))
+
     def _handled(self) -> None:
         self._pending -= 1
         if self._pending == 0:
@@ -780,32 +801,21 @@ class Hub:
             self._save_failing = False
 
     def _unheard(self) -> list[Leaf]:
-        """News Quiet mode held that the User has not heard: in the turn under way, waiting in the news, or held."""
+        """News the User has not heard: held by Quiet mode (in the turn under way, waiting or held), or the Backlog."""
         waiting = [leaf for news in self._news for leaf in news.away_leaves()]
-        return [*self._telling, *waiting, *self._held]
+        return [*self._telling, *waiting, *self._held, *self._backlog]
 
     def _restore_quiet_mode(self, held: list[Leaf], quiet_mode: bool, needs_user: dict[str, str]) -> None:
-        """Brings back Quiet mode and its news; news released before the restart but not yet heard goes out again."""
+        """Brings back Quiet mode; news the User had not heard before the restart joins the Backlog."""
+        self._backlog.extend(fresh(held))
         if self._floor is None:
-            for leaf in held:
-                self._post(self._talker_inbox, _told(News.one(leaf)))
             return
         self._needs_user = needs_user
-        self._held = held
-        self._pending += len(held)
-        if held:
-            self._settled.clear()
-        if quiet_mode:
-            self._quiet_mode = True
-        else:
-            self._release_held()
+        self._quiet_mode = quiet_mode
 
     def _restore_limit(self, limit: SavedLimit, parked: list[News]) -> None:
-        """Restores holds and parked news without persisting the partially restored Hub."""
-        self._parked_news = parked
-        self._pending += sum(item.count for item in parked)
-        if parked:
-            self._settled.clear()
+        """Restores holds, and parked news to the Backlog, without persisting the partially restored Hub."""
+        self._backlog.extend(fresh(leaf for news in parked for leaf in news.leaves()))
         self._limit.restore(limit)
         # Restored holds are visible before a new user request.
         if self._limit.active:
@@ -947,7 +957,7 @@ class Hub:
             else:
                 item, upcoming = upcoming, None
                 await self._talker_gate.before_next_turn()
-            item = self._with_away(item)
+            item = self._with_backlog(self._with_away(item))
             if item.news is not None:
                 held = self._scopes.held_tasks()
                 moved = [leaf for leaf in item.news.leaves() if leaf.task_id in held]
@@ -1333,6 +1343,7 @@ class Hub:
         tools: list[str] = []
         self._turn_tasks = tuple(task.id for task in tasks)
         self._turn_task_revisions = {task.id: task.revision for task in tasks}
+        self._turn_restart = bool(item.restart)
         self._spawned = set()
         consuming = asyncio.create_task(self._consume(tasks, session, item.message, turn, tools))
         try:
@@ -1340,6 +1351,7 @@ class Hub:
         finally:
             self._turn_tasks = ()
             self._turn_task_revisions = {}
+            self._turn_restart = False
             self._orchestrator_gate.turn = None
             if not consuming.done():
                 # A turn left mid-stream would feed its leftovers to the next message, so the session goes.
@@ -1381,15 +1393,15 @@ class Hub:
             return
         if not task.cancelled and task.reports == reports:
             if end.outcome != "completed":
-                self._fail(task, end.error or "the Orchestrator's turn was stopped")
+                self._fail(task, end.error or "the Orchestrator's turn was stopped", backlog=bool(item.restart))
             elif quiet and item.last_check:
                 # Looking and finding nothing worth saying is a fair end for a Check, not a fault.
                 task.settle()
                 self._output.notice(f"{task.id}: its last Check came due and the Orchestrator had nothing to report.")
             elif quiet and item.restart:
-                self._fail(task, "the Hub restarted and the Orchestrator did not take it up again")
+                self._fail(task, "the Hub restarted and the Orchestrator did not take it up again", backlog=True)
             elif quiet:
-                self._fail(task, "the Orchestrator ended its turn without a report")
+                self._fail(task, "the Orchestrator ended its turn without a report", backlog=bool(item.restart))
         elif quiet:
             # A report while a wait was live left the Task working; the turn may have cancelled that wait since.
             task.settle()
@@ -1431,12 +1443,12 @@ class Hub:
         except Exception as e:
             yield TurnEnd("failed", error=f"{type(e).__name__}: {e}")
 
-    def _fail(self, task: Task, reason: str) -> None:
+    def _fail(self, task: Task, reason: str, *, backlog: bool = False) -> None:
         task.fail(reason, live=self._has_pending(task.id))
         text = f"{task.id} failed: {reason}."
         if self._subagents.live(task.id):
             text = f"The Orchestrator failed on {task.id}: {reason}. Its Subagents keep working and still report."
-        self._post_news("hub", text, task.id)
+        self._post_news("hub", text, task.id, backlog=backlog)
 
     def _record(self, spec: SessionSpec, kind: str, end: TurnEnd, tools: list[str], **fields: Any) -> None:
         self._write(
@@ -1847,7 +1859,8 @@ class Hub:
         if approval is not None:
             news += f" Ask exactly one Approval question, in the User's language: {approval.question()} Italian: {approval.question('it')}"
         self._post_news(
-            "orchestrator", news, task.id, needs_user=needs_user, details=details, approval=approval and approval.id
+            "orchestrator", news, task.id, needs_user=needs_user, details=details, approval=approval and approval.id,
+            backlog=self._turn_restart,
         )
         if approval is not None:
             return f"Reported to the User, asking for Approval {approval.id}: {approval.text}."

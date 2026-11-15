@@ -19,6 +19,12 @@ def away_message(count: int) -> str:
     return f'<event source="hub" away="{count}">{text}</event>'
 
 
+def backlog_message(count: int) -> str:
+    updates = "update" if count == 1 else "updates"
+    text = f"{count} {updates} from the last session, for your context only."
+    return f'<event source="hub" backlog="{count}">{text}</event>'
+
+
 @dataclass(frozen=True)
 class Leaf:
     """One piece of news as posted."""
