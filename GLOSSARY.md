@@ -88,6 +88,10 @@ _Avoid_: treating a local floor decision as a Task selection
 The ten seconds after Jarvis finishes speaking when the User can go on without the Wake word. When it passes in silence, Jarvis plays a short falling closing sound and goes idle.
 _Avoid_: grace period, listening timeout
 
+**Stand by**:
+The User telling Jarvis to be quiet, in any words. The Talker answers with the `stand_by` tool and no speech; Jarvis stops any reply, plays the closing sound and waits for the Wake word.
+_Avoid_: mute, dismiss
+
 **Announcement**:
 Jarvis speaking up unprompted, in one sentence, because a Task has news.
 _Avoid_: notification, alert, ping

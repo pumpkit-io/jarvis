@@ -20,6 +20,7 @@ from jarvis_hub.voice.state import (
     SendTurn,
     SpeechStarted,
     SpokenWake,
+    StandBy,
     Tick,
     Timing,
     Voice,
@@ -124,11 +125,30 @@ def test_the_follow_up_window_closes_with_the_closing_sound() -> None:
     assert (voice.state, actions) == ("idle", [Closing()])
 
 
-def test_going_idle_by_a_stop_phrase_or_end_of_conversation_plays_no_closing_sound() -> None:
+def test_a_stop_phrase_plays_the_closing_sound_and_end_of_conversation_does_not() -> None:
     _, actions = run(WakeWord(10.0), Heard("That's all", "en", 11.0))
-    assert Closing() not in actions
+    assert actions[-1] == Closing()
     _, actions = run(WakeWord(10.0), Heard("Hi", "en", 11.0), EndConversation(11.5), ReplyDone(12.0, 11.0))
     assert Closing() not in actions
+
+
+@pytest.mark.parametrize("replying", [[], [ReplyAudio(12.0, 11.0)]], ids=["thinking", "speaking"])
+def test_standing_by_stops_the_reply_and_idles_at_once_with_the_closing_sound(replying: list[Event]) -> None:
+    voice, _ = run(WakeWord(10.0), Heard("Shut it", "en", 11.0), *replying)
+    voice, actions = run(StandBy(12.5), start=voice)
+    assert (voice.state, voice.deadline, voice.awaiting) == ("idle", None, None)
+    assert actions == [Interrupt(), Closing()]
+    # The reply's end, when it comes, changes nothing, and the next exchange gets its Follow-up window again.
+    voice, actions = run(ReplyDone(13.0, 11.0), start=voice)
+    assert (voice.state, actions) == ("idle", [])
+    voice, _ = run(WakeWord(30.0), Heard("Hi", "en", 31.0), ReplyDone(32.0, 31.0), start=voice)
+    assert voice.state == "follow_up"
+
+
+@pytest.mark.parametrize("state", ["idle", "listening", "follow_up"])
+def test_standing_by_with_no_reply_in_progress_changes_nothing(state: VoiceState) -> None:
+    voice = Voice(state=state)
+    assert run(StandBy(10.0), start=voice) == (voice, [])
 
 
 def test_a_turn_in_progress_holds_the_window_open() -> None:
@@ -198,7 +218,7 @@ def test_the_wake_phrase_said_in_one_breath_is_cut_from_the_turn(heard: str, tur
 def test_a_stop_phrase_on_its_own_idles_silently_without_the_model(heard: str, lang: Lang) -> None:
     voice, actions = run(WakeWord(10.0), Heard(heard, None, 12.0))
     assert voice.state == "idle"
-    assert actions == [Chime()]
+    assert actions == [Chime(), Closing()]
 
 
 @pytest.mark.parametrize(
@@ -213,7 +233,7 @@ def test_a_stop_phrase_inside_a_longer_utterance_goes_to_the_talker(heard: str) 
 def test_a_stop_phrase_in_the_follow_up_window_idles_too() -> None:
     voice, actions = run(WakeWord(10.0), Heard("Hi", "en", 11.0), ReplyDone(12.0, 11.0), Heard("That's all", "en", 13.0))
     assert voice.state == "idle"
-    assert actions == [Chime(), SendTurn("Hi", "en", 11.0)]
+    assert actions == [Chime(), SendTurn("Hi", "en", 11.0), Closing()]
 
 
 def test_end_conversation_idles_once_the_reply_has_played() -> None:
@@ -587,7 +607,7 @@ def test_a_spoken_wake_with_only_noise_listens() -> None:
 def test_a_spoken_wake_with_a_stop_phrase_stays_idle() -> None:
     voice, actions = run(SpokenWake("that's all", "en", 10.0))
     assert voice.state == "idle"
-    assert actions == []
+    assert actions == [Closing()]
 
 
 def test_a_spoken_wake_inside_the_chime_or_a_turn_is_ignored() -> None:

@@ -28,6 +28,7 @@ from jarvis_hub.voice.state import (
     Closing,
     CaptureAborted,
     EndConversation,
+    StandBy,
     Event,
     InputEvent,
     Heard,
@@ -230,6 +231,9 @@ class VoiceMode:
 
     def end_conversation(self) -> None:
         self._events.put_nowait(EndConversation(self._clock.now()))
+
+    def stand_by(self) -> None:
+        self._events.put_nowait(StandBy(self._clock.now()))
 
     async def lines(
         self, interrupt: Callable[[], Awaitable[Any]], woke: Callable[[], None] = lambda: None,

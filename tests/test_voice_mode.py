@@ -103,6 +103,7 @@ async def rig_for() -> AsyncIterator[MakeRig]:
             speech=voice.speech,
             speak_typed=False,
             on_end_conversation=voice.end_conversation,
+            on_stand_by=voice.stand_by,
             floor=voice,
             state_path=state_path,
         )
@@ -217,7 +218,7 @@ async def test_a_noise_only_turn_is_dropped(rig_for: MakeRig) -> None:
     [("Check the CI", "The CI is green, sir.", "That's all."),
      ("Controlla le PR", "Le PR sono pronte, signore.", "Grazie Jarvis.")],
 )
-async def test_a_whole_utterance_end_control_idles_silently_without_another_model_turn(
+async def test_a_whole_utterance_end_control_idles_with_the_closing_sound_without_another_model_turn(
     rig_for: MakeRig, opening: str, answer: str, ending: str
 ) -> None:
     rig: Rig = await rig_for([Text(answer)])
@@ -231,7 +232,8 @@ async def test_a_whole_utterance_end_control_idles_silently_without_another_mode
     await rig.advance(60)
 
     assert len(rig.user_messages()) == 1
-    assert rig.player.texts == played
+    assert rig.player.texts == [*played, ""]
+    assert rig.player.voices[-1] == "closing"
     assert len(talker_received(rig)) == turns
 
 
@@ -313,6 +315,30 @@ async def test_generated_farewell_finishes_before_idle_without_a_follow_up_windo
     assert rig.states() == ["listening", "thinking", "speaking", "idle"]
     assert rig.player.texts == ["", farewell]
     assert len(rig.user_messages()) == 1
+
+
+async def test_standing_by_says_nothing_and_idles_with_the_closing_sound(rig_for: MakeRig) -> None:
+    # Whatever the Talker writes once it stands by is neither said nor shown.
+    rig: Rig = await rig_for([Tool("stand_by"), Text("Very well, sir.")])
+    rig.audio.wake()
+    rig.audio.say("Oh, do be quiet")
+    await until(lambda: rig.state == "idle")
+    await rig.advance(60)
+
+    assert rig.states() == ["listening", "thinking", "idle"]
+    assert rig.player.voices == ["chime", "closing"]
+    assert "Very well" not in "".join(rig.output.replies)
+
+
+async def test_a_reply_cut_short_by_standing_by_stops_playing(rig_for: MakeRig) -> None:
+    rig: Rig = await rig_for([Text("Certainly, sir. "), Tool("stand_by")])
+    rig.player.hold = True
+    rig.audio.wake()
+    rig.audio.say("Never mind, shut up")
+    await until(lambda: rig.state == "idle")
+    await until(lambda: rig.player.voices[-1:] == ["closing"])
+
+    assert "stop" in rig.player.events
 
 
 async def test_capture_is_on_only_while_listening_for_a_turn(rig_for: MakeRig) -> None:
@@ -2423,7 +2449,7 @@ async def test_a_whole_end_control_after_wake_adds_no_speech_or_model_turn(rig_f
     await rig.advance(60)
 
     assert rig.user_messages() == []
-    assert rig.player.voices == ["chime"]
+    assert rig.player.voices == ["chime", "closing"]
     assert len(talker_received(rig)) == turns
 
 

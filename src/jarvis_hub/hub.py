@@ -341,6 +341,7 @@ class Hub:
         speech: Speech | None = None,
         speak_typed: bool = True,
         on_end_conversation: Callable[[], None] | None = None,
+        on_stand_by: Callable[[], None] | None = None,
         on_model_ready: Callable[[], None] | None = None,
         talker_restart_at: float = DEFAULT_TALKER_RESTART_AT,
         floor: Floor | None = None,
@@ -354,6 +355,7 @@ class Hub:
             cancel=self._cancel,
             show=self._show,
             end_conversation=self._end_conversation,
+            stand_by=self._stand_by,
             quiet_mode=self._quiet_mode_tool,
             approve=self._approve,
             resolve_scope=self._resolve_scope,
@@ -383,6 +385,7 @@ class Hub:
         # In voice mode a typed line gets a text-only reply; with `--text --speak` it is spoken.
         self._speak_typed = speak_typed
         self._on_end_conversation = on_end_conversation
+        self._on_stand_by = on_stand_by
         self._on_model_ready = on_model_ready
         self._model_available = False
         self._restart_at = talker_restart_at
@@ -432,6 +435,8 @@ class Hub:
         # Only the reply to the User's own spoken turn ends the conversation; news never does.
         self._turn_answers_user = False
         self._interrupted_turn: int | None = None
+        # The Talker turn that called `stand_by`: nothing more of it is said or shown.
+        self._silenced_turn: int | None = None
         self._orchestrator_gate = _TurnGate()
         # The Tasks of the running Orchestrator turn: one, or every open one in the recovery turn after a restart.
         self._turn_tasks: tuple[str, ...] = ()
@@ -1189,7 +1194,7 @@ class Hub:
             async for event in self._guarded(session.send(message)):
                 match event:
                     case TextDelta(text):
-                        if self._interrupted_turn == turn:
+                        if turn in (self._interrupted_turn, self._silenced_turn):
                             continue
                         if first_delta is None:
                             first_delta = self._clock.now()
@@ -1812,6 +1817,13 @@ class Hub:
         if self._on_end_conversation is not None and self._turn_answers_user:
             self._on_end_conversation()
         return "The conversation ends after this reply."
+
+    async def _stand_by(self, args: dict[str, Any]) -> str:
+        self._silenced_turn = self._talker_gate.turn
+        # Only a spoken User turn has listening to close; elsewhere the reply just stays silent.
+        if self._on_stand_by is not None and self._turn_answers_user:
+            self._on_stand_by()
+        return "Standing by in silence; add nothing."
 
     async def _quiet_mode_tool(self, args: dict[str, Any]) -> str:
         on = args.get("on") in (True, "true")

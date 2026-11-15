@@ -371,6 +371,7 @@ async def voice_mode(
         speech=conversation.speech,
         speak_typed=False,
         on_end_conversation=conversation.end_conversation,
+        on_stand_by=conversation.stand_by,
         floor=conversation,
         preconnect_orchestrator=True,
         on_model_ready=lambda: output.notice("Model ready."),

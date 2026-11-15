@@ -532,7 +532,7 @@ The current Hub tests cover silent whole-utterance end controls, typed turns sta
 Manual launch check, pending the recording session:
 
 1. With models already downloaded, time `./jarvis` until the nonverbal readiness cue has played and the terminal reports model, speech and listening readiness. Record elapsed time and `ears_loaded.load_ms` from `.jarvis/metrics.jsonl`; the target is at most 10 seconds. First-time downloads are setup, not this measurement.
-2. Wait for the one `warm_up` record. Say “Hey Jarvis”, then “that's all”. Expect an immediate silent return to idle. Compare model-turn records before and after: the stop phrase adds none.
+2. Wait for the one `warm_up` record. Say “Hey Jarvis”, then “that's all”. Expect an immediate return to idle with only the closing sound. Compare model-turn records before and after: the stop phrase adds none.
 3. Repeat with “thanks Jarvis”, “stand by”, “go to sleep”, “grazie Jarvis” and “basta così”. Every whole-utterance control returns idle silently. In a new turn, say “that's all I need to know about the failing CI”; this longer request must reach the Talker.
 4. While voice mode is idle, type a question. Expect a terminal reply, no spoken reply and no Wake word chime. Check `--headphones`, `--debug` and launch from the optional symlink.
 
