@@ -8,7 +8,7 @@ Read `docs/working-preferences.md` before scoping or implementing work. Use `GLO
 
 `src/jarvis_hub/main.py` wires the Hub to terminal and audio adapters. The Hub owns Tasks, events, Approvals, persistence and the agent sessions. `voice/state.py` is the pure voice state machine; audio engines and playback sit behind adapters. `agents/backend.py` defines the backend protocol; `agents/sdk.py` uses the Claude Agent SDK and the installed `claude` CLI.
 
-The Talker holds the conversation, the read-only Orchestrator plans Tasks, and Subagents do repo work in isolated worktrees. Their prompts are `prompts/talker.md`, `prompts/orchestrator.md` and `prompts/subagent.md`. The shared Boundary is `prompts/boundary.md`; read it before taking an action on a repo or external service. `prompts/working-rules.md` and `prompts/repo-catalog.md` complete the runtime instructions. Edit each rule at its source.
+The Talker holds the conversation, the read-only Orchestrator plans Tasks, and Subagents do repo work in isolated worktrees. Their prompts are `prompts/talker.md`, `prompts/orchestrator.md` and `prompts/subagent.md`. Jarvis's character lives only in `prompts/persona.md`, which the Talker reads after `talker.md`: change the character there, and keep `talker.md` to how the Talker works. The shared Boundary is `prompts/boundary.md`; read it before taking an action on a repo or external service. `prompts/working-rules.md` and `prompts/repo-catalog.md` complete the runtime instructions. Edit each rule at its source.
 
 ## Running and testing
 

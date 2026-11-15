@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
-SHARED = ("boundary.md", "working-rules.md", "repo-catalog.md")
+SHARED = ("boundary.md", "working-rules.md", "repo-catalog.md", "persona.md")
 
 
 def imports(memory_file: Path) -> list[str]:
@@ -29,3 +29,11 @@ def test_agents_md_keeps_no_copy_of_a_shared_prompt() -> None:
 def test_shared_prompts_have_no_runtime_placeholders() -> None:
     for name in SHARED:
         assert "{" not in (ROOT / "prompts" / name).read_text(), name
+
+
+def test_the_persona_alone_holds_jarvis_character() -> None:
+    persona = (ROOT / "prompts" / "persona.md").read_text()
+    talker = (ROOT / "prompts" / "talker.md").read_text()
+    for name in ("Iron Man", "Stark", "J.A.R.V.I.S"):
+        assert name not in persona and name not in talker, name
+    assert '"sir"' in persona and "sir" not in talker

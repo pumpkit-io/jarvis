@@ -12,7 +12,9 @@ def talker_spec(settings: Settings) -> SessionSpec:
         model=settings.talker.model,
         effort=settings.talker.effort,
         thinking=settings.talker.thinking,
-        system_prompt=render("talker.md", {"user": settings.user_name or "not known"}),
+        system_prompt="\n".join(
+            render(name, {"user": settings.user_name or "not known"}) for name in ("talker.md", "persona.md")
+        ),
         cwd=settings.repo_dir,
     )
 
