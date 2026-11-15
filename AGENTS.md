@@ -1,6 +1,6 @@
 # Jarvis development
 
-This repo implements Jarvis, a Python voice assistant for one GitHub organization. These instructions are for agents developing the harness. Runtime character and conversation rules live in `prompts/`.
+This repo implements Jarvis, a Python voice assistant for one person that also manages the repos of their GitHub organization. These instructions are for agents developing the harness. Runtime character and conversation rules live in `prompts/`.
 
 Read `docs/working-preferences.md` before scoping or implementing work. Use `GLOSSARY.md` for domain terms and `docs/agents/domain.md` when changing the domain model or an ADR. Issues live in GitHub Issues; read `docs/agents/issue-tracker.md` before working with them.
 

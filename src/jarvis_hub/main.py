@@ -76,6 +76,9 @@ PlayedTap = Callable[[Samples, int], None]
 
 
 class Listener(AudioInput, Protocol):
+    # Set once the engines have loaded and the microphone is open.
+    ready: threading.Event
+
     def start(self) -> None: ...
 
     def close(self) -> None: ...
@@ -352,6 +355,12 @@ async def voice_mode(
         output.notice(f"Voice mode needs an audio output: {type(e).__name__}: {e}. Run `jarvis-hub --text` instead.")
         return
     following: asyncio.Task[None] | None = None
+    model_ready = asyncio.Event()
+
+    async def ready_to_take_requests() -> None:
+        await _listening(listener)
+        await model_ready.wait()
+
     conversation = VoiceMode(
         audio=listener,
         tts=ears.tts,
@@ -361,6 +370,7 @@ async def voice_mode(
         metrics=metrics,
         notice=output.notice,
         debug=debug,
+        ready_when=ready_to_take_requests,
     )
     hub = settings_hub(
         settings,
@@ -371,9 +381,10 @@ async def voice_mode(
         speech=conversation.speech,
         speak_typed=False,
         on_end_conversation=conversation.end_conversation,
+        on_stand_by=conversation.stand_by,
         floor=conversation,
         preconnect_orchestrator=True,
-        on_model_ready=lambda: output.notice("Model ready."),
+        on_model_ready=lambda: (output.notice("Model ready."), model_ready.set()),
     )
     try:
         output.notice("Model loading.")
@@ -416,13 +427,17 @@ def _open_player(rate: int, on_played: PlayedTap) -> Player:
     return SoundPlayer(rate, on_played=on_played)
 
 
+async def _listening(listener: Listener) -> None:
+    """Returns once the capture thread has loaded its engines and opened the microphone."""
+    while not listener.ready.is_set():
+        await asyncio.sleep(0.05)
+
+
 async def _follow_devices(listener: Any, player: Any, notice: Callable[[str], None]) -> None:
     from jarvis_hub.voice.devices import DeviceRoute, device_names
 
-    # The capture thread opens the microphone once its engines load; PortAudio must not restart under it.
-    ready: threading.Event = listener.ready
-    while not ready.is_set():
-        await asyncio.sleep(0.2)
+    # PortAudio must not restart under the capture thread while it opens the microphone.
+    await _listening(listener)
     notice(f"Audio: {device_names()}.")
     await DeviceRoute([listener, player], notice).follow()
 

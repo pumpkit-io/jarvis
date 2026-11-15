@@ -454,6 +454,7 @@ async def test_each_role_gets_only_its_own_hub_tools(
         "cancel",
         "show",
         "end_conversation",
+        "stand_by",
         "quiet_mode",
         "approve",
         "resolve_scope",

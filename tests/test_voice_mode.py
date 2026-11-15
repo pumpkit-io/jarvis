@@ -103,6 +103,7 @@ async def rig_for() -> AsyncIterator[MakeRig]:
             speech=voice.speech,
             speak_typed=False,
             on_end_conversation=voice.end_conversation,
+            on_stand_by=voice.stand_by,
             floor=voice,
             state_path=state_path,
         )
@@ -217,7 +218,7 @@ async def test_a_noise_only_turn_is_dropped(rig_for: MakeRig) -> None:
     [("Check the CI", "The CI is green, sir.", "That's all."),
      ("Controlla le PR", "Le PR sono pronte, signore.", "Grazie Jarvis.")],
 )
-async def test_a_whole_utterance_end_control_idles_silently_without_another_model_turn(
+async def test_a_whole_utterance_end_control_idles_with_the_closing_sound_without_another_model_turn(
     rig_for: MakeRig, opening: str, answer: str, ending: str
 ) -> None:
     rig: Rig = await rig_for([Text(answer)])
@@ -231,7 +232,8 @@ async def test_a_whole_utterance_end_control_idles_silently_without_another_mode
     await rig.advance(60)
 
     assert len(rig.user_messages()) == 1
-    assert rig.player.texts == played
+    assert rig.player.texts == [*played, ""]
+    assert rig.player.voices[-1] == "closing"
     assert len(talker_received(rig)) == turns
 
 
@@ -313,6 +315,30 @@ async def test_generated_farewell_finishes_before_idle_without_a_follow_up_windo
     assert rig.states() == ["listening", "thinking", "speaking", "idle"]
     assert rig.player.texts == ["", farewell]
     assert len(rig.user_messages()) == 1
+
+
+async def test_standing_by_says_nothing_and_idles_with_the_closing_sound(rig_for: MakeRig) -> None:
+    # Whatever the Talker writes once it stands by is neither said nor shown.
+    rig: Rig = await rig_for([Tool("stand_by"), Text("Very well, sir.")])
+    rig.audio.wake()
+    rig.audio.say("Oh, do be quiet")
+    await until(lambda: rig.state == "idle")
+    await rig.advance(60)
+
+    assert rig.states() == ["listening", "thinking", "idle"]
+    assert rig.player.voices == ["chime", "closing"]
+    assert "Very well" not in "".join(rig.output.replies)
+
+
+async def test_a_reply_cut_short_by_standing_by_stops_playing(rig_for: MakeRig) -> None:
+    rig: Rig = await rig_for([Text("Certainly, sir. "), Tool("stand_by")])
+    rig.player.hold = True
+    rig.audio.wake()
+    rig.audio.say("Never mind, shut up")
+    await until(lambda: rig.state == "idle")
+    await until(lambda: rig.player.voices[-1:] == ["closing"])
+
+    assert "stop" in rig.player.events
 
 
 async def test_capture_is_on_only_while_listening_for_a_turn(rig_for: MakeRig) -> None:
@@ -1012,6 +1038,22 @@ async def test_a_repeat_held_in_quiet_mode_still_counts_among_the_updates(rig_fo
     assert talker_received(rig)[-1].startswith('<event source="hub" away="1">1 update while you were away')
 
 
+def backlog_turn(message: str) -> tuple[int, list[str]]:
+    """The count a Backlog opener says, and the events it lists after it."""
+    first, *rest = message.splitlines()
+    assert first.startswith('<event source="hub" backlog="')
+    return int(first.split('"')[3]), [line for line in rest if line.startswith("<event")]
+
+
+async def spoken_after_wake(rig: Rig, words: str = "Good evening") -> str:
+    """The message the Talker gets for the User's first spoken turn."""
+    turns = len(talker_received(rig))
+    rig.audio.wake()
+    rig.audio.say(words)
+    await until(lambda: len(talker_received(rig)) > turns and rig.state == "follow_up")
+    return talker_received(rig)[turns]
+
+
 def crash(state: Path, tmp_path: Path) -> Path:
     """The state file as a crash would leave it now, for a second Hub to start from."""
     crashed = tmp_path / "crashed" / "state.json"
@@ -1020,7 +1062,7 @@ def crash(state: Path, tmp_path: Path) -> Path:
     return crashed
 
 
-async def test_news_held_in_quiet_mode_survives_a_crash_and_opens_the_turn_after_the_next_wake_word(
+async def test_news_held_in_quiet_mode_survives_a_crash_as_backlog_for_the_next_spoken_turn(
     rig_for: MakeRig, tmp_path: Path
 ) -> None:
     state = tmp_path / ".jarvis" / "state.json"
@@ -1032,7 +1074,7 @@ async def test_news_held_in_quiet_mode_survives_a_crash_and_opens_the_turn_after
     for arrival in arrivals:
         await arrive(first, arrival)
 
-    second = await rig_for([Text(AWAY), Text(" Main is green, sir.")], state_path=crash(state, tmp_path))
+    second = await rig_for([Text("Main is green, sir.")], state_path=crash(state, tmp_path))
     # The warm-up turn runs in the background, so it is counted once it has gone to the Talker.
     await until(lambda: talker_received(second) != [])
     turns = len(talker_received(second))
@@ -1044,13 +1086,13 @@ async def test_news_held_in_quiet_mode_survives_a_crash_and_opens_the_turn_after
     await until(lambda: second.state == "follow_up")
     [message] = talker_received(second)[turns:]
     lines = message.splitlines()
-    assert lines[0].startswith('<event source="hub" away="2">2 updates while you were away')
+    assert lines[0] == '<event source="hub" backlog="2">2 updates from the last session, for your context only.</event>'
     assert lines[1].startswith('<event source="orchestrator" task="T1"')
     assert lines[2].startswith('<event source="orchestrator" task="T2"')
     assert lines[3] == '<user lang="en">Is main green?</user>'
 
 
-async def test_after_a_restart_quiet_mode_holds_a_recovery_report_that_repeats_the_last_needs_user_news(
+async def test_a_recovery_report_that_needs_the_user_waits_silently_in_the_backlog(
     rig_for: MakeRig, tmp_path: Path
 ) -> None:
     state = tmp_path / ".jarvis" / "state.json"
@@ -1061,7 +1103,7 @@ async def test_after_a_restart_quiet_mode_holds_a_recovery_report_that_repeats_t
 
     again = Tool("report", {"task_id": "T1", "spoken": RED, "needs_user": True})
     second = await rig_for(
-        [Text("One update, sir.")], state_path=crash(state, tmp_path), orchestrator=[[again]]
+        [Text("Good evening, sir.")], state_path=crash(state, tmp_path), orchestrator=[[again]]
     )
     # The warm-up turn runs in the background, so it is counted once it has gone to the Talker.
     await until(lambda: talker_received(second) != [])
@@ -1070,27 +1112,26 @@ async def test_after_a_restart_quiet_mode_holds_a_recovery_report_that_repeats_t
     await second.advance(60)
     assert len(talker_received(second)) == turns
 
-    second.audio.wake()
-    await second.advance(6)
-    await until(lambda: "One update, sir." in second.player.texts)
-    assert talker_received(second)[-1].startswith('<event source="hub" away="1">1 update while you were away')
+    count, [event] = backlog_turn(await spoken_after_wake(second))
+    assert count == 1 and RED in event and 'needs_user="true"' in event
 
 
-async def test_a_recovery_report_outside_quiet_mode_is_an_announcement_once_jarvis_is_idle(
+async def test_a_recovery_report_is_not_announced_and_opens_the_next_spoken_turn(
     rig_for: MakeRig, tmp_path: Path
 ) -> None:
     state = tmp_path / ".jarvis" / "state.json"
     _, [arrival] = await news_rig(rig_for, items=1, state_path=state)
     recovered = asyncio.Event()
     fixed = Tool("report", {"task_id": "T1", "spoken": "The typo fix is up.", "needs_user": False})
-    second = await rig_for(
-        [Text(NEWS)], state_path=crash(state, tmp_path), orchestrator=[[Gate(recovered), fixed]]
-    )
+    restored = crash(state, tmp_path)
+    second = await rig_for([Text(NEWS)], state_path=restored, orchestrator=[[Gate(recovered), fixed]])
     recovered.set()
-    await until(lambda: NEWS in second.player.texts and second.state == "follow_up")
+    await until(lambda: "The typo fix is up." in restored.read_text())
+    await second.advance(60)
+    assert "announce" not in second.states()
 
-    assert second.player.texts[-2:] == ["", NEWS]
-    assert second.states()[-2:] == ["announce", "follow_up"]
+    count, [event] = backlog_turn(await spoken_after_wake(second))
+    assert count == 1 and "The typo fix is up." in event
     arrival.set()
 
 
@@ -1262,7 +1303,7 @@ async def test_quiet_mode_lets_through_only_the_urgent_news_of_a_turn_that_waite
     assert any(DOCS_REPORT in e for e in events) and not any(RED in e for e in events)
 
 
-async def test_a_parked_turn_restored_in_quiet_mode_lets_through_only_its_urgent_news(
+async def test_a_parked_turn_restored_in_quiet_mode_goes_whole_to_the_backlog(
     rig_for: MakeRig, tmp_path: Path
 ) -> None:
     state = tmp_path / ".jarvis" / "state.json"
@@ -1277,22 +1318,14 @@ async def test_a_parked_turn_restored_in_quiet_mode_lets_through_only_its_urgent
     await until(lambda: any(LIMIT_LINE in n for n in first.output.notices))
     await first.settle()
 
-    second = await rig_for([Text("CI is red, sir.")], [Text(AWAY)], state_path=crash(state, tmp_path))
+    second = await rig_for([Text("Good evening, sir.")], state_path=crash(state, tmp_path))
     await until(lambda: talker_received(second) != [])
     await second.advance(700)
-    await until(lambda: "CI is red, sir." in second.player.texts)
+    assert "announce" not in second.states()
 
-    told = talker_received(second)[-1]
-    assert RED in told and DOCS_REPORT not in told
-
-    await until(lambda: second.state == "follow_up")
-    await second.advance(4)
-    second.audio.wake()
-    await second.advance(6)
-    await until(lambda: AWAY in second.player.texts)
-    count, events = away_turn(talker_received(second)[-1])
-    assert count == len(events)
-    assert any(DOCS_REPORT in e for e in events) and not any(RED in e for e in events)
+    count, events = backlog_turn(await spoken_after_wake(second))
+    assert count == len(events) == 2
+    assert any(RED in e for e in events) and any(DOCS_REPORT in e for e in events)
 
 
 async def parked_away(rig_for: MakeRig, tmp_path: Path) -> Path:
@@ -1314,25 +1347,21 @@ async def parked_away(rig_for: MakeRig, tmp_path: Path) -> Path:
     return crash(state, tmp_path)
 
 
-async def test_a_parked_away_announcement_restored_in_quiet_mode_lists_each_item_it_held(
+async def test_a_parked_away_announcement_restored_in_quiet_mode_goes_to_the_backlog_item_by_item(
     rig_for: MakeRig, tmp_path: Path
 ) -> None:
-    second = await rig_for([Text(AWAY)], state_path=await parked_away(rig_for, tmp_path))
+    second = await rig_for([Text("Good evening, sir.")], state_path=await parked_away(rig_for, tmp_path))
     await until(lambda: talker_received(second) != [])
     await second.advance(700)
+    assert "announce" not in second.states()
 
-    second.audio.wake()
-    await second.advance(6)
-    await until(lambda: AWAY in second.player.texts)
-    count, events = away_turn(talker_received(second)[-1])
+    count, events = backlog_turn(await spoken_after_wake(second))
     assert count == len(events) == 2
     assert [e.split('"')[3] for e in events] == ["T1", "T2"]
-    shown = second.output.shown[-1]
-    assert "- T1: The typo fix is up.\n- T2: The docs are merged." in shown
-    assert "None" not in shown
+    assert second.output.shown == []
 
 
-async def test_two_restarts_keep_the_exact_count_of_the_updates_held(rig_for: MakeRig, tmp_path: Path) -> None:
+async def test_backlog_keeps_its_exact_count_across_two_restarts(rig_for: MakeRig, tmp_path: Path) -> None:
     restored = await parked_away(rig_for, tmp_path)
     second = await rig_for(state_path=restored)
     await until(lambda: talker_received(second) != [])
@@ -1340,14 +1369,13 @@ async def test_two_restarts_keep_the_exact_count_of_the_updates_held(rig_for: Ma
     await second.settle()
 
     (tmp_path / "again").mkdir()
-    third = await rig_for([Text(AWAY)], [Text("Noted, sir.")], state_path=crash(restored, tmp_path / "again"))
+    third = await rig_for([Text("Good evening, sir.")], state_path=crash(restored, tmp_path / "again"))
     await until(lambda: talker_received(third) != [])
-    third.audio.wake()
-    await third.advance(6)
-    await until(lambda: AWAY in third.player.texts)
-    count, events = away_turn(talker_received(third)[-1])
-    assert count == len(events)
-    assert [e.split('"')[3] for e in events if 'source="orchestrator"' in e] == ["T1", "T2"]
+    count, events = backlog_turn(await spoken_after_wake(third))
+    # Live news Quiet mode held in this session follows the Backlog as its own away opener.
+    assert count == 2
+    assert [e.split('"')[3] for e in events[:count]] == ["T1", "T2"]
+    assert events[count].startswith('<event source="hub" away=')
 
 
 STORY = [Text("First sentence, sir. "), Text("Second sentence follows. "), Text("The third one ends it. ")]
@@ -2421,7 +2449,7 @@ async def test_a_whole_end_control_after_wake_adds_no_speech_or_model_turn(rig_f
     await rig.advance(60)
 
     assert rig.user_messages() == []
-    assert rig.player.voices == ["chime"]
+    assert rig.player.voices == ["chime", "closing"]
     assert len(talker_received(rig)) == turns
 
 
@@ -2616,3 +2644,21 @@ async def test_a_spoken_wake_alone_listens_for_the_request(rig_for: MakeRig) -> 
     rig.audio.say('What time is it?')
     await until(lambda: len(rig.user_messages()) == 1)
     assert rig.user_messages() == ['<user lang="en">What time is it?</user>']
+
+
+async def test_the_ready_sound_waits_for_everything_else_to_be_ready() -> None:
+    clock, player, output = FakeClock(), RecordingPlayer(), RecordingOutput()
+    rest = asyncio.Event()
+    voice = VoiceMode(
+        audio=ScriptedAudio(clock), tts=FakeTts(), player=player, clock=clock, timing=TIMING,
+        metrics=RecordingMetrics(), notice=output.notice, ready_when=lambda: until(rest.is_set, timeout=5),
+    )
+    voice.start()
+    await until(lambda: "Speech ready." in output.notices)
+    await asyncio.sleep(0.02)
+    assert player.voices == []
+
+    rest.set()
+    await until(lambda: player.voices == ["ready"])
+    assert output.notices[-1] == "Ready."
+    await voice.close()

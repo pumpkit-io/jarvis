@@ -41,6 +41,13 @@ def report(task_id: str, spoken: str) -> Tool:
     return Tool("report", {"task_id": task_id, "spoken": spoken, "needs_user": False})
 
 
+BACKLOG_OPENER = '<event source="hub" backlog="{n}">'
+
+
+def talker_received(backend: FakeBackend) -> list[str]:
+    return [m for s in backend.all_sessions("talker") for m in s.received]
+
+
 def received(backend: FakeBackend) -> list[str]:
     return [m for s in backend.all_sessions("orchestrator") for m in s.received]
 
@@ -172,11 +179,12 @@ async def test_a_subagent_at_work_when_the_hub_crashed_comes_back_interrupted_wi
         workspace=workspace,
     )
     await second.start()
-    await until(lambda: output.replies[-1:] == ["The typo fix was cut off, sir."])
+    await until(lambda: "shall I start it again?" in crashed.read_text())
     await second.close()
     running.cancel()
     await first.close()
 
+    assert output.replies == []  # the report waits in the Backlog until the User speaks
     [message] = received(backend)
     assert message.startswith('<event source="hub" reason="restart">')
     assert "T1 working" in message and "S1 interrupted" in message
@@ -384,6 +392,8 @@ async def test_a_watcher_restarts_its_gh_command_after_a_restart_and_its_end_wak
     await second.close()
 
     assert runner.viewed == [("gh", "run", "view", "7", "-R", "pumpkit-io/pumpkit", "--json", "status")]
+    # News that arrives after the recovery turn is told as usual, not kept as Backlog.
+    assert any("CI is green." in m and "backlog=" not in m for m in talker_received(backend))
     watcher = [m for m in received(backend) if m.startswith('<event source="watcher"')]
     assert watcher == [
         '<event source="watcher" id="W1" task="T1" kind="ci_run" target="pumpkit#7" status="succeeded">'
@@ -433,13 +443,19 @@ async def test_an_open_task_nothing_will_wake_fails_when_the_recovery_turn_leave
     running.cancel()
 
     output = RecordingOutput()
-    second, backend = a_hub(clock, state, output, scripts=[[Text("I lost that one, sir.")]], orchestrator=[[]])
+    second, backend = a_hub(clock, state, output, scripts=[[Text("Good evening, sir.")]], orchestrator=[[]])
+    typist = Typist(clock)
     await second.start()
-    await second.run(lines(clock))
+    running = asyncio.create_task(second.run(typist.lines()))
+    await until(lambda: "did not take it up again" in state.read_text())
+    typist.type("Good evening")
+    typist.end()
+    await running
     await second.close()
 
-    talker = [m for s in backend.all_sessions("talker") for m in s.received]
-    assert any("T1 failed: the Hub restarted and the Orchestrator did not take it up again." in m for m in talker)
+    [_, first_turn] = talker_received(backend)
+    assert BACKLOG_OPENER.format(n=1) in first_turn
+    assert "T1 failed: the Hub restarted and the Orchestrator did not take it up again." in first_turn
 
 
 @pytest.mark.parametrize(
@@ -463,3 +479,72 @@ async def test_an_unreadable_state_file_is_moved_aside_with_a_notice_and_the_hub
     assert aside.read_text() == content
     assert backend.all_sessions("orchestrator") == []
     assert json.loads(state.read_text())["version"] == 1
+
+
+async def interrupted_task(clock: FakeClock, state: Path, request: str = "How many PRs are open?") -> None:
+    """A launch that leaves one Task open, its Orchestrator turn cut off by the close."""
+    gate = asyncio.Event()
+    first, first_backend = a_hub(
+        clock, state, RecordingOutput(), scripts=[[Text("Let me look."), delegate(request)]], orchestrator=[[Gate(gate)]]
+    )
+    typist = Typist(clock)
+    await first.start()
+    running = asyncio.create_task(first.run(typist.lines()))
+    typist.type(request)
+    await until(lambda: first_backend.all_sessions("orchestrator"))
+    await first.close()
+    running.cancel()
+
+
+async def test_the_recovery_turns_reports_are_not_announced_and_open_the_next_user_turn_as_backlog(
+    clock: FakeClock, state: Path
+) -> None:
+    await interrupted_task(clock, state)
+
+    output = RecordingOutput()
+    second, backend = a_hub(
+        clock,
+        state,
+        output,
+        scripts=[[Text("Good evening, sir.")], [Text("Three, sir.")]],
+        orchestrator=[[Tool("report", {"task_id": "T1", "spoken": "Three PRs are open.", "needs_user": True})]],
+    )
+    typist = Typist(clock)
+    await second.start()
+    running = asyncio.create_task(second.run(typist.lines()))
+    await until(lambda: "Three PRs are open." in state.read_text())
+    await asyncio.sleep(0.02)
+    assert len(talker_received(backend)) == 1  # only the warm-up: nothing is announced
+
+    typist.type("Good evening")
+    typist.type("What was left from before?")
+    typist.end()
+    await running
+    await second.close()
+
+    [_, first_turn, second_turn] = talker_received(backend)
+    assert first_turn.startswith(BACKLOG_OPENER.format(n=1))
+    assert "Three PRs are open." in first_turn and first_turn.endswith("Good evening</user>")
+    assert "backlog=" not in second_turn
+    assert output.replies == ["Good evening, sir.", "Three, sir."]
+
+
+async def test_backlog_not_yet_attached_survives_another_restart(clock: FakeClock, state: Path) -> None:
+    await interrupted_task(clock, state)
+    second, _ = a_hub(
+        clock, state, RecordingOutput(), orchestrator=[[report("T1", "Three PRs are open.")]]
+    )
+    await second.start()
+    running = asyncio.create_task(second.run(Typist(clock).lines()))
+    await until(lambda: "Three PRs are open." in state.read_text())
+    await second.close()
+    running.cancel()
+
+    third, backend = a_hub(clock, state, RecordingOutput(), scripts=[[Text("Good morning, sir.")]])
+    await third.start()
+    await third.run(lines(clock, "Good morning"))
+    await third.close()
+
+    [_, first_turn] = talker_received(backend)
+    assert BACKLOG_OPENER.format(n=1) in first_turn and "Three PRs are open." in first_turn
+    assert backend.all_sessions("orchestrator") == []

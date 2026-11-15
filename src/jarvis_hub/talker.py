@@ -24,6 +24,7 @@ def talker_tools(
     cancel: ToolHandler,
     show: ToolHandler,
     end_conversation: ToolHandler,
+    stand_by: ToolHandler,
     quiet_mode: ToolHandler,
     approve: ToolHandler,
     resolve_scope: ToolHandler | None = None,
@@ -71,6 +72,15 @@ def talker_tools(
             "The User is done for now: stop listening after this reply.",
             object_schema({}),
             end_conversation,
+        ),
+        HubTool(
+            "stand_by",
+            "The User wants you silent: they told you to stop, hush, shut up or leave them be, in any words, language "
+            "or tone, and asked for nothing else. Call it as your whole reply, with no text before or after: Jarvis "
+            "says nothing, plays the closing sound and waits for the Wake word. Not for a pause inside a request "
+            "(\"wait\", \"hold on, let me think\"). If they also want no news for a while, turn quiet_mode on first.",
+            object_schema({}),
+            stand_by,
         ),
         HubTool(
             "quiet_mode",

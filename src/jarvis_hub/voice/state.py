@@ -134,6 +134,13 @@ class EndConversation:
 
 
 @dataclass(frozen=True)
+class StandBy:
+    """The Talker called `stand_by`: the User wants silence, so the reply stops and Jarvis idles at once."""
+
+    at: float
+
+
+@dataclass(frozen=True)
 class AnnouncementBegins:
     """The Hub is starting news on the Talker, which it does only while idle: a chime, then the news, which a Wake
     word from now on interrupts."""
@@ -161,6 +168,7 @@ Event = (
     | ReplyAudio
     | ReplyDone
     | EndConversation
+    | StandBy
     | AnnouncementBegins
     | Tick
 )
@@ -374,6 +382,11 @@ def _step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Actio
             if voice.state in ("thinking", "speaking", "announce"):
                 return replace(voice, ending=True), []
             return voice, []
+        case StandBy():
+            if voice.state not in ("thinking", "speaking", "announce"):
+                return voice, []
+            silent = replace(voice, state="idle", deadline=None, ending=False, awaiting=None, barge=None, cut_off=False)
+            return silent, [Interrupt(), Closing()]
         case AnnouncementBegins():
             if voice.state == "idle":
                 return replace(voice, state="announce", deadline=None), [Chime()]
@@ -438,7 +451,7 @@ def _spoken_wake(voice: Voice, text: str, lang: Lang | None, at: float, timing: 
         return woken, actions
     replying: list[Action] = [action for action in actions if isinstance(action, Interrupt)]
     if stop_phrase(text) is not None:
-        return replace(woken, state="idle", deadline=None, chime_until=voice.chime_until), replying
+        return replace(woken, state="idle", deadline=None, chime_until=voice.chime_until), [*replying, Closing()]
     sent = SendTurn(text, lang, at, interrupted=woken.cut_off)
     return replace(woken, state="thinking", deadline=None, awaiting=at, cut_off=False), [*actions, sent]
 
@@ -455,6 +468,6 @@ def _heard(voice: Voice, text: str, lang: Lang | None, at: float, timing: Timing
         # The wake phrase alone, or noise after the Wake word, waits for the request as the Wake word would.
         return replace(heard, state="listening", deadline=at + timing.listen_s), []
     if stop_phrase(turn) is not None:
-        return replace(heard, state="idle", deadline=None, ending=False), []
+        return replace(heard, state="idle", deadline=None, ending=False), [Closing()]
     sent = SendTurn(turn, lang, at, interrupted=voice.cut_off)
     return replace(heard, state="thinking", deadline=None, ending=False, awaiting=at, cut_off=False), [sent]

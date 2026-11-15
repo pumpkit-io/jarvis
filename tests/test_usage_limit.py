@@ -429,7 +429,7 @@ async def test_a_usage_limit_and_its_reset_time_survive_a_restart(
     await second.close()
 
 
-async def test_news_the_limited_talker_could_not_tell_survives_a_restart_and_is_told_after_the_reset(
+async def test_news_the_limited_talker_could_not_tell_survives_a_restart_as_backlog_for_the_next_turn(
     clock: FakeClock, metrics: RecordingMetrics, tmp_path: Path
 ) -> None:
     state = tmp_path / ".jarvis" / "state.json"
@@ -447,19 +447,21 @@ async def test_news_the_limited_talker_could_not_tell_survives_a_restart_and_is_
     await stopped(first, run)
 
     output = RecordingOutput()
-    backend = FakeBackend(clock, [[Text("The CI is green, sir.")], [Text("The limit has reset, sir.")]])
+    backend = FakeBackend(clock, [[Text("Hello, sir.")], [Text("The limit has reset, sir.")]])
     second = make_hub(backend, output, metrics, state_path=state)
     typist = Typist(clock)
     run = await running(second, typist)
-    typist.end()
     await asyncio.sleep(0.05)
-    assert not run.done() and len(talker_received(backend)) == 1
+    assert len(talker_received(backend)) == 1
 
     clock.advance(600)
+    typist.type("Hi")
+    typist.end()
     await run
 
-    assert output.replies == ["The CI is green, sir.", "The limit has reset, sir."]
-    assert "The CI is green." in talker_received(backend)[1]
+    assert output.replies[0] == "Hello, sir."
+    hi = talker_received(backend)[1]
+    assert hi.startswith('<event source="hub" backlog="1">') and "The CI is green." in hi
     await second.close()
 
 
@@ -508,7 +510,7 @@ async def test_an_orchestrator_message_held_for_the_limit_survives_a_restart_and
     [recovery] = backend.session("orchestrator").received
     assert recovery.startswith('<event source="hub" reason="restart">')
     assert f'<unanswered task="T1">{task_message}</unanswered>' in recovery
-    assert output.replies == ["The limit has reset, sir.", "The CI is green, sir."]
+    assert output.replies == ["The limit has reset, sir."]  # the recovery report waits in the Backlog
     await second.close()
 
 
@@ -675,7 +677,7 @@ async def test_a_retry_limited_again_after_a_restart_is_silent_and_the_reset_is_
     output = RecordingOutput()
     backend = FakeBackend(
         clock,
-        [[Text("The CI is green, sir.")], [Text("The limit has reset, sir.")]],
+        [[Text("The limit has reset, sir.")]],
         orchestrator=[[Limited(-30)], [report("T1", "The CI is green.")]],
     )
     second = make_hub(backend, output, metrics, state_path=state)
@@ -690,7 +692,7 @@ async def test_a_retry_limited_again_after_a_restart_is_silent_and_the_reset_is_
 
     assert sum(LINE in n for n in output.notices) == 1
     assert not any("expected to reset" in n for n in output.notices)
-    assert output.replies == ["The CI is green, sir.", "The limit has reset, sir."]
+    assert output.replies == ["The limit has reset, sir."]
     await second.close()
 
 

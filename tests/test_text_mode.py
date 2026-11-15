@@ -382,3 +382,11 @@ def test_text_only_launch_never_constructs_or_loads_audio_engines(tmp_path: Path
     assert "Speech loading." not in stderr.getvalue()
     assert "Listening loading." not in stderr.getvalue()
     assert stdout.getvalue() == ""
+
+
+async def test_standing_by_on_a_typed_line_prints_no_reply(tmp_path: Path) -> None:
+    backend = FakeBackend(FakeClock(), [[Tool("stand_by"), Text("Very well, sir.")]])
+
+    stdout, _ = await converse(backend, io.StringIO("Oh, be quiet\n"), config=settings(tmp_path))
+
+    assert "Very well" not in stdout
