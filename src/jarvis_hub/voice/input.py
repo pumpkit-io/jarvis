@@ -22,7 +22,7 @@ from jarvis_hub.voice.bargein import TALKING_GAP_S, Partial
 from jarvis_hub.voice.clips import ClipKind, ClipStore
 from jarvis_hub.voice.language import detect_language
 from jarvis_hub.voice.player import Samples
-from jarvis_hub.voice.state import BargeIn, CaptureAborted, Heard, InputEvent, Overheard, SpeechStarted, WakeWord
+from jarvis_hub.voice.state import BargeIn, CaptureAborted, Heard, InputEvent, Overheard, SpeechStarted, SpokenWake, WakeWord, wake_in
 
 SAMPLE_RATE = 16_000
 FRAME = SAMPLE_RATE // 100
@@ -33,6 +33,15 @@ Pcm = NDArray[np.int16]
 STAMP_SLACK_S = 0.005
 # A Barge-in is decided within 1.3 s; a clip stops growing at 5 s, in case the decision never comes.
 MAX_BARGE_CLIP_FRAMES = 500
+# Within speech, quieter chunks this soon after a loud one still count: soft consonants and trailing syllables.
+SPEECH_HANGOVER_S = 0.3
+# A Wake word hit counts only with sound as loud as speech this recently: the phrase that scored it.
+WAKE_LOUDNESS_WINDOW_S = 1.5
+
+
+def level_db(pcm: Pcm) -> float:
+    """RMS level in dB of 16-bit samples, where full scale is about 90 dB."""
+    return float(10 * np.log10(np.mean(pcm.astype(np.float64) ** 2) + 1e-9))
 
 
 class EchoCanceller(Protocol):
@@ -96,7 +105,7 @@ class Engines:
 class Listening:
     """Thresholds, each a `JARVIS_*` setting."""
 
-    wake_threshold: float = 0.5
+    wake_threshold: float = 0.2
     vad_threshold: float = 0.5
     end_silence_s: float = 0.5
     end_extend_s: float = 1.5
@@ -108,6 +117,9 @@ class Listening:
     wake_refractory_s: float = 2.0
     # VAD fires a little after the true onset, so a turn keeps this much from before it.
     onset_pad_s: float = 0.2
+    # Sound quieter than this is not speech, whatever VAD says: echo residue and distant voices sit at 15-27 dB on the
+    # built-in microphone, the User at 57-64 dB (docs/notes/speaker-echo.md). 0 turns the gate off.
+    min_speech_db: float = 35.0
     # Unbroken speech over Jarvis this long is a Barge-in; shorter is a cough or a click.
     bargein_min_speech_s: float = 0.2
     # From a Barge-in's onset, when its speech is transcribed for the decision.
@@ -116,6 +128,10 @@ class Listening:
     bargein_partial_every_s: float = 0.3
     # Partials start this long before the onset, which VAD finds late, so the first word is whole.
     bargein_lead_s: float = 0.3
+    # Idle speech the Wake word missed is transcribed, and wakes Jarvis when it opens with "Jarvis".
+    transcript_wake: bool = True
+    # Idle speech longer than this is not transcribed, so a talking room costs no STT.
+    idle_wake_max_s: float = 6.0
 
 
 @dataclass
@@ -167,10 +183,16 @@ class InputPipeline:
         # Times Smart Turn and STT for the metrics.
         self._clock = clock
         self._clips = clips
-        self._ring: deque[tuple[Pcm, float]] = deque(maxlen=max(1, round(settings.preroll_s * 100)))
+        held_s = settings.preroll_s
+        if settings.transcript_wake:
+            held_s = max(held_s, settings.onset_pad_s + settings.idle_wake_max_s + settings.end_silence_s + 0.1)
+        self._ring: deque[tuple[Pcm, float]] = deque(maxlen=max(1, round(held_s * 100)))
         self._wake_buf = np.zeros(0, np.int16)
         self._vad_buf = np.zeros(0, np.int16)
         self._last_wake = float("-inf")
+        # The latest frame loud enough to be speech, and the end of the latest such chunk VAD also called speech.
+        self._last_loud = float("-inf")
+        self._last_loud_speech = float("-inf")
         # The current stretch of speech, whether or not it is a turn: its onset and the end of its latest speech.
         self._onset: float | None = None
         self._last_speech = 0.0
@@ -185,11 +207,11 @@ class InputPipeline:
         self._endpoint_sequence = 0
         self._blocked = False
         # The start of the current unbroken speech, whether it has already made a Barge-in, and whether a resume while
-        # it went on has let it make one more, which it may only once, so Backchannels cannot pause and resume forever.
+        # it went on has let it make one more, which it may only once, so Backchannels cannot be judged over and over.
         self._run: float | None = None
         self._run_spent = False
         self._run_rearmed = False
-        # Once the run has made its last Barge-in, still transcribed from that onset, without pausing, for interrupts.
+        # Once the run has made its last Barge-in, still transcribed from that onset, for interrupts.
         self._overheard: float | None = None
         # From when speech counts toward a Barge-in; None while not watching.
         self._barge_from: float | None = None
@@ -305,11 +327,16 @@ class InputPipeline:
             if self._retained_frame_limit is not None and len(self._turn.frames) > self._retained_frame_limit:
                 if (aborted := self.discard_endpoint("retention_limit", block=True)) is not None:
                     return [aborted]
+        if level_db(frame) >= self._s.min_speech_db:
+            self._last_loud = at
         self._wake_buf = np.concatenate([self._wake_buf, frame])
         while len(self._wake_buf) >= self._e.wake.chunk:
             chunk, self._wake_buf = self._wake_buf[: self._e.wake.chunk], self._wake_buf[self._e.wake.chunk :]
             ends = at - len(self._wake_buf) / SAMPLE_RATE
-            if self._e.wake.score(chunk) >= self._s.wake_threshold and ends - self._last_wake >= self._s.wake_refractory_s:
+            # Scored on every chunk, since the model keeps a running window of the stream.
+            hit = self._e.wake.score(chunk) >= self._s.wake_threshold
+            loud = self._s.min_speech_db <= 0 or ends - self._last_loud <= WAKE_LOUDNESS_WINDOW_S
+            if hit and loud and ends - self._last_wake >= self._s.wake_refractory_s:
                 self._last_wake = ends
                 if self._blocked:
                     self._blocked = False
@@ -319,7 +346,10 @@ class InputPipeline:
         while len(self._vad_buf) >= self._e.vad.chunk:
             chunk, self._vad_buf = self._vad_buf[: self._e.vad.chunk], self._vad_buf[self._e.vad.chunk :]
             ends = at - len(self._vad_buf) / SAMPLE_RATE
-            if self._e.vad.probability(chunk) >= self._s.vad_threshold:
+            voiced = self._e.vad.probability(chunk) >= self._s.vad_threshold
+            if voiced and level_db(chunk) >= self._s.min_speech_db:
+                self._last_loud_speech = ends
+            if voiced and ends - self._last_loud_speech <= SPEECH_HANGOVER_S:
                 if self._onset is None:
                     self._onset = ends - len(chunk) / SAMPLE_RATE
                 if self._run is None:
@@ -330,6 +360,8 @@ class InputPipeline:
         if self._turn is None or self._capturing:
             events += self._barge_events(at)
         if self._onset is not None and self._turn is None and at - self._last_speech >= self._s.end_silence_s:
+            if self._transcript_wake_due(self._onset):
+                events += self._transcript_wake(self._onset)
             self._onset = None
             self._barge = None
         if at - self._last_speech >= self._s.end_silence_s:
@@ -373,6 +405,28 @@ class InputPipeline:
             events.append(self._partial(self._barge, at))
         return events
 
+    def _transcript_wake_due(self, onset: float) -> bool:
+        idle = not self._capturing and self._barge_from is None and not self._blocked
+        heard_wake = self._last_wake >= onset - self._s.onset_pad_s
+        short = self._last_speech - onset <= self._s.idle_wake_max_s
+        return self._s.transcript_wake and idle and not heard_wake and short
+
+    def _transcript_wake(self, onset: float) -> list[InputEvent]:
+        start = onset - self._s.onset_pad_s
+        frames = [f for f, t in self._ring if t - 0.01 >= start - STAMP_SLACK_S]
+        if not frames:
+            return []
+        began = self._clock()
+        text = self._e.stt.transcribe(np.concatenate(frames).astype(np.float32) / 32768.0).strip()
+        completed = self._clock()
+        request = wake_in(text)
+        self._record({"kind": "spoken_wake", "woke": request is not None, "speech_at": self._last_speech,
+                      "stt_started_at": began, "stt_completed_at": completed,
+                      "stt_ms": round((completed - began) * 1000, 1), "time_basis": "perf_counter"})
+        if request is None:
+            return []
+        return [SpokenWake(request, detect_language(text, "en"), self._last_speech, onset)]
+
     def _save_barge_clip(self) -> None:
         if self._clip is None or self._clips is None:
             return
@@ -404,7 +458,7 @@ class InputPipeline:
         return Partial(text, at, max(0.0, self._last_speech - onset), at - self._last_speech)
 
     def _begin_turn(self, onset: float) -> _Turn:
-        start = onset - self._s.onset_pad_s
+        start = max(onset - self._s.onset_pad_s, self._at - self._s.preroll_s)
         # A frame's stamp is the time of its last sample, so it starts 10 ms earlier.
         frames = [f for f, t in self._ring if t - 0.01 >= start - STAMP_SLACK_S]
         first = self._ring[-len(frames)][1] - 0.01 if frames else self._ring[-1][1]
@@ -443,6 +497,15 @@ class InputPipeline:
         """The turn from its start to `end_silence_s` past its latest speech: what Smart Turn was trained to judge."""
         return self._pcm(turn).astype(np.float32) / 32768.0
 
+    @staticmethod
+    def _speech_db(audio: Samples) -> float | None:
+        """The level of the turn's louder chunks, for calibrating `min_speech_db` to a microphone."""
+        chunks = len(audio) // 512
+        if not chunks:
+            return None
+        pcm = (audio[: chunks * 512] * 32768).astype(np.int16).reshape(chunks, 512)
+        return round(float(np.percentile([level_db(c) for c in pcm], 90)), 1)
+
     def _finish(self, turn: _Turn, at: float) -> Heard | None:
         audio = self._audio(turn)
         text, stt_ms = "", 0.0
@@ -473,6 +536,7 @@ class InputPipeline:
                 "smart_turn_ms": round(turn.smart_turn_ms, 1),
                 "stt_ms": round(stt_ms, 1),
                 "words": len(text.split()),
+                "speech_db": self._speech_db(audio),
             }
         limited = at - turn.start >= self._s.max_turn_s
         self._limited_run = limited
@@ -514,9 +578,10 @@ class Microphone:
         self._stream.start()
 
     def close(self) -> None:
-        if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            stream.stop()
+            stream.close()
 
 
 @dataclass(frozen=True)
@@ -608,6 +673,7 @@ class Capture:
         self._closed = False
         # Set once the source is open; until then, and after close, nothing is captured to cancel echo from.
         self._echo: EchoCanceller | None = None
+        self._detached = False
         self.ready = threading.Event()
 
     def start(self) -> None:
@@ -645,6 +711,19 @@ class Capture:
         while True:
             yield await self._events.get()
 
+    def detach(self) -> None:
+        """Close the frame source, keeping the engines and the pipeline, until `attach` opens it again."""
+        with self._source_lock:
+            if self._echo is not None and not self._detached:
+                self._detached = True
+                self._source.close()
+
+    def attach(self) -> None:
+        with self._source_lock:
+            if self._detached and not self._closed:
+                self._detached = False
+                self._source.open(self._push)
+
     def close(self) -> None:
         with self._source_lock:
             self._closed = True
@@ -654,7 +733,7 @@ class Capture:
             self._frames.put(None)
 
     def _publish(self, event: InputEvent, epoch: int) -> None:
-        if not self._closed and (isinstance(event, WakeWord) or epoch == self._capture_epoch):
+        if not self._closed and (isinstance(event, (WakeWord, SpokenWake)) or epoch == self._capture_epoch):
             self._events.put_nowait(event)
 
     def _abandon(self, pipeline: InputPipeline, reason: str, epoch: int) -> None:

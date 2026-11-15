@@ -20,7 +20,7 @@ from jarvis_hub.voice.player import Clip, Player, Samples
 from jarvis_hub.voice.splitter import SentenceSplitter
 from jarvis_hub.voice.tts import Synthesizer
 
-ClipName = Literal["chime", "ready"]
+ClipName = Literal["chime", "ready", "closing"]
 
 # With queued audio this long unplayed, as from a paused player or a device that stopped pulling, `idle` gives up.
 STALLED = 2.0
@@ -69,13 +69,21 @@ class _DaemonThread(Executor):
             job()
 
 
-def chime(sample_rate: int) -> Samples:
-    """Two short rising notes."""
-    note = int(sample_rate * 0.09)
+def _notes(sample_rate: int, notes: tuple[float, ...], seconds: float, gain: float) -> Samples:
+    note = int(sample_rate * seconds)
     t = np.arange(note) / sample_rate
     envelope = np.sin(np.pi * np.arange(note) / note) ** 2
-    tones = [0.25 * envelope * np.sin(2 * np.pi * hz * t) for hz in (880.0, 1318.5)]
-    return np.concatenate(tones).astype(np.float32)
+    return np.concatenate([gain * envelope * np.sin(2 * np.pi * hz * t) for hz in notes]).astype(np.float32)
+
+
+def chime(sample_rate: int) -> Samples:
+    """Two short rising notes."""
+    return _notes(sample_rate, (880.0, 1318.5), 0.09, 0.25)
+
+
+def closing(sample_rate: int) -> Samples:
+    """The chime turned around, falling and a little slower and softer: Jarvis has stopped listening."""
+    return _notes(sample_rate, (1318.5, 880.0), 0.12, 0.18)
 
 
 @dataclass
@@ -246,6 +254,7 @@ class Speech:
         for lang in ("en", "it"):
             self._cache["chime", lang] = Clip("", "chime", tone, self._tts.sample_rate)
             self._cache["ready", lang] = Clip("", "ready", tone, self._tts.sample_rate)
+            self._cache["closing", lang] = Clip("", "closing", closing(self._tts.sample_rate), self._tts.sample_rate)
 
     async def _work(self, loading: "asyncio.Future[None]") -> None:
         began = self._clock.now()

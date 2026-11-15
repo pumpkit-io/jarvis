@@ -121,7 +121,8 @@ class SoundPlayer:
         self._to_flush = 0
         # Echo cancellation's reference: every block sent to the device, silence too, on the device's thread.
         self._on_played = on_played
-        self._stream = open_stream(sample_rate, self._fill)
+        self._open_stream = open_stream
+        self._stream: Stream | None = open_stream(sample_rate, self._fill)
 
     def play(self, clip: Clip, *, starts_reply: bool = False) -> None:
         with self._lock:
@@ -164,7 +165,17 @@ class SoundPlayer:
             return (sum(len(q.clip.samples) for q in self._clips) - self._pos) / self._rate
 
     def close(self) -> None:
-        self._stream.close()
+        self.detach()
+
+    def detach(self) -> None:
+        """Close the device stream; queued clips wait, in place, for `attach`."""
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            stream.close()
+
+    def attach(self) -> None:
+        if self._stream is None:
+            self._stream = self._open_stream(self._rate, self._fill)
 
     def _partial(self) -> str:
         """The words of the playing clip heard so far, in proportion to the samples played."""

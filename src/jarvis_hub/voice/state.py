@@ -29,17 +29,29 @@ class Timing:
     listen_s: float
     # Wake word hits this soon after the chime starts are the chime's own echo or the same phrase, and are ignored.
     chime_s: float
-    # From the pause, how long a Barge-in has to be told apart as a Backchannel or an Interruption.
+    # From a Barge-in, how long it has to be told apart as a Backchannel or an Interruption while Jarvis talks on.
     decide_s: float = 0.8
     # Past that deadline, how long to wait for one more partial when the User is still talking over Backchannels.
     last_partial_s: float = 0.5
     # From when Jarvis's voice starts or resumes, how long echo cancellation gets to settle before speech counts.
     guard_s: float = 0.25
+    # Speech that began before a reply finished playing, or this soon after, is its echo and room tail.
+    tail_s: float = 0.3
 
 
 @dataclass(frozen=True)
 class WakeWord:
     at: float
+
+
+@dataclass(frozen=True)
+class SpokenWake:
+    """Idle speech whose transcript opens with "Jarvis", which the Wake word missed: `text` is what followed it."""
+
+    text: str
+    lang: Lang | None
+    at: float
+    started_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -69,7 +81,7 @@ class CaptureAborted:
 
 @dataclass(frozen=True)
 class BargeIn:
-    """The User's speech over Jarvis has held long enough to pause it: it began at `onset`."""
+    """The User's speech over Jarvis has held long enough to be judged: it began at `onset`."""
 
     onset: float
     at: float
@@ -135,9 +147,10 @@ class Tick:
 
 
 # What the audio input reports.
-InputEvent = WakeWord | SpeechStarted | CaptureAborted | Heard | BargeIn | Partial | Overheard
+InputEvent = WakeWord | SpokenWake | SpeechStarted | CaptureAborted | Heard | BargeIn | Partial | Overheard
 Event = (
     WakeWord
+    | SpokenWake
     | ChimeStarted
     | SpeechStarted
     | CaptureAborted
@@ -175,21 +188,16 @@ class Interrupt:
 
 
 @dataclass(frozen=True)
-class Pause:
-    """Hold Jarvis's voice where it is while a Barge-in is decided."""
+class Closing:
+    """The sound that says Jarvis has stopped listening and waits for the Wake word again."""
 
 
-@dataclass(frozen=True)
-class Resume:
-    """Go on with Jarvis's voice from a little before the pause."""
-
-
-Action = Chime | SendTurn | Interrupt | Pause | Resume
+Action = Chime | SendTurn | Interrupt | Closing
 
 
 @dataclass(frozen=True)
 class Barge:
-    """A Barge-in being decided: Jarvis is paused, and each partial transcript may settle it."""
+    """A Barge-in being decided: Jarvis talks on, and each partial transcript may settle it (ADR 0014)."""
 
     onset: float
     partials: tuple[Partial, ...] = ()
@@ -218,6 +226,8 @@ class Voice:
     barge: Barge | None = None
     # The User cut Jarvis off and their next turn has not been sent yet.
     cut_off: bool = False
+    # A turn whose speech began before this is Jarvis's own echo tail.
+    tail_until: float = float("-inf")
 
 
 # Said on their own, after punctuation and the wake phrase are gone. Anything longer goes to the Talker.
@@ -250,11 +260,26 @@ def _words(text: str) -> list[str]:
 
 
 # What is left of "Jarvis" when the Wake word fired before STT's end of the word: "Harvis", "Jarvid", "Jorvis".
-_FIRST_WORD = re.compile(r"^(\w+)(?!')\W+(?=\w)")
+_FIRST_WORD = re.compile(r"^(\w+)(?!')(?:\W+(?=\w)|\W*$)")
 
 
 def _sounds_like_jarvis(word: str) -> bool:
     return SequenceMatcher(None, word.lower(), "jarvis").ratio() >= 0.8
+
+
+# Words STT makes of a greeting before "Jarvis": "Hey", "Ehi" as "E i", "Hey" as "A".
+_GREETINGS = frozenset("hey hi ehi ehy ey hello ok okay oh ciao a e i".split())
+
+
+def wake_in(text: str) -> str | None:
+    """What follows "Jarvis" when the transcript opens with it, after greetings if any; None when it does not."""
+    for word in list(_WORDS.finditer(text))[:3]:
+        name = word[0].lower()
+        if name == "jarvis" or _sounds_like_jarvis(name):
+            return text[word.end() :].lstrip(" ,.;:!?-").strip()
+        if name not in _GREETINGS:
+            return None
+    return None
 
 
 def without_wake_phrase(text: str) -> str:
@@ -298,6 +323,8 @@ def _step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Actio
     match event:
         case WakeWord(at):
             return _wake(voice, at, timing)
+        case SpokenWake(text, lang, at):
+            return _spoken_wake(voice, text, lang, at, timing)
         case ChimeStarted(at):
             return replace(voice, chime_until=max(voice.chime_until, at + timing.chime_s)), []
         case SpeechStarted(at):
@@ -305,7 +332,9 @@ def _step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Actio
                 ends = voice.deadline if voice.state == "follow_up" else None
                 return replace(voice, state="listening", deadline=None, in_turn=True, window_ends=ends), []
             return voice, []
-        case Heard(text, lang, at):
+        case Heard(text, lang, at, started_at=started_at):
+            if voice.state in CAPTURING and started_at is not None and started_at < voice.tail_until:
+                return _heard(voice, "", lang, at, timing)
             return _heard(voice, text, lang, at, timing)
         case CaptureAborted(at):
             if voice.state in CAPTURING and voice.in_turn:
@@ -323,17 +352,15 @@ def _step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Actio
                 return voice, []
             if voice.state == "thinking" and answers != voice.awaiting:
                 return voice, []
-            # Nothing is left to resume, but the player must not stay paused for the next reply.
-            unpause: list[Action] = [Resume()] if voice.barge is not None else []
             voice = replace(voice, awaiting=None)
             if voice.ending:
-                return replace(voice, state="idle", deadline=None, ending=False), unpause
+                return replace(voice, state="idle", deadline=None, ending=False), []
             window = timing.announce_follow_up_s if voice.state == "announce" else timing.follow_up_s
-            return replace(voice, state="follow_up", deadline=at + window), unpause
+            return replace(voice, state="follow_up", deadline=at + window, tail_until=at + timing.tail_s), []
         case BargeIn(onset, at):
             if barge_in_from(voice, timing) is None or voice.barge is not None:
                 return voice, []
-            return replace(voice, barge=Barge(onset), deadline=at + timing.decide_s), [Pause()]
+            return replace(voice, barge=Barge(onset), deadline=at + timing.decide_s), []
         case Partial(_, at):
             if voice.barge is None:
                 return voice, []
@@ -362,7 +389,7 @@ def _step(voice: Voice, event: Event, timing: Timing) -> tuple[Voice, list[Actio
                     return replace(voice, barge=last_call, deadline=at + timing.last_partial_s), []
                 return _decide(voice, at, timing, final=True)
             if voice.deadline is not None and at >= voice.deadline:
-                return replace(voice, state="idle", deadline=None), []
+                return replace(voice, state="idle", deadline=None), [Closing()]
             return voice, []
 
 
@@ -372,7 +399,7 @@ def _decide(voice: Voice, at: float, timing: Timing, *, final: bool) -> tuple[Vo
         case "wait":
             return voice, []
         case "resume":
-            return replace(voice, barge=None, deadline=None, voiced_at=at), [Resume()]
+            return replace(voice, barge=None, deadline=None, voiced_at=at), []
         case "stop":
             return _stop(voice, at, timing)
 
@@ -403,6 +430,17 @@ def _wake(voice: Voice, at: float, timing: Timing) -> tuple[Voice, list[Action]]
     if voice.state in ("thinking", "speaking", "announce"):
         return chimed, [Interrupt(), Chime()]
     return chimed, [Chime()]
+
+
+def _spoken_wake(voice: Voice, text: str, lang: Lang | None, at: float, timing: Timing) -> tuple[Voice, list[Action]]:
+    woken, actions = _wake(voice, at, timing)
+    if woken is voice or _is_noise(text):
+        return woken, actions
+    replying: list[Action] = [action for action in actions if isinstance(action, Interrupt)]
+    if stop_phrase(text) is not None:
+        return replace(woken, state="idle", deadline=None, chime_until=voice.chime_until), replying
+    sent = SendTurn(text, lang, at, interrupted=woken.cut_off)
+    return replace(woken, state="thinking", deadline=None, awaiting=at, cut_off=False), [*actions, sent]
 
 
 def _heard(voice: Voice, text: str, lang: Lang | None, at: float, timing: Timing) -> tuple[Voice, list[Action]]:

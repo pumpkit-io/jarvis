@@ -408,3 +408,21 @@ def test_every_block_played_goes_to_echo_cancellation_silence_included() -> None
 
     np.testing.assert_array_equal(np.concatenate([s for s, _ in played]), out)
     assert {r for _, r in played} == {RATE}
+
+
+def test_moving_to_another_device_keeps_the_queue_and_its_place() -> None:
+    streams: list[FakeStream] = []
+
+    def open_stream(rate: int, fill: Callable[[np.ndarray], None]) -> FakeStream:
+        streams.append(FakeStream(fill))
+        return streams[-1]
+
+    player = SoundPlayer(RATE, open_stream=open_stream, fade_ms=10)
+    player.play(Clip("One two.", "am_liam", ramp(0, 400), RATE))
+    first = streams[0].pull(100)
+    player.detach()
+    assert streams[0].closed and player.pending() == pytest.approx(300 / RATE)  # pyright: ignore[reportUnknownMemberType]
+    player.attach()
+    player.attach()
+    assert len(streams) == 2
+    np.testing.assert_array_equal(np.concatenate([first, streams[1].pull(300)]), ramp(0, 400))

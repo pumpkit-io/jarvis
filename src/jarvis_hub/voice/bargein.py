@@ -13,11 +13,6 @@ Decision = Literal["wait", "resume", "stop"]
 
 # A gap in VAD this short is between words; longer, the User has stopped.
 TALKING_GAP_S = 0.2
-# Speech still going this long is a bid for the floor, whatever STT has made of it so far: 700 ms, less the VAD chunk
-# by which speech held throughout reads short at the 700 ms partial.
-LONG_SPEECH_S = 0.65
-# This many words that are not all Backchannel take the floor ("okay but what about…").
-FLOOR_WORDS = 3
 
 LEXICON_DIR = Path(__file__).parent / "lexicons"
 
@@ -62,18 +57,6 @@ class Lexicons:
             for phrase, start in _occurrences(said, self.interrupt)
         )
 
-    def only_backchannel(self, said: Sequence[str]) -> bool:
-        """Whether `said` is Backchannel phrases end to end."""
-        longest = max((len(p.split()) for p in self.backchannel), default=0)
-        # covered[i]: the first i words split into Backchannel phrases.
-        covered = [True] + [False] * len(said)
-        for end in range(1, len(said) + 1):
-            covered[end] = any(
-                covered[end - n] and " ".join(said[end - n : end]) in self.backchannel
-                for n in range(1, min(longest, end) + 1)
-            )
-        return covered[-1]
-
 
 def _occurrences(said: Sequence[str], phrases: frozenset[str]) -> Iterable[tuple[tuple[str, ...], int]]:
     """Each phrase found in `said`, as its words and where it starts."""
@@ -109,12 +92,7 @@ def decide(partials: Sequence[Partial], *, final: bool, lexicons: Lexicons = LEX
     if not partials:
         return "resume" if final else "wait"
     latest = partials[-1]
-    said = words(latest.text)
-    if lexicons.interrupts(said):
+    if lexicons.interrupts(words(latest.text)):
         return "stop"
-    talking = still_talking(latest)
-    if said and not lexicons.only_backchannel(said):
-        floor = len(said) >= FLOOR_WORDS or latest.speech_s >= LONG_SPEECH_S
-        return "stop" if floor or not talking or final else "wait"
-    # Backchannels or noise still going at the deadline: a slow "sì, certo" more often than the start of a sentence.
-    return "resume" if not talking or final else "wait"
+    # Other words are no strong evidence (ADR 0014): STT makes them of echo residue and distant speech too.
+    return "resume" if not still_talking(latest) or final else "wait"

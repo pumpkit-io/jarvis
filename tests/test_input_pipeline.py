@@ -22,11 +22,10 @@ from jarvis_hub.voice.state import (
     Heard,
     Interrupt,
     Overheard,
-    Pause,
     ReplyAudio,
-    Resume,
     SendTurn,
     SpeechStarted,
+    SpokenWake,
     Tick,
     Timing,
     Voice,
@@ -34,6 +33,7 @@ from jarvis_hub.voice.state import (
     barge_in_from,
     step,
 )
+from tests.test_voice_state import CARRIED_ON, JUDGING, barge_markers
 
 RATE = 16_000
 FRAME = 160
@@ -545,8 +545,9 @@ class Duet:
         self.actions.clear()
 
     def step(self, event: Event) -> None:
+        before = self.voice
         self.voice, actions = step(self.voice, event, TIMING)
-        self.actions += actions
+        self.actions += [*actions, *barge_markers(before, self.voice, list(actions))]
         if (capturing := self.voice.state in CAPTURING) != self.capturing:
             self.capturing = capturing
             self.r.pipeline.capture(capturing)
@@ -572,8 +573,8 @@ class Duet:
         self.r.stt.words[marker] = words
         self.feed("speech", seconds, marker)
 
-    def pauses(self) -> list[object]:
-        return [a for a in self.actions if a in (Pause(), Resume())]
+    def judgements(self) -> list[object]:
+        return [a for a in self.actions if a in (JUDGING, CARRIED_ON)]
 
     def sent(self) -> list[SendTurn]:
         return [a for a in self.actions if isinstance(a, SendTurn)]
@@ -586,7 +587,7 @@ def test_echo_inside_the_guard_does_not_stop_a_later_barge_in() -> None:
     d.feed("silence", 0.3)
     d.feed("speech", 1.5)
 
-    assert Pause() in d.actions
+    assert JUDGING in d.actions
 
 
 def test_the_user_still_talking_as_a_reply_starts_is_a_barge_in_once_the_guard_has_passed() -> None:
@@ -595,21 +596,21 @@ def test_the_user_still_talking_as_a_reply_starts_is_a_barge_in_once_the_guard_h
     d.speak()
     d.feed("speech", 1.5)
 
-    assert Pause() in d.actions
+    assert JUDGING in d.actions
 
 
-def test_a_second_barge_in_just_after_a_resume_still_pauses() -> None:
+def test_a_second_barge_in_just_after_carrying_on_is_judged_again() -> None:
     d = Duet()
     d.speak()
     d.feed("silence", 0.5)
     d.r.stt.text = "Mhm."
     d.feed("speech", 0.3)
     d.feed("silence", 0.2)
-    assert d.actions[-2:] == [Pause(), Resume()]
+    assert d.actions[-2:] == [JUDGING, CARRIED_ON]
     d.r.stt.text = "Wait"
     d.feed("speech", 1.0)
 
-    assert [a for a in d.actions if a in (Pause(), Resume())] == [Pause(), Resume(), Pause()]
+    assert [a for a in d.actions if a in (JUDGING, CARRIED_ON)] == [JUDGING, CARRIED_ON, JUDGING]
 
 
 def test_an_interrupt_said_on_from_a_backchannel_in_one_breath_stops_jarvis_and_is_the_next_turn() -> None:
@@ -641,16 +642,16 @@ def test_an_interrupt_after_jarvis_resumed_over_the_same_breath_still_stops_it()
     d.speak()
     d.feed("silence", 0.5)
     d.say("okay okay okay,", 1.6)
-    assert d.pauses() == [Pause(), Resume()]
+    assert d.judgements() == [JUDGING, CARRIED_ON]
     d.say("actually open an issue instead.", 1.5)
     d.feed("silence", 1.0)
 
-    assert d.pauses()[-1] == Pause() and Interrupt() in d.actions
+    assert d.judgements()[-1] == JUDGING and Interrupt() in d.actions
     assert d.sent()[-1].text == "okay okay okay, actually open an issue instead."
 
 
 @pytest.mark.parametrize("seconds", [2.5, 8.0])
-def test_a_long_run_of_pure_backchannels_pauses_and_resumes_jarvis_at_most_twice(seconds: float) -> None:
+def test_a_long_run_of_pure_backchannels_is_judged_at_most_twice(seconds: float) -> None:
     d = Duet()
     d.speak()
     d.feed("silence", 0.5)
@@ -658,7 +659,7 @@ def test_a_long_run_of_pure_backchannels_pauses_and_resumes_jarvis_at_most_twice
     d.feed("silence", 1.0)
 
     assert Interrupt() not in d.actions and d.sent() == []
-    assert d.pauses() == [Pause(), Resume(), Pause(), Resume()]
+    assert d.judgements() == [JUDGING, CARRIED_ON, JUDGING, CARRIED_ON]
     assert d.voice.state == "speaking" and d.voice.barge is None
 
 
@@ -667,11 +668,11 @@ def test_an_interrupt_after_the_second_barge_in_of_a_run_still_stops_jarvis() ->
     d.speak()
     d.feed("silence", 0.5)
     d.say("okay okay okay okay", 3.5)
-    assert d.pauses() == [Pause(), Resume(), Pause(), Resume()]
+    assert d.judgements() == [JUDGING, CARRIED_ON, JUDGING, CARRIED_ON]
     d.say("wait, stop", 0.6)
     d.feed("silence", 1.0)
 
-    assert Interrupt() in d.actions and d.pauses() == [Pause(), Resume(), Pause(), Resume()]
+    assert Interrupt() in d.actions and d.judgements() == [JUDGING, CARRIED_ON, JUDGING, CARRIED_ON]
     assert d.sent()[-1].interrupted and d.sent()[-1].text.endswith("wait, stop")
 
 
@@ -816,3 +817,144 @@ def test_captured_onset_is_separate_from_retained_pre_roll() -> None:
     capture_start = record['capture_start_at']
     assert isinstance(capture_start, float)
     assert capture_start < T0 + 0.3
+
+
+def test_idle_speech_that_names_jarvis_wakes_from_its_transcript() -> None:
+    r = rig()
+    r.stt.text = "Hey Jervis, what time is it?"
+    r.feed("silence", 0.5)
+    r.feed("speech", 1.5)
+    r.feed("silence", 0.45)
+    assert r.events == []
+    r.feed("silence", 0.1)
+
+    [wake] = r.events
+    assert isinstance(wake, SpokenWake)
+    assert (wake.text, wake.lang) == ("what time is it?", "en")
+    assert wake.at == pytest.approx(T0 + 2.0, abs=0.04)  # pyright: ignore[reportUnknownMemberType]
+    # From 200 ms before the onset to 500 ms past the last speech.
+    assert len(r.stt.heard[0]) / RATE == pytest.approx(0.2 + 1.5 + 0.5, abs=0.06)  # pyright: ignore[reportUnknownMemberType]
+    assert [row["kind"] for row in r.records] == ["spoken_wake"]
+
+
+def test_jarvis_alone_wakes_with_no_request() -> None:
+    r = rig()
+    r.stt.text = "Harvis."
+    r.feed("speech", 0.6)
+    r.feed("silence", 0.6)
+    [wake] = r.events
+    assert isinstance(wake, SpokenWake) and wake.text == ""
+
+
+def test_idle_speech_without_jarvis_wakes_nothing() -> None:
+    r = rig()
+    r.stt.text = "What's the weather?"
+    r.feed("speech", 1.0)
+    r.feed("silence", 0.6)
+    assert r.events == []
+    assert len(r.stt.heard) == 1
+
+
+def test_long_idle_speech_is_not_transcribed() -> None:
+    r = rig(idle_wake_max_s=2.0)
+    r.stt.text = "Jarvis"
+    r.feed("speech", 2.5)
+    r.feed("silence", 0.6)
+    assert r.events == []
+    assert r.stt.heard == []
+
+
+def test_idle_speech_the_wake_word_heard_is_not_transcribed() -> None:
+    r = rig()
+    r.stt.text = "Jarvis"
+    r.feed("speech", 0.5)
+    r.feed("wake", 0.2)
+    r.feed("silence", 0.6)
+    assert [type(e) for e in r.events] == [WakeWord]
+    assert r.stt.heard == []
+
+
+def test_no_transcript_wake_while_capturing_or_watching_for_barge_ins() -> None:
+    r = rig()
+    r.stt.text = "Jarvis"
+    r.pipeline.barge_in(T0)
+    r.feed("speech", 0.1)
+    r.feed("silence", 0.6)
+    assert not any(isinstance(e, SpokenWake) for e in r.events)
+    r.pipeline.barge_in(None)
+    r.pipeline.capture(True)
+    r.feed("speech", 0.5)
+    r.feed("silence", 0.6)
+    assert not any(isinstance(e, SpokenWake) for e in r.events)
+
+
+def test_transcript_wake_can_be_turned_off() -> None:
+    r = rig(transcript_wake=False)
+    r.stt.text = "Jarvis"
+    r.feed("speech", 0.5)
+    r.feed("silence", 0.6)
+    assert r.events == []
+    assert r.stt.heard == []
+
+
+class AnyVad:
+    """Hears speech in any sound at all, as Silero does in faint room noise and echo residue."""
+
+    chunk = 512
+
+    def probability(self, chunk: np.ndarray) -> float:
+        return 1.0 if chunk.any() else 0.0
+
+
+class AlwaysWake:
+    chunk = 1280
+
+    def score(self, chunk: np.ndarray) -> float:
+        return 1.0 if chunk.any() else 0.0
+
+
+def faint_rig(**settings: Any) -> Rig:
+    turn, stt, echo = ScriptedTurn(), ScriptedStt(), PassThrough()
+    engines = Engines(echo=echo, wake=AlwaysWake(), vad=AnyVad(), turn=turn, stt=stt, gate=Everyone())
+    records: list[dict[str, object]] = []
+    return Rig(InputPipeline(engines, Listening(**settings), record=records.append), turn, stt, echo, records=records)
+
+
+def test_sound_quieter_than_speech_is_no_turn_no_wake_and_no_barge_in() -> None:
+    r = faint_rig()
+    r.pipeline.capture(True)
+    r.pipeline.barge_in(T0)
+    # 30 counts RMS is about 30 dB: the level of echo residue and distant speech, far below the User's ~60 dB.
+    r.feed("speech", 2.0, 30)
+    r.feed("silence", 1.0)
+    assert r.events == []
+    assert r.stt.heard == []
+
+
+def test_speech_as_loud_as_the_user_is_a_turn_and_its_level_is_recorded() -> None:
+    r = faint_rig()
+    r.pipeline.capture(True)
+    r.feed("speech", 1.0, 1000)
+    r.feed("silence", 0.6)
+    assert [type(e) for e in r.events if not isinstance(e, WakeWord)] == [SpeechStarted, Heard]
+    [turn] = [row for row in r.records if row["kind"] == "turn"]
+    assert turn["speech_db"] == pytest.approx(60.0, abs=0.5)  # pyright: ignore[reportUnknownMemberType]
+
+
+def test_a_quieter_word_inside_loud_speech_still_counts() -> None:
+    r = faint_rig()
+    r.pipeline.capture(True)
+    r.feed("speech", 0.5, 1000)
+    r.feed("speech", 0.2, 30)
+    r.feed("speech", 0.5, 1000)
+    r.feed("silence", 0.6)
+    assert len(r.heard()) == 1
+    assert [type(e) for e in r.events].count(SpeechStarted) == 1
+
+
+def test_the_loudness_gate_is_a_setting() -> None:
+    r = faint_rig(min_speech_db=0.0)
+    r.pipeline.capture(True)
+    r.feed("speech", 1.0, 30)
+    r.feed("silence", 0.6)
+    assert len(r.heard()) == 1

@@ -25,18 +25,18 @@ from jarvis_hub.voice.state import (
     AnnouncementBegins,
     Chime,
     ChimeStarted,
+    Closing,
     CaptureAborted,
     EndConversation,
     Event,
     InputEvent,
     Heard,
     SpeechStarted,
+    SpokenWake,
     WakeWord,
     Interrupt,
-    Pause,
     ReplyAudio,
     ReplyDone,
-    Resume,
     SendTurn,
     Tick,
     Timing,
@@ -215,6 +215,11 @@ class VoiceMode:
     def state(self) -> VoiceState:
         return self._voice.state
 
+    @property
+    def judging(self) -> bool:
+        """Whether speech over Jarvis is being judged as a Backchannel or an Interruption while Jarvis talks on."""
+        return self._voice.barge is not None
+
     def start(self) -> None:
         self._notice("Speech loading.")
         self._speech.start()
@@ -348,7 +353,10 @@ class VoiceMode:
                 if len(self._origins) >= 64:
                     self._origins.pop(next(iter(self._origins)))
                 self._origins[event.candidate] = self._origin(event.started_at if event.started_at is not None else event.at)
-            if isinstance(event, Heard) and self._owned is not None:
+            if isinstance(event, Heard) and self._voice.state in CAPTURING:
+                # A turn the machine opened must reach it, or it waits in that turn forever; older fragments lapse.
+                self._drop_fragments()
+            elif isinstance(event, Heard) and self._owned is not None:
                 origin = self._origins.get(event.candidate, self._origin(event.started_at))
                 if origin[0] == "thinking" or self._retained or self._inflight or self._applying_fragments or self._waiting:
                     buffered = [*self._retained, *self._inflight, *self._applying_fragments, *self._waiting]
@@ -385,13 +393,16 @@ class VoiceMode:
         self._reply_started = None
         self._reply_finished = None
         self._accepted_candidate = -1
+        self._drop_fragments()
+        self._latest_candidate = -1
+        self._origins.clear()
+        self._sync_capture()
+
+    def _drop_fragments(self) -> None:
         self._waiting.clear()
         self._retained.clear()
         self._inflight = ()
         self._applying_fragments = ()
-        self._latest_candidate = -1
-        self._origins.clear()
-        self._sync_capture()
 
     def semantic_context(self, owner: tuple[str, int], start: int) -> None:
         if self.owns(owner) and self._owned is not None and 0 <= start < len(self._owned.segments):
@@ -510,7 +521,7 @@ class VoiceMode:
         if isinstance(event, (ReplyAudio, ReplyDone)) and event.owner is not None and not self.owns(event.owner):
             return []
         self._voice, actions = step(before_voice, event, self._timing)
-        if isinstance(event, WakeWord) and not before_voice.in_turn and event.at >= before_voice.chime_until:
+        if isinstance(event, (WakeWord, SpokenWake)) and not before_voice.in_turn and event.at >= before_voice.chime_until:
             self._retire()
         if any(isinstance(action, SendTurn) for action in actions):
             heard = next(action for action in actions if isinstance(action, SendTurn))
@@ -531,6 +542,10 @@ class VoiceMode:
             self._notice(f"{reason} Say 'Hey Jarvis' and try again.")
         self._bargein_log.observe(before_voice, event, self._voice, actions, self._speech.played)
         after = self._voice.state
+        if before_voice.barge is None and self._voice.barge is not None:
+            self._debug_notice("voice: speech over Jarvis, judging it while talking on")
+        elif before_voice.barge is not None and self._voice.barge is None and after == before:
+            self._debug_notice("voice: speech over Jarvis was no interruption")
         if after != before:
             self._transition(before, after, event)
         # After capture: a turn that starts now keeps the speech of the Barge-in that stopped Jarvis.
@@ -584,18 +599,14 @@ class VoiceMode:
         match action:
             case Chime():
                 self._speech.say("chime", "en")
+            case Closing():
+                self._speech.say("closing", "en")
             case SendTurn(text, lang, at, interrupted):
                 heard = self._heard_before_cut if interrupted else None
                 self._lines.put_nowait(Line(text, at, lang, typed=False, interrupted=heard,
                                            request_id=self._owned.id if self._owned else None,
                                            revision=self._owned.revision if self._owned else 0,
                                            segments=self._owned.segments if self._owned else (text,)))
-            case Pause():
-                self._player.pause()
-                self._debug_notice("voice: paused for a Barge-in")
-            case Resume():
-                self._player.resume()
-                self._debug_notice("voice: resumed after a Backchannel")
             case Interrupt():
                 if self._voice.cut_off:
                     self._heard_before_cut = self._speech.played()

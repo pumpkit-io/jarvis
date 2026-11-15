@@ -85,7 +85,7 @@ The Hub's pending decision about which existing Tasks an already locally admitte
 _Avoid_: treating a local floor decision as a Task selection
 
 **Follow-up window**:
-The few seconds after Jarvis finishes speaking when the User can go on without the Wake word. When it passes in silence, Jarvis goes idle without a word.
+The ten seconds after Jarvis finishes speaking when the User can go on without the Wake word. When it passes in silence, Jarvis plays a short falling closing sound and goes idle.
 _Avoid_: grace period, listening timeout
 
 **Announcement**:

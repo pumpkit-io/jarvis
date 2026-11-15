@@ -126,7 +126,7 @@ async def test_voice_mode_wakes_hears_answers_aloud_and_idles(tmp_path: Path, co
     await asyncio.wait_for(running, timeout=5)
 
     assert stdout.getvalue() == "\r» What time is it?\nHalf past nine, sir.\n"
-    assert player.texts == ["", "", "Half past nine, sir."]
+    assert player.texts == ["", "", "Half past nine, sir.", ""]
     [(choice, listening)] = chosen
     assert choice.aec == "off"
     assert (listening.end_silence_s, listening.max_turn_s, listening.onset_pad_s) == (0.4, 20.0, 0.3)
