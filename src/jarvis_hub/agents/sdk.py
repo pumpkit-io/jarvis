@@ -141,6 +141,9 @@ def _skipping_permissions(spec: SessionSpec, cli_path: str, stderr: Callable[[st
         setting_sources=["user", "project"],
         disallowed_tools=list(spec.denied_tools),
         permission_mode="bypassPermissions",
+        # Claude in Chrome acts in the User's signed-in Chrome, so it joins only behind the guard (ADR 0021). A
+        # headless session connects the extension only with this flag.
+        extra_args={"chrome": None} if spec.mcp_guard else {},
         max_turns=spec.max_turns,
         hooks=hooks or None,
         include_partial_messages=True,

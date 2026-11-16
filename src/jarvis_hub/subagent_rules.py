@@ -86,10 +86,23 @@ SENTENCE = re.compile(r"[^.!?;\n]+[.!?;\n]*")
 PUMPKIT_READS = ("get_post", "list_posts", "get_usage", "list_inspiration_authors", "list_past_communities")
 PUMPKIT_SERVERS = ("claude_ai_Pumpkit", "pumpkit")
 CLAUDE_DOCS_READS = ("guide", "read", "query")
+# Claude in Chrome's tools that open, read and close tabs (ADR 0021). Clicking, typing, forms, JavaScript, uploads,
+# batches, recordings, network and console logs, window and browser changes stay refused.
+CHROME_READS = (
+    "list_connected_browsers",
+    "tabs_context_mcp",
+    "tabs_create_mcp",
+    "tabs_close_mcp",
+    "navigate",
+    "get_page_text",
+    "read_page",
+    "find",
+)
 # Every other MCP tool is refused in a Subagent (ADR 0008).
 READ_CONNECTOR_TOOLS = frozenset(
     [f"mcp__{server}__{tool}" for server in PUMPKIT_SERVERS for tool in PUMPKIT_READS]
     + [f"mcp__claude_ai_Claude_Docs__{tool}" for tool in CLAUDE_DOCS_READS]
+    + [f"mcp__claude-in-chrome__{tool}" for tool in CHROME_READS]
 )
 
 
