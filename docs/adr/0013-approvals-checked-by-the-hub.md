@@ -1,5 +1,8 @@
 # The Hub decides an Approval from its own record, and runs merges and branch deletes itself
 
+> ADR 0022 supersedes the permission interpretation and question-matching rules below. The execution and connector guards remain.
+
+
 ADR 0004 made the User's yes a recorded Approval. This records how the Hub decides that a yes counts, how it carries out what it can, and how far a Subagent's tools widen for the rest. The code is `src/jarvis_hub/approvals.py`.
 
 ## Asking

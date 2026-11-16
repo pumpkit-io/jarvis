@@ -90,6 +90,7 @@ class ResolveScope:
     task_ids: tuple[str, ...] = ()
     from_segment: int | None = None
     scope_index: int = 0
+    preserve_authorization: bool = False
 
 
 @dataclass(frozen=True)
@@ -194,13 +195,15 @@ class FakeSession:
                     handler = next((t.handler for t in self.spec.tools if t.name == name), None)
                     result = await handler(args) if handler else None
                     self.tool_results.append(ToolResult(name, args, result))
-                case ResolveScope(disposition, task_ids, from_segment, scope_index):
+                case ResolveScope(disposition, task_ids, from_segment, scope_index, preserve_authorization):
                     matches = re.findall(r'<pending_scope id="([^"]+)" revision="(\d+)" attempt="(\d+)"', self.received[-1])
                     match = matches[scope_index] if scope_index < len(matches) else None
                     if match is None:
                         raise AssertionError("The scripted resolver needs a pending scope in the Talker's input.")
                     args: dict[str, Any] = {"scope_id": match[0], "revision": int(match[1]), "attempt": int(match[2]),
                                             "disposition": disposition, "task_ids": list(task_ids)}
+                    if preserve_authorization:
+                        args['preserve_authorization'] = True
                     if from_segment is not None:
                         args['from_segment'] = from_segment
                     handler = next(t.handler for t in self.spec.tools if t.name == 'resolve_scope')

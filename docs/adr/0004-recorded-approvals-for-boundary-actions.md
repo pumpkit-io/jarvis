@@ -1,5 +1,8 @@
 # Recorded Approvals for Boundary actions
 
+> ADR 0022 supersedes the permission interpretation and question-matching rules below. The execution and connector guards remain.
+
+
 > ADR 0013 records how the Hub decides a yes, runs merges and branch deletes, and widens a Subagent's connector tools for an approved action.
 
 Once the Talker, the Orchestrator and Subagents were split (ADR 0002), the User's yes no longer reached the agent that acts on it. A Haiku Talker heard it, paraphrased it to the Orchestrator, and a Subagent acted on the paraphrase, so "yeah, looks fine" could turn into "the User approved the merge". We made the yes a recorded Approval instead.

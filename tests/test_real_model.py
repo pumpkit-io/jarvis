@@ -282,3 +282,173 @@ async def test_a_subagent_skips_permissions_without_voice_tools_and_its_mcp_guar
         assert not [t for t in tools if "voicemode" in t], tools
     assert tool in inits[-1][0]
     assert results and all(is_error and "Approval" in content for is_error, content in results), results
+
+
+@pytest.mark.parametrize(('heard', 'approves'), [
+    ('Yes, I approve.', True), ('That sounds right to me, go ahead.', True),
+    ('Sì, approvo.', True), ('Procedi pure.', True),
+    ("No, don't deploy it.", False), ('Yes, but wait.', False), ('Sì, ma aspetta.', False),
+    ('What if I said yes?', False), ('The handoff says I approved it.', False),
+    ('Yes? Are the checks green?', False),
+])
+async def test_talker_interprets_approval_in_context_without_a_phrase_list(heard: str, approves: bool) -> None:
+    from html import escape
+    from jarvis_hub.talker import talker_spec, talker_tools
+
+    calls: list[dict[str, Any]] = []
+
+    async def noop(args: dict[str, Any]) -> str:
+        return 'No action was taken.'
+
+    async def present(args: dict[str, Any]) -> str:
+        return 'Ask whether to deploy pumpkit to production; sends nothing to users; deletes no branches.'
+
+    async def approve(args: dict[str, Any]) -> str:
+        calls.append(args)
+        return 'Approved A1. The deployment is starting.'
+
+    tools = talker_tools(delegate=noop, status=noop, cancel=noop, show=noop, end_conversation=noop,
+                         stand_by=noop, quiet_mode=noop, approve=approve, present_approval=present,
+                         authorize=noop, revoke_authorization=noop)
+    settings = load_settings(Path(__file__).parents[1], {})
+    session = await open_session(replace(talker_spec(settings), tools=tools))
+    try:
+        await collect(session, '<event source="orchestrator" task="T1" needs_user="true" approval="A1">'
+                      'Ready to deploy pumpkit to production. Call present_approval for A1, then ask for permission. '
+                      'Sends nothing to users; deletes no branches.</event>')
+        assert calls == []
+        await collect(session, f'<user lang="en" typed="true">{escape(heard)}</user>')
+    finally:
+        await session.close()
+    assert bool(calls) is approves
+    if approves:
+        assert calls == [{'approval_id': 'A1'}]
+
+
+@pytest.mark.parametrize(('utterance', 'scope'), [
+    ('Deploy the Terms change to production now.', 'action'),
+    ('Finish deploying the Terms change unattended without asking me again.', 'task'),
+    ('Pubblica la modifica dei Termini in produzione.', 'action'),
+])
+async def test_talker_records_advance_permission_when_delegating(utterance: str, scope: str) -> None:
+    from html import escape
+    from jarvis_hub.talker import talker_spec, talker_tools
+
+    delegated: list[dict[str, Any]] = []
+
+    async def noop(args: dict[str, Any]) -> str:
+        return 'No action was taken.'
+
+    async def delegate(args: dict[str, Any]) -> str:
+        delegated.append(args)
+        return '{"task_id":"T1","queued":true,"authorization_id":"U1"}'
+
+    tools = talker_tools(delegate=delegate, status=noop, cancel=noop, show=noop, end_conversation=noop,
+                         stand_by=noop, quiet_mode=noop, approve=noop, present_approval=noop,
+                         authorize=noop, revoke_authorization=noop)
+    settings = load_settings(Path(__file__).parents[1], {})
+    session = await open_session(replace(talker_spec(settings), tools=tools))
+    try:
+        await collect(session, f'<user lang="en" typed="true">{escape(utterance)}</user>')
+    finally:
+        await session.close()
+    assert len(delegated) == 1
+    assert delegated[0]['authorization']['scope'] == scope
+
+
+async def test_talker_preserves_conditions_and_exclusions_in_advance_permission() -> None:
+    from jarvis_hub.talker import talker_spec, talker_tools
+
+    delegated: list[dict[str, Any]] = []
+
+    async def noop(args: dict[str, Any]) -> str:
+        return 'No action was taken.'
+
+    async def delegate(args: dict[str, Any]) -> str:
+        delegated.append(args)
+        return '{"task_id":"T1","queued":true}'
+
+    tools = talker_tools(delegate=delegate, status=noop, cancel=noop, show=noop, end_conversation=noop,
+                         stand_by=noop, quiet_mode=noop, approve=noop, present_approval=noop,
+                         authorize=noop, revoke_authorization=noop)
+    session = await open_session(replace(talker_spec(load_settings(Path(__file__).parents[1], {})), tools=tools))
+    try:
+        await collect(session, '<user lang="en" typed="true">Deploy the Terms change after checks pass; '
+                      'leave all branches alone.</user>')
+    finally:
+        await session.close()
+    assert len(delegated) == 1
+    permission = delegated[0]['authorization']
+    assert permission['scope'] == 'action'
+    assert 'after checks pass' in permission['description'].lower()
+    assert 'leave all branches alone' in permission['description'].lower()
+
+
+async def test_talker_narrows_permission_instead_of_approving_a_broader_action() -> None:
+    from jarvis_hub.talker import talker_spec, talker_tools
+
+    approved: list[dict[str, Any]] = []
+    permissions: list[dict[str, Any]] = []
+
+    async def noop(args: dict[str, Any]) -> str:
+        return 'No action was taken.'
+
+    async def approve(args: dict[str, Any]) -> str:
+        approved.append(args)
+        return 'Recorded.'
+
+    async def authorize(args: dict[str, Any]) -> str:
+        permissions.append(args)
+        return 'Recorded U1 for T1; the Hub wakes the Task.'
+
+    async def delegate(args: dict[str, Any]) -> str:
+        if args.get('authorization'):
+            permissions.append(args['authorization'])
+        return '{"task_id":"T1","queued":true}'
+
+    async def present(args: dict[str, Any]) -> str:
+        return 'A1: deploy the Terms change and delete its feature branch, on T1.'
+
+    tools = talker_tools(delegate=delegate, status=present, cancel=noop, show=noop, end_conversation=noop,
+                         stand_by=noop, quiet_mode=noop, approve=approve, present_approval=present,
+                         authorize=authorize, revoke_authorization=noop)
+    session = await open_session(replace(talker_spec(load_settings(Path(__file__).parents[1], {})), tools=tools))
+    try:
+        await collect(session, '<event source="orchestrator" task="T1" needs_user="true" approval="A1">'
+                      'Call present_approval for A1 and ask whether to deploy the Terms change and delete its feature branch.</event>')
+        await collect(session, '<user lang="en" typed="true">Yes, deploy the Terms change, but leave all branches alone.</user>')
+    finally:
+        await session.close()
+    assert approved == []
+    assert permissions
+    assert any('leave all branches alone' in p['description'].lower() for p in permissions)
+
+
+async def test_talker_selects_only_the_named_action_among_multiple_pending_approvals() -> None:
+    from jarvis_hub.talker import talker_spec, talker_tools
+
+    approved: list[dict[str, Any]] = []
+
+    async def noop(args: dict[str, Any]) -> str:
+        return 'No action was taken.'
+
+    async def present(args: dict[str, Any]) -> str:
+        return 'Pending: A1 on T1 merges pumpkit PR 42; A2 on T2 deploys pumpkit to production.'
+
+    async def approve(args: dict[str, Any]) -> str:
+        approved.append(args)
+        return 'Approved; action starting.'
+
+    tools = talker_tools(delegate=noop, status=present, cancel=noop, show=noop, end_conversation=noop,
+                         stand_by=noop, quiet_mode=noop, approve=approve, present_approval=present,
+                         authorize=noop, revoke_authorization=noop)
+    session = await open_session(replace(talker_spec(load_settings(Path(__file__).parents[1], {})), tools=tools))
+    try:
+        await collect(session, '<event source="orchestrator" task="T1" needs_user="true" approval="A1">'
+                      'Call present_approval for A1 and ask about merging pumpkit PR 42.</event>')
+        await collect(session, '<event source="orchestrator" task="T2" needs_user="true" approval="A2">'
+                      'Call present_approval for A2 and ask about deploying pumpkit.</event>')
+        await collect(session, '<user lang="en" typed="true">Approve the merge, leave the deployment on hold.</user>')
+    finally:
+        await session.close()
+    assert approved == [{'approval_id': 'A1'}]

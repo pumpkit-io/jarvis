@@ -111,6 +111,7 @@ def orchestrator_tools(
                     "details_markdown": {**STRING, "description": "Details for the screen."},
                     "needs_user": {"type": "boolean", "description": "True when the Task waits on the User."},
                     "approval": APPROVAL,
+                    "authorization_id": {**STRING, "description": "Existing Authorization covering this exact action and its conditions. The Hub executes without asking again."},
                 },
                 ("task_id", "spoken", "needs_user"),
             ),
