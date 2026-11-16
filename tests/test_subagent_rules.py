@@ -1,12 +1,15 @@
 """The rules behind spawn_subagent (model and effort, branch names, connector tools) and the session it builds."""
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 
-from jarvis_hub.agents.backend import Refused
+from jarvis_hub.agents.backend import Refused, SessionSpec
 from jarvis_hub.agents.sdk import options_for
+from jarvis_hub.approvals import GRANTS
 from jarvis_hub.config import Effort, RoleModel, Settings
 from jarvis_hub.subagent_rules import (
     PUMPKIT_READS,
@@ -226,7 +229,27 @@ def test_branch_name(kind: str, title: str, expected: str) -> None:
         ("mcp__digitalocean__droplet-list", False),
         ("mcp__digitalocean__droplet-delete", False),
         ("mcp__posthog__exec", False),
-        ("mcp__claude-in-chrome__navigate", False),
+        ("mcp__claude-in-chrome__list_connected_browsers", True),
+        ("mcp__claude-in-chrome__tabs_context_mcp", True),
+        ("mcp__claude-in-chrome__tabs_create_mcp", True),
+        ("mcp__claude-in-chrome__tabs_close_mcp", True),
+        ("mcp__claude-in-chrome__navigate", True),
+        ("mcp__claude-in-chrome__get_page_text", True),
+        ("mcp__claude-in-chrome__read_page", True),
+        ("mcp__claude-in-chrome__find", True),
+        ("mcp__claude-in-chrome__computer", False),
+        ("mcp__claude-in-chrome__form_input", False),
+        ("mcp__claude-in-chrome__javascript_tool", False),
+        ("mcp__claude-in-chrome__file_upload", False),
+        ("mcp__claude-in-chrome__upload_image", False),
+        ("mcp__claude-in-chrome__browser_batch", False),
+        ("mcp__claude-in-chrome__gif_creator", False),
+        ("mcp__claude-in-chrome__read_network_requests", False),
+        ("mcp__claude-in-chrome__read_console_messages", False),
+        ("mcp__claude-in-chrome__resize_window", False),
+        ("mcp__claude-in-chrome__select_browser", False),
+        ("mcp__claude-in-chrome__switch_browser", False),
+        ("mcp__claude-in-chrome__shortcuts_execute", False),
         ("mcp__plugin_voicemode_voicemode__converse", False),
         ("mcp__claude_ai_Gmail__authenticate", False),
         ("mcp__claude_ai_Claude_Docs__read", True),
@@ -311,6 +334,29 @@ def test_a_subagent_session_loads_settings_skips_permissions_and_guards_mcp_tool
     assert not options.strict_mcp_config and options.tools is None
     [matcher] = (options.hooks or {})["PreToolUse"]
     assert matcher.matcher == "mcp__.*" and matcher.on_failure == "block"
+
+
+def cli_command(spec: SessionSpec) -> list[str]:
+    """The argv the installed SDK starts the CLI with for this session."""
+    transport = SubprocessCLITransport(prompt="", options=options_for(spec, "/usr/local/bin/claude"))
+    return transport._build_command()  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_guarded_subagent_session_starts_with_claude_in_chrome(tmp_path: Path) -> None:
+    command = cli_command(subagent_session(a_settings(tmp_path), a_subagent("fix/x")))
+    assert "--chrome" in command
+    assert "--setting-sources=user,project" in command and "--disallowedTools" in command
+    assert command[command.index("--permission-mode") + 1] == "bypassPermissions"
+
+
+def test_a_session_skipping_permissions_without_the_guard_gets_no_browser(tmp_path: Path) -> None:
+    spec = replace(subagent_session(a_settings(tmp_path), a_subagent("fix/x")), mcp_guard=None)
+    command = cli_command(spec)
+    assert "--chrome" not in command
+
+
+def test_no_approval_grant_opens_a_browser_tool() -> None:
+    assert not any("claude-in-chrome" in tool for tools in GRANTS.values() for tool in tools)
 
 
 async def test_the_mcp_hook_denies_a_tool_off_the_read_list_and_passes_one_on_it(tmp_path: Path) -> None:
