@@ -165,7 +165,7 @@ def test_voice_settings_default_to_the_ticket_and_phase_0(checkout: Path) -> Non
     assert (voice.wake_engine, voice.wake_threshold, voice.stt_engine, voice.aec) == ("openwakeword", 0.2, "parakeet", "webrtc")
     assert (voice.vad_threshold, voice.end_silence_ms, voice.end_extend_ms) == (0.5, 500, 1500)
     assert (voice.smart_turn_threshold, voice.preroll_ms) == (0.5, 1500)
-    assert (voice.max_turn_s, voice.chime_guard_ms, voice.wake_refractory_ms, voice.onset_pad_ms) == (30.0, 500, 2000, 200)
+    assert (voice.max_turn_s, voice.chime_guard_ms, voice.wake_refractory_ms, voice.onset_pad_ms) == (300.0, 500, 2000, 200)
     assert (voice.bargein_min_speech_ms, voice.bargein_decide_ms, voice.bargein_guard_ms) == (200, 800, 250)
     assert (voice.echo_tail_ms, voice.min_speech_db) == (300, 35.0)
 

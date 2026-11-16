@@ -112,7 +112,7 @@ class Listening:
     smart_turn_threshold: float = 0.5
     preroll_s: float = 1.5
     # A turn this long ends whatever VAD says, so a noisy room cannot hold listening open.
-    max_turn_s: float = 30.0
+    max_turn_s: float = 300.0
     # One phrase scores high on several consecutive windows; later hits within this time are the same phrase.
     wake_refractory_s: float = 2.0
     # VAD fires a little after the true onset, so a turn keeps this much from before it.
