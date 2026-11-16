@@ -71,6 +71,10 @@ def report(task_id: str, spoken: str) -> Tool:
     return Tool("report", {"task_id": task_id, "spoken": spoken, "needs_user": False})
 
 
+def present(approval_id: str = "A1") -> Tool:
+    return Tool("present_approval", {"approval_id": approval_id})
+
+
 def approve(approval_id: str = "A1") -> Tool:
     return Tool("approve", {"approval_id": approval_id})
 
@@ -164,7 +168,7 @@ async def test_a_report_asking_for_an_approval_names_the_exact_action_and_the_co
         output,
         metrics,
         gh,
-        [[Text("Right away, sir."), delegate()], [Text(ASKED)], [Text("Let me see, sir."), Tool("status")]],
+        [[Text("Right away, sir."), delegate()], [present(), Text(ASKED)], [Text("Let me see, sir."), Tool("status")]],
         [[ask_merge()]],
     )
 
@@ -176,9 +180,8 @@ async def test_a_report_asking_for_an_approval_names_the_exact_action_and_the_co
     assert asked.result == f"Reported to the User, asking for Approval A1: merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}."
     assert received(session.backend, "talker")[2] == (
         f'<event source="orchestrator" task="T1" needs_user="true" approval="A1" details="on screen">{ASK}'
-        f" Ask exactly one Approval question, in the User's language: Do you approve this action: "
-        f"merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}? Italian: Vuole approvare questa azione: "
-        f"merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}?</event>"
+        f" Call present_approval for this event's Approval, then ask about this action naturally: "
+        f"merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}</event>"
     )
     assert output.shown == [f"**Approval A1:** merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}"]
     [status] = results(session.backend, "talker", "status")
@@ -222,7 +225,7 @@ async def test_a_typed_yes_right_after_the_question_merges_the_pr_through_the_hu
         gh,
         [
             [Text("Right away, sir."), delegate()],
-            [Text(ASKED)],
+            [present(), Text(ASKED)],
             [Text("Merging now, sir."), approve()],
             [Text("Merged, sir.")],
         ],
@@ -256,7 +259,7 @@ async def test_a_spoken_yes_counts_the_same_as_a_typed_one(
         output,
         metrics,
         gh,
-        [[Text("Right away, sir."), delegate()], [Text(ASKED)], [Text("Merging now, sir."), approve()]],
+        [[Text("Right away, sir."), delegate()], [present(), Text(ASKED)], [Text("Merging now, sir."), approve()]],
         [[ask_merge()], [report("T1", "Merged.")]],
     )
     spoken: asyncio.Queue[str | None] = asyncio.Queue()
@@ -288,7 +291,7 @@ async def test_the_users_words_come_from_the_hubs_record_and_never_from_the_tool
         output,
         metrics,
         gh,
-        [[Text("Right away, sir."), delegate()], [Text(ASKED)], [Text("Very well, sir."), forged]],
+        [[Text("Right away, sir."), delegate()], [present(), Text(ASKED)], [Text("Very well, sir."), forged]],
         [[ask_merge()], [report("T1", "Merged.")]],
     )
 
@@ -309,7 +312,7 @@ async def test_approve_in_a_turn_that_answers_news_and_not_the_user_is_refused(
         output,
         metrics,
         gh,
-        [[Text("Right away, sir."), delegate()], [Text(ASKED), approve()]],
+        [[Text("Right away, sir."), delegate()], [present(), Text(ASKED), approve()]],
         [[ask_merge()]],
     )
 
@@ -317,87 +320,8 @@ async def test_approve_in_a_turn_that_answers_news_and_not_the_user_is_refused(
     await session.end()
 
     [refused] = results(session.backend, "talker", "approve")
-    assert refused.result == (
-        "Not approved: approve works only in your reply to the User's own message. Pending Approvals: A1: merge "
-        f"pumpkit-io/pumpkit#42 at commit {HEAD[:12]} (on T1, asked 0 s ago). Ask one exact question, in the User's language: "
-        f"A1: Do you approve this action: merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}? "
-        f"Italian: Vuole approvare questa azione: merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}?"
-    )
+    assert refused.result == "Not approved: approve works only in your reply to the User's own message."
     assert gh.actions == []
-
-
-async def test_a_yes_after_jarvis_said_something_else_is_refused_and_counts_once_jarvis_names_the_approval(
-    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh
-) -> None:
-    session = a_session(
-        clock,
-        output,
-        metrics,
-        gh,
-        [
-            [Text("Right away, sir."), delegate()],
-            [Text(ASKED)],
-            [Text("Clear skies, sir.")],
-            [Text("One moment, sir."), approve(), Text(" You mean merging pumpkit 42, sir?")],
-            [Text("Merging, sir."), approve()],
-        ],
-        [[ask_merge()], [report("T1", "Merged.")]],
-    )
-
-    await asked_to_merge(session)
-    await session.say("How's the weather?")
-    await session.say("Yes.")
-    assert gh.actions == []
-    await session.say("Yes.")
-    await until(lambda: gh.actions)
-    await session.end()
-
-    first, second = results(session.backend, "talker", "approve")
-    assert str(first.result).startswith("Not approved: A1 was not the last thing you asked the User about.")
-    assert str(second.result).startswith("Approved A1")
-    assert gh.actions == [merge_argv()]
-
-
-async def test_with_two_pending_a_bare_yes_is_refused_and_naming_the_one_meant_approves_it(
-    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh
-) -> None:
-    session = a_session(
-        clock,
-        output,
-        metrics,
-        gh,
-        [
-            [Text("Right away, sir."), delegate()],
-            [Text(ASKED)],
-            [Text("Right away, sir."), delegate("Clean up merged branches in pumpkit")],
-            [Text("Shall I delete feat/old-idea, sir?")],
-            [Text("One moment, sir."), approve("A2"), Text(" Merge 42, or delete old-idea?")],
-            [Text("Merging, sir."), approve("A1")],
-        ],
-        [[ask_merge()], [ask_delete("T2")], [report("T1", "Merged.")]],
-    )
-
-    await asked_to_merge(session)
-    await session.say("Clean up merged branches in pumpkit")
-    await session.replied("Shall I delete feat/old-idea, sir?")
-    await session.say("Yes.")
-    await session.say("Merge forty-two.")
-    await until(lambda: gh.actions)
-    await session.end()
-
-    bare, named = results(session.backend, "talker", "approve")
-    assert bare.result == (
-        "Not approved: with more than one Approval in play, a bare yes does not say which. Pending Approvals: "
-        f"A1: merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]} (on T1, asked 0 s ago); A2: delete branch "
-        f"feat/old-idea of pumpkit-io/pumpkit at commit {TIP[:12]} (on T2, asked 0 s ago). "
-        f"Ask one exact question, in the User's language: A1: Do you approve this action: merge pumpkit-io/pumpkit#42 "
-        f"at commit {HEAD[:12]}? Italian: Vuole approvare questa azione: merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}? "
-        f"A2: Do you approve this action: delete branch feat/old-idea of pumpkit-io/pumpkit at commit {TIP[:12]}? "
-        f"Italian: Vuole approvare questa azione: delete branch feat/old-idea of pumpkit-io/pumpkit at commit {TIP[:12]}?"
-    )
-    assert str(named.result).startswith("Approved A1")
-    assert gh.actions == [merge_argv()]
-    assert gh.branches == {"pumpkit-io/pumpkit:feat/old-idea": TIP}
 
 
 async def test_an_approval_is_single_use(
@@ -410,7 +334,7 @@ async def test_an_approval_is_single_use(
         gh,
         [
             [Text("Right away, sir."), delegate()],
-            [Text(ASKED)],
+            [present(), Text(ASKED)],
             [Text("Merging, sir."), approve(), approve()],
             [Text("Merged, sir.")],
             [Text("Again, sir."), approve()],
@@ -426,7 +350,7 @@ async def test_an_approval_is_single_use(
 
     first, twice, again = results(session.backend, "talker", "approve")
     assert str(first.result).startswith("Approved A1")
-    assert twice.result == "Not approved: one yes approves one action. Ask about the next one in its own question."
+    assert str(twice.result).startswith("Not approved: A1 is not pending.")
     assert again.result == "Not approved: A1 is not pending. No Approval is pending."
     assert gh.actions == [merge_argv()]
 
@@ -439,7 +363,7 @@ async def test_an_approval_expires_after_24_hours(
         output,
         metrics,
         gh,
-        [[Text("Right away, sir."), delegate()], [Text(ASKED)], [Text("Merging, sir."), approve()]],
+        [[Text("Right away, sir."), delegate()], [present(), Text(ASKED)], [Text("Merging, sir."), approve()]],
         [[ask_merge()]],
     )
 
@@ -461,7 +385,7 @@ async def test_a_yes_just_inside_24_hours_still_counts(
         output,
         metrics,
         gh,
-        [[Text("Right away, sir."), delegate()], [Text(ASKED)], [Text("Merging, sir."), approve()]],
+        [[Text("Right away, sir."), delegate()], [present(), Text(ASKED)], [Text("Merging, sir."), approve()]],
         [[ask_merge()], [report("T1", "Merged.")]],
     )
 
@@ -485,9 +409,9 @@ async def test_a_push_after_the_yes_lapses_the_approval_and_brings_a_fresh_reque
         gh,
         [
             [Text("Right away, sir."), delegate()],
-            [Text(ASKED)],
+            [present(), Text(ASKED)],
             [Text("Merging, sir."), approve()],
-            [Text("A new commit landed on 42, sir. Merge it?")],
+            [present("A2"), Text("A new commit landed on 42, sir. Merge it?")],
         ],
         [[ask_merge()], [ask_merge(sha=PUSHED, spoken=fresh)]],
     )
@@ -504,14 +428,13 @@ async def test_a_push_after_the_yes_lapses_the_approval_and_brings_a_fresh_reque
     assert lapsed == (
         '<event source="hub" task="T1" approval="A1" status="lapsed">Not done: the User approved merge '
         f"pumpkit-io/pumpkit#42 at commit {HEAD[:12]}, but the head of pumpkit-io/pumpkit#42 is now {PUSHED[:12]}, "
-        f"not {HEAD[:12]}, so the yes no longer covers it. Look at what changed, then ask the User again in a fresh "
-        "request that says what changed.</event>"
+        f"not {HEAD[:12]}, so the yes no longer covers it. Look at what changed and request a fresh concrete Approval, "
+        "using applicable Authorization before asking the User.</event>"
     )
     assert received(session.backend, "talker")[-1] == (
         f'<event source="orchestrator" task="T1" needs_user="true" approval="A2" details="on screen">{fresh}'
-        f" Ask exactly one Approval question, in the User's language: Do you approve this action: "
-        f"merge pumpkit-io/pumpkit#42 at commit {PUSHED[:12]}? Italian: Vuole approvare questa azione: "
-        f"merge pumpkit-io/pumpkit#42 at commit {PUSHED[:12]}?</event>"
+        f" Call present_approval for this event's Approval, then ask about this action naturally: "
+        f"merge pumpkit-io/pumpkit#42 at commit {PUSHED[:12]}</event>"
     )
 
 
@@ -523,7 +446,7 @@ async def test_a_pr_closed_after_the_yes_is_not_merged(
         output,
         metrics,
         gh,
-        [[Text("Right away, sir."), delegate()], [Text(ASKED)], [Text("Merging, sir."), approve()]],
+        [[Text("Right away, sir."), delegate()], [present(), Text(ASKED)], [Text("Merging, sir."), approve()]],
         [[ask_merge()], [report("T1", "Ada closed 42.")]],
     )
 
@@ -545,7 +468,7 @@ async def test_a_merge_github_refuses_spends_the_approval_and_says_why(
         output,
         metrics,
         gh,
-        [[Text("Right away, sir."), delegate()], [Text(ASKED)], [Text("Merging, sir."), approve()]],
+        [[Text("Right away, sir."), delegate()], [present(), Text(ASKED)], [Text("Merging, sir."), approve()]],
         [[ask_merge()], [report("T1", "GitHub refused: a review is required.")]],
     )
     gh.action_result = (1, "X Pull request pumpkit-io/pumpkit#42 is not mergeable: review required.")
@@ -572,7 +495,7 @@ async def test_an_approved_branch_delete_runs_only_while_the_branch_still_points
         gh,
         [
             [Text("Right away, sir."), delegate("Delete feat/old-idea in pumpkit")],
-            [Text("Delete old-idea, sir?")],
+            [present(), Text("Delete old-idea, sir?")],
             [Text("Deleting, sir."), approve()],
         ],
         [[ask_delete()], [report("T1", "Deleted.")]],
@@ -614,7 +537,7 @@ async def test_a_branch_that_moved_after_the_yes_is_not_deleted(
         gh,
         [
             [Text("Right away, sir."), delegate("Delete feat/old-idea in pumpkit")],
-            [Text("Delete old-idea, sir?")],
+            [present(), Text("Delete old-idea, sir?")],
             [Text("Deleting, sir."), approve()],
         ],
         [[ask_delete()], [report("T1", "Someone pushed to it.")]],
@@ -692,7 +615,7 @@ async def test_an_approved_x_post_goes_to_a_subagent_whose_brief_carries_it_and_
         gh,
         [
             [Text("Right away, sir."), delegate("Post the launch thread")],
-            [Text("The thread is ready, sir. Post it now?")],
+            [present(), Text("The thread is ready, sir. Post it now?")],
             [Text("Posting, sir."), approve()],
         ],
         [[ask_post()], [spawn], [report("T1", "Posted.")]],
@@ -746,7 +669,7 @@ async def test_a_subagent_without_the_approval_keeps_the_read_only_connectors(
         output,
         metrics,
         gh,
-        [[Text("Right away, sir."), delegate("Post the launch thread")], [Text("Post it, sir?")]],
+        [[Text("Right away, sir."), delegate("Post the launch thread")], [present(), Text("Post it, sir?")]],
         [[ask_post(), spawn]],
     )
 
@@ -778,7 +701,7 @@ async def test_a_subagent_cannot_take_an_approval_the_user_has_not_given(
         output,
         metrics,
         gh,
-        [[Text("Right away, sir."), delegate("Post the launch thread")], [Text("Post it, sir?")]],
+        [[Text("Right away, sir."), delegate("Post the launch thread")], [present(), Text("Post it, sir?")]],
         [[ask_post(), spawn]],
     )
 
@@ -806,7 +729,7 @@ async def test_the_widened_tools_close_again_when_the_approval_expires(
         gh,
         [
             [Text("Right away, sir."), delegate("Post the launch thread")],
-            [Text("Post it, sir?")],
+            [present(), Text("Post it, sir?")],
             [Text("Posting, sir."), approve()],
         ],
         [[ask_post()], [spawn]],
@@ -843,7 +766,7 @@ async def test_the_orchestrator_may_not_hand_a_merge_to_a_subagent(
         output,
         metrics,
         gh,
-        [[Text("Right away, sir."), delegate()], [Text(ASKED)]],
+        [[Text("Right away, sir."), delegate()], [present(), Text(ASKED)]],
         [[ask_merge(), spawn]],
     )
 
@@ -864,7 +787,7 @@ async def test_cancelling_the_task_withdraws_its_approval(
         gh,
         [
             [Text("Right away, sir."), delegate()],
-            [Text(ASKED)],
+            [present(), Text(ASKED)],
             [Text("Cancelled, sir."), Tool("cancel", {"task_id": "T1"})],
             [Text("Merging, sir."), approve()],
         ],
@@ -891,9 +814,9 @@ async def test_a_newer_request_on_the_same_task_replaces_the_one_pending(
         gh,
         [
             [Text("Right away, sir."), delegate()],
-            [Text(ASKED)],
+            [present(), Text(ASKED)],
             [Text("Noted, sir."), delegate_to("Check 42 again", "T1")],
-            [Text("Shall I merge 42, sir?")],
+            [present("A2"), Text("Shall I merge 42, sir?")],
             [Text("Merging, sir."), approve("A2")],
         ],
         [[ask_merge()], [ask_merge(spoken="Still green. Merge pumpkit#42?")], [report("T1", "Merged.")]],
@@ -940,7 +863,7 @@ async def test_an_approval_request_gets_through_quiet_mode_and_the_same_request_
         [
             [Text("Quiet it is, sir."), Tool("quiet_mode", {"on": True})],
             [Text("Right away, sir."), delegate()],
-            [Text(ASKED)],
+            [present(), Text(ASKED)],
             [Text("Noted, sir."), delegate_to("Check 42 again", "T1")],
         ],
         [[ask_merge()], [ask_merge()]],
@@ -960,9 +883,8 @@ async def test_an_approval_request_gets_through_quiet_mode_and_the_same_request_
 
     assert told == [
         f'<event source="orchestrator" task="T1" needs_user="true" approval="A1" details="on screen">{ASK}'
-        f" Ask exactly one Approval question, in the User's language: Do you approve this action: "
-        f"merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}? Italian: Vuole approvare questa azione: "
-        f"merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}?</event>"
+        f" Call present_approval for this event's Approval, then ask about this action naturally: "
+        f"merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}</event>"
     ]
 
 
@@ -975,7 +897,7 @@ async def test_a_pending_approval_survives_a_restart_and_is_named_again_before_a
         output,
         metrics,
         gh,
-        [[Text("Right away, sir."), delegate()], [Text(ASKED)]],
+        [[Text("Right away, sir."), delegate()], [present(), Text(ASKED)]],
         [[ask_merge()]],
         state_path=state,
     )
@@ -990,7 +912,7 @@ async def test_a_pending_approval_survives_a_restart_and_is_named_again_before_a
         metrics,
         gh,
         [
-            [Text("One moment, sir."), approve(), Text(" You mean merging pumpkit 42, sir?")],
+            [Text("One moment, sir."), approve(), present(), Text(" You mean merging pumpkit 42, sir?")],
             [Text("Merging, sir."), approve()],
         ],
         [[], [report("T1", "Merged.")]],
@@ -1005,7 +927,7 @@ async def test_a_pending_approval_survives_a_restart_and_is_named_again_before_a
     await second.end()
 
     refused, approved = results(second.backend, "talker", "approve")
-    assert str(refused.result).startswith("Not approved: A1 was not the last thing you asked the User about.")
+    assert str(refused.result).startswith("Not approved: A1 has not been presented in a completed reply.")
     assert str(approved.result).startswith("Approved A1")
     assert gh.actions == [merge_argv()]
 
@@ -1019,7 +941,7 @@ async def test_a_merge_a_restart_cut_off_is_read_again_and_not_run_twice(
         output,
         metrics,
         gh,
-        [[Text("Right away, sir."), delegate()], [Text(ASKED)], [Text("Merging, sir."), approve()]],
+        [[Text("Right away, sir."), delegate()], [present(), Text(ASKED)], [Text("Merging, sir."), approve()]],
         [[ask_merge()]],
         state_path=state,
     )
@@ -1111,7 +1033,7 @@ async def test_an_approval_held_by_a_subagent_the_hub_stops_is_spent_and_not_sav
         gh,
         [
             [Text("Right away, sir."), delegate("Post the launch thread")],
-            [Text("Post it, sir?")],
+            [present(), Text("Post it, sir?")],
             [Text("Posting, sir."), approve()],
         ],
         [[ask_post()], [spawn]],
@@ -1132,293 +1054,6 @@ async def test_an_approval_held_by_a_subagent_the_hub_stops_is_spent_and_not_sav
 
     assert [(a["id"], a["state"], a["subagent"]) for a in pending] == [("A1", "granted", "S1")]
     assert json.loads(state.read_text())["approvals"] == []
-
-
-def two_pending(talker_after: list[list[Step]], orchestrator_after: list[list[Step]] | None = None) -> tuple[
-    list[list[Step]], list[list[Step]]
-]:
-    """A Talker and an Orchestrator that leave A1 (merge 42) and A2 (delete feat/old-idea) pending, A2 asked last."""
-    talker: list[list[Step]] = [
-        [Text("Right away, sir."), delegate()],
-        [Text(ASKED)],
-        [Text("Right away, sir."), delegate("Clean up merged branches in pumpkit")],
-        [Text("Shall I delete feat/old-idea, sir?")],
-    ]
-    return talker + talker_after, [[ask_merge()], [ask_delete("T2")], *(orchestrator_after or [])]
-
-
-async def both_asked(session: Session) -> None:
-    await asked_to_merge(session)
-    await session.say("Clean up merged branches in pumpkit")
-    await session.replied("Shall I delete feat/old-idea, sir?")
-
-
-@pytest.mark.parametrize(
-    "words",
-    [
-        "No, don't merge it.",
-        "No.",
-        "Yes, but wait.",
-        "Not yet.",
-        "Hold on.",
-        "Maybe later.",
-        "Yes? Is CI green?",
-        "Cancel that, go ahead later.",
-        "Yeah, I don't think so.",
-        "Stop.",
-        "No, non farlo.",
-        "Sì, ma aspetta.",
-        "Forse dopo.",
-        "Annulla.",
-        "Ferma.",
-        "Fine, whatever, I'll look later.",
-        "Yes, after the release.",
-        "Ok, but first run CI.",
-        "Go ahead and cancel it.",
-        "Yes. Actually, never mind.",
-    ],
-)
-async def test_words_that_hold_the_yes_back_never_approve_and_the_refusal_says_why(
-    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh, words: str
-) -> None:
-    session = a_session(
-        clock,
-        output,
-        metrics,
-        gh,
-        [[Text("Right away, sir."), delegate()], [Text(ASKED)], [Text("Merging, sir."), approve()]],
-        [[ask_merge()], [report("T1", "Merged.")]],
-    )
-
-    await asked_to_merge(session)
-    await session.say(words)
-    await session.end()
-
-    [refused] = results(session.backend, "talker", "approve")
-    assert str(refused.result).startswith("Not approved: the User's words hold ")
-    assert "Nothing was done" in str(refused.result)
-    assert gh.actions == []
-
-
-@pytest.mark.parametrize("words", ["The weather is nice.", "Hmm.", "Thanks, Jarvis.", "Tell me about 42."])
-async def test_words_with_no_yes_in_them_do_not_approve(
-    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh, words: str
-) -> None:
-    session = a_session(
-        clock,
-        output,
-        metrics,
-        gh,
-        [[Text("Right away, sir."), delegate()], [Text(ASKED)], [Text("Merging, sir."), approve()]],
-        [[ask_merge()], [report("T1", "Merged.")]],
-    )
-
-    await asked_to_merge(session)
-    await session.say(words)
-    await session.end()
-
-    [refused] = results(session.backend, "talker", "approve")
-    assert str(refused.result).startswith("Not approved: the User's words hold no yes")
-    assert gh.actions == []
-
-
-@pytest.mark.parametrize(
-    "words",
-    [
-        "Yes.",
-        "yeah go ahead",
-        "Yep.",
-        "Sure, do it.",
-        "Okay, go.",
-        "Approved.",
-        "Merge it.",
-        "Yes, merge 42.",
-        "Sì, procedi.",
-        "Certo, vai.",
-        "Fallo.",
-        "Va bene.",
-    ],
-)
-async def test_a_yes_from_the_lexicon_approves(
-    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh, words: str
-) -> None:
-    session = a_session(
-        clock,
-        output,
-        metrics,
-        gh,
-        [[Text("Right away, sir."), delegate()], [Text(ASKED)], [Text("Merging, sir."), approve()]],
-        [[ask_merge()], [report("T1", "Merged.")]],
-    )
-
-    await asked_to_merge(session)
-    await session.say(words)
-    await until(lambda: gh.actions)
-    await session.end()
-
-    assert gh.actions == [merge_argv()]
-
-
-@pytest.mark.parametrize(
-    "words", ["Yes, merge 43.", "Yes, delete it.", "Yes, merge forty-three.", "Yes, and post it on X."]
-)
-async def test_a_yes_whose_words_name_something_else_is_refused(
-    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh, words: str
-) -> None:
-    session = a_session(
-        clock,
-        output,
-        metrics,
-        gh,
-        [[Text("Right away, sir."), delegate()], [Text(ASKED)], [Text("Merging, sir."), approve()]],
-        [[ask_merge()], [report("T1", "Merged.")]],
-    )
-
-    await asked_to_merge(session)
-    await session.say(words)
-    await session.end()
-
-    [refused] = results(session.backend, "talker", "approve")
-    assert str(refused.result).startswith("Not approved: the User's words name ")
-    assert gh.actions == []
-
-
-async def test_with_two_in_play_the_words_must_name_the_approval_the_talker_chose(
-    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh
-) -> None:
-    talker, orchestrator = two_pending(
-        [
-            [Text("One moment, sir."), approve("A2"), Text(" Merge 42, or delete old-idea?")],
-            [Text("Deleting, sir."), approve("A2")],
-        ]
-    )
-    session = a_session(clock, output, metrics, gh, talker, orchestrator)
-
-    await both_asked(session)
-    await session.say("Yes.")
-    await session.say("Merge forty-two.")
-    await session.end()
-
-    _, wrong = results(session.backend, "talker", "approve")
-    assert str(wrong.result).startswith("Not approved: the User's words name A1 (merge pumpkit-io/pumpkit#42")
-    assert gh.actions == []
-    assert gh.branches == {"pumpkit-io/pumpkit:feat/old-idea": TIP}
-
-
-@pytest.mark.parametrize(
-    ("words", "chosen"),
-    [
-        ("Merge forty-two.", "A1"),
-        ("Yes, number 42.", "A1"),
-        ("Sì, unisci la quarantadue.", "A1"),
-        ("Yes, the one hundred and forty-two... no, forty-two.", None),
-        ("Yes, delete it.", "A2"),
-        ("Yes, old idea.", "A2"),
-        ("Delete feat/old-idea, yes.", "A2"),
-        ("Yes, both.", None),
-        ("Yes, merge forty-three.", None),
-    ],
-)
-async def test_with_two_in_play_the_hub_matches_the_target_the_words_name(
-    clock: FakeClock,
-    output: RecordingOutput,
-    metrics: RecordingMetrics,
-    gh: StubGh,
-    words: str,
-    chosen: str | None,
-) -> None:
-    talker, orchestrator = two_pending(
-        [
-            [Text("One moment, sir."), approve("A2"), Text(" Merge 42, or delete old-idea?")],
-            [Text("Very well, sir."), approve(chosen or "A1")],
-        ]
-    )
-    session = a_session(clock, output, metrics, gh, talker, orchestrator)
-
-    await both_asked(session)
-    await session.say("Yes.")
-    await session.say(words)
-    if chosen:
-        await until(lambda: gh.actions)
-    await session.end()
-
-    _, decided = results(session.backend, "talker", "approve")
-    if chosen:
-        assert str(decided.result).startswith(f"Approved {chosen}")
-    else:
-        assert str(decided.result).startswith("Not approved:")
-        assert gh.actions == []
-
-
-async def test_after_a_refusal_a_plain_yes_counts_for_the_one_approval_jarvis_read_back(
-    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh
-) -> None:
-    talker, orchestrator = two_pending(
-        [
-            [Text("One moment, sir."), approve("A2"), Text(" You mean deleting old-idea, sir?")],
-            [Text("Deleting, sir."), approve("A2")],
-        ],
-        [[report("T2", "Deleted.")]],
-    )
-    session = a_session(clock, output, metrics, gh, talker, orchestrator)
-
-    await both_asked(session)
-    await session.say("Yes.")
-    await session.say("Yes.")
-    await until(lambda: gh.actions)
-    await session.end()
-
-    _, approved = results(session.backend, "talker", "approve")
-    assert str(approved.result).startswith("Approved A2")
-    assert gh.branches == {}
-
-
-async def test_after_a_refusal_that_named_nothing_no_approval_counts_as_last_said(
-    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh
-) -> None:
-    talker, orchestrator = two_pending(
-        [
-            [Text("One moment, sir."), approve("A2"), Text(" Which one, sir?")],
-            [Text("Merging, sir."), approve("A1")],
-        ]
-    )
-    session = a_session(clock, output, metrics, gh, talker, orchestrator)
-
-    await both_asked(session)
-    await session.say("Yes.")
-    await session.say("Merge forty-two.")
-    await session.end()
-
-    _, refused = results(session.backend, "talker", "approve")
-    assert str(refused.result).startswith("Not approved: A1 was not the last thing you asked the User about.")
-    assert gh.actions == []
-
-
-async def test_after_a_no_a_plain_yes_does_not_approve(
-    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh
-) -> None:
-    session = a_session(
-        clock,
-        output,
-        metrics,
-        gh,
-        [
-            [Text("Right away, sir."), delegate()],
-            [Text(ASKED)],
-            [Text("Merging, sir."), approve(), Text(" Very well, sir, I won't merge 42.")],
-            [Text("Merging, sir."), approve()],
-        ],
-        [[ask_merge()], [report("T1", "Merged.")]],
-    )
-
-    await asked_to_merge(session)
-    await session.say("No.")
-    await session.say("Yes.")
-    await session.end()
-
-    _, refused = results(session.backend, "talker", "approve")
-    assert str(refused.result).startswith("Not approved: A1 was not the last thing you asked the User about.")
-    assert gh.actions == []
 
 
 @pytest.mark.parametrize("branch", ["main", "refs/heads/main", "release"])
@@ -1463,7 +1098,7 @@ async def test_a_branch_protected_after_the_yes_is_not_deleted(
         gh,
         [
             [Text("Right away, sir."), delegate("Delete feat/old-idea in pumpkit")],
-            [Text("Delete old-idea, sir?")],
+            [present(), Text("Delete old-idea, sir?")],
             [Text("Deleting, sir."), approve()],
         ],
         [[ask_delete()], [report("T1", "It is protected now.")]],
@@ -1500,7 +1135,7 @@ async def test_an_approval_saved_in_a_shape_no_request_could_have_is_dropped_on_
         output,
         metrics,
         gh,
-        [[Text("Right away, sir."), delegate("Delete feat/old-idea in pumpkit")], [Text("Delete old-idea, sir?")]],
+        [[Text("Right away, sir."), delegate("Delete feat/old-idea in pumpkit")], [present(), Text("Delete old-idea, sir?")]],
         [[ask_delete()]],
         state_path=state,
     )
@@ -1537,7 +1172,7 @@ async def test_an_x_post_approval_opens_the_post_tools_for_its_own_post_only(
         gh,
         [
             [Text("Right away, sir."), delegate("Post the launch thread")],
-            [Text("Post it, sir?")],
+            [present(), Text("Post it, sir?")],
             [Text("Posting, sir."), approve()],
         ],
         [[ask_post()], [spawn]],
@@ -1581,132 +1216,9 @@ async def test_an_x_post_request_must_name_the_post(
 
 def merge_asked() -> tuple[list[list[Step]], list[list[Step]]]:
     return (
-        [[Text("Right away, sir."), delegate()], [Text(ASKED)], [Text("Merging, sir."), approve()]],
+        [[Text("Right away, sir."), delegate()], [present(), Text(ASKED)], [Text("Merging, sir."), approve()]],
         [[ask_merge()], [report("T1", "Merged.")]],
     )
-
-
-@pytest.mark.parametrize(
-    "words",
-    [
-        "Sure, abort.",
-        "Yes, abort it.",
-        "Ok, scratch that.",
-        "Ok, let me think about it.",
-        "Yes, in an hour.",
-        "Merge it next week.",
-        "Go away.",
-        "Sounds good, nevermind",
-        "Yes, the jarvis repo.",
-        "Yes, merge number one.",
-        "Sure... actually, scrap that.",
-        "Fine, whatever.",
-        "Yes, eventually.",
-        "Go home.",
-        "Merge the other one.",
-        "Yes, merge both.",
-    ],
-)
-async def test_a_yes_with_any_word_outside_a_plain_yes_is_refused(
-    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh, words: str
-) -> None:
-    session = a_session(clock, output, metrics, gh, *merge_asked())
-
-    await asked_to_merge(session)
-    await session.say(words)
-    await session.end()
-
-    [refused] = results(session.backend, "talker", "approve")
-    assert str(refused.result).startswith("Not approved: ")
-    assert "plain yes" in str(refused.result)
-    assert gh.actions == []
-
-
-@pytest.mark.parametrize(
-    "words",
-    [
-        "yes",
-        "yes please",
-        "yes, merge it",
-        "go ahead",
-        "do it",
-        "merge forty-two",
-        "yes Jarvis, merge 42",
-        "Merge PR 42 now, please.",
-        "Yes, merge the pull request.",
-        "Yes, number 42.",
-        "Yes, merge pumpkit 42.",
-        "sì",
-        "sì, procedi",
-        "vai pure",
-        "fallo",
-        "ok, unisci la 42",
-    ],
-)
-async def test_a_plain_yes_made_only_of_yes_words_the_verb_the_target_and_filler_approves(
-    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh, words: str
-) -> None:
-    session = a_session(clock, output, metrics, gh, *merge_asked())
-
-    await asked_to_merge(session)
-    await session.say(words)
-    await until(lambda: gh.actions)
-    await session.end()
-
-    assert gh.actions == [merge_argv()]
-
-
-def jarvis_and_pumpkit_pending(talker_after: list[list[Step]]) -> tuple[list[list[Step]], list[list[Step]]]:
-    """A1 merges jarvis#7 and A2 deletes pumpkit's feat/old-idea, both pending, A2 asked last."""
-    talker: list[list[Step]] = [
-        [Text("Right away, sir."), delegate("Merge jarvis#7")],
-        [Text("Shall I merge 7, sir?")],
-        [Text("Right away, sir."), delegate("Clean up merged branches in pumpkit")],
-        [Text("Shall I delete feat/old-idea, sir?")],
-    ]
-    merge_7 = Tool(
-        "report",
-        {
-            "task_id": "T1",
-            "spoken": "Shall I merge jarvis#7?",
-            "needs_user": True,
-            "approval": {"action": "merge_pr", "repo": "jarvis", "pr": 7, "sha": HEAD},
-        },
-    )
-    return talker + talker_after, [[merge_7], [ask_delete("T2")]]
-
-
-@pytest.mark.parametrize(("words", "chosen"), [("Yes, Jarvis.", None), ("Yes, the jarvis repo.", "A1")])
-async def test_jarvis_as_address_never_names_the_jarvis_repo_but_the_jarvis_repo_does(
-    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, words: str, chosen: str | None
-) -> None:
-    gh = StubGh(prs={"pumpkit-io/jarvis#7": ("OPEN", HEAD)}, branches={"pumpkit-io/pumpkit:feat/old-idea": TIP})
-    talker, orchestrator = jarvis_and_pumpkit_pending(
-        [
-            [Text("One moment, sir."), approve("A2"), Text(" Merge 7, or delete old-idea?")],
-            [Text("Very well, sir."), approve("A1")],
-        ]
-    )
-    session = a_session(clock, output, metrics, gh, talker, orchestrator)
-
-    await session.start()
-    await session.say("Merge jarvis#7")
-    await session.replied("Shall I merge 7, sir?")
-    await session.say("Clean up merged branches in pumpkit")
-    await session.replied("Shall I delete feat/old-idea, sir?")
-    await session.say("Yes.")
-    await session.say(words)
-    if chosen:
-        await until(lambda: gh.actions)
-    await session.end()
-
-    _, decided = results(session.backend, "talker", "approve")
-    if chosen:
-        assert str(decided.result).startswith("Approved A1")
-        assert gh.prs["pumpkit-io/jarvis#7"] == ("MERGED", HEAD)
-    else:
-        assert str(decided.result).startswith("Not approved: with more than one Approval in play, a bare yes")
-        assert gh.actions == []
 
 
 @pytest.mark.parametrize("rule", ["deletion", "non_fast_forward", "update"])
@@ -1747,7 +1259,7 @@ async def test_a_ruleset_that_only_asks_for_reviews_does_not_keep_a_branch(
         gh,
         [
             [Text("Right away, sir."), delegate("Delete feat/old-idea in pumpkit")],
-            [Text("Delete old-idea, sir?")],
+            [present(), Text("Delete old-idea, sir?")],
             [Text("Deleting, sir."), approve()],
         ],
         [[ask_delete()], [report("T1", "Deleted.")]],
@@ -1773,7 +1285,7 @@ async def test_a_branch_a_ruleset_keeps_after_the_yes_is_not_deleted(
         gh,
         [
             [Text("Right away, sir."), delegate("Delete feat/old-idea in pumpkit")],
-            [Text("Delete old-idea, sir?")],
+            [present(), Text("Delete old-idea, sir?")],
             [Text("Deleting, sir."), approve()],
         ],
         [[ask_delete()], [report("T1", "It is protected now.")]],
@@ -1825,7 +1337,7 @@ async def test_a_branch_in_a_repo_whose_plan_has_no_rulesets_can_be_deleted(
         gh,
         [
             [Text("Right away, sir."), delegate("Delete feat/old-idea in pumpkit")],
-            [Text("Delete old-idea, sir?")],
+            [present(), Text("Delete old-idea, sir?")],
             [Text("Deleting, sir."), approve()],
         ],
         [[ask_delete()], [report("T1", "Deleted.")]],
@@ -1889,7 +1401,7 @@ async def test_an_x_post_approval_opens_only_the_post_tool_of_its_action(
         output,
         metrics,
         gh,
-        [[Text("Right away, sir."), delegate("Post the launch thread")], [Text("Shall I " + ("schedule" if asking.input["approval"]["post_action"] == "schedule_post" else "post") + " it, sir?")], [approve()]],
+        [[Text("Right away, sir."), delegate("Post the launch thread")], [present(), Text("Shall I " + ("schedule" if asking.input["approval"]["post_action"] == "schedule_post" else "post") + " it, sir?")], [approve()]],
         [[asking], [spawn]],
     )
     session.backend.subagent_close_gate = asyncio.Event()
@@ -1910,31 +1422,6 @@ async def test_an_x_post_approval_opens_only_the_post_tool_of_its_action(
     assert own is None
 
 
-@pytest.mark.parametrize(
-    ("asking", "words"), [(ask_post(), "Post it on Friday."), (ask_schedule(), "Yes, post it now.")]
-)
-async def test_a_yes_that_changes_when_a_post_goes_out_is_refused(
-    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh, asking: Tool, words: str
-) -> None:
-    session = a_session(
-        clock,
-        output,
-        metrics,
-        gh,
-        [[Text("Right away, sir."), delegate("Post the launch thread")], [Text("Shall I " + ("schedule" if asking.input["approval"]["post_action"] == "schedule_post" else "post") + " it, sir?")], [approve()]],
-        [[asking]],
-    )
-
-    await session.start()
-    await session.say("Post the launch thread")
-    await session.replied("Shall I " + ("schedule" if asking.input["approval"]["post_action"] == "schedule_post" else "post") + " it, sir?")
-    await session.say(words)
-    await session.end()
-
-    [refused] = results(session.backend, "talker", "approve")
-    assert "which is not part of a plain yes" in str(refused.result)
-
-
 async def test_an_x_post_request_must_say_whether_it_posts_now_or_schedules(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh
 ) -> None:
@@ -1952,112 +1439,6 @@ async def test_an_x_post_request_must_say_whether_it_posts_now_or_schedules(
     assert str(results(session.backend, "orchestrator", "report")[0].result).startswith(
         "approval.post_action is post_now or schedule_post"
     )
-
-
-async def decided(
-    specs: list[dict[str, Any]],
-    said: str,
-    approval_id: str,
-    told: list[str] | None = None,
-    read_back: str | None = None,
-) -> Approval | str:
-    """What `decide` returns for `said`, after Jarvis asked about the Approvals `told` (every one of `specs` by
-    default) in one turn, and, with `read_back`, after a bare yes was refused and Jarvis replied `read_back`."""
-    gh = StubGh(
-        prs={f"pumpkit-io/{s['repo']}#{s['pr']}": ("OPEN", HEAD) for s in specs if s["action"] == "merge_pr"},
-        branches={f"pumpkit-io/{s['repo']}:{s['branch']}": TIP for s in specs if s["action"] == "delete_branch"},
-    )
-    approvals = Approvals(org="pumpkit-io", runner=gh, clock=FakeClock(), on_change=lambda: None, log=lambda e: None)
-    asked = [await approvals.request(f"T{i}", spec) for i, spec in enumerate(specs, 1)]
-    approvals.turn_began(None)
-    told = told or [getattr(a, "id", "") for a in asked]
-    questions: list[str] = []
-    for approval in asked:
-        assert isinstance(approval, Approval)
-        if approval.id not in told:
-            continue
-        if approval.action == "merge_pr":
-            questions.append(f"merge PR {approval.number}")
-        elif approval.action == "delete_branch":
-            questions.append(f"delete branch {approval.branch}")
-        elif approval.post_action:
-            verb = "schedule" if approval.post_action == "schedule_post" else "post"
-            questions.append(f"{verb} post {approval.post}")
-        else:
-            questions.append(approval.text)
-    approvals.turn_ended(completed=True, told=told, said="Shall I " + " or ".join(questions) + "?")
-    if read_back is not None:
-        approvals.turn_began("Yes.")
-        assert isinstance(approvals.decide(approval_id), str)
-        approvals.turn_ended(completed=True, told=[], said=read_back)
-    approvals.turn_began(said)
-    return approvals.decide(approval_id)
-
-
-def merge_spec(pr: int = 42, repo: str = "pumpkit") -> dict[str, Any]:
-    return {"action": "merge_pr", "repo": repo, "pr": pr, "sha": HEAD}
-
-
-def delete_spec(branch: str, repo: str = "pumpkit") -> dict[str, Any]:
-    return {"action": "delete_branch", "repo": repo, "branch": branch, "sha": TIP}
-
-
-@pytest.mark.parametrize(
-    ("merge", "branch", "said"),
-    [
-        (merge_spec(repo="jarvis"), "feat/jarvis", "Yes, Jarvis."),
-        (merge_spec(), "chore/it", "Yes, do it."),
-        (merge_spec(), "fix/please", "Yes please"),
-        (merge_spec(), "spike/this", "Yes, this."),
-        (merge_spec(), "go-ahead", "go ahead"),
-        (merge_spec(), "x/the-one", "ok do it and the one"),
-    ],
-)
-async def test_a_bare_yes_never_picks_a_branch_spelled_in_yes_or_filler_words(
-    merge: dict[str, Any], branch: str, said: str
-) -> None:
-    result = await decided([merge, delete_spec(branch, merge["repo"])], said, "A2")
-
-    assert str(result).startswith("Not approved: with more than one Approval in play, a bare yes does not say which.")
-
-
-@pytest.mark.parametrize("said", ["yes, delete feat/old-idea", "yes, the old idea branch"])
-async def test_words_that_name_a_branch_choose_its_delete(said: str) -> None:
-    result = await decided([merge_spec(), delete_spec("feat/old-idea")], said, "A2")
-
-    assert isinstance(result, Approval) and (result.id, result.state) == ("A2", "approved")
-
-
-@pytest.mark.parametrize(
-    ("branch", "said", "which"),
-    [
-        ("fix/42", "yes 42", "A1"),
-        ("fix/42", "yes 42", "A2"),
-        ("fix/42", "yes forty two", "A2"),
-        ("42", "yes 42", "A2"),
-        ("go-ahead-42", "go ahead, 42", "A2"),
-    ],
-)
-async def test_a_number_in_a_branch_never_names_it_and_makes_the_pr_number_ambiguous(
-    branch: str, said: str, which: str
-) -> None:
-    result = await decided([merge_spec(42), delete_spec(branch)], said, which)
-
-    assert isinstance(result, str) and result.startswith("Not approved")
-
-
-@pytest.mark.parametrize(("said", "which"), [("yes, delete fix/42", "A2"), ("yes, merge 42", "A1")])
-async def test_a_verb_still_names_the_action_when_a_branch_holds_the_pr_number(said: str, which: str) -> None:
-    result = await decided([merge_spec(42), delete_spec("fix/42")], said, which)
-
-    assert isinstance(result, Approval) and result.id == which
-
-
-@pytest.mark.parametrize("said", ["yes ²", "yes, merge ٤٢"])
-async def test_digits_other_than_ascii_are_not_a_number_and_refuse_the_yes(said: str) -> None:
-    result = await decided([merge_spec()], said, "A1")
-
-    assert isinstance(result, str) and "which is not part of a plain yes" in result
 
 
 async def test_a_ruleset_rule_that_keeps_a_branch_counts_on_any_page_of_the_rules(
@@ -2089,7 +1470,8 @@ async def x_post_guard(spec: dict[str, Any]) -> McpGuard:
     asked = await approvals.request("T1", spec)
     assert isinstance(asked, Approval), asked
     approvals.turn_began(None)
-    approvals.turn_ended(completed=True, told=["A1"], said="Shall I " + ("schedule" if spec["post_action"] == "schedule_post" else "post") + " post 812?")
+    approvals.present("A1")
+    approvals.turn_ended(completed=True)
     approvals.turn_began("Yes.")
     approved = approvals.decide("A1")
     assert isinstance(approved, Approval), approved
@@ -2185,43 +1567,6 @@ async def test_a_post_now_grant_refuses_a_community_it_was_not_approved_for() ->
     assert verdict is not None and verdict.reason.startswith("A1 covers exactly")
 
 
-@pytest.mark.parametrize(("said", "approved"), [("Yes, schedule 812.", True), ("Yes, 9.", False), ("Yes, 2026.", False)])
-async def test_only_the_post_id_names_a_scheduled_x_post_never_the_numbers_of_its_time(said: str, approved: bool) -> None:
-    result = await decided([x_post(publish_at=FRIDAY_9)], said, "A1")
-
-    assert isinstance(result, Approval) == approved, result
-
-
-@pytest.mark.parametrize("pr", [9, 6, 1, 2026])
-@pytest.mark.parametrize("which", ["A1", "A2"])
-@pytest.mark.parametrize("said", ["yes {n}", "yes, the {n}"])
-async def test_a_number_of_a_posts_time_is_ambiguous_with_a_pr_of_that_number(pr: int, which: str, said: str) -> None:
-    result = await decided([x_post(publish_at=FRIDAY_9), merge_spec(pr)], said.format(n=pr), which)
-
-    assert isinstance(result, str) and result.startswith("Not approved"), result
-
-
-@pytest.mark.parametrize("said", ["yes nine", "yes, the nine"])
-@pytest.mark.parametrize("which", ["A1", "A2"])
-async def test_a_number_word_of_a_posts_time_is_as_ambiguous_as_its_digits(said: str, which: str) -> None:
-    result = await decided([x_post(publish_at=FRIDAY_9), merge_spec(9)], said, which)
-
-    assert isinstance(result, str) and result.startswith("Not approved"), result
-
-
-@pytest.mark.parametrize(("said", "which"), [("yes, merge 9", "A2"), ("yes, schedule it", "A1")])
-async def test_a_verb_still_chooses_when_a_posts_time_shares_a_number_with_a_pr(said: str, which: str) -> None:
-    result = await decided([x_post(publish_at=FRIDAY_9), merge_spec(9)], said, which)
-
-    assert isinstance(result, Approval) and result.id == which
-
-
-async def test_a_posts_own_number_still_names_it_beside_a_pr_of_the_same_number_only_by_its_verb() -> None:
-    result = await decided([x_post(publish_at=FRIDAY_9), merge_spec(812)], "yes 812", "A2")
-
-    assert isinstance(result, str) and result.startswith("Not approved"), result
-
-
 @pytest.mark.parametrize(
     ("field", "value"),
     [("publish_at", "2026-11-07T09:00:00+01:00"), ("community", "999"), ("share_with_followers", True)],
@@ -2261,245 +1606,3 @@ async def test_rules_printed_before_the_no_rulesets_error_still_keep_the_branch(
 
     refused, _ = results(session.backend, "orchestrator", "report")
     assert str(refused.result).startswith("Not asked: feat/old-idea is a protected branch of pumpkit-io/pumpkit")
-
-
-def posthog(description: str) -> dict[str, Any]:
-    return {"action": "subagent_action", "repo": "pumpkit", "grants": ["posthog_config"], "description": description}
-
-
-DEPLOY: dict[str, Any] = {
-    "action": "subagent_action", "repo": "pumpkit", "grants": [], "description": "deploy pumpkit release 42 now"
-}
-
-
-@pytest.mark.parametrize(
-    ("specs", "said"),
-    [
-        ([posthog("delete the PostHog dashboard Merge Stats")], "Merge it."),
-        ([posthog("delete the PostHog dashboard Post signups")], "Post it now."),
-        (
-            [posthog("delete the PostHog dashboard Post signups"), delete_spec("feat/jarvis", "jarvis")],
-            "Yes, post it now.",
-        ),
-        ([posthog("set PostHog flag merge-queue rollout to 9 percent"), merge_spec(6)], "Yes, merge 9."),
-        (
-            [posthog("turn off the PostHog survey on release notes"), delete_spec("feat/jarvis", "jarvis")],
-            "Release it.",
-        ),
-        ([DEPLOY], "Yes, deploy."),
-        ([DEPLOY], "Yes, release 42."),
-        ([DEPLOY], "Yes, the pumpkit repo."),
-        ([DEPLOY], "Do it now."),
-    ],
-)
-async def test_an_orchestrators_action_is_never_named_by_the_words_of_its_description(
-    specs: list[dict[str, Any]], said: str
-) -> None:
-    result = await decided(specs, said, "A1", told=["A1"])
-
-    assert isinstance(result, str) and result.startswith("Not approved"), result
-
-
-@pytest.mark.parametrize("said", ["Yes.", "Yes, go ahead.", "Do it, please."])
-async def test_a_plain_yes_approves_an_orchestrators_action_when_it_was_the_one_thing_asked(said: str) -> None:
-    specs = [posthog("set PostHog flag merge-queue rollout to 9 percent"), merge_spec(6)]
-
-    result = await decided(specs, said, "A1", told=["A1"])
-
-    assert isinstance(result, Approval) and result.id == "A1", result
-
-
-@pytest.mark.parametrize(("which", "said"), [("A1", "Yes, schedule it."), ("A2", "Yes."), ("A2", "Yes, go ahead.")])
-async def test_an_orchestrators_action_asked_beside_another_is_never_approved(which: str, said: str) -> None:
-    result = await decided([x_post(post="9", publish_at=FRIDAY_9), DEPLOY], said, which)
-
-    assert (which == "A1") == isinstance(result, Approval), result
-
-
-async def test_a_yes_naming_another_pending_approval_never_approves_the_orchestrators_action() -> None:
-    result = await decided([DEPLOY, merge_spec(6)], "Yes, merge 6.", "A1", ["A1"])
-
-    assert isinstance(result, str) and result.startswith("Not approved"), result
-
-
-@pytest.mark.parametrize(
-    "reply",
-    [
-        "Understood, sir. I won't merge 42 then; it stays open.",
-        "Very well, sir, I will not merge 42?",
-        "You mean merging 42, sir.",
-        "You mean merging 42 or deleting feat/jarvis, sir?",
-    ],
-)
-async def test_a_reply_that_is_not_one_plain_question_about_one_approval_is_no_read_back(reply: str) -> None:
-    specs = [merge_spec(42), delete_spec("feat/jarvis", "jarvis")]
-
-    result = await decided(specs, "Yes.", "A1", read_back=reply)
-
-    assert isinstance(result, str) and result.startswith("Not approved"), result
-
-
-@pytest.mark.parametrize(
-    ("specs", "reply"),
-    [
-        ([merge_spec(42), delete_spec("feat/jarvis", "jarvis")], "You mean merging 42, sir?"),
-        (
-            [posthog("delete the PostHog dashboard Merge Stats"), merge_spec(6)],
-            "Shall I delete the PostHog dashboard Merge Stats?",
-        ),
-    ],
-)
-async def test_a_question_reading_back_one_approval_lets_a_plain_yes_approve_it(
-    specs: list[dict[str, Any]], reply: str
-) -> None:
-    result = await decided(specs, "Yes.", "A1", read_back=reply)
-
-    assert isinstance(result, Approval) and result.id == "A1", result
-
-
-async def test_a_number_any_pending_approval_holds_is_ambiguous_even_when_that_one_was_not_asked() -> None:
-    specs = [merge_spec(9), merge_spec(10), x_post(publish_at=FRIDAY_9)]
-
-    result = await decided(specs, "yes 9", "A1", told=["A1", "A2"])
-
-    assert isinstance(result, str) and result.startswith("Not approved"), result
-
-
-MIGRATION_AND_42 = [posthog("run the db migration"), merge_spec(42)]
-
-
-@pytest.mark.parametrize(
-    ("which", "reply"),
-    [
-        ("A2", "Should I skip PR 42 for now?"),
-        ("A2", "Should I drop PR 42?"),
-        ("A2", "Should I revert PR 42?"),
-        ("A2", "Should I abandon PR 42?"),
-        ("A2", "Should I postpone PR 42?"),
-        ("A2", "Should I defer PR 42?"),
-        ("A2", "Should I park PR 42?"),
-        ("A2", "Shall I ignore PR 42?"),
-        ("A2", "Shall I leave PR 42 open?"),
-        ("A2", "Shall I put PR 42 on ice?"),
-        ("A2", "Shall I ping the author of PR 42?"),
-        ("A2", "Want me to rebase PR 42 first?"),
-        ("A2", "Shall I close PR 42 instead?"),
-        ("A1", "Should I postpone: run the db migration?"),
-        ("A1", "Shall I skip the db migration?"),
-        ("A1", "Shall I re-check run the db migration?"),
-        ("A1", "Should I review run the db migration again?"),
-        ("A1", "Merge 42, or run the db migration?"),
-        ("A2", "Merge 42, or run the db migration?"),
-        ("A1", "Shall I merge 42 and run the db migration?"),
-        ("A2", "Shall I merge 42 and run the db migration?"),
-        ("A2", "Devo saltare la 42?"),
-        ("A2", "Should I skip PR 42 for now? Shall I merge PR 42?"),
-        ("A2", "Should I skip it... or merge 42?"),
-        ("A2", "Should I skip it? Or merge 42?"),
-    ],
-)
-async def test_a_question_with_any_word_outside_a_read_back_reads_nothing_back(which: str, reply: str) -> None:
-    result = await decided(MIGRATION_AND_42, "Yes.", which, read_back=reply)
-
-    assert isinstance(result, str) and result.startswith("Not approved"), result
-
-
-@pytest.mark.parametrize(
-    ("specs", "reply"),
-    [
-        ([merge_spec(42), posthog("run the db migration")], "Shall I merge PR 42?"),
-        ([delete_spec("feat/old-idea"), merge_spec(42)], "Should I go ahead and delete feat/old-idea?"),
-        ([x_post(publish_at=FRIDAY_9), merge_spec(42)], "Do you want me to schedule post 812?"),
-        ([posthog("run the db migration on staging"), merge_spec(42)], "Shall I run the db migration on staging?"),
-        ([merge_spec(42), delete_spec("feat/old-idea")], "Procedo con il merge della 42?"),
-        ([merge_spec(42), posthog("run the db migration")], "One moment, sir. Your words were unclear. Merge 42?"),
-    ],
-)
-async def test_a_read_back_made_only_of_the_approvals_names_and_question_words_lets_a_plain_yes_approve_it(
-    specs: list[dict[str, Any]], reply: str
-) -> None:
-    result = await decided(specs, "Yes.", "A1", read_back=reply)
-
-    assert isinstance(result, Approval) and result.id == "A1", result
-
-
-async def test_a_word_naming_another_pending_approval_it_does_not_choose_breaks_a_read_back() -> None:
-    specs = [merge_spec(42), delete_spec("feat/skip"), delete_spec("fix/skip")]
-
-    result = await decided(specs, "Yes.", "A1", read_back="Should I skip PR 42?")
-
-    assert isinstance(result, str) and result.startswith("Not approved"), result
-
-
-@pytest.mark.parametrize("reply", [
-    "Would you like a status update, sir?",
-    "Shall I merge PR 42? Would you like a status update, sir?",
-    "The merge is ready, sir.",
-])
-async def test_approval_news_requires_the_talkers_actual_last_question_to_ask_about_the_action(
-    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh, reply: str
-) -> None:
-    session = a_session(
-        clock, output, metrics, gh,
-        [[Text("Right away, sir."), delegate()], [Text(reply)], [approve(), Text("Nothing done, sir.")],
-         [Text("Finished, sir.")]],
-        [[ask_merge()], [report("T1", "Merged.")]],
-    )
-    await session.start()
-    await session.say(MERGE_42)
-    await session.replied(reply)
-    await session.say("Yes.")
-    await session.end()
-    assert gh.actions == []
-    assert str(results(session.backend, "talker", "approve")[0].result).startswith("Not approved:")
-
-
-@pytest.mark.parametrize(("specs", "which", "reply"), [
-    ([merge_spec(), delete_spec("fix/review")], "A2", "Should I review the branch?"),
-    ([merge_spec(repo="review"), merge_spec(43)], "A1", "Should I review PR 42?"),
-    ([merge_spec(repo="review"), merge_spec(43)], "A1", "Should I review and merge PR 42?"),
-])
-async def test_target_words_cannot_supply_the_action_of_a_read_back(
-    specs: list[dict[str, Any]], which: str, reply: str
-) -> None:
-    result = await decided(specs, "Yes.", which, read_back=reply)
-    assert isinstance(result, str) and result.startswith("Not approved:"), result
-
-
-@pytest.mark.parametrize("reply", [
-    "Should I merge or review PR 42?",
-    "Should I merge PR 42 or review it?",
-])
-async def test_an_alternative_action_from_a_repo_name_does_not_ask_for_approval(reply: str) -> None:
-    result = await decided([merge_spec(repo="review"), merge_spec(43)], "Yes.", "A1", read_back=reply)
-    assert isinstance(result, str) and result.startswith("Not approved:"), result
-
-
-@pytest.mark.parametrize("prefix", ["Do you approve this action", "Vuole approvare questa azione"])
-async def test_the_hubs_canonical_question_names_the_entire_pinned_action(prefix: str) -> None:
-    question = f"{prefix}: merge pumpkit-io/pumpkit#42 at commit {HEAD[:12]}?"
-    result = await decided([merge_spec(), merge_spec(43)], "Yes.", "A1", read_back=question)
-    assert isinstance(result, Approval) and result.id == "A1", result
-
-
-@pytest.mark.parametrize("read_back", [False, True])
-async def test_a_question_about_two_actions_cannot_be_reduced_to_the_one_in_news(read_back: bool) -> None:
-    gh = StubGh(prs={"pumpkit-io/pumpkit#42": ("OPEN", HEAD)})
-    approvals = Approvals(org="pumpkit-io", runner=gh, clock=FakeClock(), on_change=lambda: None, log=lambda e: None)
-    migration = await approvals.request("T1", posthog("run the database migration"))
-    merge = await approvals.request("T2", merge_spec())
-    assert isinstance(migration, Approval) and isinstance(merge, Approval)
-    approvals.turn_began(None)
-    if read_back:
-        approvals.turn_ended(completed=True, told=[], said="Nothing asked yet.")
-        approvals.turn_began("Yes.")
-        assert isinstance(approvals.decide(migration.id), str)
-    approvals.turn_ended(
-        completed=True, told=[migration.id], said="Shall I run the database migration or merge PR 42?"
-    )
-    approvals.turn_began("Yes.")
-
-    result = approvals.decide(migration.id)
-
-    assert isinstance(result, str) and result.startswith("Not approved:"), result
-    assert migration.state == merge.state == "pending"

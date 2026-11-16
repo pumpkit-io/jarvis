@@ -1,16 +1,14 @@
-"""Approvals (ADR 0004, ADR 0013): the User's recorded yes to one exact Boundary action, decided by the Hub from the
-User's own words. The Hub merges and deletes branches itself; any other action goes to one Subagent, for one call."""
+"""Concrete, single-use actions. The Talker interprets permission; the Hub owns provenance and execution."""
 
 import json
 import re
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from html import escape
 from typing import Any, Literal, Protocol, cast, get_args
 
 from jarvis_hub.agents.backend import McpGuard, Refused
-from jarvis_hub.approval_words import LEXICONS, Words, found, number_spans, numbers, words
 from jarvis_hub.read_only import Argv
 from jarvis_hub.state import Fields, TimeShift, numbered, one_of
 from jarvis_hub.subagent_rules import PUMPKIT_SERVERS
@@ -27,8 +25,6 @@ HUB_ACTIONS = ("merge_pr", "delete_branch")
 EXPIRES_AFTER = 24 * 3600.0
 
 PostAction = Literal["post_now", "schedule_post"]
-# The verb kind (verbs.txt) that says yes to each post action.
-_POST_KINDS: dict[str, str] = {"post_now": "post", "schedule_post": "schedule"}
 # The connector tools an Approval for a Subagent action may open, by grant: the only widening of ADR 0008's list.
 # x_post opens only the one of these its Approval's post_action names.
 GRANTS: dict[str, tuple[str, ...]] = {
@@ -108,10 +104,7 @@ class Approval:
     subagent: str | None = None
     outcome: str = ""
     task_revision: int = 0
-
-    def question(self, language: str = "en") -> str:
-        prefix = "Vuole approvare questa azione" if language == "it" else "Do you approve this action"
-        return f"{prefix}: {self.text}?"
+    authorization_id: str | None = None
 
     @property
     def tools(self) -> tuple[str, ...]:
@@ -161,6 +154,7 @@ _SAVED = Fields(
         "subagent",
         "outcome",
         "task_revision",
+        "authorization_id",
     ),
     times=frozenset({"created", "approved"}),
 )
@@ -174,187 +168,6 @@ class _Target:
     node: str = ""
     # The change is a branch the Hub never deletes, whatever its tip.
     forbidden: bool = False
-
-
-# A thing words can name an Approval by: ("n", a number), ("p", a phrase) or ("k", a kind of action).
-_Feature = tuple[str, object]
-
-
-@dataclass(frozen=True)
-class _Names:
-    """What the User's words may name an Approval by: numbers, phrases such as the repo or branch, and action verbs."""
-
-    numbers: frozenset[int]
-    phrases: frozenset[Words]
-    kinds: frozenset[str]
-    # Numbers in the repo or branch: said alongside the action they are part of a plain yes, but they name nothing.
-    held: frozenset[int] = frozenset()
-    # Numbers in the spoken text beyond the one that names it, such as a post's time: they are no part of a plain
-    # yes either, but another Approval's number equal to one is ambiguous.
-    spoken: frozenset[int] = frozenset()
-
-    @staticmethod
-    def of(approval: "Approval") -> "_Names":
-        phrases = _naming_phrases(approval)
-        held = numbers(words(approval.repo or "") + words(str(approval.branch or "")))
-        if approval.action == "merge_pr":
-            return _Names(frozenset({int(approval.number or 0)}), phrases, frozenset({"merge"}), held)
-        if approval.action == "delete_branch":
-            return _Names(frozenset(), phrases, frozenset({"delete"}), held)
-        said = words(approval.text)
-        if approval.post_action:
-            # The Hub wrote the text: its date and time name nothing, and "post" may stand for the post itself.
-            post = {int(approval.post)} if approval.post and approval.post.isdigit() else set[int]()
-            kinds = LEXICONS.kinds(said) | {_POST_KINDS[approval.post_action]}
-            return _Names(frozenset(post), phrases, kinds, held, numbers(said) - post)
-        # The Orchestrator wrote the text, so no word of it names the action; its numbers stay ambiguous for others.
-        return _Names(frozenset(), frozenset(), frozenset(), spoken=numbers(said))
-
-    def features(self) -> set[_Feature]:
-        out: set[_Feature] = {("n", n) for n in self.numbers}
-        return out | {("p", p) for p in self.phrases} | {("k", k) for k in self.kinds}
-
-
-_NOW: frozenset[Words] = frozenset({("now",), ("ora",), ("adesso",)})
-
-
-def _without_numbers(phrase: Words) -> list[Words]:
-    """The runs of `phrase` between its numbers: a number names an Approval only as a PR number, never in a branch
-    or repo name ("fix/42" is named by "fix")."""
-    runs: list[Words] = []
-    start = 0
-    for i, n, _ in number_spans(phrase) + [(len(phrase), 0, 0)]:
-        if i > start:
-            runs.append(phrase[start:i])
-        start = i + n
-    return runs
-
-
-def _free_text(approval: "Approval") -> bool:
-    """Whether `approval` is a Subagent action said in the Orchestrator's words: words never name it."""
-    return approval.action == "subagent_action" and approval.post_action is None
-
-
-def _naming_phrases(approval: "Approval") -> frozenset[Words]:
-    """The phrases that name `approval`: its repo, alone or with "repo"; "PR" for a merge; the branch, its last part
-    and "branch" for a delete, without their numbers. A phrase made only of yes, filler, verbs or "now" names
-    nothing: a word can't be both ("Yes, Jarvis." never names feat/jarvis)."""
-    phrases: set[Words] = set()
-    for name in _without_numbers(words(approval.repo.split("/", 1)[-1])) if approval.repo else []:
-        phrases |= {name} | {form for repo in ("repo", "repository") for form in (name + (repo,), (repo,) + name)}
-    if approval.action == "merge_pr":
-        phrases |= {("pr",), ("pull", "request")}
-    if approval.action == "delete_branch":
-        branch = str(approval.branch)
-        phrases |= {run for part in (branch, branch.rsplit("/", 1)[-1]) for run in _without_numbers(words(part))}
-        phrases.add(("branch",))
-    return frozenset(p for p in phrases if not LEXICONS.plain(tuple(w for w in p if (w,) not in _NOW)))
-
-
-def _said(said: Words, phrases: Iterable[Words], ambiguous: frozenset[int] = frozenset()) -> set[_Feature]:
-    """The features in `said`: its numbers but `ambiguous` ones, verbs, and those of `phrases` not inside a longer
-    one said ("pumpkit" in "pumpkit ops")."""
-    spans = [(i, len(p), p) for p in set(phrases) for i in found(said, p)]
-    hits = {p for i, n, p in spans if not any(j <= i and i + n <= j + m and m > n for j, m, _ in spans)}
-    out: set[_Feature] = {("n", n) for n in numbers(said) - ambiguous}
-    return out | {("k", k) for k in LEXICONS.kinds(said)} | {("p", p) for p in hits}
-
-
-def _plain_yes(approval: "Approval") -> str:
-    if approval.action == "merge_pr":
-        return f"yes, merge {approval.number}"
-    if approval.action == "delete_branch":
-        return f"yes, delete {str(approval.branch).rsplit('/', 1)[-1]}"
-    return "yes, go ahead"
-
-
-def _spoken(feature: _Feature) -> str:
-    kind, value = feature
-    return f'"{" ".join(cast(Words, value)) if kind == "p" else value}"'
-
-
-def named(text: str, among: list["Approval"], ambiguous: frozenset[int] | None = None) -> list["Approval"]:
-    """The Approvals `text` names by something no other of `among` shares: "merge" only when one is a merge. The
-    `ambiguous` numbers, by default those `among` hold, name nothing."""
-    names = {a.id: _Names.of(a).features() for a in among}
-    held = _held(among) if ambiguous is None else ambiguous
-    said = _said(words(text), (p for a in among for p in _Names.of(a).phrases), held)
-    return [a for a in among if (names[a.id] & said) - set().union(*(names[b.id] for b in among if b is not a))]
-
-
-# Where a statement ends: one full stop or exclamation mark after a word, so "it... or merge 42?" is one sentence.
-_STATEMENT_END = re.compile(r"(?<=[\w)\"'’][.!])\s+")
-
-
-_QUESTION_PREFIXES = tuple(words(p) for p in (
-    "", "shall I", "should I", "should I go ahead and", "do you want me to", "you mean",
-    "devo", "vuole che io", "procedo con il", "do you approve this action", "vuole approvare questa azione",
-))
-
-
-def _question_bodies(approval: "Approval") -> set[Words]:
-    """Finite action templates: target names fill complete slots, never question vocabulary."""
-    bodies = {words(approval.text)}
-    if _free_text(approval):
-        return bodies
-    if approval.action == "merge_pr":
-        number = str(approval.number)
-        repo = approval.repo.split("/", 1)[-1]
-        targets = {"it", number, f"PR {number}", f"pull request {number}", f"della {number}",
-                   f"{repo} {number}", f"{approval.repo} {number}"}
-        kind = "merge"
-    elif approval.action == "delete_branch":
-        branch = str(approval.branch)
-        short = branch.rsplit("/", 1)[-1]
-        targets = {"it", "branch", "the branch", branch, short, f"branch {branch}", f"branch {short}"}
-        kind = "delete"
-    else:
-        targets = {"it", f"post {approval.post}", f"Pumpkit post {approval.post} on X now"}
-        kind = _POST_KINDS[str(approval.post_action)]
-        if approval.post_action == "post_now":
-            targets.add("it now")
-    return bodies | {words(f"{verb} {target}") for verb, k in LEXICONS.verbs.items() if k == kind for target in targets}
-
-
-def _read_back(reply: str, pending: list["Approval"]) -> list["Approval"]:
-    """Only complete action templates can establish a question about an Approval (ADR 0013)."""
-    *before, question = _STATEMENT_END.split(reply.strip())
-    if not question.endswith("?") or "?" in question[:-1] or any("?" in s for s in before):
-        return []
-    if LEXICONS.holding_back(reply.replace("?", " ")) is not None:
-        return []
-    said = words(question)
-    if said and said[-1] in ("sir", "signore"):
-        said = said[:-1]
-    bodies = {a.id: _question_bodies(a) for a in pending}
-    for prefix in sorted(_QUESTION_PREFIXES, key=len, reverse=True):
-        if said[:len(prefix)] != prefix:
-            continue
-        remaining = said[len(prefix):]
-        clauses: list[Words] = []
-        start = 0
-        for i, word in enumerate(remaining):
-            if word in ("or", "o"):
-                clauses.append(remaining[start:i])
-                start = i + 1
-        clauses.append(remaining[start:])
-        matched: list[Approval] = []
-        for clause in clauses:
-            matches = [a for a in pending if clause in bodies[a.id]]
-            free = [a for a in matches if _free_text(a)]
-            selected = free or named(" ".join(clause), matches, _held(pending))
-            if len(selected) != 1 or (free and len(matches) != 1):
-                break
-            matched.extend(a for a in selected if a not in matched)
-        else:
-            return matched
-    return []
-
-
-def _held(among: Iterable["Approval"]) -> frozenset[int]:
-    """The numbers some of `among` hold in a repo, branch or spoken text without naming by them: said alone they
-    could mean that or a PR number."""
-    return frozenset[int]().union(*(_Names.of(a).held | _Names.of(a).spoken for a in among))
 
 
 def _x_post(task_id: str, spec: dict[str, Any], grants: list[str], repo: str, now: float) -> Approval | Refused:
@@ -455,14 +268,9 @@ class Approvals:
         self._all: dict[str, Approval] = {}
         self._ids = 0
         self._running: set[str] = set()
-        # The turn under way: the User's message it answers, whether it recorded a yes, and whether a refused approve
-        # lets the Talker read back the Approval(s) meant.
         self._heard: str | None = None
-        self._approved_in_turn = False
-        self._read_back_open = False
-        # The Approvals the last finished turn asked the User about, and whether a read-back named them.
-        self._last_said: tuple[str, ...] = ()
-        self._read_back = False
+        self._presenting: set[str] = set()
+        self._presented: set[str] = set()
 
     async def request(self, task_id: str, args: object, *, task_revision: int = 0) -> Approval | Refused:
         """A pending Approval for the action `args` names, once the Hub has read that its target is as stated. One
@@ -554,107 +362,39 @@ class Approvals:
             return "No Approval is pending."
         now = self._clock.now()
         named = "; ".join(f"{a.id}: {a.text} (on {a.task_id}, asked {ago(now - a.created)} ago)" for a in pending)
-        questions = " ".join(f"{a.id}: {a.question()} Italian: {a.question('it')}" for a in pending)
-        return f"Pending Approvals: {named}. Ask one exact question, in the User's language: {questions}"
+        return f"Pending Approvals: {named}. Interpret the User's intent in context; clarify only ambiguity."
 
     def turn_began(self, heard: str | None) -> None:
-        """A Talker turn starts; `heard` is the User's message it answers, None when it answers none."""
-        self._heard, self._approved_in_turn, self._read_back_open = heard, False, False
+        self._heard = heard
+        self._presenting.clear()
 
-    def turn_ended(self, *, completed: bool, told: Iterable[str], said: str) -> None:
-        """Only the completed reply's validated question establishes what the User was asked."""
-        told = tuple(told)
-        self._last_said, self._read_back = (), False
-        if completed and (self._read_back_open or told):
-            read = _read_back(said, self.pending())
-            allowed = {a.id for a in read} if self._read_back_open else set(told)
-            if all(a.id in allowed for a in read):
-                self._last_said = tuple(a.id for a in read)
-                self._read_back = self._read_back_open and bool(self._last_said)
-        self._heard, self._read_back_open = None, False
-
-    def decide(self, approval_id: object) -> Approval | str:
-        """Approves when the User's words in this turn say yes, and to this Approval; else says why not."""
-        if self._approved_in_turn:
-            return "Not approved: one yes approves one action. Ask about the next one in its own question."
-        listing = self.listing()
-        refusal = self._refusal(approval_id, listing)
-        if refusal is not None:
-            return refusal
-        approval = cast(Approval, self.get(approval_id))
-        approval.state, approval.words, approval.approved = "approved", self._heard, self._clock.now()
-        self._approved_in_turn = True
-        self._on_change()
-        return approval
-
-    def _refusal(self, approval_id: object, listing: str) -> str | None:
-        heard = self._heard
-        if heard is None:
-            self._read_back_open = True
-            return f"Not approved: approve works only in your reply to the User's own message. {listing}"
-        # Checked first, so a "no" never lets a read-back make the next plain yes count.
-        nothing = "Nothing was done; tell them so, and ask again only if they want it."
-        held = LEXICONS.holding_back(heard)
-        if held is not None:
-            return f"Not approved: the User's words hold {held}, so they are not a yes. {nothing}"
-        said = words(heard)
-        if not LEXICONS.says_yes(said) and not LEXICONS.kinds(said):
-            return f'Not approved: the User\'s words hold no yes, such as "yes" or "go ahead". {nothing}'
+    def present(self, approval_id: object) -> str:
         approval = self.get(approval_id)
         if approval is None or approval.state != "pending":
-            self._read_back_open = True
-            return f"Not approved: {approval_id} is not pending. {listing}"
-        pending = self.pending()
-        candidates = [a for a in pending if a.id in self._last_said]
-        if approval not in candidates:
-            self._read_back_open = True
-            return f"Not approved: {approval.id} was not the last thing you asked the User about. {listing}"
-        if _free_text(approval):
-            return self._free_text_refusal(approval, candidates, said, listing)
-        own = _Names.of(approval)
-        ambiguous = _held(pending)
-        if len(candidates) > 1 or (len(pending) > 1 and not self._read_back):
-            chosen = named(heard, candidates, ambiguous)
-            self._read_back_open = True
-            if not chosen:
-                return f"Not approved: with more than one Approval in play, a bare yes does not say which. {listing}"
-            if chosen != [approval]:
-                other = next(a for a in chosen if a is not approval)
-                return f"Not approved: the User's words name {other.id} ({other.text}), not {approval.id}. {listing}"
-        stray = _said(said, (p for a in pending for p in _Names.of(a).phrases)) - own.features()
-        stray -= {("n", n) for n in own.held}
-        if stray:
-            others = [a for a in named(heard, pending, ambiguous) if a is not approval]
-            what = f"{others[0].id} ({others[0].text})" if others else _spoken(min(stray, key=str))
-            return f"Not approved: the User's words name {what}, which is not {approval.id} ({approval.text}). {nothing}"
-        now = _NOW if "schedule" not in own.kinds else frozenset[Words]()
-        outside = LEXICONS.outside_plain_yes(said, own.phrases | now, own.kinds, own.numbers | own.held)
-        if outside is not None:
-            return (
-                f'Not approved: the User\'s words hold "{outside}", which is not part of a plain yes. {nothing} To '
-                f'approve, they say a plain yes, such as "{_plain_yes(approval)}".'
-            )
-        return None
+            return f"Cannot present {approval_id}: it is not pending. {self.listing()}"
+        self._presenting.add(approval.id)
+        return f"Ask whether to proceed with {approval.id}: {approval.text}"
 
-    def _free_text_refusal(
-        self, approval: Approval, candidates: list[Approval], said: Words, listing: str
-    ) -> str | None:
-        """Why a yes does not approve an action in the Orchestrator's words: it counts only as a plain yes, and only
-        when that action was the one thing just asked."""
-        if candidates != [approval] or len(self._last_said) != 1:
-            self._read_back_open = True
-            return (
-                f"Not approved: {approval.id} ({approval.text}) is approved only by a plain yes right after you asked "
-                f"about it alone. {listing}"
-            )
-        outside = LEXICONS.outside_plain_yes(said, (), frozenset(), frozenset())
-        if outside is not None:
-            return (
-                f'Not approved: the User\'s words hold "{outside}", which is not part of a plain yes. Nothing was '
-                'done; tell them so, and ask again only if they want it. To approve, they say a plain yes, such as '
-                '"yes, go ahead".'
-            )
-        return None
+    def turn_ended(self, *, completed: bool) -> None:
+        if completed:
+            self._presented.update(self._presenting)
+        self._presenting.clear()
+        self._heard = None
+
+    def decide(self, approval_id: object) -> Approval | str:
+        if not self._heard or not self._heard.strip():
+            return "Not approved: approve works only in your reply to the User's own message."
+        approval = self.get(approval_id)
+        if approval is None or approval.state != "pending":
+            return f"Not approved: {approval_id} is not pending. {self.listing()}"
+        if approval.id not in self._presented:
+            return f"Not approved: {approval.id} has not been presented in a completed reply. {self.listing()}"
+        self.approve(approval, self._heard)
+        return approval
+
+    def approve(self, approval: Approval, heard: str) -> None:
+        approval.state, approval.words, approval.approved = "approved", heard, self._clock.now()
+        self._on_change()
 
     async def carry_out(self, approval: Approval, *, authorize: Callable[[], Awaitable[Refused | None]] | None = None,
                         authority_version: Callable[[], object] | None = None) -> str:
@@ -664,7 +404,7 @@ class Approvals:
         try:
             if self._expired(approval):
                 approval.state, approval.outcome = "expired", "It expired before it ran."
-                return approval_event(approval, "expired", f"{approval.text}: {approval.outcome} Ask again.")
+                return approval_event(approval, "expired", f"{approval.text}: {approval.outcome} Request a fresh Approval, using applicable Authorization before asking the User.")
             while True:
                 if authorize is not None and (refused := await authorize()) is not None:
                     return approval_event(approval, "held", refused.reason)
@@ -678,12 +418,12 @@ class Approvals:
                 approval.state, approval.outcome = "lapsed", target.change
                 text = (
                     f"Not done: the User approved {approval.text}, but {target.change}, so the yes no longer covers "
-                    "it. Look at what changed, then ask the User again in a fresh request that says what changed."
+                    "it. Look at what changed and request a fresh concrete Approval, using applicable Authorization before asking the User."
                 )
                 return approval_event(approval, "lapsed", text)
             if self._expired(approval):
                 approval.state, approval.outcome = "expired", "It expired before it ran."
-                return approval_event(approval, "expired", f"{approval.text}: {approval.outcome} Ask again.")
+                return approval_event(approval, "expired", f"{approval.text}: {approval.outcome} Request a fresh Approval, using applicable Authorization before asking the User.")
             argv = self._action_argv(approval, target.node)
             code, printed = await self._runner(argv)
             approval.state = "used"
@@ -800,6 +540,12 @@ class Approvals:
                 approval.state, approval.outcome = "used", f"{subagent_id} ended."
                 self._on_change()
 
+    def reassess(self, task_id: str) -> None:
+        for approval in self._all.values():
+            if approval.task_id == task_id and approval.state == "pending":
+                approval.state, approval.outcome = "withdrawn", "New Authorization requires reassessing this action."
+        self._on_change()
+
     def withdraw(self, task_id: str, *, reason: str = "Its Task was cancelled.") -> None:
         """Cancel or supersede the Task's Approvals, except an action the Hub is already running."""
         for approval in self._all.values():
@@ -835,7 +581,7 @@ class Approvals:
     def load(records: list[dict[str, Any]], from_wall: TimeShift) -> list[Approval]:
         approvals: list[Approval] = []
         for r in records:
-            approval = Approval(**_SAVED.load({"task_revision": 0, **r}, from_wall))
+            approval = Approval(**_SAVED.load({"task_revision": 0, "authorization_id": None, **r}, from_wall))
             numbered(approval.id, "A")
             one_of(approval.state, get_args(ApprovalState))
             approvals.append(approval)

@@ -50,8 +50,12 @@ _Avoid_: repo index, project list
 One piece of work the User asked for, from the moment the Talker hands it to the Orchestrator until it is reported done, failed or cancelled. A Task may run several Subagents, Watchers and Checks.
 _Avoid_: job, request, ticket
 
+**Authorization**:
+The User's permission for one action, one Task, or explicitly the current session, including any conditions and exclusions. It may be given before the exact action is ready. Task permission survives a restart and ends with the Task or revocation; session permission ends at restart.
+_Avoid_: blanket approval, permission mode
+
 **Approval**:
-The User's explicit yes to one named action the Boundary reserves for them, such as merging one PR, recorded with the User's own words. It covers that action once, on the state the User was told about, and nothing else.
+The single-use record permitting one concrete action reserved by the Boundary, such as merging one PR. It records the User's words and either their agreement to the presented action or the Authorization that covers it. It applies only to its recorded target state.
 _Avoid_: confirmation, consent, sign-off
 
 **Watcher**:

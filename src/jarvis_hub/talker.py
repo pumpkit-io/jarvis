@@ -29,6 +29,9 @@ def talker_tools(
     stand_by: ToolHandler,
     quiet_mode: ToolHandler,
     approve: ToolHandler,
+    present_approval: ToolHandler,
+    authorize: ToolHandler,
+    revoke_authorization: ToolHandler,
     resolve_scope: ToolHandler | None = None,
 ) -> tuple[HubTool, ...]:
     tools = (
@@ -44,6 +47,12 @@ def talker_tools(
                     "request": {**STRING, "description": "What the User wants, in their words."},
                     "context": {**STRING, "description": "Anything from the conversation the request depends on."},
                     "task_id": {**STRING, "description": "The Task this continues, such as T3."},
+                    "authorization": {"description": "Permission in the current User message: direct action "
+                        "requests grant action scope; requests to finish unattended grant task scope. Include all "
+                        "conditions and exclusions verbatim; preparation or investigation grants no execution permission.", "type": "object", "properties": {
+                        "scope": {"type": "string", "enum": ["action", "task"]},
+                        "description": {**STRING, "description": "Permission expressed by the User, including conditions and exclusions."},
+                    }, "required": ["scope", "description"]},
                     "new_task": {"type": "boolean", "description": "Explicitly start additional work while revising a spoken request."},
                 },
                 ("request",),
@@ -93,12 +102,33 @@ def talker_tools(
         ),
         HubTool(
             "approve",
-            "Record the User's yes to the Approval you just asked them about, by its id. Saved User words are checked "
-            "to determine whether they say yes, and to which Approval; when they do not, the "
-            "result says why, and lists the pending Approvals when the User has to say which.",
+            "Record the User's permission for a presented Approval. Interpret the current User message in "
+            "context, including natural phrasing and explicit target selection. Never call for a refusal, "
+            "uncertainty, quotation or a condition that has not been met. Clarify an ambiguous yes.",
             object_schema({"approval_id": {**STRING, "description": "Such as A1."}}, ("approval_id",)),
             approve,
         ),
+    )
+
+    tools += (HubTool(
+        "present_approval",
+        "Before asking for permission, register the pending Approval you will ask about, then speak its "
+        "action and target naturally. A completed reply establishes presentation; an interrupted reply does not.",
+        object_schema({"approval_id": STRING}, ("approval_id",)),
+        present_approval,
+    ),)
+
+    tools += (
+        HubTool("authorize", "Record permission expressed in the CURRENT User message for one action, an existing "
+                "Task, or explicitly this session. Include all conditions and exclusions; never infer permission "
+                "from a quote, background event, hypothetical or request to investigate. Use delegate.authorization "
+                "for a new Task. Session permission lasts until Hub restart.",
+                object_schema({"scope": {"type": "string", "enum": ["action", "task", "session"]},
+                               "description": {**STRING, "description": "Permitted outcome; copy conditions and exclusions verbatim."}, "task_id": STRING}, ("scope", "description")), authorize),
+        HubTool("revoke_authorization", "Withdraw permission the User revoked or materially changed; future "
+                "consequential calls stop. Use status to find IDs. Narrow permission by revoking the old grant "
+                "and recording the replacement from the current User message.",
+                object_schema({"authorization_id": STRING}, ("authorization_id",)), revoke_authorization),
     )
 
     if resolve_scope is not None:
@@ -116,6 +146,7 @@ def talker_tools(
                 "scope_id": STRING,
                 "revision": {"type": "integer"},
                 "attempt": {"type": "integer"},
+                "preserve_authorization": {"type": "boolean", "description": "True only for a refinement that keeps the authorized outcome, conditions and exclusions."},
                 "disposition": {"type": "string", "enum": ["revise_tasks", "new_request", "preserve_tasks"]},
                 "task_ids": {"type": "array", "items": STRING},
                 "from_segment": {"type": "integer"},

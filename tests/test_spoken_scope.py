@@ -177,7 +177,8 @@ async def test_hub_approval_action_rechecks_source_authority_after_target_read()
     asked = await approvals.request('T1', {'action': 'merge_pr', 'repo': 'pumpkit', 'pr': 42, 'sha': head})
     assert isinstance(asked, Approval)
     approvals.turn_began(None)
-    approvals.turn_ended(completed=True, told=[asked.id], said=asked.question())
+    approvals.present(asked.id)
+    approvals.turn_ended(completed=True)
     approvals.turn_began('Yes.')
     approved = approvals.decide(asked.id)
     assert isinstance(approved, Approval)
@@ -354,7 +355,8 @@ async def test_a_scope_wait_invalidates_the_approval_target_read_and_reads_it_ag
     asked = await approvals.request('T1', {'action': 'merge_pr', 'repo': 'pumpkit', 'pr': 42, 'sha': head})
     assert isinstance(asked, Approval)
     approvals.turn_began(None)
-    approvals.turn_ended(completed=True, told=[asked.id], said=asked.question())
+    approvals.present(asked.id)
+    approvals.turn_ended(completed=True)
     approvals.turn_began('Yes.')
     approved = approvals.decide(asked.id)
     assert isinstance(approved, Approval)
@@ -515,7 +517,8 @@ async def test_approval_expiry_is_checked_after_every_pre_dispatch_wait(pause: s
     asked = await approvals.request('T1', {'action': 'merge_pr', 'repo': 'pumpkit', 'pr': 42, 'sha': head})
     assert isinstance(asked, Approval)
     approvals.turn_began(None)
-    approvals.turn_ended(completed=True, told=[asked.id], said=asked.question())
+    approvals.present(asked.id)
+    approvals.turn_ended(completed=True)
     approvals.turn_began('Yes.')
     approved = approvals.decide(asked.id)
     assert isinstance(approved, Approval)
@@ -599,3 +602,65 @@ async def test_cross_task_scope_wait_rechecks_the_callers_own_revision(rig_for: 
     finish.set()
     assert blocked
     assert result == 'Refused: this Task revision was superseded.'
+
+
+@pytest.mark.parametrize('preserve', [False, True])
+async def test_spoken_revision_preserves_permission_only_for_the_same_authorized_outcome(
+    rig_for: MakeRig, tmp_path: Path, preserve: bool,
+) -> None:
+    path = tmp_path / 'state.json'
+    hold = asyncio.Event()
+    rig = await rig_for(
+        [Tool('delegate', {'request': 'Investigate build', 'authorization': {
+            'scope': 'task', 'description': 'Investigate build unattended'}}), AwaitInterrupt()],
+        [ResolveScope('revise_tasks', ('T1',), preserve_authorization=preserve), Text('Updated.')],
+        orchestrator=[[Gate(hold)], [Gate(hold)]],
+        recognition=LocalRelation('directed'), state_path=path,
+    )
+    rig.audio.wake()
+    rig.audio.say('Investigate the build unattended')
+    await until(lambda: bool(rig.backend.all_sessions('orchestrator')))
+    rig.audio.say('Include the test logs' if preserve else 'Actually deploy the new build')
+    await until(lambda: any(r.name == 'resolve_scope' for r in rig.backend.session('talker').tool_results))
+    saved = json.loads(path.read_text())
+    [permission] = saved['authorizations']
+    assert permission['state'] == ('active' if preserve else 'revoked')
+    assert permission['task_revision'] == (1 if preserve else 0)
+    assert permission['words'] == 'Investigate the build unattended'
+    hold.set()
+
+
+async def test_replayed_speech_cannot_recreate_session_permission_after_restart(
+    rig_for: MakeRig, tmp_path: Path,
+) -> None:
+    from tests.fakes import FakeBackend, FakeClock, RecordingMetrics, RecordingOutput, make_hub
+
+    path = tmp_path / 'state.json'
+    hold = asyncio.Event()
+    rig = await rig_for(
+        [Tool('delegate', {'request': 'Check build'}), AwaitInterrupt()],
+        [Gate(hold), Text('Waiting.')], orchestrator=[[Gate(hold)]],
+        recognition=LocalRelation('directed'), state_path=path,
+    )
+    rig.audio.wake()
+    rig.audio.say('Check build')
+    await until(lambda: bool(rig.backend.all_sessions('orchestrator')))
+    rig.audio.say('For this session work unattended')
+    await until(lambda: len(rig.user_messages()) == 2)
+    restart = tmp_path / 'restart.json'
+    restart.write_text(path.read_text())
+    backend = FakeBackend(FakeClock(),
+        [[ResolveScope('preserve_tasks'), Tool('authorize', {'scope': 'session', 'description': 'Work unattended'}),
+          Text('Resolved.')]],
+        orchestrator=[[Tool('report', {'task_id': 'T1', 'spoken': 'Waiting.', 'needs_user': True})]])
+    hub = make_hub(backend, RecordingOutput(), RecordingMetrics(), state_path=restart)
+    try:
+        await hub.start()
+        await until(lambda: bool(backend.all_sessions('talker')) and
+                    any(r.name == 'authorize' for r in backend.session('talker').tool_results))
+        result = next(r for r in backend.session('talker').tool_results if r.name == 'authorize')
+        assert 'needs the User\'s own message' in str(result.result)
+        assert json.loads(restart.read_text())['authorizations'] == []
+    finally:
+        hold.set()
+        await hub.close()

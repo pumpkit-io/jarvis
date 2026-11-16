@@ -6,7 +6,7 @@ rule that tells leaves apart (the reset, what gets through Quiet mode, the count
 saved form, so a restart brings back exactly what was waiting.
 """
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -140,27 +140,23 @@ class News:
         return tuple(leaf for group in self.groups if isinstance(group, _Away) for leaf in group.leaves)
 
     def without_tasks(self, task_ids: set[str]) -> "News | None":
+        return self.without(lambda leaf: leaf.task_id in task_ids)
+
+    def without(self, remove: Callable[[Leaf], bool]) -> "News | None":
         groups: list[_Group] = []
         for group in self.groups:
             if isinstance(group, _Away):
-                kept = tuple(leaf for leaf in group.leaves if leaf.task_id not in task_ids)
+                kept = tuple(leaf for leaf in group.leaves if not remove(leaf))
                 if kept:
                     groups.append(_Away(kept, group.arrived))
-            elif group.task_id not in task_ids:
+            elif not remove(group):
                 groups.append(group)
         return News(tuple(groups)) if groups else None
 
     def without_reset(self) -> "News | None":
         """This turn less the news that the limit reset, which is told once or never; None when nothing is left.
         An away opener that loses some is recounted."""
-        groups: list[_Group] = []
-        for group in self.groups:
-            if isinstance(group, _Away):
-                if kept := fresh(group.leaves):
-                    groups.append(_Away(tuple(kept), group.arrived))
-            elif not group.reset:
-                groups.append(group)
-        return News(tuple(groups)) if groups else None
+        return self.without(lambda leaf: leaf.reset)
 
     def split(self) -> "tuple[News | None, list[Leaf]]":
         """What gets through Quiet mode, as one turn, and every other leaf for it to hold. An away opener is held

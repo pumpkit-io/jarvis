@@ -66,7 +66,7 @@ Startup shows loading and ready notices for the conversation model, speech and l
 
 The Talker warms in the background at startup, using one hidden subscription turn ([ADR 0006](docs/adr/0006-warm-up-in-the-background.md)). The Orchestrator connects without a prompt. Idle listening and stop phrases use no model call; pending work and Announcements may still need agent turns.
 
-Ask for status or to cancel a Task by name. Quiet mode holds routine Announcements until the next Wake word; news that needs you can still be announced. A Boundary action asks for one recorded Approval. The Hub runs approved merges and branch deletions; other approved actions go to a Subagent. See [ADR 0013](docs/adr/0013-approvals-checked-by-the-hub.md) for the rules and limits.
+Ask for status or to cancel a Task by name. Quiet mode holds routine Announcements until the next Wake word; news that needs you can still be announced. A direct action request grants permission for that action. You can also authorize a Task unattended, or explicitly authorize the whole session. Task permission survives restarts; session permission ends at restart. Each Boundary action still gets a concrete Approval, using existing permission without another question when it applies. Approval replies use natural language. The Hub runs approved merges and branch deletions; other approved actions go to a Subagent. See [ADR 0022](docs/adr/0022-natural-language-authorization.md) for the permission model and its limits.
 
 ## Settings
 

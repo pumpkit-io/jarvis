@@ -9,6 +9,7 @@ import contextlib
 import json
 import re
 import time
+import uuid
 from collections import deque
 from collections.abc import Mapping, AsyncIterator, Callable, Coroutine, Iterable
 from dataclasses import asdict, dataclass, replace
@@ -29,6 +30,7 @@ from jarvis_hub.agents.backend import (
     ToolHandler,
     TurnEnd,
 )
+from jarvis_hub.authorizations import Authorization, Authorizations
 from jarvis_hub.approvals import HUB_ACTIONS, Approval, Approvals, approval_event
 from jarvis_hub.config import DEFAULT_TALKER_RESTART_AT
 from jarvis_hub.limits import SavedLimit, UsageLimit, reset_sentence, update_sentence
@@ -244,6 +246,7 @@ class _TalkerInput:
     lang: Lang | None = None
     typed: bool = True
     spoken: bool = True
+    replayed: bool = False
     request_id: str | None = None
     revision: int = 0
     # The news this turn tells: all of a news turn, or the away opener a User's spoken turn opens with.
@@ -358,6 +361,9 @@ class Hub:
             stand_by=self._stand_by,
             quiet_mode=self._quiet_mode_tool,
             approve=self._approve,
+            present_approval=self._present_approval,
+            authorize=self._authorize,
+            revoke_authorization=self._revoke_authorization,
             resolve_scope=self._resolve_scope,
         )
         self._talker_spec = replace(talker, tools=tuple(replace(tool, handler=self._owned_tool(tool.handler)) for tool in tools))
@@ -461,6 +467,8 @@ class Hub:
         self._announcing: set[asyncio.Task[None]] = set()
         # Whether a Talker reply is on screen or being said.
         self._replying = False
+        self._authorizations = Authorizations()
+        self._user_source = ""
         # The User's own text in the Talker turn under way, for the Tasks it delegates.
         self._user_text: str | None = None
         self._scopes = SpokenScopes(clock, change=self._persist, notice=output.notice)
@@ -474,8 +482,6 @@ class Hub:
             org=waits.org, runner=waits.runner, clock=clock, on_change=self._persist, log=self._write
         )
         self._preconnect_orchestrator = preconnect_orchestrator
-        # What the Talker turn under way has shown so far, for the Approvals it names.
-        self._shown = ""
         self._carrying_out: set[asyncio.Task[None]] = set()
         self._approval_runs: dict[str, asyncio.Task[None]] = {}
         self._session_for = subagents.session
@@ -751,8 +757,7 @@ class Hub:
         if item.kind != "user" or not self._backlog or self._limit.blocks("talker"):
             return item
         leaves, self._backlog = self._backlog, []
-        leaves = [leaf for leaf in leaves if leaf.task_id is None or (task := self._tasks.get(leaf.task_id)) is None
-                  or leaf.revision == task.revision]
+        leaves = [leaf for leaf in leaves if not self._obsolete_news(leaf)]
         if not leaves:
             return item
         return replace(item, backlog="\n".join([backlog_message(len(leaves)), *(leaf.message for leaf in leaves)]))
@@ -767,6 +772,7 @@ class Hub:
         """Saves the Hub's records as they change; a closing Hub saves once, at the end of close()."""
         if self._persist_suspended:
             return
+        self._authorizations.settle(lambda task_id: (task := self._tasks.get(task_id)) is not None and task.open)
         if not self._closing:
             self._save()
 
@@ -795,6 +801,7 @@ class Hub:
             "usage_limit": self._limit.dump(),
             "parked": [news.dump(to_wall) for news in self._parked_news],
             "approvals": self._approvals.dump(ids, to_wall),
+            "authorizations": self._authorizations.dump(ids, to_wall),
         }
         try:
             self._state.save(data)
@@ -860,6 +867,7 @@ class Hub:
             limit = UsageLimit.load(data["usage_limit"])
             parked = [News.load(r, from_wall) for r in data["parked"]]
             approvals = Approvals.load(data["approvals"], from_wall)
+            authorizations = Authorizations.load(data.get("authorizations", []), from_wall)
             loaded_scopes = SpokenScopes.load(data.get("spoken_scopes", []), from_wall)
             scope_news = [Leaf.load(record, from_wall) for record in data.get("scope_news", [])]
         except (KeyError, TypeError, ValueError, IndexError, AttributeError) as e:
@@ -872,12 +880,17 @@ class Hub:
             self._restore_held(held, quiet_mode, needs_user)
             return None
         self._tasks.restore(tasks)
+        self._authorizations.restore(authorizations)
+        self._authorizations.settle(lambda task_id: (task := self._tasks.get(task_id)) is not None and task.open)
         def current(task_id: str, revision: int) -> bool:
             task = self._tasks.get(task_id)
             return task is not None and task.revision == revision
         unanswered = [item for item in unanswered if current(item.task_id, item.revision)]
         waits = [wait for wait in waits if current(wait.task_id, wait.task_revision)]
         for approval in approvals:
+            if approval.authorization_id and isinstance(self._authorizations.check(
+                    approval.authorization_id, approval.task_id, approval.task_revision, approval_id=approval.id), Refused):
+                approval.state, approval.outcome = "withdrawn", "Its Authorization is no longer valid after restart."
             if not current(approval.task_id, approval.task_revision):
                 approval.state, approval.outcome = "withdrawn", "Its spoken request was revised."
         for subagent in subagents:
@@ -928,7 +941,8 @@ class Hub:
             if pending_scopes:
                 text = "\n\n".join(scope.text for scope in pending_scopes)
                 self._post(self._talker_inbox, _TalkerInput("user", self._clock.now(),
-                    user_message(text, self._lang, typed=False), heard=text, typed=False, spoken=False))
+                    '<event source="hub" reason="recovery_scope">Resolve this saved speech; it is not fresh User permission.</event>\n'
+                    + user_message(text, self._lang, typed=False), heard=text, typed=False, spoken=False, replayed=True))
             ids = tuple(task.id for task in tasks if task.open and not self._scopes.held(task.id))
             if ids:
                 listing = self._tasks.open_status(self._clock.now(), self._task_lines)
@@ -947,6 +961,15 @@ class Hub:
             for approval in unfinished:
                 self._carry_out(approval)
             self._handled()
+
+    def _obsolete_news(self, leaf: Leaf) -> bool:
+        task = self._tasks.get(leaf.task_id)
+        if task is not None and leaf.revision != task.revision:
+            return True
+        if leaf.approval:
+            approval = self._approvals.get(leaf.approval)
+            return approval is None or approval.state != "pending"
+        return False
 
     async def _talk(self) -> None:
         try:
@@ -974,9 +997,7 @@ class Hub:
                     if item.kind == "event" and item.news is None:
                         continue
             if item.news is not None:
-                stale = {leaf.task_id for leaf in item.news.leaves() if leaf.task_id is not None
-                         and (task := self._tasks.get(leaf.task_id)) is not None and leaf.revision != task.revision}
-                rest = item.news.without_tasks(stale)
+                rest = item.news.without(self._obsolete_news)
                 for _ in range(item.news.count - (rest.count if rest else 0)):
                     self._handled()
                 item = replace(item, news=rest)
@@ -994,10 +1015,10 @@ class Hub:
                     continue
                 if item.details:
                     self._output.show(item.details)
-                self._user_text = item.heard if item.kind == "user" else None
+                self._user_text = item.heard if item.kind == "user" and not item.replayed else None
+                self._user_source = uuid.uuid4().hex if self._user_text else ""
                 self._telling = item.news.away_leaves() if item.news else ()
                 self._approvals.turn_began(self._user_text)
-                self._shown = ""
                 if item.kind == "user" and self._limit.blocks("talker"):
                     end = self._limited_reply(item)
                 else:
@@ -1010,8 +1031,7 @@ class Hub:
                         message = "\n".join(part for part in (item.message, scope_context) if part)
                         end = await self._turn(message, kind=item.kind, arrived=item.arrived, spoken=item.spoken,
                                                owner=owner, scope_authority=authority)
-                told = [leaf.approval for leaf in (item.news.leaves() if item.news else ()) if leaf.approval]
-                self._approvals.turn_ended(completed=end.outcome == "completed", told=told, said=self._shown)
+                self._approvals.turn_ended(completed=end.outcome == "completed")
                 if end.outcome == "limited":
                     # The news was not told, so the Talker gets it again after the reset.
                     parked = self._park(item)
@@ -1119,7 +1139,11 @@ class Hub:
             self._restart_failed(str(e))
             return None
         try:
-            seed = restart_message(self._tasks.open_status(self._clock.now(), self._task_lines), self._exchanges)
+            status = self._tasks.open_status(self._clock.now(), self._task_lines)
+            permissions = self._authorizations.context()
+            if permissions:
+                status += "\n" + permissions
+            seed = restart_message(status, self._exchanges)
             end = await self._turn(seed, kind="restart", arrived=self._clock.now(), session=session)
         except BaseException:
             with contextlib.suppress(Exception):
@@ -1249,7 +1273,6 @@ class Hub:
                 self._on_model_ready()
         if show and (shown.strip() or end.outcome != "failed"):
             self._exchanges.append((message, shown))
-        self._shown = shown
 
         def ms(t: float | None) -> int | None:
             return None if t is None else round((t - arrived) * 1000)
@@ -1350,7 +1373,10 @@ class Hub:
         self._turn_task_revisions = {task.id: task.revision for task in tasks}
         self._turn_restart = bool(item.restart)
         self._spawned = set()
-        consuming = asyncio.create_task(self._consume(tasks, session, item.message, turn, tools))
+        permissions = "\n".join(context for task in tasks
+                                  if (context := self._authorizations.context(task.id)))
+        message = item.message + ("\n<authorizations>\n" + permissions + "\n</authorizations>" if permissions else "")
+        consuming = asyncio.create_task(self._consume(tasks, session, message, turn, tools))
         try:
             end = await self._within_time(consuming, session, turn)
         finally:
@@ -1582,6 +1608,7 @@ class Hub:
                 task = self._tasks.get(task_id)
                 if task is not None:
                     task.revise(choice.scope.current_text)
+                    self._authorizations.revise(task_id, task.revision, preserve=args.get("preserve_authorization") is True)
             self._unanswered = [item for item in self._unanswered if item.task_id not in task_ids]
             for task_id in task_ids:
                 self._approvals.withdraw(task_id, reason="Its spoken request was revised.")
@@ -1745,6 +1772,12 @@ class Hub:
                 return "This scope did not select that Task for revision."
             if not args.get("new_task") and not args.get("task_id"):
                 return "Choose task_id for selected existing work, or new_task=true for additional work."
+        permission = args.get("authorization")
+        if permission is not None:
+            if not self._user_text:
+                return "Authorization needs the User's own message."
+            if refused := self._authorizations.validate(permission, delegate=True):
+                return refused.reason
         continues = bool(args.get("task_id"))
         if continues:
             task = self._tasks.get(args["task_id"])
@@ -1758,13 +1791,20 @@ class Hub:
         words = scope.current_text if scope is not None else self._user_text
         if words is not None and (not task.words or task.words[-1] != words):
             task.words.append(words)
+        authorization = None
+        if permission is not None:
+            self._approvals.reassess(task.id)
+            authorization = self._issue_authorization(permission, task, self._user_text or "")
         task.queue_message()
         message = task_message(task, request, context, continues=continues)
         self._ask(_OrchestratorInput(task.id, message, self._clock.now(), revision=task.revision))
-        return json.dumps({"task_id": task.id, "queued": True})
+        return json.dumps({"task_id": task.id, "queued": True} |
+                          ({"authorization_id": authorization.id} if authorization is not None else {}))
 
     async def _status(self, args: dict[str, Any]) -> str:
-        return self._tasks.status(self._clock.now(), self._task_lines)
+        status = self._tasks.status(self._clock.now(), self._task_lines)
+        permissions = self._authorizations.context()
+        return status + ("\n" + permissions if permissions else "")
 
     def _task_lines(self, task_id: str) -> list[str]:
         deferred = any(task_id == d.task_id or task_id in d.restart for d in self._deferred)
@@ -1777,7 +1817,10 @@ class Hub:
         task = self._tasks.get(task_id)
         if task is None:
             return False
-        return bool(any(subagent.task_revision == task.revision and not subagent.stop_requested
+        return bool(any(a.task_id == task_id and a.task_revision == task.revision and
+                        (run := self._approval_runs.get(a.id)) is not None and not run.done()
+                        for a in self._approvals.live())
+                    or any(subagent.task_revision == task.revision and not subagent.stop_requested
                         for subagent in self._subagents.live(task_id))
                     or any(wait.task_revision == task.revision for wait in self._waits.live(task_id))
                     or any(item.task_id == task_id and item.revision == task.revision for item in self._scope_inputs))
@@ -1855,6 +1898,13 @@ class Hub:
         details = str(args.get("details_markdown") or "").strip() or None
         needs_user = args.get("needs_user") in (True, "true")
         approval: Approval | None = None
+        authorization = None
+        if args.get("authorization_id"):
+            if not args.get("approval"):
+                return "authorization_id requires a concrete approval action."
+            authorization = self._authorizations.check(args["authorization_id"], task.id, task.revision)
+            if isinstance(authorization, Refused):
+                return authorization.reason
         if args.get("approval"):
             requested = await self._approvals.request(task.id, args["approval"], task_revision=self._turn_task_revisions[task.id])
             if not self._task_current(task.id):
@@ -1863,13 +1913,25 @@ class Hub:
             if isinstance(requested, Refused):
                 return requested.reason
             approval, needs_user = requested, True
+            if authorization is not None:
+                checked = self._authorizations.check(authorization.id, task.id, task.revision)
+                if isinstance(checked, Refused):
+                    approval.state, approval.outcome = "withdrawn", checked.reason
+                    self._persist()
+                    return checked.reason
+                approval.authorization_id = authorization.id
+                self._authorizations.bind(authorization, approval.id)
+                self._approvals.approve(approval, authorization.words)
+                task.report(spoken, needs_user=False, live=True)
+                self._dispatch_approval(approval)
+                return f"Authorized {approval.id} by {authorization.id}; executing without another question."
             # The screen names the exact action in the Hub's words, whatever the sentence says.
             exact = f"**Approval {approval.id}:** {approval.text}"
             details = f"{exact}\n\n{details}" if details else exact
         task.report(spoken, needs_user=needs_user, live=self._has_pending(task.id))
         news = spoken
         if approval is not None:
-            news += f" Ask exactly one Approval question, in the User's language: {approval.question()} Italian: {approval.question('it')}"
+            news += f" Call present_approval for this event's Approval, then ask about this action naturally: {approval.text}"
         self._post_news(
             "orchestrator", news, task.id, needs_user=needs_user, details=details, approval=approval and approval.id,
             backlog=self._turn_restart,
@@ -1877,6 +1939,67 @@ class Hub:
         if approval is not None:
             return f"Reported to the User, asking for Approval {approval.id}: {approval.text}."
         return "Reported to the User."
+
+    def _issue_authorization(self, spec: dict[str, Any], task: Task | None, words: str) -> Authorization:
+        authorization = self._authorizations.issue(spec, words=words, source=self._user_source,
+            task_id=task.id if task else None, revision=task.revision if task else 0)
+        self._write({"kind": "authorization", "authorization": authorization.id, "task": authorization.task_id,
+                     "scope": authorization.scope, "words": authorization.words, "source": authorization.source})
+        return authorization
+
+    async def _authorize(self, args: dict[str, Any]) -> str:
+        if not self._user_text:
+            return "Authorization needs the User's own message."
+        if refused := self._authorizations.validate(args):
+            return refused.reason
+        task_id = args.get("task_id")
+        task = self._tasks.get(task_id)
+        if args["scope"] == "session":
+            if task_id:
+                return "Session Authorization has no task_id."
+        elif task is None or not task.open:
+            return "Action or Task Authorization needs an open Task; use delegate.authorization for new work."
+        if task is not None and self._scopes.held(task.id):
+            return "Resolve the pending spoken scope before authorizing this Task."
+        authorization = self._issue_authorization(args, task, self._user_text)
+        self._persist()
+        for affected in self._tasks.open_tasks():
+            if authorization.scope == "session" or affected.id == authorization.task_id:
+                self._approvals.reassess(affected.id)
+                self._wake(affected.id, event_message("hub",
+                    f"Authorization {authorization.id} recorded. Reassess pending actions against its outcome and "
+                    "conditions; use authorization_id for covered actions without asking again.", affected.id))
+        return f"Recorded {authorization.id}: {authorization.description}. Scope: {authorization.scope}."
+
+    async def _revoke_authorization(self, args: dict[str, Any]) -> str:
+        if not self._user_text:
+            return "Revocation needs the User's own message."
+        authorization = self._authorizations.revoke(args.get("authorization_id"))
+        if isinstance(authorization, Refused):
+            return authorization.reason
+        for approval in self._approvals.live():
+            if approval.authorization_id == authorization.id:
+                approval.state, approval.outcome = "withdrawn", "Its Authorization was revoked."
+                self._wake(approval.task_id, approval_event(approval, "withdrawn", approval.outcome))
+        self._write({"kind": "authorization_revoked", "authorization": authorization.id, "words": self._user_text,
+                     "source": self._user_source})
+        self._persist()
+        return f"Revoked {authorization.id}; further consequential calls are blocked."
+
+    def _approval_authority(self, approval: Approval) -> Refused | None:
+        task = self._tasks.get(approval.task_id)
+        if task is None or not task.open or task.revision != approval.task_revision:
+            return Refused("This Approval's Task ended or was superseded.")
+        if approval.state not in ("approved", "granted", "used"):
+            return Refused(f"{approval.id} is {approval.state}.")
+        if approval.authorization_id:
+            allowed = self._authorizations.check(approval.authorization_id, task.id, task.revision, approval_id=approval.id)
+            if isinstance(allowed, Refused):
+                return allowed
+        return None
+
+    async def _present_approval(self, args: dict[str, Any]) -> str:
+        return self._approvals.present(args.get("approval_id"))
 
     async def _approve(self, args: dict[str, Any]) -> str:
         wanted = self._approvals.get(args.get("approval_id"))
@@ -1889,6 +2012,11 @@ class Hub:
             return decided
         task = self._tasks.get(decided.task_id)
         self._scopes.bind(self._active_scope_id, decided.task_id, task.request if task is not None else "")
+        return self._dispatch_approval(decided)
+
+    def _dispatch_approval(self, decided: Approval) -> str:
+        self._write({"kind": "approval_authorized", "approval": decided.id, "task": decided.task_id,
+                     "authorization": decided.authorization_id, "action": decided.text, "words": decided.words})
         self._persist()
         if decided.action in HUB_ACTIONS:
             self._pending += 1
@@ -1917,7 +2045,7 @@ class Hub:
                 approval.state, approval.outcome = "withdrawn", "Its Task revision was superseded before dispatch."
                 self._persist()
                 return Refused(approval.outcome)
-            return None
+            return self._approval_authority(approval)
         async def run() -> None:
             try:
                 event = await self._approvals.carry_out(approval, authorize=authorize,
@@ -1951,6 +2079,12 @@ class Hub:
             if not await self._scopes.wait(subagent.task_id):
                 return Refused("Task scope remains unresolved.")
             task = self._tasks.get(subagent.task_id)
+            if subagent.approval is not None:
+                approval = self._approvals.get(subagent.approval)
+                if approval is None:
+                    return Refused("This Subagent's Approval is missing.")
+                if refused := self._approval_authority(approval):
+                    return refused
             if self._closing or task is None or task.cancelled or task.revision != subagent.task_revision:
                 return Refused("This Subagent's Task revision was superseded.")
             return None
@@ -1979,6 +2113,8 @@ class Hub:
             if isinstance(granted, str):
                 return granted
             approval = granted
+            if refused := self._approval_authority(approval):
+                return refused.reason
         prepared = await self._subagents.prepare(task.id, args, task.words, task_revision=self._turn_task_revisions[task.id])
         if isinstance(prepared, Refused):
             return prepared.reason

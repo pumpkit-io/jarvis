@@ -126,6 +126,9 @@ class Tasks:
             self._tasks[task.id] = task
             self._ids = max(self._ids, numbered(task.id, "T"))
 
+    def open_tasks(self) -> tuple[Task, ...]:
+        return tuple(task for task in self._tasks.values() if task.open)
+
     def get(self, task_id: object) -> Task | None:
         return self._tasks.get(str(task_id).strip().upper()) if task_id else None
 
