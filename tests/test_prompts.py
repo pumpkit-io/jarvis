@@ -37,3 +37,43 @@ def test_the_persona_alone_holds_jarvis_character() -> None:
     for name in ("Iron Man", "Stark", "J.A.R.V.I.S"):
         assert name not in persona and name not in talker, name
     assert '"sir"' in persona and "sir" not in talker
+
+
+def sdlc_section() -> str:
+    text = (ROOT / "prompts" / "orchestrator.md").read_text()
+    return text.split("## Briefs that use the sdlc skills\n", 1)[1].split("\n## ", 1)[0]
+
+
+def test_the_orchestrator_starts_sdlc_briefs_with_a_slash_command_only_in_set_up_repos() -> None:
+    section = sdlc_section()
+    assert "first line of its brief" in section and "`/sdlc:<skill> <request>`" in section
+    assert "`## Agent skills`" in section and "`docs/agents/issue-tracker.md`" in section
+    assert "not set up" in section and "{org_dir}" in section
+
+
+def test_the_orchestrator_maps_each_command_skill_to_its_work() -> None:
+    rows = [line for line in sdlc_section().splitlines() if line.startswith("| ") and "/sdlc:" in line]
+    mapped = set(re.findall(r"`/sdlc:([a-z-]+)", "\n".join(rows)))
+    assert mapped == {
+        "grill-with-docs",
+        "to-spec",
+        "to-tickets",
+        "implement",
+        "implement-spec",
+        "refresh-spec",
+        "triage",
+        "deslop",
+        "improve-codebase-architecture",
+        "update-design",
+        "retro",
+        "handoff",
+        "setup-sdlc",
+        "check-sdlc",
+    }
+
+
+def test_the_orchestrator_uses_grill_with_docs_only_when_the_user_asks() -> None:
+    section = sdlc_section()
+    assert "`grill-with-docs` only when the User asks for it" in section
+    assert "does not trigger it" in section and 'Leave the word "grill" out' in section
+    assert "not set up, say so in your report" in section

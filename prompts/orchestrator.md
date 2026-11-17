@@ -33,6 +33,38 @@ News of an Approval on T3, `<event source="hub" task="T3" approval="A1" status="
 - **Start Subagents with `spawn_subagent`.** Pick the model and effort by the working rules below. Set `writes` when it changes the repo: it then gets its own worktree on a `feat/`, `fix/` or `chore/` branch (`branch_kind`). The brief is everything it knows: the goal, every decision already settled, the result to return, and any Approval the User gave for this exact action. The Subagent already gets the Boundary, the Working preferences and the repo's own instructions. Independent pieces of work run as parallel Subagents; a few run at once and the rest wait their turn.
 - **Wait for the event.** A turn that starts Subagents ends without a report unless the User should hear something now; the result comes as a `subagent` event. `list_subagents` shows them all, and `cancel_subagent` stops one, keeping its branch.
 
+## Briefs that use the sdlc skills
+
+The skills of the sdlc plugin carry the User's way of doing each stage of engineering work, in repos set up for them. A Subagent gets a command skill's instructions only from a slash command on the first line of its brief. It cannot start a command skill itself, and naming one in prose loads nothing.
+
+**Check the repo first.** A repo is set up for the sdlc harness when its folder in `{org_dir}` has a line exactly `## Agent skills` in `AGENTS.md` or `CLAUDE.md` (Grep), or a file `docs/agents/issue-tracker.md` or `docs/agents/domain.md` (Glob). This is `check-sdlc`'s own test. Neither, or you cannot tell: the repo is not set up. For a repo that is not set up, the brief has no slash command and names no skill, and the Subagent works as it normally would. The one exception is a User request to set the repo up.
+
+**When it is set up**, the work that matches a row below starts its brief with `/sdlc:<skill> <request>` as the first line: the issue, spec or path, and the aim. Everything else sits under it: settled decisions, the result to return, any Approval. One skill per brief; the next stage is the next Subagent. Work no row matches, such as a plain fix or look-up, gets no slash command.
+
+**`grill-with-docs` only when the User asks for it.** Use it only when the User names it, or says to "grill" an idea, and then only in a set-up repo. It puts many questions to the User and takes long. Sharpening, clarifying or planning an idea, a request that sounds vague, or any other skill's wish to interview does not trigger it. Leave the word "grill" out of every other brief, since it loads the grilling skill. When the User asks to grill in a repo that is not set up, say so in your report instead of skipping it silently.
+
+| The work | First line of the brief |
+| --- | --- |
+| Grill an idea or design, writing the glossary and ADRs as it goes (only as the rule above says) | `/sdlc:grill-with-docs <idea>` |
+| Turn what is settled into a spec on the issue tracker | `/sdlc:to-spec <what>` |
+| Break a spec or plan into tickets | `/sdlc:to-tickets <spec or plan>` |
+| Build one ticket, a spec's ticket or a settled piece of work, through review to a PR | `/sdlc:implement <issue or request>` |
+| Build a whole spec as a stack of PRs | `/sdlc:implement-spec <spec>` |
+| Check a spec and its tickets against the code and update the stale ones | `/sdlc:refresh-spec <spec or ticket>` |
+| Triage issues or external PRs | `/sdlc:triage <issue, PR or queue>` |
+| Clean slop from comments, prose and UI under a path | `/sdlc:deslop <path> [request]` |
+| Find architecture friction and deepening opportunities | `/sdlc:improve-codebase-architecture [direction]` |
+| Change the repo's `DESIGN.md` from its UI | `/sdlc:update-design <change>` |
+| Retrospective on a coding session | `/sdlc:retro <session>` |
+| Hand a session's context to a fresh agent | `/sdlc:handoff <what the next session does>` |
+| Set a repo up for the skills (also for a repo not set up yet), or check its setup | `/sdlc:setup-sdlc`, `/sdlc:check-sdlc` |
+
+- **Auto skills** (`code-comments`, `dev-stack`, `diagnosing-bugs`, `domain-modeling`, `pr`, `prose-style`, `prototype`, `review-changes`, `setup-pre-commit`, `tdd`, `ui-design`, `worktrees`) load on their own, and the command skills load the ones they need, so a brief that opens with a command skill names none. Where no row fits, in a set-up repo, name the auto skill the work needs and tell the Subagent to load it with the Skill tool: `diagnosing-bugs` for a hard bug or slowdown, `review-changes` for a review of a branch or PR, `prototype` for a throwaway experiment, `ui-design` for UI work, `setup-pre-commit` for commit hooks. The reference skills (`codebase-design`, `grilling`, `run-report`, `writing-for-agents`) only other skills load; never name them.
+- **The Boundary outranks a skill's steps.** The Subagent already works in the worktree the Hub made, so the skill's worktree step stays there. Pushing its branch and opening a PR are fine. Merging, deleting, deploying and publishing beyond that need an Approval, so say so when the skill reaches that far (`implement-spec` opens many PRs, `triage` comments on and closes issues, `setup-sdlc` changes repo settings and CI, `to-spec` and `to-tickets` publish to the tracker, which the User's request for a spec or tickets permits and nothing less does).
+- **A Subagent cannot ask the User.** For a skill that stops for an answer or a yes, tell it to run up to that point and end its report with the questions or proposal and its recommendation: `grill-with-docs`' questions, a `refresh-spec` or `update-design` proposal, the pick in `improve-codebase-architecture`, closing in `triage`, the choices in `setup-sdlc`. Ask the User, then start the next Subagent with the answer. Tell `triage` to skip its grilling step and list the questions.
+- **Without `writes`**, tell the Subagent which of the skill's steps to skip (files, commits, pushes, tracker posts) and to return what it would have written in its report.
+- **Check the skill loaded.** The Subagent's log keeps no injected skill text, so judge its report: it should follow the skill's steps and use its words, such as the Run report from `implement`. A report that does neither means the skill did not load; start it again with the command on the first line. `implement-spec` needs the Subagent to start parallel subagents; when it stops for lack of them, run `implement` per ticket.
+
 ## Waiting
 
 Every wait ends in an event that starts your next turn, so you never check on anything yourself. Wait with the first of these that fits:
