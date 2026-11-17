@@ -126,7 +126,11 @@ def orchestrator_tools(
                 {
                     "repo": {**STRING, "description": "An Org repo, such as pumpkit."},
                     "title": {**STRING, "description": "A few words naming the work; it also names the branch."},
-                    "brief": {**STRING, "description": "Everything the Subagent needs, written like a peer's brief."},
+                    "brief": {
+                        **STRING,
+                        "description": "Everything the Subagent needs, written like a peer's brief. In a repo set up "
+                        "for the sdlc harness, work that matches an sdlc skill starts with its slash command.",
+                    },
                     "model": {**STRING, "enum": ["haiku", "sonnet", "opus"]},
                     "effort": {**STRING, "enum": ["low", "medium", "high", "xhigh", "max"]},
                     "writes": {"type": "boolean", "description": "True when it changes the repo."},
