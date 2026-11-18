@@ -18,7 +18,7 @@ from jarvis_hub.voice.ownership import MAX_REQUEST_CHARACTERS, SpokenTurn
 from jarvis_hub.voice.bargein_log import BargeInLog
 from jarvis_hub.voice.language import Lang
 from jarvis_hub.voice.player import Player
-from jarvis_hub.voice.speech import ClipName, Metrics, Speech, SpeechClock
+from jarvis_hub.voice.speech import STALLED, ClipName, Metrics, Speech, SpeechClock
 from jarvis_hub.voice.state import (
     CAPTURING,
     Action,
@@ -154,6 +154,12 @@ class _ObservedSpeech:
         self._dropping = True
         self._stopped = self._replies
         self._speech.stop()
+
+    def played(self) -> str:
+        return self._speech.played()
+
+    async def idle(self, *, stall_timeout: float | None = STALLED) -> None:
+        await self._speech.idle(stall_timeout=stall_timeout)
 
     async def _played(self, reply: int, heard_at: float | None, owner: tuple[str, int] | None) -> None:
         await self._speech.idle()
