@@ -286,3 +286,55 @@ async def test_disconnected_phone_preserves_terminal_typed_reply_queue() -> None
     finally:
         await hub.close()
         await speech.close()
+
+
+@pytest.mark.parametrize("phone_generating", [False, True])
+async def test_mac_spoken_request_stops_phone_reply_and_keeps_its_local_floor(phone_generating: bool) -> None:
+    import asyncio
+    from jarvis_hub.voice.state import Timing
+    from jarvis_hub.voice.voice_mode import VoiceMode, merge
+    from tests.fakes import AwaitInterrupt, ScriptedAudio, Step, until
+
+    clock, tts, metrics = FakeClock(), FakeTts(), RecordingMetrics()
+    output, local, remote, audio = RecordingOutput(), RecordingPlayer(), RecordingPlayer(hold=True), ScriptedAudio(clock)
+    voice = VoiceMode(
+        audio=audio, tts=tts, player=local, clock=clock, metrics=metrics, notice=output.notice,
+        timing=Timing(follow_up_s=6, announce_follow_up_s=4, listen_s=6, chime_s=0.5, tail_s=0),
+    )
+    phone_script: list[Step] = [Text("Phone reply. ")]
+    if phone_generating:
+        phone_script += [AwaitInterrupt(), Text("Stale phone sentence.")]
+    backend = FakeBackend(clock, [phone_script, [Text("Desk reply.")]])
+    hub = make_hub(backend, output, metrics, speech=voice.speech, floor=voice, speak_typed=False)
+    hub.attach_client(Client("phone", "iphone", connected=True, can_speak=True), player=remote)
+
+    end = asyncio.Event()
+
+    async def inputs() -> AsyncIterator[Line]:
+        await until(lambda: local.voices == ["ready"])
+        yield Line("Phone", clock.now(), typed=False, client_id="phone")
+        await end.wait()
+
+    await hub.start()
+    voice.start()
+    running = asyncio.create_task(hub.run(merge(inputs(), voice.lines(hub.interrupt, hub.woke, hub.admit_spoken_revision))))
+    try:
+        await until(lambda: remote.texts == ["Phone reply."])
+        assert voice.state == "idle"
+        audio.wake()
+        await until(lambda: voice.state == "listening")
+        audio.say("Desk")
+        await until(lambda: "Desk reply." in local.texts)
+        assert remote.pending() == 0
+        assert "stop" in remote.events
+        assert remote.texts == ["Phone reply."]
+        assert local.texts.count("Desk reply.") == 1
+        assert not any("Stale phone sentence." in reply for reply in output.replies)
+        assert hub.clients.focus == "terminal"
+        await until(lambda: voice.state == "follow_up")
+        end.set()
+        await running
+    finally:
+        running.cancel()
+        await hub.close()
+        await voice.close()
