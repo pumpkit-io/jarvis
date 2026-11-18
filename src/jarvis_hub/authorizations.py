@@ -6,6 +6,7 @@ from html import escape
 from typing import Any, Literal, cast, get_args
 
 from jarvis_hub.agents.backend import Refused
+from jarvis_hub.clients import TERMINAL
 from jarvis_hub.state import Fields, TimeShift, numbered, one_of
 
 AuthorizationScope = Literal["action", "task", "session"]
@@ -23,9 +24,10 @@ class Authorization:
     task_revision: int
     state: AuthorizationState = "active"
     approval_id: str | None = None
+    client_id: str = TERMINAL
 
 
-_SAVED = Fields(("id", "scope", "description", "words", "source", "task_id", "task_revision", "state", "approval_id"))
+_SAVED = Fields(("id", "scope", "description", "words", "source", "task_id", "task_revision", "state", "approval_id", "client_id"))
 
 
 class Authorizations:
@@ -45,7 +47,7 @@ class Authorizations:
             return Refused("authorization.description states the permitted outcome, conditions and exclusions.")
         return None
 
-    def issue(self, spec: dict[str, Any], *, words: str, source: str, task_id: str | None, revision: int) -> Authorization:
+    def issue(self, spec: dict[str, Any], *, words: str, source: str, task_id: str | None, revision: int, client_id: str = TERMINAL) -> Authorization:
         for existing in self._all.values():
             if (existing.source, existing.scope, existing.task_id, existing.description) == (
                 source, spec["scope"], task_id, spec["description"].strip()
@@ -53,7 +55,7 @@ class Authorizations:
                 return existing
         self._ids += 1
         authorization = Authorization(f"U{self._ids}", spec["scope"], spec["description"].strip(), words,
-                                      source, task_id, revision)
+                                      source, task_id, revision, client_id=client_id)
         self._all[authorization.id] = authorization
         return authorization
 
@@ -114,12 +116,13 @@ class Authorizations:
     def load(records: list[dict[str, Any]], from_wall: TimeShift) -> list[Authorization]:
         loaded: list[Authorization] = []
         for record in records:
-            authorization = Authorization(**_SAVED.load(record, from_wall))
+            authorization = Authorization(**_SAVED.load({"client_id": TERMINAL, **record}, from_wall))
             numbered(authorization.id, "U")
             one_of(authorization.scope, ("action", "task"))
             one_of(authorization.state, get_args(AuthorizationState))
             numbered(authorization.task_id, "T")
             if (not authorization.words.strip() or not authorization.description.strip() or not authorization.source
+                    or type(authorization.client_id) is not str or not authorization.client_id
                     or type(authorization.task_revision) is not int or authorization.task_revision < 0):
                 raise ValueError("Invalid Authorization provenance or Task revision")
             loaded.append(authorization)

@@ -32,6 +32,7 @@ from jarvis_hub.agents.backend import (
 )
 from jarvis_hub.authorizations import Authorization, Authorizations
 from jarvis_hub.approvals import HUB_ACTIONS, Approval, Approvals, approval_event
+from jarvis_hub.clients import Clients, TERMINAL
 from jarvis_hub.config import DEFAULT_TALKER_RESTART_AT
 from jarvis_hub.limits import SavedLimit, UsageLimit, reset_sentence, update_sentence
 from jarvis_hub.news import Leaf, News, backlog_message, fresh
@@ -148,6 +149,7 @@ class Line:
     revision: int = 0
     segments: tuple[str, ...] = ()
     relation_hint: str | None = None
+    client_id: str = TERMINAL
 
 
 # Sent once at launch, in the background, so the first real turn finds the prompt cached (ADR 0006); never shown.
@@ -249,6 +251,7 @@ class _TalkerInput:
     replayed: bool = False
     request_id: str | None = None
     revision: int = 0
+    client_id: str = TERMINAL
     # The news this turn tells: all of a news turn, or the away opener a User's spoken turn opens with.
     news: News | None = None
     # The Backlog a User's turn opens with: context for the Talker, never told or counted as news.
@@ -469,6 +472,7 @@ class Hub:
         self._replying = False
         self._authorizations = Authorizations()
         self._user_source = ""
+        self._user_client_id = TERMINAL
         # The User's own text in the Talker turn under way, for the Tasks it delegates.
         self._user_text: str | None = None
         self._scopes = SpokenScopes(clock, change=self._persist, notice=output.notice)
@@ -497,6 +501,7 @@ class Hub:
             on_start=lambda subagent: self._persist(),
         )
         self._waits = Waits(setup=waits, clock=clock, on_watcher_end=self._watcher_ended, on_check=self._check_due)
+        self.clients = Clients(terminal_speech=speech is not None, on_focus=self._persist)
 
     async def start(self) -> None:
         """Open the Talker and warm it in the background (ADR 0006); a line typed meanwhile waits for it.
@@ -575,6 +580,8 @@ class Hub:
     async def _read(self, inputs: AsyncIterator[Line]) -> None:
         async for line in inputs:
             if text := line.text.strip():
+                if self.clients.get(line.client_id) is None:
+                    raise ValueError(f"Unknown Client {line.client_id}")
                 if line.typed and self._floor is not None:
                     self._floor.typed_input()
                     await self.interrupt()
@@ -587,13 +594,14 @@ class Hub:
                     self.admit_spoken_revision(line)
                     if self._floor is not None and not self._floor.owns(owner):
                         continue
+                self.clients.take_focus(line.client_id)
                 self._read_lang = lang = line.lang or detect_language(text, self._read_lang)
                 message = user_message(text, lang, typed=line.typed)
                 if line.interrupted is not None:
                     message = f"{interrupted_message(line.interrupted)}\n{message}"
                 spoken = not line.typed or self._speak_typed
                 item = _TalkerInput("user", line.arrived, message, heard=text, lang=lang, typed=line.typed, spoken=spoken,
-                                    request_id=line.request_id, revision=line.revision)
+                                    request_id=line.request_id, revision=line.revision, client_id=line.client_id)
                 self._post(self._talker_inbox, item)
 
     def _post(self, inbox: "asyncio.Queue[Any]", item: _TalkerInput | _OrchestratorInput) -> None:
@@ -788,6 +796,7 @@ class Hub:
         ids = {t["id"] for t in tasks}
         data = {
             "saved_at": wall,
+            "focus_client_id": self.clients.focus,
             "spoken_scopes": self._scopes.dump(to_wall),
             "scope_news": [leaf.dump(to_wall) for leaf in self._scope_news],
             "tasks": tasks,
@@ -870,9 +879,13 @@ class Hub:
             authorizations = Authorizations.load(data.get("authorizations", []), from_wall)
             loaded_scopes = SpokenScopes.load(data.get("spoken_scopes", []), from_wall)
             scope_news = [Leaf.load(record, from_wall) for record in data.get("scope_news", [])]
+            focus_client_id = data.get("focus_client_id", TERMINAL)
+            if not isinstance(focus_client_id, str) or not focus_client_id:
+                raise ValueError("Focus needs a Client id")
         except (KeyError, TypeError, ValueError, IndexError, AttributeError) as e:
             self._output.notice(self._state.set_aside(f"could not be read whole ({type(e).__name__}: {e})"))
             return None
+        self.clients.restore_focus(focus_client_id)
         self._scopes.install(loaded_scopes)
         self._scope_news = scope_news
         self._restore_limit(limit, parked)
@@ -1017,6 +1030,7 @@ class Hub:
                     self._output.show(item.details)
                 self._user_text = item.heard if item.kind == "user" and not item.replayed else None
                 self._user_source = uuid.uuid4().hex if self._user_text else ""
+                self._user_client_id = item.client_id
                 self._telling = item.news.away_leaves() if item.news else ()
                 self._approvals.turn_began(self._user_text)
                 if item.kind == "user" and self._limit.blocks("talker"):
@@ -1941,10 +1955,11 @@ class Hub:
         return "Reported to the User."
 
     def _issue_authorization(self, spec: dict[str, Any], task: Task | None, words: str) -> Authorization:
-        authorization = self._authorizations.issue(spec, words=words, source=self._user_source,
+        authorization = self._authorizations.issue(spec, words=words, source=self._user_source, client_id=self._user_client_id,
             task_id=task.id if task else None, revision=task.revision if task else 0)
         self._write({"kind": "authorization", "authorization": authorization.id, "task": authorization.task_id,
-                     "scope": authorization.scope, "words": authorization.words, "source": authorization.source})
+                     "scope": authorization.scope, "words": authorization.words, "source": authorization.source,
+                     "client_id": authorization.client_id})
         return authorization
 
     async def _authorize(self, args: dict[str, Any]) -> str:
