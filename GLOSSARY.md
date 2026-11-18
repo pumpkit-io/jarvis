@@ -15,8 +15,12 @@ The one person Jarvis works for, named by `JARVIS_USER_NAME`. Jarvis addresses t
 _Avoid_: master, owner, operator
 
 **Hub**:
-The always-running part of Jarvis that owns the microphone and speaker, decides when Jarvis listens and speaks, and runs the Talker, the Orchestrator and every Subagent.
+The always-running part of Jarvis that holds the one conversation, turns speech into text and text into speech, decides when Jarvis listens and speaks, and runs the Talker, the Orchestrator and every Subagent.
 _Avoid_: server, daemon, runtime
+
+**Client**:
+One way the User reaches the Hub, owning one device's microphone, speaker and screen. There are two kinds: the terminal Client on the Mac and the iPhone Client.
+_Avoid_: app, device, frontend, session
 
 **Talker**:
 The agent that holds the conversation with the User and is the only part that speaks as Jarvis. It answers directly or hands work to the Orchestrator as a Task.
@@ -88,12 +92,16 @@ _Avoid_: treating every transcript fragment as a fresh request
 The Hub's pending decision about which existing Tasks an already locally admitted spoken revision changes. The Talker selects the complete affected Task set, a separate request or no change. Unresolved scope holds old Task and Approval authority without rewriting their targets.
 _Avoid_: treating a local floor decision as a Task selection
 
+**Talk**:
+One push-to-talk capture on the iPhone Client, from press to release. The iPhone Client listens at no other time, and each Talk is a new Spoken request.
+_Avoid_: recording, voice message, push
+
 **Follow-up window**:
 The ten seconds after Jarvis finishes speaking when the User can go on without the Wake word. When it passes in silence, Jarvis plays a short falling closing sound and goes idle.
 _Avoid_: grace period, listening timeout
 
 **Stand by**:
-The User telling Jarvis to be quiet, in any words. The Talker answers with the `stand_by` tool and no speech; Jarvis stops any reply, plays the closing sound and waits for the Wake word.
+The User telling Jarvis to be quiet, in any words. The Talker answers with the `stand_by` tool and no speech; Jarvis stops any reply, plays the closing sound and waits for the Wake word. On the iPhone Client it only stops the reply, since that Client listens only during a Talk.
 _Avoid_: mute, dismiss
 
 **Announcement**:
@@ -101,8 +109,16 @@ Jarvis speaking up unprompted, in one sentence, because a Task has news.
 _Avoid_: notification, alert, ping
 
 **Quiet mode**:
-A state the User sets in which Announcements wait until the next Wake word, except those that need the User.
+A state the User sets in which Announcements wait, on every Client, until the User next speaks to Jarvis by Wake word or Talk, except those that need the User.
 _Avoid_: do not disturb, mute
+
+**Focus**:
+The one Client that speaks Announcements: the Client the User last gave input to or chose for updates. A reply is spoken on the Client that made the request, whichever has Focus.
+_Avoid_: active device, primary client
+
+**Silence**:
+A setting of one iPhone Client under which Jarvis speaks nothing on it, replies included, while text and work carry on. News shown on its open screen counts as told. It is neither Quiet mode, which holds Announcements on every Client, nor Stand by.
+_Avoid_: mute, do not disturb
 
 **Backlog**:
 News left from the last session: what the User had not heard when Jarvis stopped, and what the recovery turn reports at launch. Jarvis never announces it; it opens the User's next turn as context for the Talker, which tells it only when the User asks.
