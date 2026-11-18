@@ -118,3 +118,86 @@ async def test_buffer_only_transcription_does_not_load_microphone_models(monkeyp
         assert await service.transcribe_buffer(np.zeros(1600, np.float32)) == "Good evening"
     finally:
         service.close()
+
+
+@pytest.mark.parametrize("stall", ["load", "transcribe"])
+def test_process_exits_after_close_during_stalled_transcription(stall: str) -> None:
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent('''
+        import asyncio
+        import sys
+        import threading
+        import numpy as np
+        from jarvis_hub.voice.transcription import TranscriptionService
+
+        entered = threading.Event()
+        forever = threading.Event()
+        class Model:
+            def transcribe(self, audio, *, after=0.0):
+                entered.set()
+                forever.wait()
+                return "Never returned"
+        def load():
+            if sys.argv[1] == "load":
+                entered.set()
+                forever.wait()
+            return Model()
+        async def main():
+            service = TranscriptionService(load)
+            task = asyncio.create_task(service.transcribe_buffer(np.zeros(16, np.float32)))
+            assert await asyncio.to_thread(entered.wait, 2)
+            service.close()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        asyncio.run(main())
+        print("Closed", flush=True)
+    ''')
+    process = subprocess.Popen([sys.executable, "-c", script, stall], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        stdout, stderr = process.communicate(timeout=5)
+        assert process.returncode == 0, stderr
+        assert stdout == "Closed\n"
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+
+
+async def test_close_cancels_waiting_transcriptions_and_refuses_new_calls() -> None:
+    entered, release = threading.Event(), threading.Event()
+    calls: list[int] = []
+
+    class Model:
+        def transcribe(self, audio: Samples, *, after: float = 0.0) -> str:
+            calls.append(int(audio[0]))
+            entered.set()
+            assert release.wait(2)
+            return "Finished current transcription"
+
+    service = TranscriptionService(Model)
+    first = asyncio.create_task(service.transcribe_buffer(np.ones(16, np.float32)))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        waiting = asyncio.create_task(service.transcribe_buffer(np.full(16, 2, np.float32)))
+        await asyncio.sleep(0)
+        service.close()
+        service.close()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(waiting, timeout=1)
+        with pytest.raises(RuntimeError, match="closed"):
+            await service.transcribe_buffer(np.zeros(16, np.float32))
+        with pytest.raises(RuntimeError, match="closed"):
+            service.transcribe(np.zeros(16, np.float32))
+        release.set()
+        assert await first == "Finished current transcription"
+        assert calls == [1]
+    finally:
+        release.set()
+        service.close()
+        await first
