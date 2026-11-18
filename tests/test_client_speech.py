@@ -358,3 +358,45 @@ async def test_mac_spoken_request_stops_phone_reply_and_keeps_its_local_floor(ph
         running.cancel()
         await hub.close()
         await voice.close()
+
+
+async def test_retired_mac_spoken_line_leaves_current_phone_reply_and_focus_untouched() -> None:
+    import asyncio
+    from jarvis_hub.voice.state import Timing
+    from jarvis_hub.voice.voice_mode import VoiceMode
+    from tests.fakes import Gate, ScriptedAudio, until
+
+    clock, tts, metrics = FakeClock(), FakeTts(), RecordingMetrics()
+    output, local, remote = RecordingOutput(), RecordingPlayer(), RecordingPlayer(hold=True)
+    voice = VoiceMode(
+        audio=ScriptedAudio(clock), tts=tts, player=local, clock=clock, metrics=metrics, notice=output.notice,
+        timing=Timing(follow_up_s=6, announce_follow_up_s=4, listen_s=6, chime_s=0.5, tail_s=0),
+    )
+    release = asyncio.Event()
+    backend = FakeBackend(clock, [[Text("Phone opening. "), Gate(release), Text("Phone conclusion.")]])
+    hub = make_hub(backend, output, metrics, speech=voice.speech, floor=voice, speak_typed=False)
+    hub.attach_client(Client("phone", "iphone", connected=True, can_speak=True), player=remote)
+
+    async def inputs() -> AsyncIterator[Line]:
+        await until(lambda: local.voices == ["ready"])
+        yield Line("Phone", clock.now(), typed=False, client_id="phone")
+        await until(lambda: remote.texts == ["Phone opening."])
+        playback = list(remote.events)
+        yield Line("Delayed Mac request", clock.now(), typed=False, request_id="retired-mac", revision=1)
+        assert remote.events == playback
+        assert hub.clients.focus == "phone"
+        release.set()
+
+    await hub.start()
+    voice.start()
+    try:
+        await hub.run(inputs())
+        await until(lambda: remote.texts == ["Phone opening.", "Phone conclusion."])
+        remote.finish()
+        assert remote.played() == "Phone opening. Phone conclusion."
+        assert output.replies == ["Phone opening. Phone conclusion."]
+        assert [text for kind, text in output.log if kind == "said"] == ["Phone"]
+        assert hub.clients.focus == "phone"
+    finally:
+        await hub.close()
+        await voice.close()
