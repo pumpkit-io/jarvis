@@ -1,13 +1,14 @@
+import asyncio
 import io
+import threading
 from pathlib import Path
 
 import pytest
 
-from jarvis_hub.event_log import EventOutput
+from jarvis_hub.event_log import EventLog, EventOutput
 from tests.fakes import FakeBackend, FakeClock, RecordingOutput, Text, Tool
 from tests.test_text_mode import converse, settings
 
-from jarvis_hub.event_log import EventLog
 
 
 def test_events_are_durable_and_sequences_increase_after_restart(tmp_path: Path) -> None:
@@ -145,3 +146,26 @@ async def test_terminal_screen_failure_is_recorded_before_the_visible_notice(tmp
     assert notices == ["Model loading.", "Model ready.", "Could not show the details on screen: Screen unavailable"]
     assert stderr.getvalue() == "".join(f"[hub] {notice}\n" for notice in notices)
     assert "# Plan" in (config.runtime_dir / "show.log").read_text()
+
+
+async def test_worker_notices_are_durable_and_displayed_in_log_order(tmp_path: Path) -> None:
+    path = tmp_path / "events.sqlite3"
+    start = threading.Barrier(8)
+
+    class CheckingScreen(RecordingOutput):
+        def notice(self, text: str) -> None:
+            with EventLog(path) as reader:
+                assert reader.after(0)[-1].payload == {"text": text}
+            super().notice(text)
+
+    screen = CheckingScreen()
+    with EventLog(path) as log:
+        output = EventOutput(log, screen)
+
+        def device_notice(index: int) -> None:
+            start.wait(timeout=5)
+            output.notice(f"Audio moved: device {index}")
+
+        await asyncio.gather(*(asyncio.to_thread(device_notice, index) for index in range(8)))
+        assert [event.payload["text"] for event in log.after(0)] == screen.notices
+        assert len(screen.notices) == 8
