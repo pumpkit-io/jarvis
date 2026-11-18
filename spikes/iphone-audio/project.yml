@@ -1,0 +1,27 @@
+name: JarvisAudioSpike
+options:
+  bundleIdPrefix: io.pumpkit.jarvis
+  deploymentTarget:
+    iOS: ${IOS_DEPLOYMENT_TARGET}
+settings:
+  base:
+    SWIFT_VERSION: 6.0
+    TARGETED_DEVICE_FAMILY: 1
+    CODE_SIGN_STYLE: Automatic
+targets:
+  JarvisAudioSpike:
+    type: application
+    platform: iOS
+    sources: [Sources]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.pumpkit.jarvis.audio-spike
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Jarvis Audio Spike
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: Record a five-second clip to test music and microphone routing.
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+    info:
+      path: .build/Info.plist
+      properties:
+        UIBackgroundModes: [audio]

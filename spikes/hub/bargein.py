@@ -9,6 +9,7 @@ machine in audio time, with the reply pausing, rewinding and stopping as the pla
 """
 
 import argparse
+from contextlib import closing
 import json
 import os
 import platform
@@ -28,6 +29,7 @@ from jarvis_hub.voice.input import FRAME, SAMPLE_RATE, Engines, InputPipeline, L
 from jarvis_hub.voice.player import Samples
 from jarvis_hub.voice.state import BargeIn, Interrupt, Pause, Resume, Tick, Timing, Voice, WakeWord, barge_in_from, step
 from jarvis_hub.voice.tts import KokoroSynthesizer
+from jarvis_hub.voice.transcription import TranscriptionService
 
 TIMING = Timing(follow_up_s=6.0, announce_follow_up_s=4.0, listen_s=6.0, chime_s=0.5)
 TTS_RATE = 24_000
@@ -177,51 +179,52 @@ def main() -> None:
     args = parser.parse_args()
     tts = KokoroSynthesizer()
     tts.load()
-    loaded = load_engines(EngineChoice(aec="webrtc"))
-    stt = TimedStt(loaded.stt)
-    replies = {lang: np.asarray(tts.synthesize(text, "am_liam" if lang == "en" else "im_nicola"), np.float32) for lang, text in REPLIES.items()}
-    rows: list[dict[str, Any]] = []
-    for case, lang, said, expected in CASES:
-        # A fresh echo canceller and Wake word model per case, so nothing one case leaves behind reaches the next.
-        engines = replace(loaded, echo=WebRtcEchoCancellation(), wake=OpenWakeWord(), stt=stt)
-        if case in AT_START:
-            converge(engines.echo, replies["it" if lang == "en" else "en"])
-        result = run_case(engines, stt, replies[lang], user_audio(tts, lang, said), AT_START.get(case, USER_AT_S))
-        outcome = result["decisions"][0][0] if result["decisions"] else "none"
-        decided_ms = None
-        if result["decisions"] and result["onset_s"] is not None:
-            decided_ms = round((result["decisions"][0][1] - result["onset_s"]) * 1000)
-        rows.append(
-            {
-                "case": case,
-                "lang": lang,
-                "expected": expected,
-                "outcome": outcome,
-                "ok": outcome == expected,
-                # Audio time from the User's first sound to the decision; the partials' STT time comes on top.
-                "decided_ms": decided_ms,
-                "partial_stt_ms": result["partial_stt_ms"],
-                "barge_ins": result["barge_ins"],
-                "wake_words": result["wake_words"],
-                "pauses_s": result["pauses"],
-                "decisions": [d for d, _ in result["decisions"]],
-            }
-        )
-        print(rows[-1])
-    # Frames queue behind a partial's STT and catch up after it, so only the deciding partial's STT time adds up.
-    resumed = [r["decided_ms"] + r["partial_stt_ms"][-1] for r in rows if r["decided_ms"] is not None and r["outcome"] == "resume"]
-    stopped = [r["decided_ms"] + r["partial_stt_ms"][-1] for r in rows if r["decided_ms"] is not None and r["outcome"] == "stop"]
-    summary = {
-        "date": date.today().isoformat(),
-        "machine": platform.machine(),
-        "cases": len(rows),
-        "as_expected": sum(r["ok"] for r in rows),
-        "resume_ms_max": max(resumed) if resumed else None,
-        "stop_ms_max": max(stopped) if stopped else None,
-        "partial_stt_ms_median": statistics.median(ms for r in rows for ms in r["partial_stt_ms"][1:] or r["partial_stt_ms"]),
-        "rows": rows,
-    }
-    args.out.write_text(json.dumps(summary, indent=2) + "\n")
+    with closing(TranscriptionService()) as transcription:
+        loaded = load_engines(EngineChoice(aec="webrtc"), transcription=transcription)
+        stt = TimedStt(loaded.stt)
+        replies = {lang: np.asarray(tts.synthesize(text, "am_liam" if lang == "en" else "im_nicola"), np.float32) for lang, text in REPLIES.items()}
+        rows: list[dict[str, Any]] = []
+        for case, lang, said, expected in CASES:
+            # A fresh echo canceller and Wake word model per case, so nothing one case leaves behind reaches the next.
+            engines = replace(loaded, echo=WebRtcEchoCancellation(), wake=OpenWakeWord(), stt=stt)
+            if case in AT_START:
+                converge(engines.echo, replies["it" if lang == "en" else "en"])
+            result = run_case(engines, stt, replies[lang], user_audio(tts, lang, said), AT_START.get(case, USER_AT_S))
+            outcome = result["decisions"][0][0] if result["decisions"] else "none"
+            decided_ms = None
+            if result["decisions"] and result["onset_s"] is not None:
+                decided_ms = round((result["decisions"][0][1] - result["onset_s"]) * 1000)
+            rows.append(
+                {
+                    "case": case,
+                    "lang": lang,
+                    "expected": expected,
+                    "outcome": outcome,
+                    "ok": outcome == expected,
+                    # Audio time from the User's first sound to the decision; the partials' STT time comes on top.
+                    "decided_ms": decided_ms,
+                    "partial_stt_ms": result["partial_stt_ms"],
+                    "barge_ins": result["barge_ins"],
+                    "wake_words": result["wake_words"],
+                    "pauses_s": result["pauses"],
+                    "decisions": [d for d, _ in result["decisions"]],
+                }
+            )
+            print(rows[-1])
+        # Frames queue behind a partial's STT and catch up after it, so only the deciding partial's STT time adds up.
+        resumed = [r["decided_ms"] + r["partial_stt_ms"][-1] for r in rows if r["decided_ms"] is not None and r["outcome"] == "resume"]
+        stopped = [r["decided_ms"] + r["partial_stt_ms"][-1] for r in rows if r["decided_ms"] is not None and r["outcome"] == "stop"]
+        summary = {
+            "date": date.today().isoformat(),
+            "machine": platform.machine(),
+            "cases": len(rows),
+            "as_expected": sum(r["ok"] for r in rows),
+            "resume_ms_max": max(resumed) if resumed else None,
+            "stop_ms_max": max(stopped) if stopped else None,
+            "partial_stt_ms_median": statistics.median(ms for r in rows for ms in r["partial_stt_ms"][1:] or r["partial_stt_ms"]),
+            "rows": rows,
+        }
+        args.out.write_text(json.dumps(summary, indent=2) + "\n")
 
 
 if __name__ == "__main__":

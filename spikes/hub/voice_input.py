@@ -9,6 +9,7 @@ real Kokoro voice and a silent player. Writes numbers only (no transcripts) to `
 """
 
 import argparse
+from contextlib import closing
 import asyncio
 import json
 import os
@@ -37,6 +38,7 @@ from jarvis_hub.voice.input import FRAME, SAMPLE_RATE, Capture, Listening, Push
 from jarvis_hub.voice.player import Clip
 from jarvis_hub.voice.state import InputEvent, Timing, WakeWord
 from jarvis_hub.voice.tts import KokoroSynthesizer
+from jarvis_hub.voice.transcription import TranscriptionService
 from jarvis_hub.voice.voice_mode import VoiceMode
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "audio"))
@@ -261,143 +263,144 @@ async def main() -> None:
     source = RealTimeSource()
     loaded = threading.Event()
 
-    def engines() -> Any:
-        e = load_engines(EngineChoice(aec=args.aec))
-        loaded.set()
-        return e
+    with closing(TranscriptionService()) as transcription:
+        def engines() -> Any:
+            e = load_engines(EngineChoice(aec=args.aec), transcription=transcription)
+            loaded.set()
+            return e
 
-    capture = Capture(engines, Listening(), metrics.record, print, source=source)
-    timed = TimedInput(capture)
-    voice = VoiceMode(
-        audio=timed, tts=KokoroSynthesizer(), player=SilentPlayer(), clock=Clock(), timing=TIMING,
-        metrics=metrics, notice=print,
-    )
-    voice.start()
-    capture.start()
-    await asyncio.to_thread(capture.ready.wait)
-    await voice.idle()
-    ready_s = time.perf_counter() - started
-    run = Run(voice, source, rows)
-    consumer = asyncio.create_task(run.consume())
-    results: dict[str, Any] = {"date": date.today().isoformat(), "ready_s": round(ready_s, 2)}
+        capture = Capture(engines, Listening(), metrics.record, print, source=source)
+        timed = TimedInput(capture)
+        voice = VoiceMode(
+            audio=timed, tts=KokoroSynthesizer(), player=SilentPlayer(), clock=Clock(), timing=TIMING,
+            metrics=metrics, notice=print,
+        )
+        voice.start()
+        capture.start()
+        await asyncio.to_thread(capture.ready.wait)
+        await voice.idle()
+        ready_s = time.perf_counter() - started
+        run = Run(voice, source, rows)
+        consumer = asyncio.create_task(run.consume())
+        results: dict[str, Any] = {"date": date.today().isoformat(), "ready_s": round(ready_s, 2)}
 
-    wake_takes = sorted((args.data / "wake").glob("*.wav"))
-    clips = {c.id: c for c in CLIPS if (args.data / "clips" / f"{c.id}.wav").exists()}
-    clip_audio = {k: load(args.data / "clips" / f"{k}.wav") for k in clips}
+        wake_takes = sorted((args.data / "wake").glob("*.wav"))
+        clips = {c.id: c for c in CLIPS if (args.data / "clips" / f"{c.id}.wav").exists()}
+        clip_audio = {k: load(args.data / "clips" / f"{k}.wav") for k in clips}
 
-    # 1. A wake phrase on its own: detected, chimed, and the phrase alone never becomes a turn.
-    per_phrasing: dict[str, list[bool]] = {k: [] for k in WAKE_PHRASINGS}
-    wake_ms: list[float] = []
-    stray_turns = 0
-    for take in wake_takes:
-        audio = load(take)
-        mark, n_turns, n_wakes = len(rows), len(run.turns), len(timed.wakes)
-        t0 = await run.play(np.concatenate([audio, silence(0.5)]))
-        await asyncio.sleep(1.5)
-        woke = "listening" in run.transitions_since(mark)
-        per_phrasing[take.stem.split("_")[0]].append(woke)
-        if len(timed.wakes) > n_wakes:
-            wake_ms.append((timed.wakes[n_wakes] - (t0 + speech_end_s(audio))) * 1000)
-        stray_turns += len(run.turns) - n_turns
-        await run.until_idle()
-    results["wake_alone"] = {
-        "recall_at_0.5": {WAKE_PHRASINGS[k]: f"{sum(v)}/{len(v)}" for k, v in per_phrasing.items()},
-        "wake_after_phrase_end_ms": summary(wake_ms),
-        "wake_phrase_sent_as_a_turn": stray_turns,
-    }
-
-    # 2. "Hey Jarvis, <request>" in one breath (150 ms gap), and 3. with a 1 s pause for the chime.
-    hey = [load(t) for t in wake_takes if t.stem.startswith("hey_")]
-    for name, gap in [("one_breath", 0.15), ("pause_for_chime", 1.0)]:
-        eot, right, exact, missed, stt, smart, incomplete = [], 0, 0, 0, [], [], 0
-        for i, (cid, clip) in enumerate(clips.items()):
-            wake_audio = hey[i % len(hey)]
-            head = wake_audio[: int(speech_end_s(wake_audio) * SAMPLE_RATE) + FRAME]
-            audio = np.concatenate([silence(0.3), head, silence(gap), clip_audio[cid]])
-            end = speech_end_s(audio)
-            mark, n_turns = len(rows), len(run.turns)
-            t0 = await run.play(np.concatenate([audio, silence(2.5)]))
-            await asyncio.sleep(0.5)
-            got = run.turns[n_turns:]
-            if not got:
-                missed += 1
-            else:
-                wall, text = got[0]
-                eot.append((wall - (t0 + end)) * 1000)
-                expected, heard = words(clip.text), words(text)
-                exact += heard == expected
-                right += sum(a == b for a, b in zip(heard, expected)) >= len(expected) - 1
-                turn_rows = [r for r in rows[mark:] if r["kind"] == "turn" and r["words"]]
-                if turn_rows:
-                    stt.append(turn_rows[-1]["stt_ms"])
-                    smart.append(turn_rows[-1]["smart_turn_ms"])
-                    incomplete += any(v < Listening().smart_turn_threshold for v in turn_rows[-1]["smart_turn"])
+        # 1. A wake phrase on its own: detected, chimed, and the phrase alone never becomes a turn.
+        per_phrasing: dict[str, list[bool]] = {k: [] for k in WAKE_PHRASINGS}
+        wake_ms: list[float] = []
+        stray_turns = 0
+        for take in wake_takes:
+            audio = load(take)
+            mark, n_turns, n_wakes = len(rows), len(run.turns), len(timed.wakes)
+            t0 = await run.play(np.concatenate([audio, silence(0.5)]))
+            await asyncio.sleep(1.5)
+            woke = "listening" in run.transitions_since(mark)
+            per_phrasing[take.stem.split("_")[0]].append(woke)
+            if len(timed.wakes) > n_wakes:
+                wake_ms.append((timed.wakes[n_wakes] - (t0 + speech_end_s(audio))) * 1000)
+            stray_turns += len(run.turns) - n_turns
             await run.until_idle()
-        results[name] = {
-            "turns": len(clips),
-            "missed": missed,
-            "transcript_exact": exact,
-            "transcript_within_one_word": right,
-            "speech_end_to_turn_ms": summary(eot),
-            "stt_ms": summary(stt),
-            "smart_turn_ms": summary(smart),
-            "turns_judged_incomplete": incomplete,
+        results["wake_alone"] = {
+            "recall_at_0.5": {WAKE_PHRASINGS[k]: f"{sum(v)}/{len(v)}" for k, v in per_phrasing.items()},
+            "wake_after_phrase_end_ms": summary(wake_ms),
+            "wake_phrase_sent_as_a_turn": stray_turns,
         }
 
-    # 4. The Follow-up window: a turn without the Wake word inside it, then silence to idle.
-    follow_ok = 0
-    for cid in list(clips)[:6]:
-        n_turns = len(run.turns)
-        await run.play(np.concatenate([hey[0][: int(speech_end_s(hey[0]) * SAMPLE_RATE)], silence(0.15), clip_audio["en01"], silence(1.5)]))
-        await asyncio.sleep(0.5)
-        await run.play(np.concatenate([clip_audio[cid], silence(1.5)]))
-        await asyncio.sleep(0.3)
-        follow_ok += len(run.turns) - n_turns == 2
-        await run.until_idle()
-    results["follow_up"] = {"window_s": TIMING.follow_up_s, "follow_up_turns_heard": f"{follow_ok}/6"}
+        # 2. "Hey Jarvis, <request>" in one breath (150 ms gap), and 3. with a 1 s pause for the chime.
+        hey = [load(t) for t in wake_takes if t.stem.startswith("hey_")]
+        for name, gap in [("one_breath", 0.15), ("pause_for_chime", 1.0)]:
+            eot, right, exact, missed, stt, smart, incomplete = [], 0, 0, 0, [], [], 0
+            for i, (cid, clip) in enumerate(clips.items()):
+                wake_audio = hey[i % len(hey)]
+                head = wake_audio[: int(speech_end_s(wake_audio) * SAMPLE_RATE) + FRAME]
+                audio = np.concatenate([silence(0.3), head, silence(gap), clip_audio[cid]])
+                end = speech_end_s(audio)
+                mark, n_turns = len(rows), len(run.turns)
+                t0 = await run.play(np.concatenate([audio, silence(2.5)]))
+                await asyncio.sleep(0.5)
+                got = run.turns[n_turns:]
+                if not got:
+                    missed += 1
+                else:
+                    wall, text = got[0]
+                    eot.append((wall - (t0 + end)) * 1000)
+                    expected, heard = words(clip.text), words(text)
+                    exact += heard == expected
+                    right += sum(a == b for a, b in zip(heard, expected)) >= len(expected) - 1
+                    turn_rows = [r for r in rows[mark:] if r["kind"] == "turn" and r["words"]]
+                    if turn_rows:
+                        stt.append(turn_rows[-1]["stt_ms"])
+                        smart.append(turn_rows[-1]["smart_turn_ms"])
+                        incomplete += any(v < Listening().smart_turn_threshold for v in turn_rows[-1]["smart_turn"])
+                await run.until_idle()
+            results[name] = {
+                "turns": len(clips),
+                "missed": missed,
+                "transcript_exact": exact,
+                "transcript_within_one_word": right,
+                "speech_end_to_turn_ms": summary(eot),
+                "stt_ms": summary(stt),
+                "smart_turn_ms": summary(smart),
+                "turns_judged_incomplete": incomplete,
+            }
 
-    # 5. Stop phrases said on their own, and 6. requests with no Wake word while idle.
-    with tempfile.TemporaryDirectory() as tmp:
-        stops = [say("That's all.", "Samantha", Path(tmp)), say("Grazie Jarvis.", "Alice", Path(tmp))]
-    stop_ok = 0
-    for stop in stops:
-        n_turns = len(run.turns)
-        await run.play(np.concatenate([hey[1][: int(speech_end_s(hey[1]) * SAMPLE_RATE)], silence(0.15), clip_audio["en09"], silence(1.5)]))
-        await asyncio.sleep(0.5)
-        await run.play(np.concatenate([stop, silence(0.5)]))
-        # Idle well inside the 3 s window, and with no turn sent, means the stop phrase did it.
-        idled = await run.until_idle(timeout=1.5)
-        stop_ok += idled and len(run.turns) - n_turns == 1
-        await run.until_idle()
-    idle_turns, idle_requests = 0, list(clips)[:6]
-    for cid in idle_requests:
-        n_turns = len(run.turns)
-        await run.play(np.concatenate([clip_audio[cid], silence(1.5)]))
-        idle_turns += len(run.turns) - n_turns
-    results["stop_phrases"] = f"{stop_ok}/{len(stops)} idled at once with no turn sent"
-    results["requests_while_idle_sent"] = idle_turns
-    results["requests_while_idle_played"] = len(idle_requests)
+        # 4. The Follow-up window: a turn without the Wake word inside it, then silence to idle.
+        follow_ok = 0
+        for cid in list(clips)[:6]:
+            n_turns = len(run.turns)
+            await run.play(np.concatenate([hey[0][: int(speech_end_s(hey[0]) * SAMPLE_RATE)], silence(0.15), clip_audio["en01"], silence(1.5)]))
+            await asyncio.sleep(0.5)
+            await run.play(np.concatenate([clip_audio[cid], silence(1.5)]))
+            await asyncio.sleep(0.3)
+            follow_ok += len(run.turns) - n_turns == 2
+            await run.until_idle()
+        results["follow_up"] = {"window_s": TIMING.follow_up_s, "follow_up_turns_heard": f"{follow_ok}/6"}
 
-    mx.clear_cache()
-    results["memory"] = {
-        "footprint_mb_at_start": footprint_start,
-        "footprint_mb_after": footprint_mb(),
-        "mlx_active_mb": round(mx.get_active_memory() / 2**20),
-        "mlx_peak_mb": round(mx.get_peak_memory() / 2**20),
-        "budget_mb": 4096,
-    }
-    results["versions"] = {
-        p: version(p) for p in ["parakeet-mlx", "openwakeword", "onnxruntime", "livekit", "mlx", "kokoro-mlx"]
-    }
-    results["machine"] = platform.machine()
-    results["aec"] = args.aec
-    results["settings"] = {"listening": Listening().__dict__, "timing": TIMING.__dict__}
-    consumer.cancel()
-    capture.close()
-    args.out.write_text(json.dumps(results, indent=2) + "\n")
-    if args.transcripts:
-        args.transcripts.write_text("\n".join(text for _, text in run.turns) + "\n")
-    print(json.dumps(results, indent=2))
+        # 5. Stop phrases said on their own, and 6. requests with no Wake word while idle.
+        with tempfile.TemporaryDirectory() as tmp:
+            stops = [say("That's all.", "Samantha", Path(tmp)), say("Grazie Jarvis.", "Alice", Path(tmp))]
+        stop_ok = 0
+        for stop in stops:
+            n_turns = len(run.turns)
+            await run.play(np.concatenate([hey[1][: int(speech_end_s(hey[1]) * SAMPLE_RATE)], silence(0.15), clip_audio["en09"], silence(1.5)]))
+            await asyncio.sleep(0.5)
+            await run.play(np.concatenate([stop, silence(0.5)]))
+            # Idle well inside the 3 s window, and with no turn sent, means the stop phrase did it.
+            idled = await run.until_idle(timeout=1.5)
+            stop_ok += idled and len(run.turns) - n_turns == 1
+            await run.until_idle()
+        idle_turns, idle_requests = 0, list(clips)[:6]
+        for cid in idle_requests:
+            n_turns = len(run.turns)
+            await run.play(np.concatenate([clip_audio[cid], silence(1.5)]))
+            idle_turns += len(run.turns) - n_turns
+        results["stop_phrases"] = f"{stop_ok}/{len(stops)} idled at once with no turn sent"
+        results["requests_while_idle_sent"] = idle_turns
+        results["requests_while_idle_played"] = len(idle_requests)
+
+        mx.clear_cache()
+        results["memory"] = {
+            "footprint_mb_at_start": footprint_start,
+            "footprint_mb_after": footprint_mb(),
+            "mlx_active_mb": round(mx.get_active_memory() / 2**20),
+            "mlx_peak_mb": round(mx.get_peak_memory() / 2**20),
+            "budget_mb": 4096,
+        }
+        results["versions"] = {
+            p: version(p) for p in ["parakeet-mlx", "openwakeword", "onnxruntime", "livekit", "mlx", "kokoro-mlx"]
+        }
+        results["machine"] = platform.machine()
+        results["aec"] = args.aec
+        results["settings"] = {"listening": Listening().__dict__, "timing": TIMING.__dict__}
+        consumer.cancel()
+        capture.close()
+        args.out.write_text(json.dumps(results, indent=2) + "\n")
+        if args.transcripts:
+            args.transcripts.write_text("\n".join(text for _, text in run.turns) + "\n")
+        print(json.dumps(results, indent=2))
 
 
 if __name__ == "__main__":
