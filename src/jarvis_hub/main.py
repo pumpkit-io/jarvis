@@ -162,6 +162,7 @@ class TerminalOutput:
         self._show_log = show_log
         self._console = _Console(file=stdout, highlight=False)
         self._mid_reply = False
+        self.on_notice: Callable[[str], None] = self.notice
 
     def heard(self, text: str, *, typed: bool = True) -> None:
         # A terminal already shows what was typed; piped input is echoed so the transcript reads in order.
@@ -194,14 +195,14 @@ class TerminalOutput:
             self._console.print(Markdown(markdown))
             self._stdout.flush()
         except OSError as e:
-            self.notice(f"Could not show the details on screen: {e}")
+            self.on_notice(f"Could not show the details on screen: {e}")
         try:
             self._show_log.parent.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
             with self._show_log.open("a") as f:
                 f.write(f"<!-- shown {stamp} -->\n{markdown.rstrip()}\n\n")
         except OSError as e:
-            self.notice(f"Could not write the show log: {e}")
+            self.on_notice(f"Could not write the show log: {e}")
 
 
 def _guard_billing(environ: MutableMapping[str, str], stderr: TextIO) -> None:
@@ -288,7 +289,9 @@ async def text_mode(
     _guard_billing(environ, stderr)
     with EventLog(settings.runtime_dir / "events.sqlite3") as log:
         interactive = stdin.isatty()
-        output = EventOutput(log, TerminalOutput(stdout, stderr, prompt=interactive, show_log=settings.runtime_dir / "show.log"))
+        terminal = TerminalOutput(stdout, stderr, prompt=interactive, show_log=settings.runtime_dir / "show.log")
+        output = EventOutput(log, terminal)
+        terminal.on_notice = output.notice
         metrics = JsonlMetrics(settings.runtime_dir / "metrics.jsonl")
         speech = None
         if voice is not None:
@@ -346,7 +349,9 @@ async def voice_mode(
     """
     _guard_billing(environ, stderr)
     with EventLog(settings.runtime_dir / "events.sqlite3") as log:
-        output = EventOutput(log, TerminalOutput(stdout, stderr, prompt=stdin.isatty(), show_log=settings.runtime_dir / "show.log"))
+        terminal = TerminalOutput(stdout, stderr, prompt=stdin.isatty(), show_log=settings.runtime_dir / "show.log")
+        output = EventOutput(log, terminal)
+        terminal.on_notice = output.notice
         metrics = JsonlMetrics(settings.runtime_dir / "metrics.jsonl")
         voice = settings.voice
         choice = EngineChoice(aec="off" if headphones else voice.aec, wake=voice.wake_engine, stt=voice.stt_engine)
