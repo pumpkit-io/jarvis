@@ -7,3 +7,9 @@ __pycache__/
 .pytest_cache/
 # Hub runtime state, logs and metrics.
 .jarvis/
+# Generated iPhone projects, Swift build output and local device settings.
+ios/*.xcodeproj/
+ios/.generated/
+ios/.build/
+ios/JarvisClient/.build/
+ios/device.env

@@ -14,7 +14,7 @@ The Talker holds the conversation, the read-only Orchestrator plans Tasks, and S
 
 Use `./jarvis --text` for a terminal conversation without audio. `./jarvis` starts voice mode; `--headphones` disables echo cancellation and `--debug` displays voice transitions. The launcher follows symlinks and runs from its own checkout. Configuration is parsed from `.env`; `.env.example` lists the settings.
 
-Run `uv run pytest -q` and `uv run pyright` before reporting a change complete. Tests inject fake agents, clock and audio through the Hub seam and never spend model quota. Real-model and real-GitHub tests are opt-in; leave them off unless explicitly authorized. Runtime state and logs live under the gitignored `.jarvis/` folder. See `docs/notes/phase-0-spikes.md` for measurements and manual voice checks.
+Run `uv run pytest -q` and `uv run pyright` before reporting a change complete. For changes under `ios/`, also run `swift build --package-path ios/JarvisClient` and `swift test --package-path ios/JarvisClient` locally; Swift has no CI. See `ios/README.md` for the generated app project and device checks. Tests inject fake agents, clock and audio through the Hub seam and never spend model quota. Real-model and real-GitHub tests are opt-in; leave them off unless explicitly authorized. Runtime state and logs live under the gitignored `.jarvis/` folder. See `docs/notes/phase-0-spikes.md` for measurements and manual voice checks.
 
 The Talker warms in the background at launch (ADR 0006). That hidden turn spends subscription usage; idle listening and stop phrases need no model call. Preserve `strict_mcp_config` and the Hub's tool guards when changing the SDK adapter; see ADRs 0007, 0008 and 0013.
 
