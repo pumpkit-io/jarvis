@@ -152,19 +152,15 @@ async def test_pairing_validates_the_protocol_and_caps_json(tmp_path: Path) -> N
             await hub.close()
 
 
-async def test_cli_processes_share_codes_and_revocations_with_the_running_door(tmp_path: Path) -> None:
-    import asyncio
-    import re
-    import sys
-
-    script = '''
+_CLI_SCRIPT = '''
 import sys
 from pathlib import Path
 from jarvis_hub import main as entry
 from jarvis_hub.config import load_settings
 root = Path(sys.argv.pop(1))
+configured_origin = sys.argv.pop(1)
 def settings(*args, **kwargs):
-    return load_settings(root, {"JARVIS_REMOTE_ORIGIN": "https://configured.example.ts.net"})
+    return load_settings(root, {"JARVIS_REMOTE_ORIGIN": configured_origin})
 def forbidden(*args, **kwargs):
     raise AssertionError("pairing CLI must not start models, audio, or Claude checks")
 entry.load_settings = settings
@@ -173,13 +169,25 @@ entry.shutil.which = forbidden
 entry.main()
 '''
 
+
+async def run_cli(root: Path, *arguments: str, configured_origin: str = "https://configured.example.ts.net") -> tuple[int, str, str]:
+    import asyncio
+    import sys
+
+    process = await asyncio.create_subprocess_exec(sys.executable, "-c", _CLI_SCRIPT, str(root), configured_origin, *arguments,
+                                                  stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    stdout, stderr = await asyncio.wait_for(process.communicate(), 10)
+    assert process.returncode is not None
+    return process.returncode, stdout.decode(), stderr.decode()
+
+
+async def test_cli_processes_share_codes_and_revocations_with_the_running_door(tmp_path: Path) -> None:
+    import re
+
     async def cli(*arguments: str) -> tuple[int, str]:
-        process = await asyncio.create_subprocess_exec(sys.executable, "-c", script, str(tmp_path), *arguments,
-                                                      stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        stdout, stderr = await asyncio.wait_for(process.communicate(), 10)
-        assert not stderr, stderr.decode()
-        assert process.returncode is not None
-        return process.returncode, stdout.decode()
+        status, stdout, stderr = await run_cli(tmp_path, *arguments)
+        assert not stderr, stderr
+        return status, stdout
 
     hub = make_hub(FakeBackend(FakeClock()), RecordingOutput(), RecordingMetrics())
     path = tmp_path / ".jarvis" / "events.sqlite3"
@@ -217,11 +225,24 @@ entry.main()
             await hub.close()
 
 
-def test_pair_cli_requires_a_safe_explicit_origin(tmp_path: Path) -> None:
-    import pytest
+async def test_pair_cli_requires_a_safe_explicit_origin(tmp_path: Path) -> None:
+    import re
 
-    with PairingStore(tmp_path / "events.sqlite3") as store:
-        for origin in ("", "http://mac.example.ts.net", "https://u:p@mac.example.ts.net", "https://mac.example.ts.net/path",
-                       "https://mac.example.ts.net?x=1", "https://mac.example.ts.net#x", "https://mac.example.ts.net:bad"):
-            with pytest.raises(ValueError, match="HTTPS origin"):
-                store.create_code(origin)
+    for origin in (None, "", "http://mac.example.ts.net", "https://pair-test-user:pair-test-secret@mac.example.ts.net",
+                   "https://mac.example.ts.net/path", "https://mac.example.ts.net?x=1", "https://mac.example.ts.net#x",
+                   "https://mac.example.ts.net:bad"):
+        arguments = ("pair",) if origin is None else ("pair", "--origin", origin)
+        status, stdout, stderr = await run_cli(tmp_path, *arguments, configured_origin="")
+        assert status != 0
+        assert stdout == ""
+        assert stderr.startswith("jarvis-hub: ")
+        assert "HTTPS origin" in stderr
+        if not origin:
+            assert "Set JARVIS_REMOTE_ORIGIN" in stderr
+            assert "pair --origin" in stderr
+        assert "Traceback" not in stderr
+        assert "pair-test-user" not in stderr
+        assert "pair-test-secret" not in stderr
+        assert "Pairing code:" not in stderr
+        assert "device_token" not in stderr
+        assert re.search(r"\b\d{6}\b", stderr) is None
