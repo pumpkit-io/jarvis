@@ -96,3 +96,52 @@ def test_output_is_durable_before_it_reaches_the_screen(tmp_path: Path, kind: st
             output.reply_end()
         else:
             getattr(output, kind)("A line.")
+
+
+async def test_terminal_show_log_failure_is_recorded_once_with_the_visible_notice(tmp_path: Path) -> None:
+    config = settings(tmp_path)
+    config.runtime_dir.mkdir(parents=True)
+    (config.runtime_dir / "show.log").mkdir()
+    backend = FakeBackend(FakeClock(), [[Tool("show", {"markdown": "# Plan"})]])
+
+    stdout, stderr = await converse(backend, io.StringIO("Show me\n"), config=config)
+
+    with EventLog(config.runtime_dir / "events.sqlite3") as log:
+        notices = [event.payload["text"] for event in log.after(0) if event.type == "notice"]
+    assert "Plan" in stdout
+    assert len(notices) == 3
+    assert notices[:2] == ["Model loading.", "Model ready."]
+    assert notices[2].startswith("Could not write the show log:")
+    assert stderr == "".join(f"[hub] {notice}\n" for notice in notices)
+
+
+async def test_terminal_screen_failure_is_recorded_before_the_visible_notice(tmp_path: Path) -> None:
+    from jarvis_hub.main import text_mode
+
+    config = settings(tmp_path)
+    backend = FakeBackend(FakeClock(), [[Tool("show", {"markdown": "# Plan"})]])
+    path = config.runtime_dir / "events.sqlite3"
+
+    class FailedDetailsScreen(io.StringIO):
+        def write(self, text: str) -> int:
+            if "Plan" in text:
+                raise OSError("Screen unavailable")
+            return super().write(text)
+
+    class CheckingNotices(io.StringIO):
+        def write(self, text: str) -> int:
+            with EventLog(path) as reader:
+                assert text == f"[hub] {reader.after(0)[-1].payload['text']}\n"
+            return super().write(text)
+
+    stderr = CheckingNotices()
+    await text_mode(
+        settings=config, environ={}, backend=backend, clock=backend.clock,
+        stdin=io.StringIO("Show me\n"), stdout=FailedDetailsScreen(), stderr=stderr,
+    )
+
+    with EventLog(path) as log:
+        notices = [event.payload["text"] for event in log.after(0) if event.type == "notice"]
+    assert notices == ["Model loading.", "Model ready.", "Could not show the details on screen: Screen unavailable"]
+    assert stderr.getvalue() == "".join(f"[hub] {notice}\n" for notice in notices)
+    assert "# Plan" in (config.runtime_dir / "show.log").read_text()
