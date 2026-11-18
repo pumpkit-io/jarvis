@@ -72,7 +72,7 @@ Ask for status or to cancel a Task by name. Quiet mode holds routine Announcemen
 
 The optional door stays off with `JARVIS_REMOTE=off` (the default). Set `JARVIS_REMOTE=on` and `JARVIS_REMOTE_PORT=8765` in `.env` to listen on `127.0.0.1`. Only that loopback address is accepted. Both text and voice mode own the listener; ending terminal input stops it and the Hub.
 
-`GET /v1/health` returns protocol `version: 1`, model readiness, the Mac name and the Usage limit. It requires a device token under [protocol v1](docs/protocol/client-v1.md), following Spec #91's every-request authentication rule over #101's health exception. Until durable pairing is connected, the door denies every health request with HTTP 401. Tests inject a fake token verifier; there is no development bypass in the launcher. The health response exposes no paths, configuration or credentials.
+`GET /v1/health` returns protocol `version: 1`, model readiness, the Mac name and the Usage limit. It requires a device token under [protocol v1](docs/protocol/client-v1.md), following Spec #91's every-request authentication rule over #101's health exception. Unpaired and revoked tokens receive HTTP 401. The running Hub looks up each token in the durable device store on every request; CLI revocation takes effect on the next HTTP call. The health response exposes no paths, configuration or credentials.
 
 After completing the account checklist below, run this on the Mac, using the configured port:
 
@@ -81,7 +81,13 @@ tailscale serve --bg http://127.0.0.1:8765
 tailscale serve status
 ```
 
-Use the HTTPS origin printed by Serve for pairing. Serve limits access to the tailnet and manages HTTPS; see the [Tailscale Serve instructions](https://tailscale.com/docs/features/tailscale-serve) and [command reference](https://tailscale.com/docs/reference/tailscale-cli/serve). Never use `tailscale funnel`: it publishes to the public internet. Do not forward the port through a router or bind the Hub to a LAN or tailnet address.
+Set `JARVIS_REMOTE_ORIGIN` to the HTTPS origin printed by Serve, for example `https://mac.example.ts.net`. Then run `./jarvis pair` in another terminal. It prints a six-digit code and a terminal QR containing protocol version, origin and code. `./jarvis pair --origin https://mac.example.ts.net` overrides the configured origin for that code. Pairing never guesses the address from an HTTP Host header.
+
+The code expires after five minutes and works once; creating another invalidates the previous code. Pairing requests need the running remote-enabled Hub, although the CLI can create the code while it is stopped. Five failed exchanges in five minutes lock pairing for five minutes. The lockout survives a Hub restart and creating a new code. A lost successful response needs a new code; the token is never returned again.
+
+`./jarvis clients` lists active device names, kinds and paired times in UTC. `./jarvis revoke "My iPhone"` revokes that exact, case-sensitive name. Active names are unique: pairing another device with the same friendly name assigns a suffix such as `My iPhone (2)`. The original token keeps working, including after an app resets its local token and pairs again. Use the assigned name from `./jarvis clients` when revoking. Pairing never silently replaces another device. Pairing again gets a new Client identity and token; a revoked name can be reused. These commands run without starting audio or model sessions or requiring the Claude CLI. The shared SQLite store under `.jarvis/events.sqlite3` keeps token and code hashes, never their raw values.
+
+Serve limits access to the tailnet and manages HTTPS; see the [Tailscale Serve instructions](https://tailscale.com/docs/features/tailscale-serve) and [command reference](https://tailscale.com/docs/reference/tailscale-cli/serve). Never use `tailscale funnel`: it publishes to the public internet. Do not forward the port through a router or bind the Hub to a LAN or tailnet address.
 
 Waiting on the User, these account and device steps have not been performed or verified by the automated loopback tests:
 
@@ -89,7 +95,7 @@ Waiting on the User, these account and device steps have not been performed or v
 - [ ] Enable HTTPS for the tailnet through the Tailscale admin console or Serve's interactive setup.
 - [ ] Restrict the tailnet ACL to the User's own devices reaching this Mac's Serve HTTPS port; remove broader rules that grant the same access.
 - [ ] Run Serve, verify its HTTPS origin from the iPhone and verify that another unauthorized tailnet device cannot reach it.
-- [ ] Once pairing is available, check that authenticated health works and unpaired/revoked tokens are refused over HTTPS and cellular.
+- [ ] Scan the terminal QR on the physical iPhone, then check that authenticated health works and unpaired/revoked tokens are refused over HTTPS and cellular.
 
 ## Settings
 

@@ -8,6 +8,7 @@ import io
 import json
 import os
 import shutil
+import sqlite3
 import sys
 import threading
 import time
@@ -23,6 +24,7 @@ from rich.markdown import Markdown
 
 from jarvis_hub.event_log import EventLog, EventOutput
 from jarvis_hub.door import Door
+from jarvis_hub.pairing import PairingStore, https_origin
 from jarvis_hub.agents.backend import AgentBackend, SessionSpec
 from jarvis_hub.agents.sdk import SdkBackend
 from jarvis_hub.config import ConfigError, Settings, VoiceSettings, load_settings
@@ -289,7 +291,7 @@ async def text_mode(
     With a voice, replies are also spoken, and the conversation ends once the last one has finished playing.
     """
     _guard_billing(environ, stderr)
-    with EventLog(settings.runtime_dir / "events.sqlite3") as log:
+    with EventLog(settings.runtime_dir / "events.sqlite3") as log, PairingStore(settings.runtime_dir / "events.sqlite3") as pairing:
         interactive = stdin.isatty()
         terminal = TerminalOutput(stdout, stderr, prompt=interactive, show_log=settings.runtime_dir / "show.log")
         output = EventOutput(log, terminal)
@@ -310,7 +312,7 @@ async def text_mode(
             settings, backend=backend, clock=clock, output=output, metrics=metrics, speech=speech,
             on_model_ready=lambda: output.notice("Model ready."),
         )
-        door = Door(enabled=settings.remote, port=settings.remote_port, health=hub.health)
+        door = Door(enabled=settings.remote, port=settings.remote_port, health=hub.health, pairing=pairing)
         try:
             output.notice("Model loading.")
             await hub.start()
@@ -355,7 +357,7 @@ async def voice_mode(
     Ends with the typed input (Ctrl-D) or Ctrl-C.
     """
     _guard_billing(environ, stderr)
-    with EventLog(settings.runtime_dir / "events.sqlite3") as log:
+    with EventLog(settings.runtime_dir / "events.sqlite3") as log, PairingStore(settings.runtime_dir / "events.sqlite3") as pairing:
         terminal = TerminalOutput(stdout, stderr, prompt=stdin.isatty(), show_log=settings.runtime_dir / "show.log")
         output = EventOutput(log, terminal)
         terminal.on_notice = output.notice
@@ -401,7 +403,7 @@ async def voice_mode(
             preconnect_orchestrator=True,
             on_model_ready=lambda: (output.notice("Model ready."), model_ready.set()),
         )
-        door = Door(enabled=settings.remote, port=settings.remote_port, health=hub.health)
+        door = Door(enabled=settings.remote, port=settings.remote_port, health=hub.health, pairing=pairing)
         try:
             output.notice("Model loading.")
             await hub.start()
@@ -517,7 +519,7 @@ def main() -> None:
     parser.add_argument("--speak", action="store_true", help="with --text, speak generated replies; readiness is nonverbal")
     parser.add_argument("--headphones", action="store_true", help="voice mode with echo cancellation off")
     parser.add_argument("--debug", action="store_true", help="show the voice state machine's transitions")
-    commands = parser.add_subparsers(dest="command", metavar="stats")
+    commands = parser.add_subparsers(dest="command", metavar="{stats,pair,clients,revoke}")
     stats = commands.add_parser("stats", help="print usage and latency per role from the metrics log")
     stats.add_argument("--since", help="start of the range: a time ago like 24h or 7d, or a date like 2026-11-01")
     stats.add_argument(
@@ -528,7 +530,44 @@ def main() -> None:
     stats.add_argument("--metrics", type=Path, help="metrics JSONL for the controlled latency report")
     stats.add_argument("--voice", action="store_true", help="trace captured requests, recognition and meaningful audio")
     stats.add_argument("--bargein", action="store_true", help="report the Barge-in decision log instead")
+    pair = commands.add_parser("pair", help="create a one-time pairing code and terminal QR")
+    pair.add_argument("--origin", help="Tailscale HTTPS origin; overrides JARVIS_REMOTE_ORIGIN")
+    commands.add_parser("clients", help="list paired devices")
+    revoke = commands.add_parser("revoke", help="revoke a paired device by its exact name")
+    revoke.add_argument("name", help="exact device name, quoted if it contains spaces")
     args = parser.parse_args()
+
+    if args.command in ("pair", "clients", "revoke"):
+        try:
+            settings = load_settings(Path(__file__).resolve().parents[2], os.environ, ignore_voice=lambda error: None)
+            with PairingStore(settings.runtime_dir / "events.sqlite3") as pairing:
+                if args.command == "pair":
+                    import qrcode
+
+                    origin = args.origin or settings.remote_origin
+                    if not origin:
+                        raise ValueError("Set JARVIS_REMOTE_ORIGIN to the HTTPS origin from tailscale serve status, or use pair --origin")
+                    origin = https_origin(origin)
+                    code = pairing.create_code(origin)
+                    print(f"Origin: {origin}\nPairing code: {code}\nValid once for 5 minutes.")
+                    print("Pairing requests need a running Hub with JARVIS_REMOTE=on.")
+                    qr = qrcode.QRCode()
+                    qr.add_data(json.dumps({"version": 1, "origin": origin, "code": code}, separators=(",", ":")))
+                    qr.print_ascii(out=sys.stdout)
+                elif args.command == "clients":
+                    clients = pairing.clients()
+                    if not clients:
+                        print("No paired devices.")
+                    for client in clients:
+                        stamp = datetime.fromtimestamp(client.created_at, timezone.utc).isoformat().replace("+00:00", "Z")
+                        print(f"{client.name}\t{client.kind}\t{stamp}")
+                elif not pairing.revoke(args.name):
+                    raise ValueError("No active device has that exact name. Run ./jarvis clients.")
+                else:
+                    print(f"Revoked {args.name}.")
+        except (ConfigError, ValueError, sqlite3.OperationalError) as e:
+            sys.exit(f"jarvis-hub: {e}")
+        return
 
     if args.command == "stats":
         try:
