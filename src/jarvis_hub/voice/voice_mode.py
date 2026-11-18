@@ -113,16 +113,19 @@ class _ObservedSpeech:
         self._heard_at: float | None = None
         self._owner: tuple[str, int] | None = None
         self._dropping = False
+        self._remote = False
         self._waits: set[asyncio.Task[None]] = set()
 
-    def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None) -> None:
-        self._dropping = self._moved_on(heard_at, owner)
+    def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
+              destination: Player | None = None, allowed: Callable[[], bool] | None = None) -> None:
+        self._remote = destination is not None
+        self._dropping = not self._remote and self._moved_on(heard_at, owner)
         if self._dropping:
             return
         self._replies += 1
         self._heard_at = heard_at
         self._owner = owner
-        self._speech.begin(lang, turn=turn, heard_at=heard_at, owner=owner)
+        self._speech.begin(lang, turn=turn, heard_at=heard_at, owner=owner, destination=destination, allowed=allowed)
 
     def feed(self, text: str) -> None:
         if not self._dropping:
@@ -141,6 +144,8 @@ class _ObservedSpeech:
             self._dropping = False
             return
         self._speech.end()
+        if self._remote:
+            return
         wait = asyncio.create_task(self._played(self._replies, self._heard_at, self._owner))
         self._waits.add(wait)
         wait.add_done_callback(self._waits.discard)

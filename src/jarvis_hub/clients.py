@@ -13,6 +13,7 @@ class Client:
     connected: bool = False
     can_show_text: bool = True
     can_speak: bool = False
+    silence: bool = False
 
 
 class Clients:
