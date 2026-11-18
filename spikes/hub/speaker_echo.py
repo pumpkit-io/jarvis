@@ -10,6 +10,7 @@ counts what a silent User would have been heard saying.
 """
 
 import argparse
+from contextlib import closing
 import json
 import sys
 import threading
@@ -24,6 +25,7 @@ from jarvis_hub.voice.engines import EngineChoice, WebRtcEchoCancellation, load_
 from jarvis_hub.voice.input import FRAME, SAMPLE_RATE, Engines, InputPipeline, Listening
 from jarvis_hub.voice.state import BargeIn, SpeechStarted, WakeWord
 from jarvis_hub.voice.tts import KokoroSynthesizer
+from jarvis_hub.voice.transcription import TranscriptionService
 
 OUT = Path(".jarvis/echo")
 VOICE = "am_liam"
@@ -193,29 +195,30 @@ def analyse(delays: list[int | None]) -> None:
     meta = json.loads((OUT / "recording.json").read_text())
     started = meta["started"]
     spans = [(started + a + 0.0, started + b) for a, b in meta["spans"]]
-    engines = load_engines(EngineChoice(aec="off"))
-    times = data["cap_t"]
-    voiced = np.zeros(len(times), bool)
-    for start, end in spans:
-        voiced |= (times >= start) & (times <= end)
-    raw = data["cap"]
-    results: dict[str, Any] = {"latencies": meta["latencies"], "raw_voice_db": rms_db(raw[voiced]),
-                               "raw_silence_db": rms_db(raw[~voiced]), "settings": {}}
-    for delay in delays:
-        clean = cancel(data, delay)
-        found = heard(engines, clean, times, spans)
-        stops = [b for b in found["barge_ins"] if b["decision"] == "stop"]
-        results["settings"][str(delay)] = {
-            "voice_db": rms_db(clean[voiced]), "silence_db": rms_db(clean[~voiced]),
-            "erle_db": rms_db(raw[voiced]) - rms_db(clean[voiced]),
-            "barge_ins": len(found["barge_ins"]), "stops": len(stops),
-            "worded": [(b["where"], b["text"]) for b in found["barge_ins"] if b["text"]],
-            "wake_hits": found["wake_hits"], "tail_speech_s": found["tail_speech_s"],
-        }
-        row = results["settings"][str(delay)]
-        print(f"delay {delay}: ERLE {row['erle_db']:.1f} dB, barge-ins {row['barge_ins']}, stops {row['stops']}, "
-              f"wake {row['wake_hits']}, tail speech {row['tail_speech_s']} s, words {row['worded']}", flush=True)
-    (OUT / "analysis.json").write_text(json.dumps(results, indent=1, default=str))
+    with closing(TranscriptionService()) as transcription:
+        engines = load_engines(EngineChoice(aec="off"), transcription=transcription)
+        times = data["cap_t"]
+        voiced = np.zeros(len(times), bool)
+        for start, end in spans:
+            voiced |= (times >= start) & (times <= end)
+        raw = data["cap"]
+        results: dict[str, Any] = {"latencies": meta["latencies"], "raw_voice_db": rms_db(raw[voiced]),
+                                   "raw_silence_db": rms_db(raw[~voiced]), "settings": {}}
+        for delay in delays:
+            clean = cancel(data, delay)
+            found = heard(engines, clean, times, spans)
+            stops = [b for b in found["barge_ins"] if b["decision"] == "stop"]
+            results["settings"][str(delay)] = {
+                "voice_db": rms_db(clean[voiced]), "silence_db": rms_db(clean[~voiced]),
+                "erle_db": rms_db(raw[voiced]) - rms_db(clean[voiced]),
+                "barge_ins": len(found["barge_ins"]), "stops": len(stops),
+                "worded": [(b["where"], b["text"]) for b in found["barge_ins"] if b["text"]],
+                "wake_hits": found["wake_hits"], "tail_speech_s": found["tail_speech_s"],
+            }
+            row = results["settings"][str(delay)]
+            print(f"delay {delay}: ERLE {row['erle_db']:.1f} dB, barge-ins {row['barge_ins']}, stops {row['stops']}, "
+                  f"wake {row['wake_hits']}, tail speech {row['tail_speech_s']} s, words {row['worded']}", flush=True)
+        (OUT / "analysis.json").write_text(json.dumps(results, indent=1, default=str))
 
 
 def main() -> None:
