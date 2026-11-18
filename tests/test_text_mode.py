@@ -401,3 +401,79 @@ async def test_standing_by_on_a_typed_line_prints_no_reply(tmp_path: Path) -> No
     stdout, _ = await converse(backend, io.StringIO("Oh, be quiet\n"), config=settings(tmp_path))
 
     assert "Very well" not in stdout
+
+
+async def test_remote_door_shares_terminal_lifetime_and_eof_still_closes_the_hub(tmp_path: Path) -> None:
+    import socket
+    from dataclasses import replace
+    from urllib.error import HTTPError
+    from urllib.request import urlopen
+
+    with socket.socket() as reserved:
+        reserved.bind(("127.0.0.1", 0))
+        port = reserved.getsockname()[1]
+    observed: list[int] = []
+
+    class RemoteStdin(io.StringIO):
+        def __next__(self) -> str:
+            if not observed:
+                try:
+                    with urlopen(f"http://127.0.0.1:{port}/v1/health", timeout=2) as response:
+                        observed.append(response.status)
+                except HTTPError as error:
+                    observed.append(error.code)
+            return super().__next__()
+
+    backend = FakeBackend(FakeClock(), [[Text("Evening, sir.")]])
+    stdout, _ = await converse(
+        backend, RemoteStdin("Hello\n"), config=replace(settings(tmp_path), remote=True, remote_port=port),
+    )
+
+    assert observed == [401]
+    assert stdout == "› Hello\nEvening, sir.\n"
+    assert backend.sessions[0].closed
+    with socket.socket() as probe:
+        assert probe.connect_ex(("127.0.0.1", port)) != 0
+
+
+async def test_a_busy_remote_port_preserves_saved_tasks_for_the_next_launch(tmp_path: Path) -> None:
+    import socket
+    from dataclasses import replace
+
+    from tests.fakes import RecordingMetrics, RecordingOutput, Typist, make_hub, until
+
+    clock = FakeClock()
+    request = "Tell me when Ada reviews pumpkit#42"
+    first = FakeBackend(
+        clock, [[Tool("delegate", {"request": request, "context": ""})]],
+        orchestrator=[[
+            Tool("schedule_check", {"after_seconds": 600, "note": "Check Ada's review", "max_repeats": 1}),
+            Tool("report", {"task_id": "T1", "spoken": "I'll check later.", "needs_user": False}),
+        ]],
+    )
+    config = settings(tmp_path)
+    await converse(first, io.StringIO(request + "\n"), config=config)
+
+    with socket.socket() as occupied:
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen()
+        with pytest.raises(OSError):
+            await converse(
+                FakeBackend(clock), io.StringIO(""),
+                config=replace(config, remote=True, remote_port=occupied.getsockname()[1]),
+            )
+
+    backend = FakeBackend(clock, orchestrator=[[], [Tool("report", {"task_id": "T1", "spoken": "Ada reviewed it.", "needs_user": False})]])
+    output = RecordingOutput()
+    hub = make_hub(backend, output, RecordingMetrics(), state_path=config.runtime_dir / "state.json")
+    typist = Typist(clock)
+    await hub.start()
+    running = asyncio.create_task(hub.run(typist.lines()))
+    try:
+        await until(lambda: any(request in message for session in backend.all_sessions("orchestrator") for message in session.received))
+        clock.advance(600)
+        await until(lambda: any('source="timer"' in message for session in backend.all_sessions("orchestrator") for message in session.received))
+    finally:
+        typist.end()
+        await running
+        await hub.close()

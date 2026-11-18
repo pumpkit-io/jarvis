@@ -280,3 +280,23 @@ def test_audio_clips_are_off_by_default_and_opt_in_with_retention_limits(checkou
 def test_audio_clips_must_be_on_or_off(checkout: Path) -> None:
     with pytest.raises(ConfigError, match="JARVIS_AUDIO_CLIPS"):
         load_settings(checkout, environ={"JARVIS_AUDIO_CLIPS": "yes"})
+
+
+def test_remote_door_defaults_off_and_accepts_an_explicit_port(checkout: Path) -> None:
+    default = load_settings(checkout, environ={})
+    assert default.remote is False
+    assert default.remote_port == 8765
+    configured = load_settings(checkout, environ={"JARVIS_REMOTE": "on", "JARVIS_REMOTE_PORT": "54321"})
+    assert configured.remote is True
+    assert configured.remote_port == 54321
+
+
+@pytest.mark.parametrize("value", ["0", "65536", "1.5", "nan", "-1", "abc"])
+def test_remote_port_must_be_a_valid_tcp_port(checkout: Path, value: str) -> None:
+    with pytest.raises(ConfigError, match="JARVIS_REMOTE_PORT"):
+        load_settings(checkout, environ={"JARVIS_REMOTE_PORT": value})
+
+
+def test_remote_switch_requires_on_or_off(checkout: Path) -> None:
+    with pytest.raises(ConfigError, match="JARVIS_REMOTE"):
+        load_settings(checkout, environ={"JARVIS_REMOTE": "yes"})
