@@ -96,6 +96,8 @@ class _Reply:
     began: float
     heard_at: float | None
     owner: tuple[str, int] | None = None
+    player: Player | None = None
+    allowed: Callable[[], bool] | None = None
     splitter: SentenceSplitter = field(default_factory=SentenceSplitter)
     chunks: int = 0
     first_chunk: float | None = None
@@ -144,6 +146,8 @@ class Speech:
     ) -> None:
         self._tts = tts
         self._player = player
+        self._players: list[Player] = [player]
+        self._last_player = player
         self._clock = clock
         self._metrics = metrics
         self._notice = notice
@@ -171,9 +175,15 @@ class Speech:
         """Queue a nonverbal cue; `in_reply` associates its playback with the reply `begin` opened."""
         self._queue.put_nowait(_Cached(name, lang, self._reply if in_reply else None))
 
-    def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None) -> None:
-        """`heard_at` retains the User's speech-end timestamp for latency and reply ownership."""
-        self._reply = _Reply(turn, lang, self._clock.now(), heard_at, owner=owner)
+    def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
+              destination: Player | None = None, allowed: Callable[[], bool] | None = None) -> None:
+        """Bind the destination for this reply; recheck availability before synthesis and delivery.
+        `heard_at` retains the User's speech-end timestamp for latency and reply ownership."""
+        player = destination if destination is not None else self._player
+        if not any(p is player for p in self._players):
+            self._players.append(player)
+        self._last_player = player
+        self._reply = _Reply(turn, lang, self._clock.now(), heard_at, owner=owner, player=player, allowed=allowed)
         self._prune_replies()
         self._replies[turn] = self._reply
 
@@ -215,10 +225,14 @@ class Speech:
         while not self._queue.empty():
             self._queue.get_nowait()
             self._queue.task_done()
-        self._player.stop()
+        for player in self._players:
+            try:
+                player.stop()
+            except Exception as e:
+                self._notice(f"Could not stop speech: {type(e).__name__}: {e}")
 
     def played(self) -> str:
-        return self._player.played()
+        return self._last_player.played()
 
     async def idle(self) -> None:
         """Returns once the voice has loaded, or failed to, and everything said so far has finished playing."""
@@ -226,10 +240,10 @@ class Speech:
             with contextlib.suppress(Exception):
                 await self._loading
         await self._queue.join()
-        left, since = self._player.pending(), self._clock.now()
+        left, since = sum(p.pending() for p in self._players), self._clock.now()
         while left > 0:
             await self._clock.sleep(0.05)
-            if (now_left := self._player.pending()) < left:
+            if (now_left := sum(p.pending() for p in self._players)) < left:
                 left, since = now_left, self._clock.now()
             elif self._clock.now() - since >= STALLED:
                 return
@@ -240,7 +254,8 @@ class Speech:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._worker
         self._thread.shutdown(wait=False)
-        self._player.close()
+        for player in self._players:
+            player.close()
 
     def _say(self, chunks: list[str]) -> None:
         reply = self._reply
@@ -287,21 +302,24 @@ class Speech:
                 self._queue.task_done()
 
     def _prune_replies(self) -> None:
-        pending = self._player.pending()
         self._replies = {
             turn: reply for turn, reply in self._replies.items()
-            if not reply.generation_done or (reply.audio_s > 0 and pending > reply.trailing_audio_s + 1e-9)
+            if not reply.generation_done or (
+                reply.audio_s > 0 and (reply.player or self._player).pending() > reply.trailing_audio_s + 1e-9
+            )
         }
 
     async def _handle(self, item: _Say | _Cached | _End) -> None:
         match item:
             case _Say(reply, text):
+                if reply.allowed is not None and not reply.allowed():
+                    return
                 generation = self._generation
                 voice = voice_for(reply.lang)
                 samples = await asyncio.get_running_loop().run_in_executor(
                     self._thread, self._tts.synthesize, text, voice
                 )
-                if generation == self._generation:
+                if generation == self._generation and (reply.allowed is None or reply.allowed()):
                     self._play(Clip(text, voice, samples, self._tts.sample_rate), reply, sentence=True)
             case _Cached(name, lang, reply):
                 starts = self._play(self._cache[name, lang], reply, sentence=False)
@@ -312,23 +330,27 @@ class Speech:
 
     def _play(self, clip: Clip, reply: _Reply | None, *, sentence: bool) -> float:
         """Plays `clip` after what is queued; returns when it starts."""
+        player = reply.player if reply is not None and reply.player is not None else self._player
+        if reply is not None and reply.allowed is not None and not reply.allowed():
+            return self._clock.now()
         self._prune_replies()
         for queued in self._replies.values():
-            queued.trailing_audio_s += clip.seconds
+            if queued.player is player:
+                queued.trailing_audio_s += clip.seconds
         if reply is not None:
             reply.trailing_audio_s = 0.0
-        starts = self._clock.now() + self._player.pending()
+        starts = self._clock.now() + player.pending()
         starts_reply = reply is not None and reply.first_audio is None
         if reply is not None:
             if reply.first_audio is None:
                 reply.first_audio = starts
             if sentence and reply.first_chunk_audio is None:
                 reply.first_chunk_audio = starts
-            elif sentence and self._player.pending() == 0:
+            elif sentence and player.pending() == 0:
                 reply.gaps += 1
             reply.audio_s += clip.seconds
-        self._player.play(clip, starts_reply=starts_reply)
-        if starts_reply and reply is not None and self._on_reply_audio is not None:
+        player.play(clip, starts_reply=starts_reply)
+        if starts_reply and reply is not None and player is self._player and self._on_reply_audio is not None:
             self._on_reply_audio(reply.heard_at, reply.owner)
         return starts
 

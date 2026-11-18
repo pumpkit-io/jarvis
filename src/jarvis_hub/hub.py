@@ -32,7 +32,7 @@ from jarvis_hub.agents.backend import (
 )
 from jarvis_hub.authorizations import Authorization, Authorizations
 from jarvis_hub.approvals import HUB_ACTIONS, Approval, Approvals, approval_event
-from jarvis_hub.clients import Clients, TERMINAL
+from jarvis_hub.clients import Client, Clients, TERMINAL
 from jarvis_hub.config import DEFAULT_TALKER_RESTART_AT
 from jarvis_hub.limits import SavedLimit, UsageLimit, reset_sentence, update_sentence
 from jarvis_hub.news import Leaf, News, backlog_message, fresh
@@ -45,6 +45,7 @@ from jarvis_hub.talker import talker_tools
 from jarvis_hub.tasks import Task, Tasks, no_task
 from jarvis_hub.voice.language import Lang, detect_language
 from jarvis_hub.voice.speech import ClipName
+from jarvis_hub.voice.player import Player
 from jarvis_hub.waits import Check, Watcher, Waits, WaitSetup, cancelled_event, check_event, watcher_event
 
 
@@ -76,6 +77,40 @@ class Output(Protocol):
         ...
 
 
+class _ClientOutput:
+    def __init__(self, terminal: Output, clients: Clients) -> None:
+        self._outputs: dict[str, Output] = {TERMINAL: terminal}
+        self._clients = clients
+
+    def attach(self, client_id: str, output: Output) -> None:
+        self._outputs[client_id] = output
+
+    def _targets(self) -> list[Output]:
+        return [output for client_id, output in tuple(self._outputs.items())
+                if (client := self._clients.get(client_id)) is not None
+                and client.connected and client.can_show_text]
+
+    def heard(self, text: str, *, typed: bool = True) -> None:
+        for output in self._targets():
+            output.heard(text, typed=typed)
+
+    def reply(self, text: str) -> None:
+        for output in self._targets():
+            output.reply(text)
+
+    def reply_end(self) -> None:
+        for output in self._targets():
+            output.reply_end()
+
+    def notice(self, text: str) -> None:
+        for output in self._targets():
+            output.notice(text)
+
+    def show(self, markdown: str) -> None:
+        for output in self._targets():
+            output.show(markdown)
+
+
 class Metrics(Protocol):
     def record(self, entry: dict[str, Any]) -> None: ...
 
@@ -83,7 +118,8 @@ class Metrics(Protocol):
 class Speech(Protocol):
     """Says the Talker's replies aloud as they stream (`jarvis_hub.voice.speech.Speech`)."""
 
-    def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None) -> None: ...
+    def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
+              destination: Player | None = None, allowed: Callable[[], bool] | None = None) -> None: ...
 
     def say(self, name: ClipName, lang: Lang, *, in_reply: bool = False) -> None: ...
 
@@ -115,7 +151,8 @@ class Floor(Protocol):
 
 
 class _Silent:
-    def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None) -> None:
+    def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
+              destination: Player | None = None, allowed: Callable[[], bool] | None = None) -> None:
         pass
 
     def say(self, name: ClipName, lang: Lang, *, in_reply: bool = False) -> None:
@@ -387,7 +424,9 @@ class Hub:
         ))
         self._backend = backend
         self._clock = clock
-        self._output = output
+        self.clients = Clients(terminal_speech=speech is not None, on_focus=self._persist)
+        self._output = _ClientOutput(output, self.clients)
+        self._client_players: dict[str, Player] = {}
         self._metrics = metrics
         self._orchestrator_timeout = orchestrator_timeout
         self._speech: Speech = speech if speech is not None else _Silent()
@@ -501,7 +540,6 @@ class Hub:
             on_start=lambda subagent: self._persist(),
         )
         self._waits = Waits(setup=waits, clock=clock, on_watcher_end=self._watcher_ended, on_check=self._check_due)
-        self.clients = Clients(terminal_speech=speech is not None, on_focus=self._persist)
 
     async def start(self) -> None:
         """Open the Talker and warm it in the background (ADR 0006); a line typed meanwhile waits for it.
@@ -526,6 +564,19 @@ class Hub:
         settling = asyncio.create_task(self._settled.wait())
         await asyncio.wait([settling, talking], return_when=asyncio.FIRST_COMPLETED)
         settling.cancel()
+
+    def attach_client(self, client: Client, *, output: Output | None = None, player: Player | None = None) -> None:
+        """Attach screen and audio adapters without moving Focus; omitted adapters keep their existing bindings."""
+        self.clients.register(client)
+        if output is not None:
+            self._output.attach(client.id, output)
+        if player is not None:
+            self._client_players[client.id] = player
+
+    def _client_can_speak(self, client_id: str) -> bool:
+        client = self.clients.get(client_id)
+        return bool(client is not None and client.connected and client.can_speak and not client.silence
+                    and (client_id == TERMINAL or client_id in self._client_players))
 
     async def interrupt(self) -> bool:
         """Stop whatever is being said, and the Talker turn under way if its reply is spoken; a typed line's reply
@@ -582,9 +633,18 @@ class Hub:
             if text := line.text.strip():
                 if self.clients.get(line.client_id) is None:
                     raise ValueError(f"Unknown Client {line.client_id}")
-                if line.typed and self._floor is not None:
+                if line.client_id != TERMINAL:
+                    if self._floor is not None:
+                        self._floor.typed_input()
+                    await self.interrupt()
+                elif self._floor is not None and line.typed:
                     self._floor.typed_input()
                     await self.interrupt()
+                elif self._floor is None and any(
+                    (client := self.clients.get(client_id)) is not None and client.connected
+                    for client_id in self._client_players if client_id != TERMINAL
+                ):
+                    self._speech.stop()
                 if line.typed:
                     self._scopes.typed(text)
                 if line.request_id is not None:
@@ -599,7 +659,7 @@ class Hub:
                 message = user_message(text, lang, typed=line.typed)
                 if line.interrupted is not None:
                     message = f"{interrupted_message(line.interrupted)}\n{message}"
-                spoken = not line.typed or self._speak_typed
+                spoken = not line.typed or (self._speak_typed and line.client_id == TERMINAL)
                 item = _TalkerInput("user", line.arrived, message, heard=text, lang=lang, typed=line.typed, spoken=spoken,
                                     request_id=line.request_id, revision=line.revision, client_id=line.client_id)
                 self._post(self._talker_inbox, item)
@@ -1225,8 +1285,11 @@ class Hub:
         self._active_scope_id = owner[0] if owner is not None else next(iter(self._active_scope_authority), None)
         self._turn_spoken = show and spoken
         self._turn_answers_user = self._turn_spoken and kind == "user"
-        speech = self._speech if self._turn_spoken else _Silent()
-        speech.begin(self._lang, turn=turn, heard_at=arrived if kind == "user" else None, owner=owner)
+        destination_id = self._user_client_id if kind == "user" else TERMINAL
+        speech = self._speech if self._turn_spoken and self._client_can_speak(destination_id) else _Silent()
+        speech.begin(self._lang, turn=turn, heard_at=arrived if kind == "user" else None, owner=owner,
+                     destination=self._client_players.get(destination_id),
+                     allowed=lambda: self._client_can_speak(destination_id))
         self._replying = show
         try:
             async for event in self._guarded(session.send(message)):
