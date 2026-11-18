@@ -246,3 +246,64 @@ async def test_pair_cli_requires_a_safe_explicit_origin(tmp_path: Path) -> None:
         assert "Pairing code:" not in stderr
         assert "device_token" not in stderr
         assert re.search(r"\b\d{6}\b", stderr) is None
+
+
+async def test_pairing_rejects_non_utf8_charsets_without_consuming_the_code(tmp_path: Path) -> None:
+    import json
+
+    hub = make_hub(FakeBackend(FakeClock()), RecordingOutput(), RecordingMetrics())
+    with PairingStore(tmp_path / "events.sqlite3") as store:
+        code = store.create_code("https://mac.example.ts.net")
+        door = Door(enabled=True, port=0, health=hub.health, pairing=store)
+        await door.start()
+        try:
+            async with aiohttp.ClientSession() as client:
+                url = f"http://127.0.0.1:{door.port}/v1/pair"
+                body = {"version": 1, "code": code, "name": "Phone", "kind": "iphone"}
+                for charset in ("nonexistent-pair-test-secret", "utf-16", "iso-8859-1"):
+                    async with client.post(url, data=json.dumps(body).encode("utf-8"),
+                                           headers={"Content-Type": f"application/json; charset={charset}"}) as response:
+                        assert response.status == 400
+                        assert response.headers["Cache-Control"] == "no-store"
+                        text = await response.text()
+                        assert code not in text
+                        assert charset not in text
+                        assert json.loads(text) == {"version": 1, "error": {
+                            "code": "invalid_payload", "message": "JSON must use UTF-8", "retry_after_seconds": None}}
+                async with client.post(url, data=json.dumps(body).encode("utf-8"),
+                                       headers={"Content-Type": "application/json; charset=UTF-8"}) as response:
+                    assert response.status == 201
+                    assert response.headers["Cache-Control"] == "no-store"
+        finally:
+            await door.close()
+            await hub.close()
+
+
+async def test_health_refuses_non_ascii_bearer_tokens_over_raw_http(tmp_path: Path) -> None:
+    import asyncio
+    import json
+
+    hub = make_hub(FakeBackend(FakeClock()), RecordingOutput(), RecordingMetrics())
+    with PairingStore(tmp_path / "events.sqlite3") as store:
+        door = Door(enabled=True, port=0, health=hub.health, pairing=store)
+        await door.start()
+        assert door.port is not None
+        try:
+            for token in (b"\xff.x", b"x.\xff"):
+                reader, writer = await asyncio.open_connection("127.0.0.1", door.port)
+                try:
+                    writer.write(b"GET /v1/health HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer "
+                                 + token + b"\r\nConnection: close\r\n\r\n")
+                    await writer.drain()
+                    response = await asyncio.wait_for(reader.read(), timeout=2)
+                    headers, body = response.split(b"\r\n\r\n", 1)
+                    assert headers.split(b"\r\n", 1)[0] == b"HTTP/1.1 401 Unauthorized"
+                    assert b"WWW-Authenticate: Bearer" in headers
+                    assert json.loads(body) == {"version": 1, "error": {
+                        "code": "unauthorized", "message": "Device token required", "retry_after_seconds": None}}
+                finally:
+                    writer.close()
+                    await writer.wait_closed()
+        finally:
+            await door.close()
+            await hub.close()

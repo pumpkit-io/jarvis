@@ -148,6 +148,8 @@ class PairingStore:
         return PairingResult(client, token, pairing[3])
 
     def authenticate(self, token: str) -> PairedClient | None:
+        if not token.isascii():
+            return None
         client_id = token.partition(".")[0]
         with self._lock:
             row = self._db.execute("SELECT id, kind, name, created_at, token_hash FROM clients WHERE id = ? AND revoked_at IS NULL",

@@ -73,8 +73,10 @@ class Door:
         try:
             if request.content_type != "application/json":
                 raise PairingError("invalid_payload", "Content-Type must be application/json")
+            if request.charset is not None and request.charset.lower() not in ("utf-8", "utf8"):
+                raise PairingError("invalid_payload", "JSON must use UTF-8")
             try:
-                body = await request.json()
+                body = json.loads((await request.read()).decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 raise PairingError("invalid_payload", "Expected a JSON object") from None
             if not isinstance(body, dict):
