@@ -640,11 +640,11 @@ class Hub:
                 elif self._floor is not None and line.typed:
                     self._floor.typed_input()
                     await self.interrupt()
-                elif self._floor is None and any(
+                elif any(
                     (client := self.clients.get(client_id)) is not None and client.connected
                     for client_id in self._client_players if client_id != TERMINAL
                 ):
-                    self._speech.stop()
+                    await self.interrupt()
                 if line.typed:
                     self._scopes.typed(text)
                 if line.request_id is not None:
