@@ -11,6 +11,7 @@ xcodebuild -project JarvisAudioSpike.xcodeproj -scheme JarvisAudioSpike \
   -configuration Debug -destination "id=$DEVICE_ID" \
   -derivedDataPath .build/DerivedData -allowProvisioningUpdates \
   DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" build
-xcrun devicectl device install app --device "$DEVICE_ID" \
-  .build/DerivedData/Build/Products/Debug-iphoneos/JarvisAudioSpike.app
-xcrun devicectl device process launch --device "$DEVICE_ID" io.pumpkit.jarvis.audio-spike
+app=.build/DerivedData/Build/Products/Debug-iphoneos/JarvisAudioSpike.app
+bundle_id=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$app/Info.plist")
+xcrun devicectl device install app --device "$DEVICE_ID" "$app"
+xcrun devicectl device process launch --device "$DEVICE_ID" "$bundle_id"
