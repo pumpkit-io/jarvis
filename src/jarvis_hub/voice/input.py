@@ -622,8 +622,8 @@ SILENT_MIC_S = 3.0
 
 
 class Capture:
-    """The pipeline on a frame source, the microphone by default. Engines load and run on a thread of their own,
-    since MLX ties a model to the thread that loaded it; `ready` is set once they have loaded and frames flow.
+    """Microphone engines run on the capture thread; STT dispatches to the shared transcription thread.
+    `ready` is set once the engines have loaded and frames flow.
 
     Echo cancellation runs on the source callback before frames join the inference queue.
     Frames wait at most `backlog_s` for that thread; past it they are dropped, so a slow engine costs audio, not
@@ -640,7 +640,9 @@ class Capture:
         backlog_s: float = 2.0,
         clips: ClipStore | None = None,
         clock: Callable[[], float] = time.perf_counter,
+        on_close: Callable[[], None] | None = None,
     ) -> None:
+        self._on_close = on_close
         self._clock = clock
         self._trace_frames = 0
         self._max_delay_ms = 0.0
@@ -731,6 +733,8 @@ class Capture:
             self._source.close()
         with self._backlog_lock:
             self._frames.put(None)
+        if self._on_close is not None:
+            self._on_close()
 
     def _publish(self, event: InputEvent, epoch: int) -> None:
         if not self._closed and (isinstance(event, (WakeWord, SpokenWake)) or epoch == self._capture_epoch):
