@@ -35,6 +35,7 @@ from jarvis_hub.voice.engines import EngineChoice
 from jarvis_hub.voice.input import Listening
 from jarvis_hub.voice.player import Player, Samples, SoundPlayer
 from jarvis_hub.voice.speech import Speech, SpeechClock
+from jarvis_hub.voice.transcription import TranscriptionService
 from jarvis_hub.voice.state import Timing
 from jarvis_hub.voice.tts import KokoroSynthesizer, Synthesizer
 from jarvis_hub.voice.voice_mode import AudioInput, VoiceMode, merge
@@ -416,11 +417,20 @@ def _open_listener(
     record: Callable[[dict[str, Any]], None],
     notice: Callable[[str], None],
     clips: ClipStore,
+    *,
+    transcription: TranscriptionService | None = None,
 ) -> Listener:
-    from jarvis_hub.voice.engines import load_engines
+    from jarvis_hub.voice.engines import STT_ENGINES, load_engines
     from jarvis_hub.voice.input import Capture
 
-    return Capture(lambda: load_engines(choice), settings, record, notice, clips=clips)
+    owned = transcription is None
+    if transcription is None:
+        transcription = TranscriptionService(STT_ENGINES[choice.stt])
+    service = transcription
+    return Capture(
+        lambda: load_engines(choice, transcription=service), settings, record, notice, clips=clips,
+        on_close=service.close if owned else None,
+    )
 
 
 def _open_player(rate: int, on_played: PlayedTap) -> Player:

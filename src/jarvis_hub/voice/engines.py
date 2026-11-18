@@ -16,6 +16,7 @@ import numpy as np
 from jarvis_hub.voice.input import FRAME, SAMPLE_RATE, Engines, EveryoneGate, Pcm, Transcriber, WakeDetector
 from jarvis_hub.voice.player import Samples
 from jarvis_hub.voice.tts import MLX_CACHE_LIMIT
+from jarvis_hub.voice.transcription import TranscriptionService
 from jarvis_hub.voice.whisper_features import log_mel
 
 PARAKEET_MODEL = "mlx-community/parakeet-tdt-0.6b-v3"
@@ -193,11 +194,11 @@ WAKE_ENGINES: dict[WakeEngine, Callable[[], WakeDetector]] = {"openwakeword": Op
 STT_ENGINES: dict[SttEngine, Callable[[], Transcriber]] = {"parakeet": Parakeet}
 
 
-def load_engines(choice: EngineChoice) -> Engines:
+def load_engines(choice: EngineChoice, *, transcription: TranscriptionService) -> Engines:
     """Loads the chosen engines and runs each once, so the first turn does not pay for a warm-up. Blocking: seconds."""
     echo = WebRtcEchoCancellation() if choice.aec == "webrtc" else NoEchoCancellation()
-    wake, stt = WAKE_ENGINES[choice.wake](), STT_ENGINES[choice.stt]()
-    engines = Engines(echo=echo, wake=wake, vad=SileroVad(), turn=SmartTurn(), stt=stt, gate=EveryoneGate())
+    wake = WAKE_ENGINES[choice.wake]()
+    engines = Engines(echo=echo, wake=wake, vad=SileroVad(), turn=SmartTurn(), stt=transcription, gate=EveryoneGate())
     noise = np.random.default_rng(0).normal(0, 0.01, SAMPLE_RATE).astype(np.float32)
     pcm = (noise * 32767).astype(np.int16)
     engines.wake.score(pcm[: engines.wake.chunk])
