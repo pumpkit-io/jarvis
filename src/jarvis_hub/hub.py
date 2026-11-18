@@ -659,6 +659,10 @@ class Hub:
                     (client := self.clients.get(client_id)) is not None and client.connected
                     for client_id in self._client_players if client_id != TERMINAL
                 ):
+                    if line.request_id is not None and self._floor is not None and not self._floor.owns(
+                        (line.request_id, line.revision)
+                    ):
+                        continue
                     await self.interrupt()
                 if line.typed:
                     self._scopes.typed(text)
