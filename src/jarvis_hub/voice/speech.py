@@ -234,8 +234,8 @@ class Speech:
     def played(self) -> str:
         return self._last_player.played()
 
-    async def idle(self) -> None:
-        """Returns once the voice has loaded, or failed to, and everything said so far has finished playing."""
+    async def idle(self, *, stall_timeout: float | None = STALLED) -> None:
+        """Wait for voice loading and playback; None disables the stalled-player timeout."""
         if self._loading is not None:
             with contextlib.suppress(Exception):
                 await self._loading
@@ -245,7 +245,7 @@ class Speech:
             await self._clock.sleep(0.05)
             if (now_left := sum(p.pending() for p in self._players)) < left:
                 left, since = now_left, self._clock.now()
-            elif self._clock.now() - since >= STALLED:
+            elif stall_timeout is not None and self._clock.now() - since >= stall_timeout:
                 return
 
     async def close(self) -> None:

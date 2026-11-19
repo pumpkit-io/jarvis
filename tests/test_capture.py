@@ -1058,7 +1058,7 @@ async def test_same_frame_wake_survives_old_vad_without_releasing_its_stale_spee
         await until(lambda: player.voices == ['ready'])
         source.frames(8, value=2000, start=clock.now())
         source.frames(96, start=clock.now() + .08)
-        await until(lambda: voice.state == 'listening')
+        await until(lambda: player.voices == ['ready', 'chime'])
         clock.advance(3)
         vad.armed = True
         source.frames(8, value=2000, start=clock.now())
