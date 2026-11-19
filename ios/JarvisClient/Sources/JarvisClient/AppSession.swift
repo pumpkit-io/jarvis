@@ -9,6 +9,10 @@ import Observation
     public private(set) var error: PairingError?
     public private(set) var client: HubClient?
     public private(set) var conversation = ConversationProjection()
+    private var tasksNeedRefresh = true
+    private var tasksReplaying = true
+    public var updatingTasks: Bool { tasksNeedRefresh && (connection == .connecting || connection.canSend) }
+    public var openTasks: [OpenTask] { OpenTask.current(in: conversation.events, now: historyNow()) }
     public private(set) var loadingHistory = false
     public private(set) var hasOlderHistory = true
     public private(set) var historyMessage: String?
@@ -120,6 +124,7 @@ import Observation
         switch update {
         case .event(let event):
             conversation.ingest(event); talk.receive(event)
+            if event.kind == .taskSnapshot && !tasksReplaying { tasksNeedRefresh = false }
             switch event.kind {
             case .speechBegin:
                 if voiceOn, let id = event.string("speech_id"), let reply = event.string("reply_id"), foreground {
@@ -158,7 +163,10 @@ import Observation
             voiceMessage = voicePersistenceFailed ? "Voice changed for this session, but could not be saved. Try again."
                 : pending ? "Voice setting saved here. Waiting for the Mac to confirm." : nil
             if silence { silencePlayback() }
+        case .replayStarted:
+            tasksNeedRefresh = true; tasksReplaying = true
         case .replay(let replay):
+            tasksReplaying = false
             if replay.history_pruned == true { historyMessage = "Some older history is no longer available on the Mac." }
         case .speechConnectionEnded(let id):
             playback.stop(speechID: id, reportStopped: false)
@@ -342,6 +350,7 @@ import Observation
         } catch { historyClearFailed = true }
         voiceOn = true; explicitSilence = nil; voicePending = false; voiceMessage = nil; voicePersistenceFailed = false; voiceRevision = 0
         do { try store.clear(); error = historyClearFailed ? .storage : nil } catch { self.error = .storage }
+        tasksNeedRefresh = true; tasksReplaying = true
         conversation = ConversationProjection(); historyBefore = nil; hasOlderHistory = true; loadingHistory = false; historyMessage = nil; typedLines = []; draft = ""; inputMessage = nil
         playback.reset(); replayCommands = [:]; replayMessages = [:]
         await old?.stop()
