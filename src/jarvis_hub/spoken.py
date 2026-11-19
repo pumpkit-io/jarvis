@@ -36,6 +36,7 @@ class SpokenScope:
     selected: tuple[str, ...] = ()
     typed_context: tuple[str, ...] = ()
     task_context: dict[str, str] = field(default_factory=lambda: dict[str, str]())
+    one_shot: bool = False
     changed: asyncio.Event = field(default_factory=asyncio.Event)
 
     @property
@@ -96,11 +97,20 @@ class SpokenScopes:
     def held_tasks(self) -> set[str]:
         return {task_id for scope in self.pending() for task_id in scope.task_ids}
 
-    def admit(self, request_id: str, revision: int, segments: tuple[str, ...], arrived: float) -> SpokenScope:
+    def admit(
+        self, request_id: str, revision: int, segments: tuple[str, ...], arrived: float, *, one_shot: bool = False,
+    ) -> SpokenScope:
         previous = self.get(request_id)
-        if previous is not None and revision <= previous.revision:
-            return previous
-        if not segments or len(' '.join(segments)) > 6000:
+        if type(one_shot) is not bool:
+            raise ValueError('Invalid spoken request revision policy.')
+        if one_shot and (type(revision) is not int or revision != 0 or len(segments) != 1):
+            raise ValueError('A one-shot spoken request is immutable: one segment at revision zero.')
+        if previous is not None:
+            if one_shot != previous.one_shot or (previous.one_shot and segments != previous.segments):
+                raise ValueError('A one-shot spoken request is immutable.')
+            if revision <= previous.revision:
+                return previous
+        if not segments or (len(' '.join(segments)) > 6000 and not one_shot):
             raise ValueError('Spoken scope exceeds its retained request limit.')
         if previous is not None and segments[:len(previous.segments)] != previous.segments:
             raise ValueError('A spoken revision must preserve its raw segment history.')
@@ -108,7 +118,7 @@ class SpokenScopes:
                             previous.task_ids if previous else (), previous.history_task_ids if previous else (),
                             arrived, self._clock.now() + SCOPE_SECONDS, revision > 0,
                             semantic_start=previous.semantic_start if previous else 0,
-                            task_context=dict(previous.task_context) if previous else {})
+                            task_context=dict(previous.task_context) if previous else {}, one_shot=one_shot)
         self._records[request_id] = scope
         if previous is not None:
             previous.changed.set()
@@ -243,7 +253,7 @@ class SpokenScopes:
                      task_ids=scope.task_ids, history_task_ids=scope.history_task_ids, created=to_wall(scope.created),
                      deadline=to_wall(scope.deadline), pending=scope.pending, semantic_start=scope.semantic_start,
                      attempt=scope.attempt, failed=scope.failed, disposition=scope.disposition, selected=scope.selected,
-                     task_context=scope.task_context, typed_context=scope.typed_context)
+                     task_context=scope.task_context, typed_context=scope.typed_context, one_shot=scope.one_shot)
                 for scope in self._records.values()]
 
     @staticmethod
@@ -252,11 +262,20 @@ class SpokenScopes:
         for record in records:
             values = dict(record)
             values.setdefault('typed_context', ())
+            values.setdefault('one_shot', False)
             for name in ('segments', 'typed_context', 'task_ids', 'history_task_ids', 'selected'):
                 values[name] = tuple(values[name])
+            if not all(isinstance(segment, str) for segment in values['segments']):
+                raise ValueError('Invalid retained spoken text.')
             values['created'], values['deadline'] = from_wall(values['created']), from_wall(values['deadline'])
             scope = SpokenScope(**values)
-            if not scope.segments or len(' '.join(scope.segments)) > 6000 or not 0 <= scope.semantic_start < len(scope.all_segments):
+            if type(scope.one_shot) is not bool:
+                raise ValueError('Invalid spoken request revision policy.')
+            if scope.one_shot and (type(scope.revision) is not int or scope.revision != 0 or len(scope.segments) != 1
+                                   or scope.pending or scope.typed_context or scope.previous != 0 or scope.semantic_start != 0):
+                raise ValueError('Invalid retained one-shot spoken scope.')
+            if (not scope.segments or (not scope.one_shot and len(' '.join(scope.segments)) > 6000)
+                    or not 0 <= scope.semantic_start < len(scope.all_segments)):
                 raise ValueError('Invalid retained spoken scope.')
             loaded.append(scope)
         return loaded

@@ -45,6 +45,9 @@ class EventLog:
                 client_id TEXT NOT NULL, id TEXT NOT NULL, type TEXT NOT NULL,
                 digest TEXT NOT NULL, status TEXT NOT NULL, result TEXT,
                 PRIMARY KEY(client_id, id));
+            CREATE TABLE IF NOT EXISTS talks (
+                client_id TEXT NOT NULL, id TEXT NOT NULL, request_id TEXT NOT NULL, status TEXT NOT NULL,
+                PRIMARY KEY(client_id, id));
             CREATE TABLE IF NOT EXISTS retention (
                 singleton INTEGER PRIMARY KEY CHECK(singleton = 1), pruned_through INTEGER NOT NULL);
             INSERT OR IGNORE INTO retention VALUES (1, 0);
@@ -56,6 +59,7 @@ class EventLog:
         unknown = json.dumps({"ok": False, "error": {"code": "outcome_unknown",
             "message": "Previous operation outcome is unknown; reconcile with history", "retry_after_seconds": None}})
         self._db.execute("UPDATE commands SET status = 'complete', result = ? WHERE status != 'complete'", (unknown,))
+        self._db.execute("UPDATE talks SET status = 'expired' WHERE status = 'active'")
         self._db.commit()
 
     def append(self, type: str, payload: dict[str, Any], *, client_id: str | None = "terminal", replayable: bool = True) -> Event:
@@ -124,12 +128,22 @@ class EventLog:
         digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
         with self._lock, self._db:
             inserted = self._db.execute("INSERT OR IGNORE INTO commands VALUES (?, ?, ?, ?, 'reserved', NULL)",
-                             (client_id, command_id, kind if kind in {"say_text", "acknowledge"} else "unknown", digest))
+                             (client_id, command_id, kind if kind in {"say_text", "acknowledge", "set_presence", "talk_begin", "talk_cancel", "upload"} else "unknown", digest))
             row = self._db.execute("SELECT digest, status, result FROM commands WHERE client_id = ? AND id = ?",
                                    (client_id, command_id)).fetchone()
             if row[0] != digest:
                 return "conflict", None
             return "new" if inserted.rowcount else row[1], json.loads(row[2]) if row[2] is not None else None
+
+    def begin_talk(self, client_id: str, talk_id: str) -> bool:
+        with self._lock, self._db:
+            inserted = self._db.execute("INSERT OR IGNORE INTO talks VALUES (?, ?, '', 'active')", (client_id, talk_id))
+            return bool(inserted.rowcount)
+
+    def finish_talk(self, client_id: str, talk_id: str, request_id: str, status: str) -> None:
+        with self._lock, self._db:
+            self._db.execute("UPDATE talks SET request_id = ?, status = ? WHERE client_id = ? AND id = ?",
+                             (request_id, status, client_id, talk_id))
 
     def complete(self, client_id: str, command_id: str, result: dict[str, Any]) -> None:
         safe_fields = {"request_id", "talk_id", "speech_id", "reply_id", "seq", "focus_client_id", "silence", "cancelled", "stopped", "can_show_text"}

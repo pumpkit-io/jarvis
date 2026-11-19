@@ -312,7 +312,9 @@ async def text_mode(
             settings, backend=backend, clock=clock, output=output, metrics=metrics, speech=speech,
             on_model_ready=lambda: output.notice("Model ready."),
         )
-        door = Door(enabled=settings.remote, port=settings.remote_port, health=hub.health, pairing=pairing, hub=hub, log=log, now=clock.now)
+        transcription = TranscriptionService() if settings.remote else None
+        door = Door(enabled=settings.remote, port=settings.remote_port, health=hub.health, pairing=pairing, hub=hub, log=log, now=clock.now,
+                    transcription=transcription, sleep=clock.sleep)
         try:
             output.notice("Model loading.")
             await hub.start()
@@ -335,8 +337,12 @@ async def text_mode(
                 finally:
                     await hub.close()
             finally:
-                if speech is not None:
-                    await speech.close()
+                try:
+                    if speech is not None:
+                        await speech.close()
+                finally:
+                    if transcription is not None:
+                        transcription.close()
 
 
 async def voice_mode(
@@ -365,10 +371,23 @@ async def voice_mode(
         voice = settings.voice
         choice = EngineChoice(aec="off" if headphones else voice.aec, wake=voice.wake_engine, stt=voice.stt_engine)
         clips = ClipStore(settings.runtime_dir / "clips", clip_settings(voice))
-        listener = ears.open_listener(choice, listening(voice), metrics.record, output.notice, clips)
+        transcription = TranscriptionService() if settings.remote or ears.open_listener is _open_listener else None
+        try:
+            listener = (_open_listener(choice, listening(voice), metrics.record, output.notice, clips, transcription=transcription)
+                        if ears.open_listener is _open_listener else
+                        ears.open_listener(choice, listening(voice), metrics.record, output.notice, clips))
+        except BaseException:
+            if transcription is not None:
+                transcription.close()
+            raise
         try:
             player = ears.open_player(ears.tts.sample_rate, listener.reference)
         except Exception as e:
+            try:
+                listener.close()
+            finally:
+                if transcription is not None:
+                    transcription.close()
             output.notice(f"Voice mode needs an audio output: {type(e).__name__}: {e}. Run `jarvis-hub --text` instead.")
             return
         following: asyncio.Task[None] | None = None
@@ -403,7 +422,8 @@ async def voice_mode(
             preconnect_orchestrator=True,
             on_model_ready=lambda: (output.notice("Model ready."), model_ready.set()),
         )
-        door = Door(enabled=settings.remote, port=settings.remote_port, health=hub.health, pairing=pairing, hub=hub, log=log, now=clock.now)
+        door = Door(enabled=settings.remote, port=settings.remote_port, health=hub.health, pairing=pairing, hub=hub, log=log, now=clock.now,
+                    transcription=transcription, sleep=clock.sleep)
         try:
             output.notice("Model loading.")
             await hub.start()
@@ -428,8 +448,12 @@ async def voice_mode(
                 finally:
                     await hub.close()
             finally:
-                listener.close()
-                await conversation.close()
+                try:
+                    listener.close()
+                    await conversation.close()
+                finally:
+                    if transcription is not None:
+                        transcription.close()
 
 
 def _open_listener(

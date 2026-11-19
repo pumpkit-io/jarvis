@@ -201,6 +201,7 @@ async def exchanges(root: Path) -> dict[str, Any]:
         cases.update(await concurrent_restart(root / "restart"))
         cases.update(await snapshot_exchanges(root / "snapshots"))
         cases.update(await large_event_exchanges(root / "large-events"))
+        cases.update(await uploaded_exchange(root / "upload"))
         return normalize(artifact)
 
 
@@ -214,6 +215,9 @@ class DelayedAdmission:
     def __init__(self, hub: Hub) -> None:
         self.hub = hub
         self.clients = hub.clients
+        self.begin_remote_talk = hub.begin_remote_talk
+        self.cancel_remote_talk = hub.cancel_remote_talk
+        self.set_client_talking = hub.set_client_talking
         self.admitted = asyncio.Event()
         self.release = asyncio.Event()
 
@@ -406,6 +410,45 @@ async def large_event_exchanges(root: Path) -> dict[str, Any]:
                     await capture.until(resumed, "replay_complete")
                     await capture.until(resumed, "pending_approval")
             return {"large_event_replay": {"command": say, "after": after, "live": live, "replay": capture.frames()[1]}}
+        finally:
+            await door.close()
+            await hub.close()
+
+
+async def uploaded_exchange(root: Path) -> dict[str, Any]:
+    from jarvis_hub.voice.player import Samples
+
+    class Transcriber:
+        async def transcribe_buffer(self, audio: Samples) -> str:
+            return 'Good evening from the phone'
+
+    capture = WireCapture()
+    root.mkdir(parents=True)
+    with PairingStore(root / 'pairing.db') as pairing, EventLog(root / 'events.db', wall=lambda: 1000) as log:
+        phone = pairing.exchange(pairing.create_code('https://mac.example.ts.net'), 'Phone', 'iphone')
+        finish = asyncio.Event()
+        backend = FakeBackend(FakeClock(), [[Gate(finish), Text('Good evening, sir.')]])
+        hub = make_hub(backend, EventOutput(log, RecordingOutput()), RecordingMetrics())
+        door = Door(enabled=True, port=0, health=hub.health, pairing=pairing, hub=hub, log=log, transcription=Transcriber())
+        await hub.start()
+        await until(lambda: hub.health()['ready'])
+        await door.start()
+        try:
+            async with aiohttp.ClientSession() as session, connect(session, door, phone.token) as socket:
+                await capture.until(socket, 'pending_approval')
+                begin = command('talk-begin', 'talk_begin', talk_id='talk-1')
+                await socket.send_json(begin)
+                await capture.until(socket, 'command_result')
+                async with session.post(f'http://127.0.0.1:{door.port}/v1/utterances/talk-1', data=b'\x00\x00', headers={
+                    'Authorization': f'Bearer {phone.token}', 'Idempotency-Key': 'upload-1',
+                    'Content-Type': 'application/octet-stream', 'X-Jarvis-Audio-Format': 'pcm_s16le_16000_mono',
+                }) as response:
+                    assert response.status == 200
+                    receipt = await response.json()
+                await capture.until(socket, 'heard')
+                finish.set()
+                await capture.until(socket, 'reply_end')
+            return {'uploaded_talk': {'begin': begin, 'upload_result': receipt, 'live': capture.frames()[0]}}
         finally:
             await door.close()
             await hub.close()

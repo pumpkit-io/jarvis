@@ -201,3 +201,34 @@ async def test_close_cancels_waiting_transcriptions_and_refuses_new_calls() -> N
         release.set()
         service.close()
         await first
+
+
+@pytest.mark.parametrize('failure', ['success', 'direct', 'chained'])
+async def test_idle_worker_releases_its_last_audio_job(failure: str) -> None:
+    import gc
+    import weakref
+    from tests.fakes import until
+
+    recordings: list[weakref.ReferenceType[Samples]] = []
+    class Model:
+        def transcribe(self, audio: Samples, *, after: float = 0.0) -> str:
+            recordings.append(weakref.ref(audio))
+            if failure == 'direct':
+                raise RuntimeError('Failed')
+            if failure == 'chained':
+                try:
+                    raise ValueError('Inner failure')
+                except ValueError as error:
+                    raise RuntimeError('Failed') from error
+            return 'Finished'
+    service = TranscriptionService(Model)
+    try:
+        if failure != 'success':
+            with pytest.raises(RuntimeError):
+                await service.transcribe_buffer(np.zeros(16, np.float32))
+        else:
+            assert await service.transcribe_buffer(np.zeros(16, np.float32)) == 'Finished'
+        gc.collect()
+        await until(lambda: recordings[0]() is None)
+    finally:
+        service.close()

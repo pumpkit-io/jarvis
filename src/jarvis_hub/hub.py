@@ -527,6 +527,8 @@ class Hub:
         self._input_ended = asyncio.Event()
         self._turn_count = 0
         self._active_spoken_owner: tuple[str, int] | None = None
+        self._remote_spoken_owner: tuple[str, int] | None = None
+        self._admitted_remote_owners: set[tuple[str, int]] = set()
         self._turn_task_revisions: dict[str, int] = {}
         self._producer_revisions: dict[str, int] = {}
         self._persist_suspended = False
@@ -828,12 +830,39 @@ class Hub:
                 await session.close()
         self._talker = self._orchestrator = None
 
+    def _owns_spoken(self, owner: tuple[str, int], client_id: str) -> bool:
+        if client_id != TERMINAL:
+            return owner == self._remote_spoken_owner or owner in self._admitted_remote_owners
+        return self._floor is None or self._floor.owns(owner)
+
+    async def begin_remote_talk(self, client_id: str) -> str:
+        async with self._admission_lock:
+            if self._closing or self._input_ended.is_set() or self.clients.get(client_id) is None:
+                raise ValueError("Hub is stopping")
+            request_id = uuid.uuid4().hex
+            self._remote_spoken_owner = (request_id, 0)
+            self.set_client_talking(client_id, True)
+            if self._floor is not None:
+                self._floor.typed_input()
+            await self.interrupt()
+            self.clients.take_focus(client_id)
+            self.woke()
+            return request_id
+
+    def cancel_remote_talk(self, client_id: str, request_id: str) -> None:
+        if self._remote_spoken_owner == (request_id, 0):
+            self._remote_spoken_owner = None
+        self.set_client_talking(client_id, False)
+
     def admit_spoken_revision(self, line: Line) -> None:
         if line.request_id is None:
             return
+        if line.client_id == TERMINAL:
+            self._remote_spoken_owner = None
         self._persist_suspended = True
         try:
-            scope = self._scopes.admit(line.request_id, line.revision, line.segments or (line.text,), line.arrived)
+            scope = self._scopes.admit(line.request_id, line.revision, line.segments or (line.text,), line.arrived,
+                                       one_shot=line.client_id != TERMINAL)
             for task_id in scope.task_ids:
                 task = self._tasks.get(task_id)
                 if task is not None:
@@ -856,6 +885,10 @@ class Hub:
         async with self._admission_lock:
             if self._closing or self._input_ended.is_set() or not allowed():
                 raise ValueError("Hub is stopping")
+            if not line.typed and line.request_id is not None and not self._owns_spoken(
+                (line.request_id, line.revision), line.client_id
+            ):
+                return None
             return await self._admit_line(line, allowed=allowed)
 
     async def _admit_line(self, line: Line, *, allowed: Callable[[], bool]) -> str | None:
@@ -863,6 +896,8 @@ class Hub:
         if text := line.text.strip():
             if self.clients.get(line.client_id) is None:
                 raise ValueError(f"Unknown Client {line.client_id}")
+            if line.typed or line.client_id == TERMINAL:
+                self._remote_spoken_owner = None
             if line.client_id != TERMINAL:
                 if self._floor is not None:
                     self._floor.typed_input()
@@ -890,10 +925,10 @@ class Hub:
                 self._scopes.typed(text)
             if not line.typed and line.request_id is not None:
                 owner = (line.request_id, line.revision)
-                if self._floor is not None and not self._floor.owns(owner):
+                if not self._owns_spoken(owner, line.client_id):
                     return None
                 self.admit_spoken_revision(line)
-                if self._floor is not None and not self._floor.owns(owner):
+                if not self._owns_spoken(owner, line.client_id):
                     return None
             if not line.typed:
                 self._release_held(arrived=line.arrived)
@@ -906,7 +941,11 @@ class Hub:
             item = _TalkerInput("user", line.arrived, message, heard=text, lang=lang, typed=line.typed, spoken=spoken,
                                 request_id=request_id, revision=line.revision, client_id=line.client_id,
                                 spoken_owner=(line.request_id, line.revision)
-                                if not line.typed and line.client_id == TERMINAL and line.request_id is not None else None)
+                                if not line.typed and line.request_id is not None else None)
+            if item.spoken_owner is not None and line.client_id != TERMINAL:
+                self._admitted_remote_owners.add(item.spoken_owner)
+                if self._remote_spoken_owner == item.spoken_owner:
+                    self._remote_spoken_owner = None
             self._output.heard(text, typed=line.typed, request_id=request_id, client_id=line.client_id, display=False)
             self._post(self._talker_inbox, item)
             return request_id
@@ -1355,7 +1394,7 @@ class Hub:
                     parked = self._park(item)
                     continue
                 owner = item.spoken_owner
-                current = owner is None or self._floor is None or self._floor.owns(owner)
+                current = owner is None or self._owns_spoken(owner, item.client_id)
                 if current:
                     self._output.begin_reply(item.client_id if item.kind == "user" else None,
                                              item.request_id if item.kind == "user" else None)
@@ -1397,6 +1436,8 @@ class Hub:
                     # The news was not told, so the Talker gets it again after the reset.
                     parked = self._park(item)
             finally:
+                if item.client_id != TERMINAL and item.spoken_owner is not None:
+                    self._admitted_remote_owners.discard(item.spoken_owner)
                 self._user_text = None
                 self._telling = ()
                 for _ in range(item.count - parked):
@@ -1440,7 +1481,9 @@ class Hub:
                 self._floor is not None or not self._client_can_speak(TERMINAL)
             ):
                 return replace(_told(self._news.popleft(), ready=True), spoken=False)
-            if self._news and quiet and (self.clients.focus != TERMINAL or self._floor is None or self._floor.announce()):
+            if self._news and quiet and (not self.clients.remote_activity or not self._client_can_speak(self.clients.focus)) and (
+                self.clients.focus != TERMINAL or self._floor is None or self._floor.announce()
+            ):
                 # Everything waiting goes as one Announcement rather than one Follow-up window each.
                 news = News.joined(self._news)
                 self._news.clear()
@@ -1470,6 +1513,9 @@ class Hub:
         while not self._news:
             self._arrived.clear()
             await self._arrived.wait()
+        while self.clients.remote_activity and self._client_can_speak(self.clients.focus):
+            self._clients_updated.clear()
+            await self._clients_updated.wait()
         if self.clients.focus == TERMINAL and self._floor is not None:
             await self._quiet()
         elif self._client_can_speak(self.clients.focus):
@@ -2158,7 +2204,7 @@ class Hub:
             if self._closing or self._interrupted_turn == self._talker_gate.turn and self._talker_gate.turn is not None:
                 return "Refused: this spoken generation was superseded."
             owner = self._active_spoken_owner
-            if owner is not None and self._floor is not None and not self._floor.owns(owner):
+            if owner is not None and not self._owns_spoken(owner, self._user_client_id):
                 return "Refused: this spoken request revision is no longer current."
             return await handler(args)
         return guarded
