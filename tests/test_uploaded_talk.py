@@ -627,6 +627,31 @@ async def test_socket_replacement_releases_recording_floor_and_keeps_only_retry_
             assert asr.calls == 0
 
 
+async def test_reconnected_cancellation_retires_only_old_talk_before_fresh_capture(tmp_path: Path) -> None:
+    async with rig(tmp_path) as (session, socket, door, hub, _log, _backend, asr, phone, _clock, _pairing):
+        await socket.send_json(command('old-begin', 'talk_begin', talk_id='old'))
+        assert (await result(socket, 'old-begin'))['ok'] is True
+        await socket.close()
+        await until(lambda: not client(hub, phone.client.id).connected)
+        async with connect(session, door, phone.token) as replacement:
+            await replacement.send_json(command('blocked-begin', 'talk_begin', talk_id='fresh'))
+            assert (await result(replacement, 'blocked-begin'))['error']['code'] == 'talk_in_progress'
+            cancellation = command('old-cancel', 'talk_cancel', talk_id='old')
+            await replacement.send_json(cancellation)
+            receipt = await result(replacement, 'old-cancel')
+            assert receipt['result'] == {'talk_id': 'old', 'cancelled': True}
+            await replacement.send_json(command('fresh-begin', 'talk_begin', talk_id='fresh'))
+            assert (await result(replacement, 'fresh-begin'))['ok'] is True
+            await replacement.send_json(cancellation)
+            assert await result(replacement, 'old-cancel') == receipt
+            assert client(hub, phone.client.id).talking
+            async with session.post(f'http://127.0.0.1:{door.port}/v1/utterances/old', headers=headers(phone.token, 'old-upload'), data=PCM) as response:
+                assert response.status == 409
+            async with session.post(f'http://127.0.0.1:{door.port}/v1/utterances/fresh', headers=headers(phone.token), data=PCM) as response:
+                assert response.status == 200
+            assert asr.calls == 1
+
+
 async def test_malformed_utf8_http_and_websocket_ids_are_safe_rejections(tmp_path: Path) -> None:
     import json
     async with rig(tmp_path) as (_session, socket, door, _hub, _log, _backend, asr, phone, _clock, _pairing):

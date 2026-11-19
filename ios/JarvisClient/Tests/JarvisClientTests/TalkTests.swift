@@ -342,13 +342,58 @@ import JarvisClient
     try await client.send(HubCommand(id: "lost-begin", type: "talk_begin", payload: ["talk_id": .string("lost")] ))
     first.input.finish(throwing: URLError(.networkConnectionLost))
     try await eventually { await sleeper.pending == 1 }
-    #expect(await client.pendingCommands.contains(where: { $0.id == "lost-begin" }) == false)
     await sleeper.advance()
     try await eventually { await transport.socket(1) != nil }
     let next = try #require(await transport.socket(1))
     await next.ready(through: 2)
     try await eventually { await client.state == .ready }
     #expect(await next.sent.contains(where: { $0.type == "talk_begin" }) == false)
+    await client.stop()
+}
+
+@MainActor @Test(arguments: [false, true]) func cancelledCaptureSurvivesReconnectBeforeFreshHoldCanStart(acknowledged: Bool) async throws {
+    let transport = FakeTransport()
+    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }))
+    await client.start()
+    try await eventuallySession { await transport.socket(0) != nil }
+    let first = try #require(await transport.socket(0))
+    await first.ready()
+    try await eventuallySession { await client.state == .ready }
+    let recorder = FakeTalkRecorder(), wire = TalkWire()
+    let talk = TalkController(recorder: recorder, permission: { true })
+    talk.configure(ready: true, send: { try await client.send($0) }, retire: { await client.retireTalkBegin(id: $0) },
+                   upload: { try await wire.upload($0, $1, $2) })
+    await talk.press()
+    let oldID = try #require(talk.talkID)
+    let begin = try #require(await first.sent.first(where: { $0.type == "talk_begin" }))
+    if acknowledged {
+        await first.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(begin.id)\",\"ok\":true,\"result\":{}}")
+        try await eventuallySession { await client.results[begin.id] != nil }
+        first.input.finish(throwing: URLError(.networkConnectionLost))
+        await talk.setReady(false)
+    } else { await talk.cancel() }
+    #expect(!recorder.active)
+    try await eventuallySession { await transport.socket(1) != nil }
+    let next = try #require(await transport.socket(1))
+    await next.ready(through: 2)
+    try await eventuallySession { await next.sent.contains(where: { $0.type == "talk_cancel" }) }
+    let cancellation = try #require(await next.sent.first(where: { $0.type == "talk_cancel" }))
+    #expect(cancellation.payload == ["talk_id": .string(oldID)])
+    #expect(await client.state != .ready)
+    #expect(await next.sent.contains(where: { $0.type == "talk_begin" }) == false)
+    await next.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(cancellation.id)\",\"ok\":true,\"result\":{\"cancelled\":true}}")
+    try await eventuallySession { await client.state == .ready }
+    await talk.setReady(true)
+    await talk.press()
+    #expect(talk.state == .recording)
+    let fresh = try #require(await next.sent.first(where: { $0.type == "talk_begin" }))
+    #expect(fresh.payload["talk_id"] != .string(oldID))
+    await first.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(begin.id)\",\"ok\":false,\"error\":{\"code\":\"talk_not_active\",\"message\":\"Old capture\",\"retry_after_seconds\":null}}")
+    await next.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(fresh.id)\",\"ok\":true,\"result\":{}}")
+    #expect(await client.finishTalkBegin(id: fresh.id))
+    #expect(talk.talkID.map { JSONValue.string($0) } == fresh.payload["talk_id"])
+    #expect(wire.uploads.isEmpty)
+    await talk.cancel()
     await client.stop()
 }
 
@@ -427,4 +472,94 @@ actor HeldUploadResponse {
     #expect(talk.message == "Jarvis needs the microphone to hear you. Allow it in Settings.")
     #expect(recorder.starts == 0)
     #expect(wire.commands.isEmpty)
+}
+
+@Test func cancellationRetainedDuringReconnectResendIsSentBeforeReady() async throws {
+    let transport = FakeTransport()
+    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }))
+    await client.start()
+    try await eventually { await transport.socket(0) != nil }
+    let first = try #require(await transport.socket(0))
+    await first.ready()
+    try await eventually { await client.state == .ready }
+    try await client.send(HubCommand(id: "retained", type: "take_focus"))
+    await client.pathChanged()
+    try await eventually { await transport.socket(1) != nil }
+    let next = try #require(await transport.socket(1))
+    await next.blockSend("take_focus")
+    await next.ready(through: 2)
+    try await eventually { await next.sendWaiter != nil }
+    try await client.send(HubCommand(id: "cancel-during-resend", type: "talk_cancel", payload: ["talk_id": .string("old")]))
+    #expect(await client.state != .ready)
+    await next.releaseSend()
+    try await eventually { await next.sent.contains(where: { $0.id == "cancel-during-resend" }) }
+    #expect(await client.state != .ready)
+    await #expect(throws: HubProtocolError.self) {
+        try await client.send(HubCommand(id: "premature", type: "talk_begin", payload: ["talk_id": .string("fresh")]))
+    }
+    await next.text(#"{"version":1,"type":"command_result","id":"cancel-during-resend","ok":true,"result":{"cancelled":true}}"#)
+    try await eventually { await client.state == .ready }
+    try await client.send(HubCommand(id: "fresh", type: "talk_begin", payload: ["talk_id": .string("fresh")]))
+    #expect(await next.sent.dropFirst().map(\.id) == ["retained", "cancel-during-resend", "fresh"])
+    await client.stop()
+}
+
+@MainActor @Test func backgroundedCaptureResendsOnlyCancellationBeforeNextHealthyHold() async throws {
+    let transport = FakeTransport(), store = MemoryPairingStore(), recorder = FakeTalkRecorder()
+    store.record = try testPairingCredentials()
+    let controller = TalkController(recorder: recorder, permission: { true })
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { await transport.connect($0) })) },
+                             makePaths: { nil }, talk: controller)
+    await session.launch()
+    try await eventuallySession { await transport.socket(0) != nil }
+    let first = try #require(await transport.socket(0))
+    await first.ready()
+    try await eventuallySession { session.talk.canPress }
+    await session.talk.press()
+    let oldID = try #require(session.talk.talkID)
+    await session.setForeground(false)
+    #expect(!recorder.active)
+    let nextIndex = await transport.sockets.count
+    await session.setForeground(true)
+    try await eventuallySession { await transport.socket(nextIndex) != nil }
+    let next = try #require(await transport.socket(nextIndex))
+    await next.ready(through: 2)
+    try await eventuallySession { await next.sent.contains(where: { $0.type == "talk_cancel" }) }
+    let cancel = try #require(await next.sent.first(where: { $0.type == "talk_cancel" }))
+    #expect(cancel.payload["talk_id"] == .string(oldID))
+    #expect(await next.sent.contains(where: { $0.type == "talk_begin" }) == false)
+    #expect(!session.talk.canPress)
+    await next.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(cancel.id)\",\"ok\":true,\"result\":{}}")
+    try await eventuallySession { session.talk.canPress }
+    await session.talk.press()
+    #expect(session.talk.state == .recording)
+    #expect(session.talk.talkID != oldID)
+    await session.unpair()
+    await next.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(cancel.id)\",\"ok\":true,\"result\":{}}")
+    #expect(session.credentials == nil)
+    #expect(!session.talk.canPress)
+    #expect(!recorder.active)
+}
+
+@MainActor @Test func freshHoldWaitsUntilPreviousCancellationRetirementReturns() async throws {
+    let recorder = FakeTalkRecorder(), wire = TalkWire()
+    var retirement: CheckedContinuation<Void, Never>?
+    let talk = TalkController(recorder: recorder, permission: { true })
+    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { _ in
+        await withCheckedContinuation { retirement = $0 }
+    }, upload: { try await wire.upload($0, $1, $2) })
+    await talk.press()
+    let cancelled = Task { await talk.cancel() }
+    try await eventuallySession { retirement != nil }
+    await talk.setReady(true)
+    await talk.press()
+    #expect(!recorder.active)
+    #expect(recorder.starts == 1)
+    #expect(!talk.canPress)
+    retirement?.resume(); retirement = nil
+    await cancelled.value
+    #expect(talk.canPress)
+    await talk.press()
+    #expect(recorder.starts == 2)
+    #expect(talk.state == .recording)
 }
