@@ -37,7 +37,7 @@ public enum TalkState: Equatable, Sendable {
         default: nil
         }
     }
-    public var canPress: Bool { ready && ![.authorizing, .recording, .uploading, .thinking].contains(state) }
+    public var canPress: Bool { ready && retiring == 0 && ![.authorizing, .recording, .uploading, .thinking].contains(state) }
     private let recorder: any TalkRecorder
     private let permission: @MainActor () async -> Bool
     private let now: @MainActor () -> Double
@@ -49,6 +49,7 @@ public enum TalkState: Equatable, Sendable {
     private var completedRequests: [String] = []
     private var stopSpeech: @MainActor () async -> Void = {}
     private var generation: UInt64 = 0
+    private var retiring = 0
     private var beginID: String?
     private var started = 0.0
     private var timer: Task<Void, Never>?
@@ -158,6 +159,8 @@ public enum TalkState: Equatable, Sendable {
     }
 
     public func cancel(failed: Bool = false) async {
+        retiring += 1
+        defer { retiring -= 1 }
         generation &+= 1
         let id = talkID, begin = beginID
         let retire = retire, send = send
@@ -165,8 +168,8 @@ public enum TalkState: Equatable, Sendable {
         timer?.cancel(); timer = nil; operation?.cancel(); operation = nil; deadline?.cancel(); deadline = nil
         state = failed ? .failed : .cancelled
         talkID = nil; beginID = nil; requestID = nil
-        if let begin { await retire?(begin) }
         if let id { try? await send?(HubCommand(type: "talk_cancel", payload: ["talk_id": .string(id)])) }
+        if let begin { await retire?(begin) }
     }
 
     public func receive(_ result: CommandResult) async {
