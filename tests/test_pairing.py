@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
+import pytest
 
 from jarvis_hub.door import Door
 from jarvis_hub.pairing import PairingStore
@@ -304,6 +305,40 @@ async def test_health_refuses_non_ascii_bearer_tokens_over_raw_http(tmp_path: Pa
                 finally:
                     writer.close()
                     await writer.wait_closed()
+        finally:
+            await door.close()
+            await hub.close()
+
+
+@pytest.mark.parametrize("malformed", ["large_integer", "nested_arrays", "NaN", "Infinity", "-Infinity"])
+async def test_pairing_refuses_invalid_json_without_consuming_the_code(tmp_path: Path, malformed: str) -> None:
+    import json
+
+    hub = make_hub(FakeBackend(FakeClock()), RecordingOutput(), RecordingMetrics())
+    with PairingStore(tmp_path / "events.sqlite3") as store:
+        code = store.create_code("https://mac.example.ts.net")
+        door = Door(enabled=True, port=0, health=hub.health, pairing=store)
+        await door.start()
+        try:
+            async with aiohttp.ClientSession() as client:
+                url = f"http://127.0.0.1:{door.port}/v1/pair"
+                valid = {"version": 1, "code": code, "name": "Phone", "kind": "iphone"}
+                if malformed == "large_integer":
+                    body = '{"version":' + "9" * 5000 + "}"
+                elif malformed == "nested_arrays":
+                    body = "[" * 10_000 + "]" * 10_000
+                else:
+                    body = json.dumps(valid)[:-1] + ', "extra":' + malformed + "}"
+                async with client.post(url, data=body.encode("utf-8"),
+                                       headers={"Content-Type": "application/json"}) as response:
+                    assert response.status == 400
+                    assert response.headers["Cache-Control"] == "no-store"
+                    text = await response.text()
+                    assert code not in text
+                    assert json.loads(text) == {"version": 1, "error": {
+                        "code": "invalid_payload", "message": "Expected a JSON object", "retry_after_seconds": None}}
+                async with client.post(url, json=valid) as response:
+                    assert response.status == 201
         finally:
             await door.close()
             await hub.close()

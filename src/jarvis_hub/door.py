@@ -4,12 +4,16 @@ import asyncio
 import json
 import sqlite3
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 from aiohttp import web
 
 from jarvis_hub.config import ConfigError
 from jarvis_hub.pairing import PairingError, PairingStore
+
+
+def _reject_json_constant(value: str) -> NoReturn:
+    raise ValueError("Nonstandard JSON constant")
 
 
 class Door:
@@ -76,8 +80,8 @@ class Door:
             if request.charset is not None and request.charset.lower() not in ("utf-8", "utf8"):
                 raise PairingError("invalid_payload", "JSON must use UTF-8")
             try:
-                body = json.loads((await request.read()).decode("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError):
+                body = json.loads((await request.read()).decode("utf-8"), parse_constant=_reject_json_constant)
+            except (ValueError, RecursionError):
                 raise PairingError("invalid_payload", "Expected a JSON object") from None
             if not isinstance(body, dict):
                 raise PairingError("invalid_payload", "Expected a JSON object")
