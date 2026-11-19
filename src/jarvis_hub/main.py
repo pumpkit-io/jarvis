@@ -21,6 +21,7 @@ from uuid import uuid4
 from rich.console import Console
 from rich.markdown import Markdown
 
+from jarvis_hub.event_log import EventLog, EventOutput
 from jarvis_hub.agents.backend import AgentBackend, SessionSpec
 from jarvis_hub.agents.sdk import SdkBackend
 from jarvis_hub.config import ConfigError, Settings, VoiceSettings, load_settings
@@ -161,6 +162,7 @@ class TerminalOutput:
         self._show_log = show_log
         self._console = _Console(file=stdout, highlight=False)
         self._mid_reply = False
+        self.on_notice: Callable[[str], None] = self.notice
 
     def heard(self, text: str, *, typed: bool = True) -> None:
         # A terminal already shows what was typed; piped input is echoed so the transcript reads in order.
@@ -193,14 +195,14 @@ class TerminalOutput:
             self._console.print(Markdown(markdown))
             self._stdout.flush()
         except OSError as e:
-            self.notice(f"Could not show the details on screen: {e}")
+            self.on_notice(f"Could not show the details on screen: {e}")
         try:
             self._show_log.parent.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
             with self._show_log.open("a") as f:
                 f.write(f"<!-- shown {stamp} -->\n{markdown.rstrip()}\n\n")
         except OSError as e:
-            self.notice(f"Could not write the show log: {e}")
+            self.on_notice(f"Could not write the show log: {e}")
 
 
 def _guard_billing(environ: MutableMapping[str, str], stderr: TextIO) -> None:
@@ -285,44 +287,47 @@ async def text_mode(
     With a voice, replies are also spoken, and the conversation ends once the last one has finished playing.
     """
     _guard_billing(environ, stderr)
-    interactive = stdin.isatty()
-    output = TerminalOutput(stdout, stderr, prompt=interactive, show_log=settings.runtime_dir / "show.log")
-    metrics = JsonlMetrics(settings.runtime_dir / "metrics.jsonl")
-    speech = None
-    if voice is not None:
+    with EventLog(settings.runtime_dir / "events.sqlite3") as log:
+        interactive = stdin.isatty()
+        terminal = TerminalOutput(stdout, stderr, prompt=interactive, show_log=settings.runtime_dir / "show.log")
+        output = EventOutput(log, terminal)
+        terminal.on_notice = output.notice
+        metrics = JsonlMetrics(settings.runtime_dir / "metrics.jsonl")
+        speech = None
+        if voice is not None:
+            try:
+                player = voice.open_player(voice.tts.sample_rate)
+            except Exception as e:
+                output.notice(f"Speech is off: no audio output: {type(e).__name__}: {e}")
+            else:
+                speech = Speech(
+                    voice.tts, player, clock, metrics=metrics, notice=output.notice,
+                    on_ready=lambda: output.notice("Speech ready."),
+                )
+        hub = settings_hub(
+            settings, backend=backend, clock=clock, output=output, metrics=metrics, speech=speech,
+            on_model_ready=lambda: output.notice("Model ready."),
+        )
         try:
-            player = voice.open_player(voice.tts.sample_rate)
-        except Exception as e:
-            output.notice(f"Speech is off: no audio output: {type(e).__name__}: {e}")
-        else:
-            speech = Speech(
-                voice.tts, player, clock, metrics=metrics, notice=output.notice,
-                on_ready=lambda: output.notice("Speech ready."),
-            )
-    hub = settings_hub(
-        settings, backend=backend, clock=clock, output=output, metrics=metrics, speech=speech,
-        on_model_ready=lambda: output.notice("Model ready."),
-    )
-    try:
-        output.notice("Model loading.")
-        await hub.start()
-        await asyncio.to_thread(language.warm_up)
-        if speech is not None:
-            output.notice("Speech loading.")
-            speech.start()
-            speech.say("ready", "en")
-        if interactive:
-            stdout.write(PROMPT)
-            stdout.flush()
-        await hub.run(_typed_lines(stdin, clock))
-        if speech is not None:
-            await speech.idle()
-    finally:
-        try:
-            await hub.close()
-        finally:
+            output.notice("Model loading.")
+            await hub.start()
+            await asyncio.to_thread(language.warm_up)
             if speech is not None:
-                await speech.close()
+                output.notice("Speech loading.")
+                speech.start()
+                speech.say("ready", "en")
+            if interactive:
+                stdout.write(PROMPT)
+                stdout.flush()
+            await hub.run(_typed_lines(stdin, clock))
+            if speech is not None:
+                await speech.idle()
+        finally:
+            try:
+                await hub.close()
+            finally:
+                if speech is not None:
+                    await speech.close()
 
 
 async def voice_mode(
@@ -343,71 +348,74 @@ async def voice_mode(
     Ends with the typed input (Ctrl-D) or Ctrl-C.
     """
     _guard_billing(environ, stderr)
-    output = TerminalOutput(stdout, stderr, prompt=stdin.isatty(), show_log=settings.runtime_dir / "show.log")
-    metrics = JsonlMetrics(settings.runtime_dir / "metrics.jsonl")
-    voice = settings.voice
-    choice = EngineChoice(aec="off" if headphones else voice.aec, wake=voice.wake_engine, stt=voice.stt_engine)
-    clips = ClipStore(settings.runtime_dir / "clips", clip_settings(voice))
-    listener = ears.open_listener(choice, listening(voice), metrics.record, output.notice, clips)
-    try:
-        player = ears.open_player(ears.tts.sample_rate, listener.reference)
-    except Exception as e:
-        output.notice(f"Voice mode needs an audio output: {type(e).__name__}: {e}. Run `jarvis-hub --text` instead.")
-        return
-    following: asyncio.Task[None] | None = None
-    model_ready = asyncio.Event()
-
-    async def ready_to_take_requests() -> None:
-        await _listening(listener)
-        await model_ready.wait()
-
-    conversation = VoiceMode(
-        audio=listener,
-        tts=ears.tts,
-        player=player,
-        clock=clock,
-        timing=timing(voice),
-        metrics=metrics,
-        notice=output.notice,
-        debug=debug,
-        ready_when=ready_to_take_requests,
-    )
-    hub = settings_hub(
-        settings,
-        backend=backend,
-        clock=clock,
-        output=output,
-        metrics=metrics,
-        speech=conversation.speech,
-        speak_typed=False,
-        on_end_conversation=conversation.end_conversation,
-        on_stand_by=conversation.stand_by,
-        floor=conversation,
-        preconnect_orchestrator=True,
-        on_model_ready=lambda: (output.notice("Model ready."), model_ready.set()),
-    )
-    try:
-        output.notice("Model loading.")
-        await hub.start()
-        await asyncio.to_thread(language.warm_up)
-        conversation.start()
-        output.notice("Listening loading.")
-        listener.start()
-        if ears.follow_devices is not None:
-            following = asyncio.create_task(ears.follow_devices(listener, player, output.notice))
-        if stdin.isatty():
-            stdout.write(PROMPT)
-            stdout.flush()
-        await hub.run(merge(_typed_lines(stdin, clock), conversation.lines(hub.interrupt, hub.woke, hub.admit_spoken_revision)))
-    finally:
-        if following is not None:
-            following.cancel()
-            await asyncio.gather(following, return_exceptions=True)
+    with EventLog(settings.runtime_dir / "events.sqlite3") as log:
+        terminal = TerminalOutput(stdout, stderr, prompt=stdin.isatty(), show_log=settings.runtime_dir / "show.log")
+        output = EventOutput(log, terminal)
+        terminal.on_notice = output.notice
+        metrics = JsonlMetrics(settings.runtime_dir / "metrics.jsonl")
+        voice = settings.voice
+        choice = EngineChoice(aec="off" if headphones else voice.aec, wake=voice.wake_engine, stt=voice.stt_engine)
+        clips = ClipStore(settings.runtime_dir / "clips", clip_settings(voice))
+        listener = ears.open_listener(choice, listening(voice), metrics.record, output.notice, clips)
         try:
-            await hub.close()
+            player = ears.open_player(ears.tts.sample_rate, listener.reference)
+        except Exception as e:
+            output.notice(f"Voice mode needs an audio output: {type(e).__name__}: {e}. Run `jarvis-hub --text` instead.")
+            return
+        following: asyncio.Task[None] | None = None
+        model_ready = asyncio.Event()
+
+        async def ready_to_take_requests() -> None:
+            await _listening(listener)
+            await model_ready.wait()
+
+        conversation = VoiceMode(
+            audio=listener,
+            tts=ears.tts,
+            player=player,
+            clock=clock,
+            timing=timing(voice),
+            metrics=metrics,
+            notice=output.notice,
+            debug=debug,
+            ready_when=ready_to_take_requests,
+        )
+        hub = settings_hub(
+            settings,
+            backend=backend,
+            clock=clock,
+            output=output,
+            metrics=metrics,
+            speech=conversation.speech,
+            speak_typed=False,
+            on_end_conversation=conversation.end_conversation,
+            on_stand_by=conversation.stand_by,
+            floor=conversation,
+            preconnect_orchestrator=True,
+            on_model_ready=lambda: (output.notice("Model ready."), model_ready.set()),
+        )
+        try:
+            output.notice("Model loading.")
+            await hub.start()
+            await asyncio.to_thread(language.warm_up)
+            conversation.start()
+            output.notice("Listening loading.")
+            listener.start()
+            if ears.follow_devices is not None:
+                following = asyncio.create_task(ears.follow_devices(listener, player, output.notice))
+            if stdin.isatty():
+                stdout.write(PROMPT)
+                stdout.flush()
+            await hub.run(merge(_typed_lines(stdin, clock), conversation.lines(hub.interrupt, hub.woke, hub.admit_spoken_revision)))
         finally:
-            listener.close()
-            await conversation.close()
+            if following is not None:
+                following.cancel()
+                await asyncio.gather(following, return_exceptions=True)
+            try:
+                await hub.close()
+            finally:
+                listener.close()
+                await conversation.close()
 
 
 def _open_listener(
