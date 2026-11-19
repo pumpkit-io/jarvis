@@ -4,6 +4,7 @@ import asyncio
 import threading
 from pathlib import Path
 from collections.abc import Callable
+from types import CoroutineType
 from typing import Any
 
 import numpy as np
@@ -592,7 +593,30 @@ async def test_queued_endpoint_delivers_one_complete_hub_request_and_task_and_pr
     from tests.fakes import (FakeBackend, FakeClock, FakeTts, RecordingMetrics, RecordingOutput,
                              RecordingPlayer, Text, Tool, Typist, make_hub)
 
+    class SpeechClock:
+        def __init__(self, clock: FakeClock) -> None:
+            self.clock = clock
+            self.calls = 0
+            self.pending = 0
+
+        def now(self) -> float:
+            return self.clock.now()
+
+        def sleep(self, seconds: float) -> 'CoroutineType[Any, Any, None]':
+            self.calls += 1
+            sleeping = self.clock.sleep(seconds)
+
+            async def wait() -> None:
+                self.pending += 1
+                try:
+                    await sleeping
+                finally:
+                    self.pending -= 1
+
+            return wait()
+
     clock, source, stt = FakeClock(), Source(), GatedEndpointStt()
+    voice_clock = SpeechClock(clock)
     spoken = [Text('I will check.'), Tool('delegate', {'request': 'Check the tests', 'context': ''})]
     typed = [Text('Typed input received.')]
     backend = FakeBackend(clock, [typed, spoken] if typed_during_stt else [spoken, typed])
@@ -601,7 +625,7 @@ async def test_queued_endpoint_delivers_one_complete_hub_request_and_task_and_pr
         lambda: Engines(CountingEcho(), MarkerWake(), LoudVad(), ScriptedTurn(), stt, Everyone()),
         Listening(), metrics.record, output.notice, source=source, backlog_s=10, clock=clock.now,
     )
-    voice = VoiceMode(audio=capture, tts=FakeTts(), player=player, clock=clock,
+    voice = VoiceMode(audio=capture, tts=FakeTts(), player=player, clock=voice_clock,
                       timing=Timing(6.0, 4.0, 6.0, .5), metrics=metrics, notice=output.notice)
     hub = make_hub(backend, output, metrics, speech=voice.speech, speak_typed=False,
                    on_end_conversation=voice.end_conversation, floor=voice)
@@ -617,11 +641,15 @@ async def test_queued_endpoint_delivers_one_complete_hub_request_and_task_and_pr
         if one_breath:
             source.frames(140, value=1000, start=1000.08)
         await until(lambda: voice.state == 'listening')
+        # Listening precedes the chime's consumption; wait until its timeout is armed before sending silence.
+        await until(lambda: voice_clock.calls >= 2 and voice_clock.pending > 0)
         if not one_breath:
             source.frames(140, value=1000, start=1000.08)
         source.frames(60, start=1001.48)
         assert await asyncio.to_thread(stt.entered.wait, 2)
         if typed_during_stt:
+            # STT runs on the capture thread; its entry does not mean VoiceMode has consumed SpeechStarted.
+            await until(lambda: voice_clock.pending == 0)
             typist.type('Show the status')
             await until(lambda: any('Typed input received.' in text for text in output.replies))
         continuation_at = 1002.08

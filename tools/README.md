@@ -66,3 +66,7 @@ uv run --frozen --offline pyright tools/reference_client.py tests/test_reference
 ```
 
 The suite executes the CLI against the real loopback Door with fake Hub agents and audio. It also exercises delayed HTTP responses, early and unrelated clips, identical upload retries, and reconnect during a streamed reply. Executable Talk regressions cover recovered canonical text with lost or partial audio, late synthesis, synthesis without a live stream, and WAV rejection through the command interface. No real Hub launch, device, account or model is used.
+
+## E5 measurement runner
+
+`latency_e5.py` uses this Client's upload and timing API to run 20 utterances per operator-selected route, then reports the combined 20 Wi-Fi + 20 LTE series offline. Real runs require `--allow-model-usage` and spend model usage; the `report` command reads existing JSONL without connecting. The runner paces new uploads below ten per minute, preserves missing/partial outcomes and stops on uncertain input for history reconciliation. See [E5 method and current unmeasured results](../docs/notes/iphone-latency-e5.md) for executable commands, separate-machine network topology, private output provenance and the provisional PCM/full-upload decision. Both physical routes remain Waiting on User.
