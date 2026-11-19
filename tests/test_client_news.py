@@ -245,7 +245,7 @@ async def test_phone_conversation_tools_leave_mac_listening_callbacks_untouched(
         await speech.close()
 
 
-async def test_reconnected_focus_waits_for_playback_before_batched_announcement() -> None:
+async def test_live_focus_waits_for_playback_before_batched_announcement() -> None:
     from tests.fakes import Set
 
     clock, output, metrics = FakeClock(), RecordingOutput(), RecordingMetrics()
@@ -269,10 +269,11 @@ async def test_reconnected_focus_waits_for_playback_before_batched_announcement(
     running = asyncio.create_task(hub.run(inputs()))
     try:
         await until(lambda: remote.texts == ["Working, sir."])
-        hub.clients.disconnect("phone")
+        hub.clients.take_focus("terminal")
+        hub.clients.disconnect("terminal")
         arrival.set()
         await reported.wait()
-        hub.attach_client(client)
+        hub.clients.take_focus("phone")
         await asyncio.sleep(0.01)
         clock.advance(3)
         await asyncio.sleep(0.01)

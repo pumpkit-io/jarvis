@@ -133,6 +133,8 @@ class Speech(Protocol):
 
     def stop(self) -> None: ...
 
+    def retire(self, destination: Player | None) -> None: ...
+
     def played(self) -> str: ...
 
     async def idle(self, *, stall_timeout: float | None = None) -> None: ...
@@ -174,6 +176,9 @@ class _Silent:
         pass
 
     def stop(self) -> None:
+        pass
+
+    def retire(self, destination: Player | None) -> None:
         pass
 
     def played(self) -> str:
@@ -330,6 +335,7 @@ class _NewsDelivery:
     news: News
     client_id: str
     speaks: bool
+    player: Player | None
     follows_focus: bool
     turn: int | None = None
     held: bool = False
@@ -621,6 +627,9 @@ class Hub:
         if output is not None:
             self._output.attach(client.id, output)
         if player is not None:
+            previous = self._client_players.get(client.id)
+            if previous is not player and (previous is not None or client.id == TERMINAL):
+                self._speech.retire(previous)
             self._client_players[client.id] = player
         self._clients_changed()
 
@@ -638,20 +647,24 @@ class Hub:
             client = self.clients.get(delivery.client_id)
             visible = bool(client is not None and client.connected and client.can_show_text)
             can_speak = self._client_can_speak(delivery.client_id)
+            player_current = self._client_players.get(delivery.client_id) is delivery.player
             retargeted = delivery.follows_focus and delivery.client_id != self.clients.focus
             told = self._news_delivery_told(delivery)
-            if delivery.speaks and (retargeted or not can_speak):
-                self._speech.stop()
+            if delivery.speaks and (retargeted or not can_speak or not player_current):
+                self._speech.retire(delivery.player)
                 if delivery.client_id == TERMINAL and self._floor is not None:
                     self._floor.typed_input()
             if not retargeted and visible and not can_speak:
                 delivery.speaks = False
                 if delivery.reply is not None:
                     self._news_delivery = None
-            elif retargeted or not (can_speak if delivery.speaks else visible):
+            elif retargeted or not (can_speak and player_current if delivery.speaks else visible):
                 self._news_delivery = None
                 if not told:
                     self._hold_news_delivery(delivery)
+        for client_id in (TERMINAL, *self._client_players):
+            if not self._client_can_speak(client_id):
+                self._speech.retire(self._client_players.get(client_id))
         if not self._focus_available():
             for news in self._news:
                 self._held.extend(news.leaves())
@@ -1245,6 +1258,7 @@ class Hub:
                     destination = item.client_id if item.kind == "user" else self.clients.focus
                     delivery = _NewsDelivery(item.news, destination,
                                              speaks=item.spoken and self._client_can_speak(destination),
+                                             player=self._client_players.get(destination),
                                              follows_focus=item.kind == "event")
                     self._news_delivery = delivery
                 self._approvals.turn_began(self._user_text)
@@ -1481,9 +1495,11 @@ class Hub:
             delivery.turn = turn
         if audible:
             self._speech_turn = turn
+        player = self._client_players.get(destination_id)
         speech.begin(self._lang, turn=turn, heard_at=arrived if kind == "user" else None, owner=owner,
-                     destination=self._client_players.get(destination_id),
+                     destination=player,
                      allowed=lambda: self._client_can_speak(destination_id)
+                     and self._client_players.get(destination_id) is player
                      and (kind != "event" or self.clients.focus == destination_id))
         self._replying = show
         try:

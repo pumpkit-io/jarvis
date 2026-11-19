@@ -106,6 +106,7 @@ class _Reply:
     gaps: int = 0
     audio_s: float = 0.0
     generation_done: bool = False
+    stopped: bool = False
     # Later clips remain in pending() after this reply has drained.
     trailing_audio_s: float = 0.0
 
@@ -147,6 +148,7 @@ class Speech:
         self._tts = tts
         self._player = player
         self._players: list[Player] = [player]
+        self._retired_players: list[Player] = []
         self._last_player = player
         self._clock = clock
         self._metrics = metrics
@@ -182,6 +184,7 @@ class Speech:
         player = destination if destination is not None else self._player
         if not any(p is player for p in self._players):
             self._players.append(player)
+        self._retired_players = [retired for retired in self._retired_players if retired is not player]
         self._last_player = player
         self._reply = _Reply(turn, lang, self._clock.now(), heard_at, owner=owner, player=player, allowed=allowed)
         self._prune_replies()
@@ -231,6 +234,22 @@ class Speech:
             except Exception as e:
                 self._notice(f"Could not stop speech: {type(e).__name__}: {e}")
 
+    def retire(self, destination: Player | None) -> None:
+        """Stop this destination and exclude it from playback waits until a new reply binds it."""
+        player = destination if destination is not None else self._player
+        for reply in self._replies.values():
+            if reply.player is player:
+                reply.stopped = True
+        if self._reply is not None and self._reply.stopped:
+            self._reply = None
+        if not any(retired is player for retired in self._retired_players):
+            self._retired_players.append(player)
+            try:
+                player.stop()
+            except Exception as e:
+                self._notice(f"Could not stop speech: {type(e).__name__}: {e}")
+        self._prune_replies()
+
     def played(self) -> str:
         return self._last_player.played()
 
@@ -240,10 +259,13 @@ class Speech:
             with contextlib.suppress(Exception):
                 await self._loading
         await self._queue.join()
-        left, since = sum(p.pending() for p in self._players), self._clock.now()
+        def pending() -> float:
+            return sum(p.pending() for p in self._players if not any(retired is p for retired in self._retired_players))
+
+        left, since = pending(), self._clock.now()
         while left > 0:
             await self._clock.sleep(0.05)
-            if (now_left := sum(p.pending() for p in self._players)) < left:
+            if (now_left := pending()) < left:
                 left, since = now_left, self._clock.now()
             elif stall_timeout is not None and self._clock.now() - since >= stall_timeout:
                 return
@@ -304,22 +326,22 @@ class Speech:
     def _prune_replies(self) -> None:
         self._replies = {
             turn: reply for turn, reply in self._replies.items()
-            if not reply.generation_done or (
+            if not reply.stopped and (not reply.generation_done or (
                 reply.audio_s > 0 and (reply.player or self._player).pending() > reply.trailing_audio_s + 1e-9
-            )
+            ))
         }
 
     async def _handle(self, item: _Say | _Cached | _End) -> None:
         match item:
             case _Say(reply, text):
-                if reply.allowed is not None and not reply.allowed():
+                if reply.stopped or (reply.allowed is not None and not reply.allowed()):
                     return
                 generation = self._generation
                 voice = voice_for(reply.lang)
                 samples = await asyncio.get_running_loop().run_in_executor(
                     self._thread, self._tts.synthesize, text, voice
                 )
-                if generation == self._generation and (reply.allowed is None or reply.allowed()):
+                if generation == self._generation and not reply.stopped and (reply.allowed is None or reply.allowed()):
                     self._play(Clip(text, voice, samples, self._tts.sample_rate), reply, sentence=True)
             case _Cached(name, lang, reply):
                 starts = self._play(self._cache[name, lang], reply, sentence=False)
@@ -331,7 +353,9 @@ class Speech:
     def _play(self, clip: Clip, reply: _Reply | None, *, sentence: bool) -> float:
         """Plays `clip` after what is queued; returns when it starts."""
         player = reply.player if reply is not None and reply.player is not None else self._player
-        if reply is not None and reply.allowed is not None and not reply.allowed():
+        if any(retired is player for retired in self._retired_players) or (
+            reply is not None and (reply.stopped or (reply.allowed is not None and not reply.allowed()))
+        ):
             return self._clock.now()
         self._prune_replies()
         for queued in self._replies.values():
