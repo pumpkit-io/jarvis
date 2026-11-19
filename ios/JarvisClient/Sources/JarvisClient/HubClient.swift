@@ -29,7 +29,7 @@ public enum HubTransportError: Error, Equatable, Sendable {
 
 public enum HubClientUpdate: Sendable {
     case state(HubConnectionState), event(HubEvent), audio(HubEvent, Data), result(CommandResult)
-    case failure(String), replay(ReplayComplete)
+    case failure(String), replay(ReplayComplete), speechConnectionEnded(String)
 }
 
 public actor HubClient {
@@ -106,25 +106,37 @@ public actor HubClient {
 
     /// Call before surrendering foreground time. Only already-playing audio may drain in the background.
     public func setForeground(_ value: Bool, playingSpeechID: String? = nil) async {
+        if !value, !foreground, playing, let playingSpeechID,
+           playingSpeechID == drainingSpeechID, playingSpeechID == activeSpeechID,
+           socket != nil, handover { return }
+        let resumePlaying = value && !foreground && playing && drainingSpeechID == activeSpeechID && socket != nil && handover
         foreground = value
-        playing = playingSpeechID != nil && playingSpeechID == activeSpeechID
+        playing = resumePlaying || playingSpeechID != nil && playingSpeechID == activeSpeechID
         drainingSpeechID = value ? nil : playingSpeechID
         if !value { cancelRetries(); setState(.suspended) }
         if value {
-            if running { await replace() }
-        } else if playing, displayReady, let socket {
-            let command = HubCommand(type: "set_presence", payload: ["can_show_text": .bool(false)])
-            presenceID = command.id; presenceDesired = false; displayReady = false
-            let owner = generation
-            await withCheckedContinuation { waiter in
-                presenceWaiter = waiter
-                startPresenceDeadline(command.id, owner: owner)
-                Task {
-                    do { try await socket.send(JSONEncoder().encode(command)) }
-                    catch { await presenceExpired(command.id, owner: owner) }
-                }
-            }
+            if resumePlaying, let socket { await setPresence(true, socket: socket) }
+            else if running { await replace() }
+        } else if playing, handover, let socket {
+            await setPresence(false, socket: socket)
         } else { await retire() }
+    }
+
+    private func setPresence(_ value: Bool, socket: any HubSocket) async {
+        presenceTimeout?.cancel()
+        presenceWaiter?.resume(); presenceWaiter = nil
+        let command = HubCommand(type: "set_presence", payload: ["can_show_text": .bool(value)])
+        presenceID = command.id; presenceDesired = value; displayReady = false
+        let owner = generation
+        await withCheckedContinuation { waiter in
+            presenceWaiter = waiter
+            startPresenceDeadline(command.id, owner: owner)
+            Task {
+                guard generation == owner, presenceID == command.id else { return }
+                do { try await socket.send(JSONEncoder().encode(command)) }
+                catch { await presenceExpired(command.id, owner: owner) }
+            }
+        }
     }
 
     public func playbackDrained(speechID: String) async {
@@ -319,6 +331,7 @@ public actor HubClient {
         task?.cancel(); task = nil
         cancelRetries()
         retireTalkBegins()
+        if let activeSpeechID { continuation.yield(.speechConnectionEnded(activeSpeechID)) }
         let old = socket; socket = nil; handover = false; displayReady = false; presenceID = nil; activeSpeechID = nil
         presenceTimeout?.cancel(); presenceTimeout = nil
         presenceWaiter?.resume(); presenceWaiter = nil
@@ -442,6 +455,7 @@ public actor HubClient {
                 guard generation == owner else { await current?.close(); return }
                 cancelRetries()
                 retireTalkBegins()
+                if let activeSpeechID { continuation.yield(.speechConnectionEnded(activeSpeechID)) }
                 socket = nil; handover = false; displayReady = false; presenceID = nil; activeSpeechID = nil
                 presenceTimeout?.cancel(); presenceTimeout = nil
                 presenceWaiter?.resume(); presenceWaiter = nil

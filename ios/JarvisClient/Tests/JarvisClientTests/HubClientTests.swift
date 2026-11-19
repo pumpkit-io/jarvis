@@ -37,7 +37,10 @@ actor FakeSocket: HubSocket {
     func blockClose() { holdClose = true }
     func releaseClose() { holdClose = false; closeWaiter?.resume(); closeWaiter = nil }
     func blockSend(_ type: String) { heldSendType = type }
-    func releaseSend() { heldSendType = nil; sendWaiter?.resume(); sendWaiter = nil }
+    func releaseSend(keepingBlocked: Bool = false) {
+        if !keepingBlocked { heldSendType = nil }
+        let waiter = sendWaiter; sendWaiter = nil; waiter?.resume()
+    }
     func text(_ text: String) { input.yield(.text(Data(text.utf8))) }
     func ready(through: Int64 = 0) {
         input.yield(.text(Data("{\"version\":1,\"seq\":\(through + 1),\"time\":\"2026-11-19T00:00:00Z\",\"type\":\"status\",\"client_id\":\"test-status\",\"payload\":{\"ready\":true,\"usage_limit\":{\"limited\":false,\"resets_at\":null},\"quiet\":false,\"focus_client_id\":null,\"mac_voice_on\":true,\"silence\":false}}".utf8)))

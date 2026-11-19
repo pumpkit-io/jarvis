@@ -12,6 +12,13 @@ import Observation
     public var draft = ""
     public private(set) var typedLines: [TypedLine] = []
     public private(set) var inputMessage: String?
+    public let playback: SpeechPlayer
+    private var playbackDelivery: Task<Void, Never>?
+    private var playbackRevision: UInt64 = 0
+    private var pendingPlaybackDrain: (speechID: String, revision: UInt64)?
+    private var backgroundSpeechID: String?
+    public private(set) var replayMessages: [String: String] = [:]
+    private var replayCommands: [String: HubCommand] = [:]
     public let talk: TalkController
     public private(set) var speechID: String?
     private var lastCompletedClip: Int64 = -1
@@ -20,7 +27,7 @@ import Observation
 
     public func reportCompletedClip(speechID: String, index: Int64) {
         guard self.speechID == speechID else { return }
-        lastCompletedClip = max(lastCompletedClip, index)
+        if index == lastCompletedClip + 1 { lastCompletedClip = index }
     }
 
     public func playbackDrained(speechID: String) async {
@@ -30,11 +37,13 @@ import Observation
     }
 
     private func interruptSpeech() async {
-        stopPlayback()
+        let speechID = playback.speechID ?? self.speechID
+        let finished = max(lastCompletedClip, playback.lastFinishedIndex)
+        playback.stop(reportStopped: false); stopPlayback()
         guard let speechID, let client else { return }
         self.speechID = nil; talk.speaking = false
         try? await sendCommand(client, HubCommand(type: "interrupt", payload: [
-            "speech_id": .string(speechID), "last_clip_index": .integer(lastCompletedClip)
+            "speech_id": .string(speechID), "last_clip_index": .integer(finished)
         ]))
     }
 
@@ -99,16 +108,40 @@ import Observation
         switch update {
         case .event(let event):
             conversation.ingest(event); talk.receive(event)
-            if event.kind == .speechBegin {
-                speechID = event.string("speech_id"); lastCompletedClip = -1; talk.speaking = true
-            } else if event.kind == .speechStop {
-                speechID = nil; talk.speaking = false; stopPlayback()
+            switch event.kind {
+            case .speechBegin:
+                if let id = event.string("speech_id"), let reply = event.string("reply_id"), foreground {
+                    playback.begin(speechID: id, replyID: reply)
+                    speechID = id; lastCompletedClip = -1
+                }
+            case .speechEnd:
+                if let id = event.string("speech_id"), let reply = event.string("reply_id"), let last = event.integer("last_clip_index") {
+                    playback.end(speechID: id, replyID: reply, lastIndex: last)
+                }
+            case .speechStop:
+                if let id = event.string("speech_id") { playback.stop(speechID: id, reportStopped: false) }
+            case .replyEnd:
+                if let reply = event.string("reply_id"), playback.replyID != reply { playback.markMissed(replyID: reply) }
+            default: break
+            }
+        case .audio(let event, let pcm):
+            if foreground || backgroundSpeechID == playback.speechID && playback.activeSpeechID != nil,
+               let id = event.string("speech_id"), let reply = event.string("reply_id"),
+               let index = event.integer("index"), let text = event.string("text") {
+                playback.append(speechID: id, replyID: reply, index: index, text: text, pcm: pcm)
+                talk.speaking = playback.playingSpeechID != nil
             }
         case .result(let result):
+            if let entry = replayCommands.first(where: { $0.value.id == result.id }) {
+                replayCommands.removeValue(forKey: entry.key)
+                replayMessages[entry.key] = result.ok ? nil : result.error?.message ?? "Jarvis could not play this reply."
+            }
             guard let index = typedLines.firstIndex(where: { $0.id == result.id }) else { return }
             if result.ok { typedLines[index].outcome = .accepted }
             else if result.error?.code == "outcome_unknown" { typedLines[index].outcome = .outcomeUnknown }
             else { typedLines[index].outcome = .rejected(result.error?.message ?? "Jarvis could not accept your line.") }
+        case .speechConnectionEnded(let id):
+            playback.stop(speechID: id, reportStopped: false)
         case .failure:
             for index in typedLines.indices where typedLines[index].outcome == .unanswered {
                 typedLines[index].outcome = .deliveryUncertain
@@ -133,13 +166,42 @@ import Observation
                 makeClient: @escaping (PairingCredentials) throws -> HubClient = {
                     HubClient(transport: try .urlSession(origin: $0.origin, token: $0.deviceToken))
                 }, makePaths: @escaping () -> HubNetworkPaths? = { HubNetworkPaths() },
-                talk: TalkController? = nil, uploadTalk: TalkUpload = TalkUpload(),
+                talk: TalkController? = nil, playback: SpeechPlayer? = nil, uploadTalk: TalkUpload = TalkUpload(),
                 stopPlayback: @escaping @MainActor () -> Void = {},
                 sendCommand: @escaping @Sendable (HubClient, HubCommand) async throws -> Void = { try await $0.send($1) }) {
         self.store = store; self.service = service; self.makeClient = makeClient; self.makePaths = makePaths
         self.sendCommand = sendCommand
-        self.talk = talk ?? TalkController(recorder: NativeTalkRecorder(), permission: { await NativeTalkRecorder.requestPermission() })
+        let audioSession = NativeTalkAudioSession()
+        self.playback = playback ?? SpeechPlayer(session: audioSession)
+        self.talk = talk ?? TalkController(recorder: NativeTalkRecorder(session: audioSession), permission: { await NativeTalkRecorder.requestPermission() })
         self.uploadTalk = uploadTalk; self.stopPlayback = stopPlayback
+        self.playback.configure(report: { [weak self] command in
+            guard let self, let client = self.client else { return }
+            self.playbackRevision &+= 1
+            let previous = self.playbackDelivery
+            self.playbackDelivery = Task {
+                await previous?.value
+                guard !Task.isCancelled else { return }
+                try? await client.reportPlayback(command)
+            }
+        }, drained: { [weak self] id in
+            guard let self else { return }
+            self.talk.speaking = false
+            if self.speechID == id { self.speechID = nil }
+            guard let client = self.client else { return }
+            let previous = self.playbackDelivery, owner = self.generation, revision = self.playbackRevision
+            self.pendingPlaybackDrain = (id, revision)
+            self.playbackDelivery = Task {
+                await previous?.value
+                // A newer clip can resume and finish while an older receipt is still being written.
+                guard !Task.isCancelled, self.generation == owner, self.client === client,
+                      self.playbackRevision == revision else { return }
+                await client.playbackDrained(speechID: id)
+                guard self.generation == owner, self.client === client, self.playbackRevision == revision else { return }
+                if self.pendingPlaybackDrain?.revision == revision { self.pendingPlaybackDrain = nil }
+                if self.backgroundSpeechID == id { self.backgroundSpeechID = nil }
+            }
+        })
     }
 
     public func launch() async {
@@ -171,6 +233,20 @@ import Observation
         }
     }
 
+    public func silencePlayback() { playback.stop(reportStopped: false); stopPlayback(); talk.speaking = false }
+
+    public func replay(replyID: String) async {
+        guard connection.canSend, let client else { return }
+        let owner = generation
+        let command = replayCommands[replyID] ?? HubCommand(type: "replay_speech", payload: ["reply_id": .string(replyID)])
+        replayCommands[replyID] = command; replayMessages[replyID] = nil
+        do { try await sendCommand(client, command) }
+        catch {
+            guard generation == owner, self.client === client, replayCommands[replyID]?.id == command.id else { return }
+            replayMessages[replyID] = "Playback may not have reached the Mac. Tap Play to retry the same request."
+        }
+    }
+
     public func showError(_ error: PairingError) { self.error = error }
 
     /// Invalidates in-flight pairing before clearing the sole durable credential record.
@@ -178,7 +254,8 @@ import Observation
         generation &+= 1
         let owner = generation, old = client
         updates?.cancel(); updates = nil; paths?.cancel(); paths = nil
-        connection = .unpaired; speechID = nil; stopPlayback()
+        connection = .unpaired; speechID = nil; playback.stop(reportStopped: false); stopPlayback()
+        playbackDelivery?.cancel(); playbackDelivery = nil; pendingPlaybackDrain = nil
         await talk.setReady(false)
         guard generation == owner, client === old else { await old?.stop(); return }
         await talk.cancel()
@@ -186,6 +263,7 @@ import Observation
         client = nil; credentials = nil; pairing = false; loading = false
         do { try store.clear(); error = nil } catch { self.error = .storage }
         conversation = ConversationProjection(); typedLines = []; draft = ""; inputMessage = nil
+        playback.reset(); replayCommands = [:]; replayMessages = [:]
         await old?.stop()
     }
 
@@ -195,7 +273,10 @@ import Observation
         let transition = foregroundGeneration, owner = generation, client = client
         if !value { await talk.cancel() }
         guard foregroundGeneration == transition, generation == owner, self.client === client else { return }
-        await client?.setForeground(value)
+        let playing = playback.activeSpeechID ?? pendingPlaybackDrain?.speechID ?? backgroundSpeechID
+        backgroundSpeechID = value ? nil : playing
+        if !value && playing == nil { playback.stop(reportStopped: false) }
+        await client?.setForeground(value, playingSpeechID: value ? nil : playing)
     }
 
     private func connect(_ credentials: PairingCredentials, owner: UInt64) async throws {

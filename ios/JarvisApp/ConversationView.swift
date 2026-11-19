@@ -115,7 +115,7 @@ struct ConversationView: View {
     private func scriptRow(_ row: ConversationRow) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             if !row.text.isEmpty {
-                Text(verbatim: row.text)
+                Text(spokenText(row))
                     .font(.system(size: row.speaker == .user ? controlSize : scriptSize,
                                   design: row.speaker == .user ? .default : .serif))
                     .lineSpacing(row.speaker == .user ? 2 : 5)
@@ -123,6 +123,21 @@ struct ConversationView: View {
                     .multilineTextAlignment(row.speaker == .user ? .trailing : .leading)
                     .frame(maxWidth: .infinity, alignment: row.speaker == .user ? .trailing : .leading)
                     .textSelection(.enabled)
+            }
+            if row.id.hasPrefix("reply:"), session.playback.missedReplies.contains(String(row.id.dropFirst(6))),
+               session.playback.replyID != String(row.id.dropFirst(6)) {
+                Button("Play") { Task { await session.replay(replyID: String(row.id.dropFirst(6))) } }
+                    .buttonStyle(.plain)
+                    .font(.system(size: controlSize))
+                    .foregroundStyle(theme.secondary)
+                    .underline()
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
+                    .disabled(!session.connection.canSend)
+                    .accessibilityLabel("Play reply")
+                if let message = session.replayMessages[String(row.id.dropFirst(6))] ?? session.playback.messages[String(row.id.dropFirst(6))] {
+                    Text(message).font(.system(size: controlSize)).foregroundStyle(theme.secondary)
+                }
             }
             if !row.details.isEmpty {
                 DisclosureGroup(isExpanded: Binding(get: { expandedDetails.contains(row.id) }, set: {
@@ -142,6 +157,20 @@ struct ConversationView: View {
                 .tint(theme.secondary)
             }
         }
+    }
+
+    private func spokenText(_ row: ConversationRow) -> AttributedString {
+        guard row.id == session.playback.replyID.map({ "reply:\($0)" }),
+              let sentence = session.playback.sentence else { return AttributedString(row.text) }
+        var cursor = row.text.startIndex
+        for completed in session.playback.completedSentences {
+            if let range = row.text.range(of: completed, range: cursor..<row.text.endIndex) { cursor = range.upperBound }
+        }
+        guard let range = row.text.range(of: sentence, range: cursor..<row.text.endIndex) else { return AttributedString(row.text) }
+        var marked = AttributedString(row.text[range])
+        marked.underlineStyle = .single
+        marked.font = .system(size: scriptSize, design: .serif).bold()
+        return AttributedString(row.text[..<range.lowerBound]) + marked + AttributedString(row.text[range.upperBound...])
     }
 
     private var composer: some View {
@@ -177,17 +206,26 @@ struct ConversationView: View {
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.secondary, lineWidth: 1))
 
             if !typing {
-                HStack(alignment: .top, spacing: 12) {
-                    TalkKey(talk: session.talk, controlSize: controlSize)
-                    VStack(spacing: 6) {
-                        Text("Voice")
-                        Text("Coming\nsoon").multilineTextAlignment(.center)
+                if controlSize > 20 {
+                    VStack(spacing: 12) {
+                        TalkKey(talk: session.talk, controlSize: controlSize)
+                        Text("Voice · Coming soon")
+                            .foregroundStyle(theme.secondary)
+                            .frame(minHeight: 44)
                     }
-                    .padding(12)
-                    .frame(minWidth: 60, minHeight: 88)
-                    .foregroundStyle(theme.secondary)
-                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.secondary, lineWidth: 1))
-                    .accessibilityElement(children: .combine)
+                } else {
+                    HStack(alignment: .top, spacing: 12) {
+                        TalkKey(talk: session.talk, controlSize: controlSize)
+                        VStack(spacing: 6) {
+                            Text("Voice")
+                            Text("Coming\nsoon").multilineTextAlignment(.center)
+                        }
+                        .padding(12)
+                        .frame(minWidth: 60, minHeight: 88)
+                        .foregroundStyle(theme.secondary)
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.secondary, lineWidth: 1))
+                        .accessibilityElement(children: .combine)
+                    }
                 }
             }
         }
