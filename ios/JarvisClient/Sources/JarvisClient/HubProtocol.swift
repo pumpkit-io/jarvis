@@ -151,7 +151,7 @@ public struct SpeechStop: Decodable, Equatable, Sendable {
     public let reason: String
 }
 
-public struct HubEvent: Decodable, Equatable, Sendable {
+public struct HubEvent: Codable, Equatable, Sendable {
     public enum Kind: Equatable, Sendable {
         case heard, replyDelta, replyEnd, notice, show, taskSnapshot, pendingApproval, status
         case speechBegin, speechClip, speechEnd, speechStop, unknown(String)

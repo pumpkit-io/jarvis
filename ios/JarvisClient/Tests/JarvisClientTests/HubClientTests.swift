@@ -310,6 +310,7 @@ func event(_ seq: Int, _ type: String, _ payload: String) -> String {
     let page = try await client.history(before: 10)
     #expect(page.events.first?.seq == 2)
     #expect(await client.cursor == 20)
+    try await eventually { await captured.events.last?.seq == 20 }
     #expect(await captured.events.map(\.seq) == [14, 20])
     await client.stop(); reader.cancel()
 }

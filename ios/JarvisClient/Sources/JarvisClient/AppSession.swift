@@ -9,6 +9,11 @@ import Observation
     public private(set) var error: PairingError?
     public private(set) var client: HubClient?
     public private(set) var conversation = ConversationProjection()
+    public private(set) var loadingHistory = false
+    public private(set) var hasOlderHistory = true
+    public private(set) var historyMessage: String?
+    private var history: HistoryStore?
+    private var historyBefore: Int64?
     public var draft = ""
     public private(set) var typedLines: [TypedLine] = []
     public private(set) var inputMessage: String?
@@ -140,6 +145,8 @@ import Observation
             if result.ok { typedLines[index].outcome = .accepted }
             else if result.error?.code == "outcome_unknown" { typedLines[index].outcome = .outcomeUnknown }
             else { typedLines[index].outcome = .rejected(result.error?.message ?? "Jarvis could not accept your line.") }
+        case .replay(let replay):
+            if replay.history_pruned == true { historyMessage = "Some older history is no longer available on the Mac." }
         case .speechConnectionEnded(let id):
             playback.stop(speechID: id, reportStopped: false)
         case .failure:
@@ -152,7 +159,10 @@ import Observation
 
     private let store: any PairingStore
     private let service: PairingService
-    private let makeClient: (PairingCredentials) throws -> HubClient
+    private let makeClient: ((PairingCredentials) throws -> HubClient)?
+    private let historyDirectory: URL?
+    private let historyNow: @Sendable () -> Date
+    private let makeTransport: (PairingCredentials) throws -> HubTransport
     private let makePaths: () -> HubNetworkPaths?
     private let sendCommand: @Sendable (HubClient, HubCommand) async throws -> Void
     private var paths: HubNetworkPaths?
@@ -163,14 +173,17 @@ import Observation
     private var launched = false
 
     public init(store: any PairingStore, service: PairingService = .urlSession,
-                makeClient: @escaping (PairingCredentials) throws -> HubClient = {
-                    HubClient(transport: try .urlSession(origin: $0.origin, token: $0.deviceToken))
+                makeClient: ((PairingCredentials) throws -> HubClient)? = nil,
+                historyDirectory: URL? = nil, historyNow: @escaping @Sendable () -> Date = { Date() },
+                makeTransport: @escaping (PairingCredentials) throws -> HubTransport = {
+                    try .urlSession(origin: $0.origin, token: $0.deviceToken)
                 }, makePaths: @escaping () -> HubNetworkPaths? = { HubNetworkPaths() },
                 talk: TalkController? = nil, playback: SpeechPlayer? = nil, uploadTalk: TalkUpload = TalkUpload(),
                 stopPlayback: @escaping @MainActor () -> Void = {},
                 sendCommand: @escaping @Sendable (HubClient, HubCommand) async throws -> Void = { try await $0.send($1) }) {
         self.store = store; self.service = service; self.makeClient = makeClient; self.makePaths = makePaths
         self.sendCommand = sendCommand
+        self.historyDirectory = historyDirectory; self.historyNow = historyNow; self.makeTransport = makeTransport
         let audioSession = NativeTalkAudioSession()
         self.playback = playback ?? SpeechPlayer(session: audioSession)
         self.talk = talk ?? TalkController(recorder: NativeTalkRecorder(session: audioSession), permission: { await NativeTalkRecorder.requestPermission() })
@@ -247,22 +260,50 @@ import Observation
         }
     }
 
+    public func loadOlderHistory() async {
+        guard !loadingHistory, hasOlderHistory, connection.canSend, let client else { return }
+        let owner = generation, history = history
+        loadingHistory = true; historyMessage = nil
+        defer { if generation == owner, self.client === client { loadingHistory = false } }
+        do {
+            let page = try await client.history(before: historyBefore)
+            guard generation == owner, self.client === client else { return }
+            if page.has_more {
+                guard let next = page.next_before, let first = page.events.first,
+                      next <= first.seq, historyBefore.map({ next < $0 }) ?? true else {
+                    throw HubProtocolError.invalidSequence
+                }
+            }
+            try await history?.merge(page.events)
+            guard generation == owner, self.client === client else { return }
+            for event in page.events { conversation.ingest(event) }
+            historyBefore = page.next_before
+            hasOlderHistory = page.has_more
+        } catch {
+            guard generation == owner, self.client === client else { return }
+            historyMessage = "Couldn't load older history. Try again when the Mac is reachable."
+        }
+    }
+
     public func showError(_ error: PairingError) { self.error = error }
 
     /// Invalidates in-flight pairing before clearing the sole durable credential record.
     public func unpair() async {
         generation &+= 1
-        let owner = generation, old = client
+        let owner = generation, old = client, oldHistory = history
+        history = nil
         updates?.cancel(); updates = nil; paths?.cancel(); paths = nil
         connection = .unpaired; speechID = nil; playback.stop(reportStopped: false); stopPlayback()
         playbackDelivery?.cancel(); playbackDelivery = nil; pendingPlaybackDrain = nil
         await talk.setReady(false)
+        var historyClearFailed = false
+        do { try await oldHistory?.clear() } catch { historyClearFailed = true }
         guard generation == owner, client === old else { await old?.stop(); return }
         await talk.cancel()
         guard generation == owner, client === old else { await old?.stop(); return }
         client = nil; credentials = nil; pairing = false; loading = false
-        do { try store.clear(); error = nil } catch { self.error = .storage }
-        conversation = ConversationProjection(); typedLines = []; draft = ""; inputMessage = nil
+        do { try store.clear(); error = historyClearFailed ? .storage : nil } catch { self.error = .storage }
+        conversation = ConversationProjection(); historyBefore = nil; hasOlderHistory = true; loadingHistory = false; historyMessage = nil; typedLines = []; draft = ""; inputMessage = nil
         playback.reset(); replayCommands = [:]; replayMessages = [:]
         await old?.stop()
     }
@@ -281,7 +322,34 @@ import Observation
 
     private func connect(_ credentials: PairingCredentials, owner: UInt64) async throws {
         guard generation == owner else { return }
-        let client = try makeClient(credentials)
+        var cached = CachedHistory()
+        var history: HistoryStore?
+        if makeClient == nil || historyDirectory != nil {
+            let directory = historyDirectory ?? HistoryStore.applicationDirectory
+            let candidate = HistoryStore(directory: directory, credentials: credentials, now: historyNow)
+            self.history = candidate
+            do { cached = try await candidate.load(); history = candidate }
+            catch {
+                guard generation == owner else { return }
+                historyMessage = "Saved history could not be read. Fetching it again from the Mac."
+                try await candidate.clear()
+                history = HistoryStore(directory: directory, credentials: credentials, now: historyNow)
+            }
+            guard generation == owner else { return }
+        }
+        let client: HubClient
+        if let makeClient { client = try makeClient(credentials) }
+        else {
+            let cache = history
+            client = HubClient(transport: try makeTransport(credentials), cursor: cached.cursor,
+                               cache: { event, cursor in try await cache?.commit(event, through: cursor) })
+        }
+        self.history = history
+        for event in cached.events { conversation.ingest(event) }
+        historyBefore = cached.events.first?.seq
+        for row in conversation.rows where row.id.hasPrefix("reply:") {
+            playback.markMissed(replyID: String(row.id.dropFirst(6)))
+        }
         self.credentials = credentials; self.client = client; connection = .connecting
         talk.configure(ready: false, send: { [weak self] command in
             guard let self, self.client === client,
