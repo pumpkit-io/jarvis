@@ -7,12 +7,14 @@ share this one code path.
 import asyncio
 import contextlib
 import json
+import platform
 import re
 import time
 import uuid
 from collections import deque
 from collections.abc import Mapping, AsyncIterator, Callable, Coroutine, Iterable
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -540,6 +542,19 @@ class Hub:
             on_start=lambda subagent: self._persist(),
         )
         self._waits = Waits(setup=waits, clock=clock, on_watcher_end=self._watcher_ended, on_check=self._check_due)
+
+    def health(self) -> dict[str, Any]:
+        resets = [self._limit.resets_at(role) for role in self._limit.dump()["until"]]
+        reset = max(value for value in resets if value is not None) if resets and None not in resets else None
+        return {
+            "version": 1,
+            "ready": self._model_available and not self._closing,
+            "mac_name": platform.node(),
+            "usage_limit": {
+                "limited": self._limit.active or self._limit.recovery_pending,
+                "resets_at": datetime.fromtimestamp(reset, timezone.utc).isoformat().replace("+00:00", "Z") if reset is not None else None,
+            },
+        }
 
     async def start(self) -> None:
         """Open the Talker and warm it in the background (ADR 0006); a line typed meanwhile waits for it.

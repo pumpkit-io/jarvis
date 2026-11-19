@@ -79,6 +79,8 @@ class Settings:
     # No Subagent runs above this effort, whatever the User or the Orchestrator asks.
     max_effort: Effort = "max"
     max_subagents: int = 3
+    remote: bool = False
+    remote_port: int = 8765
 
 
 def parse_env(data: bytes) -> dict[str, str]:
@@ -217,6 +219,10 @@ def load_settings(
             raise ConfigError(f"{name}={value!r} is not a whole number of at least 1")
         return int(value)
 
+    remote_port = count("JARVIS_REMOTE_PORT", 8765)
+    if remote_port > 65535:
+        raise ConfigError("JARVIS_REMOTE_PORT must be at most 65535")
+
     return Settings(
         user_name=values.get("JARVIS_USER_NAME") or None,
         org=get("JARVIS_GITHUB_ORG", DEFAULT_ORG),
@@ -235,4 +241,6 @@ def load_settings(
         talker_restart_at=fraction("JARVIS_TALKER_RESTART_AT", DEFAULT_TALKER_RESTART_AT),
         max_effort=effort("JARVIS_MAX_EFFORT", "max"),
         max_subagents=count("JARVIS_MAX_SUBAGENTS", 3),
+        remote=choice("JARVIS_REMOTE", "off", ("off", "on")) == "on",
+        remote_port=remote_port,
     )

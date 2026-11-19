@@ -68,6 +68,29 @@ The Talker warms in the background at startup, using one hidden subscription tur
 
 Ask for status or to cancel a Task by name. Quiet mode holds routine Announcements until the next Wake word; news that needs you can still be announced. A direct action request grants permission for that action. You can also authorize a Task unattended, or explicitly authorize the whole session. Task permission survives restarts; session permission ends at restart. Each Boundary action still gets a concrete Approval, using existing permission without another question when it applies. Approval replies use natural language. The Hub runs approved merges and branch deletions; other approved actions go to a Subagent. See [ADR 0022](docs/adr/0022-natural-language-authorization.md) for the permission model and its limits.
 
+## Remote access
+
+The optional door stays off with `JARVIS_REMOTE=off` (the default). Set `JARVIS_REMOTE=on` and `JARVIS_REMOTE_PORT=8765` in `.env` to listen on `127.0.0.1`. Only that loopback address is accepted. Both text and voice mode own the listener; ending terminal input stops it and the Hub.
+
+`GET /v1/health` returns protocol `version: 1`, model readiness, the Mac name and the Usage limit. It requires a device token under [protocol v1](docs/protocol/client-v1.md), following Spec #91's every-request authentication rule over #101's health exception. Until durable pairing is connected, the door denies every health request with HTTP 401. Tests inject a fake token verifier; there is no development bypass in the launcher. The health response exposes no paths, configuration or credentials.
+
+After completing the account checklist below, run this on the Mac, using the configured port:
+
+```sh
+tailscale serve --bg http://127.0.0.1:8765
+tailscale serve status
+```
+
+Use the HTTPS origin printed by Serve for pairing. Serve limits access to the tailnet and manages HTTPS; see the [Tailscale Serve instructions](https://tailscale.com/docs/features/tailscale-serve) and [command reference](https://tailscale.com/docs/reference/tailscale-cli/serve). Never use `tailscale funnel`: it publishes to the public internet. Do not forward the port through a router or bind the Hub to a LAN or tailnet address.
+
+Waiting on the User, these account and device steps have not been performed or verified by the automated loopback tests:
+
+- [ ] Install/sign in to Tailscale on the Mac and iPhone, in the same tailnet.
+- [ ] Enable HTTPS for the tailnet through the Tailscale admin console or Serve's interactive setup.
+- [ ] Restrict the tailnet ACL to the User's own devices reaching this Mac's Serve HTTPS port; remove broader rules that grant the same access.
+- [ ] Run Serve, verify its HTTPS origin from the iPhone and verify that another unauthorized tailnet device cannot reach it.
+- [ ] Once pairing is available, check that authenticated health works and unpaired/revoked tokens are refused over HTTPS and cellular.
+
 ## Settings
 
 [`.env.example`](.env.example) is the complete setting reference, with defaults and units beside every key. The Hub parses `.env` as text, never as shell code; nonempty `JARVIS_*` process variables override the file. Restart the Hub after editing settings.

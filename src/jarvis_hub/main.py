@@ -22,6 +22,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 
 from jarvis_hub.event_log import EventLog, EventOutput
+from jarvis_hub.door import Door
 from jarvis_hub.agents.backend import AgentBackend, SessionSpec
 from jarvis_hub.agents.sdk import SdkBackend
 from jarvis_hub.config import ConfigError, Settings, VoiceSettings, load_settings
@@ -309,9 +310,11 @@ async def text_mode(
             settings, backend=backend, clock=clock, output=output, metrics=metrics, speech=speech,
             on_model_ready=lambda: output.notice("Model ready."),
         )
+        door = Door(enabled=settings.remote, port=settings.remote_port, health=hub.health)
         try:
             output.notice("Model loading.")
             await hub.start()
+            await door.start()
             await asyncio.to_thread(language.warm_up)
             if speech is not None:
                 output.notice("Speech loading.")
@@ -325,7 +328,10 @@ async def text_mode(
                 await speech.idle()
         finally:
             try:
-                await hub.close()
+                try:
+                    await door.close()
+                finally:
+                    await hub.close()
             finally:
                 if speech is not None:
                     await speech.close()
@@ -395,9 +401,11 @@ async def voice_mode(
             preconnect_orchestrator=True,
             on_model_ready=lambda: (output.notice("Model ready."), model_ready.set()),
         )
+        door = Door(enabled=settings.remote, port=settings.remote_port, health=hub.health)
         try:
             output.notice("Model loading.")
             await hub.start()
+            await door.start()
             await asyncio.to_thread(language.warm_up)
             conversation.start()
             output.notice("Listening loading.")
@@ -413,7 +421,10 @@ async def voice_mode(
                 following.cancel()
                 await asyncio.gather(following, return_exceptions=True)
             try:
-                await hub.close()
+                try:
+                    await door.close()
+                finally:
+                    await hub.close()
             finally:
                 listener.close()
                 await conversation.close()
