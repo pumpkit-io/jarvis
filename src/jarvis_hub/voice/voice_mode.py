@@ -180,8 +180,8 @@ class _ObservedSpeech:
     def played(self) -> str:
         return self._speech.played()
 
-    async def idle(self, *, stall_timeout: float | None = STALLED) -> None:
-        await self._speech.idle(stall_timeout=stall_timeout)
+    async def idle(self, *, stall_timeout: float | None = STALLED, destination: Player | None = None) -> None:
+        await self._speech.idle(stall_timeout=stall_timeout, destination=destination)
 
     async def _played(self, reply: int, heard_at: float | None, owner: tuple[str, int] | None) -> None:
         await self._speech.idle()

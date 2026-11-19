@@ -147,7 +147,7 @@ class Speech(Protocol):
 
     def played(self) -> str: ...
 
-    async def idle(self, *, stall_timeout: float | None = None) -> None: ...
+    async def idle(self, *, stall_timeout: float | None = None, destination: Player | None = None) -> None: ...
 
 
 class Floor(Protocol):
@@ -202,7 +202,7 @@ class _Silent:
     def played(self) -> str:
         return ""
 
-    async def idle(self, *, stall_timeout: float | None = None) -> None:
+    async def idle(self, *, stall_timeout: float | None = None, destination: Player | None = None) -> None:
         pass
 
 
@@ -802,6 +802,14 @@ class Hub:
         return bool(client is not None and client.connected and client.can_speak and not client.silence
                     and (client_id == TERMINAL or client_id in self._client_players))
 
+    def _focus_busy(self) -> bool:
+        if not self._client_can_speak(self.clients.focus):
+            return False
+        if self.clients.focus == TERMINAL:
+            return self.clients.remote_activity
+        client = self.clients.get(self.clients.focus)
+        return bool(client is not None and (client.talking or client.playing))
+
     def _news_delivery_told(self, delivery: _NewsDelivery) -> bool:
         return delivery.reply is not None and (
             not delivery.speaks or (delivery.receipt is not None and delivery.receipt())
@@ -881,6 +889,13 @@ class Hub:
         if client_id != TERMINAL:
             return owner == self._remote_spoken_owner or owner in self._admitted_remote_owners
         return self._floor is None or self._floor.owns(owner)
+
+    async def take_focus(self, client_id: str, *, allowed: Callable[[], bool] = lambda: True) -> None:
+        async with self._admission_lock:
+            client = self.clients.get(client_id)
+            if self._closing or self._input_ended.is_set() or client is None or not client.connected or not allowed():
+                raise ValueError("Client is disconnected or Hub is stopping")
+            self.clients.take_focus(client_id)
 
     async def begin_remote_talk(self, client_id: str, *, allowed: Callable[[], bool] = lambda: True) -> str:
         async with self._admission_lock:
@@ -1539,7 +1554,7 @@ class Hub:
                 self._floor is not None or not self._client_can_speak(TERMINAL)
             ):
                 return replace(_told(self._news.popleft(), ready=True), spoken=False)
-            if self._news and quiet and (not self.clients.remote_activity or not self._client_can_speak(self.clients.focus)) and (
+            if self._news and quiet and not self._focus_busy() and (
                 self.clients.focus != TERMINAL or self._floor is None or self._floor.announce()
             ):
                 # Everything waiting goes as one Announcement rather than one Follow-up window each.
@@ -1571,13 +1586,13 @@ class Hub:
         while not self._news:
             self._arrived.clear()
             await self._arrived.wait()
-        while self.clients.remote_activity and self._client_can_speak(self.clients.focus):
+        while self._focus_busy():
             self._clients_updated.clear()
             await self._clients_updated.wait()
         if self.clients.focus == TERMINAL and self._floor is not None:
             await self._quiet()
         elif self._client_can_speak(self.clients.focus):
-            await self._speech.idle(stall_timeout=None)
+            await self._speech.idle(stall_timeout=None, destination=self._client_players.get(self.clients.focus))
 
     async def _quiet(self) -> None:
         """Returns once voice mode is quiet, or the input has ended."""

@@ -809,3 +809,51 @@ async def test_denied_start_preserves_another_queued_reply_and_player(speech: Sp
     assert unavailable.texts == [] and unavailable.events == []
     assert player.texts == ["A complete queued reply."]
     assert not skipped() and queued()
+
+
+@pytest.mark.parametrize("completion", ["error", "stop", "close"])
+async def test_destination_wait_releases_after_failed_or_cancelled_synthesis(completion: str) -> None:
+    from jarvis_hub.voice.player import Samples
+
+    entered = threading.Event()
+
+    class GatedTts(FakeTts):
+        def synthesize(self, text: str, voice: str) -> Samples:
+            if text == "Held sentence.":
+                entered.set()
+            return super().synthesize(text, voice)
+
+    tts, player = GatedTts(), RecordingPlayer()
+    speech = Speech(tts, player, FakeClock(), metrics=RecordingMetrics(), notice=lambda _: None)
+    speech.start()
+    await speech.idle()
+    tts.hold.clear()
+    tts.fail_on = "Held sentence."
+    speech.begin("en", turn=1, heard_at=None, destination=player)
+    speech.feed("Held sentence. Skipped sentence.")
+    speech.end()
+    waiting = asyncio.create_task(speech.idle(destination=player))
+    try:
+        await until(entered.is_set)
+        await asyncio.sleep(0)
+        assert not waiting.done()
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+        waiting = asyncio.create_task(speech.idle(destination=player))
+        if completion == "stop":
+            speech.stop()
+        elif completion == "close":
+            await speech.close()
+        tts.hold.set()
+        async with asyncio.timeout(1):
+            await waiting
+            await speech.idle(destination=player)
+        if completion != "error":
+            assert player.texts == []
+        else:
+            assert player.texts == ["Skipped sentence."]
+    finally:
+        tts.hold.set()
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+        await speech.close()
