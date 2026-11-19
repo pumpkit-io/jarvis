@@ -43,17 +43,29 @@ import Observation
         let command = HubCommand(type: "say_text", payload: ["text": .string(text)])
         typedLines.append(TypedLine(command: command, outcome: .unanswered)); inputMessage = nil
         do {
-            try await client.send(command)
+            try await sendCommand(client, command)
             guard generation == owner else { return }
-            if draft == text { draft = "" }
+            if draft == text && typedLines.first(where: { $0.id == command.id })?.outcome != .recovered { draft = "" }
         } catch {
-            let retained = await client.pendingCommands.contains(where: { $0.id == command.id })
+            let delivery = await client.delivery(of: command.id)
             guard generation == owner, let index = typedLines.firstIndex(where: { $0.id == command.id }) else { return }
-            if retained {
-                if typedLines[index].outcome == .unanswered { typedLines[index].outcome = .deliveryUncertain }
-            } else if typedLines[index].outcome == .unanswered {
-                typedLines.remove(at: index)
-                inputMessage = "Can't reach the Mac. Your line is still here to send."
+            if typedLines[index].outcome == .accepted {
+                if draft == text { draft = "" }
+                return
+            }
+            guard typedLines[index].outcome == .unanswered || typedLines[index].outcome == .deliveryUncertain else { return }
+            switch delivery {
+            case .pending: typedLines[index].outcome = .deliveryUncertain
+            case .completed(let result):
+                receive(.result(result))
+                if result.ok && draft == text { draft = "" }
+            case .absent:
+                if draft == text {
+                    typedLines.remove(at: index)
+                    inputMessage = "Can't reach the Mac. Your line is still here to send."
+                } else {
+                    typedLines[index].outcome = .notSent
+                }
             }
         }
     }
@@ -78,6 +90,7 @@ import Observation
     private let service: PairingService
     private let makeClient: (PairingCredentials) throws -> HubClient
     private let makePaths: () -> HubNetworkPaths?
+    private let sendCommand: @Sendable (HubClient, HubCommand) async throws -> Void
     private var paths: HubNetworkPaths?
     private var updates: Task<Void, Never>?
     private var generation: UInt64 = 0
@@ -87,8 +100,10 @@ import Observation
     public init(store: any PairingStore, service: PairingService = .urlSession,
                 makeClient: @escaping (PairingCredentials) throws -> HubClient = {
                     HubClient(transport: try .urlSession(origin: $0.origin, token: $0.deviceToken))
-                }, makePaths: @escaping () -> HubNetworkPaths? = { HubNetworkPaths() }) {
+                }, makePaths: @escaping () -> HubNetworkPaths? = { HubNetworkPaths() },
+                sendCommand: @escaping @Sendable (HubClient, HubCommand) async throws -> Void = { try await $0.send($1) }) {
         self.store = store; self.service = service; self.makeClient = makeClient; self.makePaths = makePaths
+        self.sendCommand = sendCommand
     }
 
     public func launch() async {
@@ -156,6 +171,18 @@ import Observation
         guard generation == owner else { await client.stop(); return }
         await client.start(paths: paths?.changes)
         if generation != owner { await client.stop() }
+    }
+}
+
+private enum CommandDelivery: Sendable {
+    case pending, completed(CommandResult), absent
+}
+
+private extension HubClient {
+    // Read retention and results in one actor turn so an arriving result cannot fall between two snapshots.
+    func delivery(of id: String) -> CommandDelivery {
+        if let result = results[id] { return .completed(result) }
+        return pendingCommands.contains { $0.id == id } ? .pending : .absent
     }
 }
 
