@@ -1187,3 +1187,120 @@ async def test_moving_to_another_microphone_closes_and_reopens_the_source() -> N
         assert source.opened
     finally:
         capture.close()
+
+
+async def test_remote_suppression_drops_inflight_wake_and_queued_audio_then_accepts_fresh_wake() -> None:
+    from jarvis_hub.voice.state import InputEvent, WakeWord
+
+    class HeldWake(MarkerWake):
+        def __init__(self) -> None:
+            self.entered, self.release = threading.Event(), threading.Event()
+
+        def score(self, chunk: np.ndarray) -> float:
+            self.entered.set()
+            self.release.wait(timeout=5)
+            return super().score(chunk)
+
+    wake, source = HeldWake(), Source()
+    events: list[InputEvent] = []
+    rows: list[dict[str, Any]] = []
+    capture = Capture(lambda: engines(CountingEcho(), wake), Listening(), rows.append, lambda text: None,
+                      source=source, backlog_s=10)
+    capture.start()
+
+    async def collect() -> None:
+        async for event in capture.events():
+            events.append(event)
+
+    collecting = asyncio.create_task(collect())
+    try:
+        await until(capture.ready.is_set)
+        source.frames(8, value=2000)
+        assert await asyncio.to_thread(wake.entered.wait, 2)
+        capture.suppress(True)
+        source.frames(120, value=1000, start=.08)
+        capture.suppress(False)
+        wake.release.set()
+        await until(lambda: any(row.get('kind') == 'capture' for row in rows))
+        assert events == []
+        source.frames(8, value=2000, start=10)
+        await until(lambda: any(isinstance(event, WakeWord) for event in events))
+        assert len([event for event in events if isinstance(event, WakeWord)]) == 1
+    finally:
+        wake.release.set()
+        capture.close()
+        collecting.cancel()
+        await asyncio.gather(collecting, return_exceptions=True)
+
+
+@pytest.mark.parametrize('activity', ['talking', 'playing'])
+@pytest.mark.parametrize('mac_woke', [False, True])
+@pytest.mark.parametrize('one_breath', [False, True])
+async def test_phone_activity_retires_mac_inflight_transcription_at_the_hub(
+    activity: str, mac_woke: bool, one_breath: bool,
+) -> None:
+    from jarvis_hub.clients import Client
+    from jarvis_hub.voice.state import Timing
+    from jarvis_hub.voice.voice_mode import VoiceMode, merge
+    from tests.fakes import (FakeBackend, FakeClock, FakeTts, RecordingMetrics, RecordingOutput,
+                             RecordingPlayer, Text, Typist, make_hub)
+
+    clock, source, stt = FakeClock(), Source(), GatedEndpointStt()
+    backend = FakeBackend(clock, [[Text('Fresh Mac request.')]])
+    metrics, output, player = RecordingMetrics(), RecordingOutput(), RecordingPlayer()
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), LoudVad(), ScriptedTurn(), stt, Everyone()),
+        Listening(), metrics.record, output.notice, source=source, backlog_s=10, clock=clock.now,
+    )
+    voice = VoiceMode(audio=capture, tts=FakeTts(), player=player, clock=clock,
+                      timing=Timing(6.0, 4.0, 6.0, .5), metrics=metrics, notice=output.notice)
+    hub = make_hub(backend, output, metrics, speech=voice.speech, speak_typed=False,
+                   on_end_conversation=voice.end_conversation, floor=voice)
+    typist = Typist(clock)
+    await hub.start()
+    hub.attach_client(Client('phone', 'reference', connected=True))
+    capture.start()
+    voice.start()
+    running = asyncio.create_task(hub.run(merge(typist.lines(), voice.lines(hub.interrupt, hub.woke))))
+
+    def user_messages() -> list[str]:
+        return [message for session in backend.all_sessions('talker') for message in session.received
+                if message.startswith('<user')]
+
+    report = hub.set_client_talking if activity == 'talking' else hub.set_client_playing
+    try:
+        await until(capture.ready.is_set)
+        await until(lambda: player.voices == ['ready'])
+        if mac_woke:
+            source.frames(8, value=2000, start=clock.now())
+            await until(lambda: player.voices == ['ready', 'chime'])
+        source.frames(80, value=1000, start=clock.now() + .08)
+        source.frames(80, start=clock.now() + .88)
+        assert await asyncio.to_thread(stt.entered.wait, 2)
+        report('phone', True)
+        source.frames(8, value=2000, start=clock.now() + 2)
+        source.frames(100, value=1500, start=clock.now() + 2.08)
+        source.frames(80, start=clock.now() + 3.08)
+        stt.release.set()
+        await until(lambda: bool(stt.heard))
+        assert user_messages() == []
+        assert player.voices.count('chime') == int(mac_woke)
+        report('phone', False)
+        clock.advance(10)
+        chimes_before_resume = player.voices.count('chime')
+        source.frames(8, value=2000, start=clock.now())
+        if not one_breath:
+            await until(lambda: player.voices.count('chime') == chimes_before_resume + 1)
+        source.frames(80, value=1500, start=clock.now() + .08)
+        await until(lambda: player.voices.count('chime') == chimes_before_resume + 1)
+        source.frames(80, start=clock.now() + .88)
+        await until(lambda: bool(user_messages()))
+        assert user_messages() == ['<user lang="en">the tests</user>']
+        assert len(stt.heard) == 2
+    finally:
+        stt.release.set()
+        typist.end()
+        await asyncio.wait([running], timeout=1)
+        await hub.close()
+        await voice.close()
+        capture.close()

@@ -592,7 +592,13 @@ class _Capture:
 
 
 @dataclass(frozen=True)
+class _Suppression:
+    generation: int
+
+
+@dataclass(frozen=True)
 class _EndpointFence:
+    generation: int
     candidate: int
     capture_epoch: int
     loss_epoch: int
@@ -610,6 +616,7 @@ class _CapturedFrame:
     at: float
     raw_silent: bool
     sequence: int
+    generation: int
 
 
 @dataclass(frozen=True)
@@ -657,7 +664,9 @@ class Capture:
         self._notice = notice
         self._source: FrameSource = source if source is not None else Microphone()
         # Frames and switches in the order they happened; None stops the thread.
-        self._frames: queue.SimpleQueue[_CapturedFrame | _Capture | _BargeIn | _EndpointFence | _Overflow | None] = queue.SimpleQueue()
+        self._frames: queue.SimpleQueue[_CapturedFrame | _Capture | _Suppression | _BargeIn | _EndpointFence | _Overflow | None] = queue.SimpleQueue()
+        self._suppressed = False
+        self._suppression_generation = 0
         self._capture_epoch = 0
         self._capture_owner: int | None = None
         self._capture_on = False
@@ -668,7 +677,7 @@ class Capture:
         self._backlog = 0
         self._behind = False
         self._backlog_lock = threading.Lock()
-        self._events: asyncio.Queue[InputEvent] = asyncio.Queue()
+        self._events: asyncio.Queue[tuple[InputEvent, int]] = asyncio.Queue()
         self._loop: asyncio.AbstractEventLoop | None = None
         # Held while the source opens or closes, so a close during loading cannot leave it open.
         self._source_lock = threading.Lock()
@@ -689,6 +698,16 @@ class Capture:
                 self._capture_epoch += 1
             self._capture_owner, self._capture_on = owner, on
             self._frames.put(_Capture(on, self._capture_epoch, owner))
+
+    def suppress(self, active: bool) -> None:
+        """Ignore microphone frames and invalidate unfinished inference, resuming with fresh audio."""
+        with self._backlog_lock:
+            if active == self._suppressed:
+                return
+            self._suppressed = active
+            self._suppression_generation += 1
+            self._capture_epoch += 1
+            self._frames.put(_Suppression(self._suppression_generation))
 
     def barge_in(self, since: float | None) -> None:
         self._frames.put(_BargeIn(since))
@@ -711,7 +730,9 @@ class Capture:
 
     async def events(self) -> AsyncIterator[InputEvent]:
         while True:
-            yield await self._events.get()
+            event, generation = await self._events.get()
+            if not self._suppressed and generation == self._suppression_generation:
+                yield event
 
     def detach(self) -> None:
         """Close the frame source, keeping the engines and the pipeline, until `attach` opens it again."""
@@ -736,15 +757,16 @@ class Capture:
         if self._on_close is not None:
             self._on_close()
 
-    def _publish(self, event: InputEvent, epoch: int) -> None:
-        if not self._closed and (isinstance(event, (WakeWord, SpokenWake)) or epoch == self._capture_epoch):
-            self._events.put_nowait(event)
+    def _publish(self, event: InputEvent, epoch: int, generation: int) -> None:
+        if (not self._closed and not self._suppressed and generation == self._suppression_generation
+                and (isinstance(event, (WakeWord, SpokenWake)) or epoch == self._capture_epoch)):
+            self._events.put_nowait((event, generation))
 
-    def _abandon(self, pipeline: InputPipeline, reason: str, epoch: int) -> None:
+    def _abandon(self, pipeline: InputPipeline, reason: str, epoch: int, generation: int) -> None:
         if (aborted := pipeline.discard_endpoint(reason, block=True)) is not None:
-            self._on_loop(lambda event: self._publish(event, epoch), aborted)
+            self._on_loop(lambda event: self._publish(event, epoch, generation), aborted)
 
-    def _fence(self, pipeline: InputPipeline, epoch: int, loss_epoch: int) -> None:
+    def _fence(self, pipeline: InputPipeline, epoch: int, loss_epoch: int, generation: int) -> None:
         candidate = pipeline.pending_endpoint
         if candidate is None or candidate == self._fenced_candidate:
             return
@@ -752,7 +774,7 @@ class Capture:
         # Source enqueue and fence insertion share this lock; later frames cannot move this boundary.
         with self._backlog_lock:
             watermark = self._frame_sequence
-            self._frames.put(_EndpointFence(candidate, epoch, loss_epoch, watermark))
+            self._frames.put(_EndpointFence(generation, candidate, epoch, loss_epoch, watermark))
         self._on_loop(self._record, {"kind": "endpoint_fence", "stage": "inserted", "endpoint_candidate": candidate,
                                     "capture_epoch": epoch, "captured_frame_watermark": watermark,
                                     "inserted_at": self._clock(), "time_basis": "perf_counter"})
@@ -763,8 +785,9 @@ class Capture:
         self._loop.call_soon_threadsafe(fn, arg)
 
     def _push(self, frame: Pcm, at: float) -> None:
+        generation = self._suppression_generation
         echo = self._echo
-        if echo is None:
+        if echo is None or self._suppressed:
             return
         raw_silent = not frame.any()
         try:
@@ -773,7 +796,7 @@ class Capture:
             self._on_loop(self._notice, f"Could not process the audio input: {type(error).__name__}: {error}")
             return
         with self._backlog_lock:
-            if self._closed:
+            if self._closed or self._suppressed or generation != self._suppression_generation:
                 return
             self._frame_sequence += 1
             if self._backlog >= self._max_backlog:
@@ -785,7 +808,7 @@ class Capture:
                     self._on_loop(self._notice, "Listening is falling behind the microphone: dropping audio.")
                 return
             self._backlog += 1
-            self._frames.put(_CapturedFrame(frame, at, raw_silent, self._frame_sequence))
+            self._frames.put(_CapturedFrame(frame, at, raw_silent, self._frame_sequence, generation))
 
     def _run(self) -> None:
         began = time.perf_counter()
@@ -808,36 +831,48 @@ class Capture:
             self._echo = None
             self._on_loop(self._notice, f"Listening is off: {type(e).__name__}: {e}")
             return
-        pipeline = InputPipeline(
-            engines, self._settings, lambda row: self._on_loop(self._record, row), clock=self._clock,
-            clips=self._clips, defer_endpoints=True,
-            retained_frame_limit=round(self._settings.max_turn_s * 100) + self._max_backlog + 1,
-        )
+        def fresh_pipeline() -> InputPipeline:
+            return InputPipeline(
+                engines, self._settings, lambda row: self._on_loop(self._record, row), clock=self._clock,
+                clips=self._clips, defer_endpoints=True,
+                retained_frame_limit=round(self._settings.max_turn_s * 100) + self._max_backlog + 1,
+            )
+        pipeline = fresh_pipeline()
         self.ready.set()
         self._on_loop(self._record, {"kind": "ears_loaded", "load_ms": round((time.perf_counter() - began) * 1000)})
         self._on_loop(self._notice, 'Listening ready: waiting for "Hey Jarvis".')
         silent = 0
         epoch = 0
         processed_frame = 0
+        generation = 0
         while (item := self._frames.get()) is not None:
             if self._closed:
                 pipeline.discard_endpoint("shutdown")
                 break
+            if isinstance(item, _Suppression):
+                pipeline.discard_endpoint("remote_activity")
+                pipeline = fresh_pipeline()
+                generation = item.generation
+                self._fenced_candidate = None
+                silent = 0
+                continue
             if isinstance(item, _Capture):
                 epoch = item.epoch
                 pipeline.capture(item.on, owner=item.owner)
                 continue
             if isinstance(item, _Overflow):
-                self._abandon(pipeline, "overflow", epoch)
+                self._abandon(pipeline, "overflow", epoch, generation)
                 continue
             if isinstance(item, _EndpointFence):
+                if item.generation != generation:
+                    continue
                 with self._backlog_lock:
                     stale_capture = item.capture_epoch != self._capture_epoch
                     lost = item.loss_epoch != self._loss_epoch
                     loss_epoch = self._loss_epoch
                 reason = "capture_changed" if stale_capture else "overflow" if lost else None
                 if reason == "overflow" and pipeline.pending_endpoint == item.candidate:
-                    self._abandon(pipeline, "overflow", epoch)
+                    self._abandon(pipeline, "overflow", epoch, generation)
                 self._on_loop(self._record, {"kind": "endpoint_fence", "stage": "processed",
                     "endpoint_candidate": item.candidate, "capture_epoch": item.capture_epoch,
                     "captured_frame_watermark": item.watermark, "processed_frame": processed_frame,
@@ -845,12 +880,12 @@ class Capture:
                 try:
                     heard = pipeline.finalize_endpoint(item.candidate, reject=reason)
                 except Exception as e:
-                    self._abandon(pipeline, "inference_failed", epoch)
+                    self._abandon(pipeline, "inference_failed", epoch, generation)
                     self._on_loop(self._notice, f"Could not process the audio input: {type(e).__name__}: {e}")
                     continue
                 if heard is not None:
-                    self._on_loop(lambda event, owner=item.capture_epoch: self._publish(event, owner), heard)
-                self._fence(pipeline, epoch, loss_epoch)
+                    self._on_loop(lambda event, owner=item.capture_epoch, source=generation: self._publish(event, owner, source), heard)
+                self._fence(pipeline, epoch, loss_epoch, generation)
                 continue
             if isinstance(item, _BargeIn):
                 pipeline.barge_in(item.since)
@@ -861,6 +896,8 @@ class Capture:
                 if self._backlog == 0:
                     self._behind = False
                 loss_epoch = self._loss_epoch
+            if self._suppressed or item.generation != self._suppression_generation:
+                continue
             processed_frame = item.sequence
             silent = silent + 1 if item.raw_silent else 0
             if silent == round(SILENT_MIC_S * 100):
@@ -875,12 +912,12 @@ class Capture:
             try:
                 events = pipeline.push_clean(item.pcm, item.at)
             except Exception as e:
-                self._abandon(pipeline, "inference_failed", epoch)
+                self._abandon(pipeline, "inference_failed", epoch, generation)
                 self._on_loop(self._notice, f"Could not process the audio input: {type(e).__name__}: {e}")
                 continue
             for event in events:
-                self._on_loop(lambda event, owner=epoch: self._publish(event, owner), event)
-            self._fence(pipeline, epoch, loss_epoch)
+                self._on_loop(lambda event, owner=epoch, source=generation: self._publish(event, owner, source), event)
+            self._fence(pipeline, epoch, loss_epoch, generation)
             with self._backlog_lock:
                 backlog = self._backlog
                 dropped = self._dropped
