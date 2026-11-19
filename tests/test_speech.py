@@ -775,3 +775,23 @@ async def test_fresh_local_cue_after_retirement_does_not_revive_queued_cues_or_r
         running.cancel()
         await hub.close()
         await speech.close()
+
+
+async def test_canceling_a_playback_wait_during_loading_keeps_speech_available() -> None:
+    tts, player, metrics, output = FakeTts(), RecordingPlayer(), RecordingMetrics(), RecordingOutput()
+    tts.hold.clear()
+    speech = Speech(tts, player, FakeClock(), metrics=metrics, notice=output.notice)
+    speech.start()
+    waiting = asyncio.create_task(speech.idle())
+    try:
+        await asyncio.sleep(0)
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+        tts.hold.set()
+        speech.begin('en', turn=1, heard_at=None)
+        speech.feed('Still available.')
+        speech.end()
+        await until(lambda: player.texts == ['Still available.'])
+    finally:
+        tts.hold.set()
+        await speech.close()
