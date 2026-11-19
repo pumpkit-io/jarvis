@@ -356,3 +356,38 @@ async def test_worker_notices_remain_ordered_while_display_clients_attach(tmp_pa
                 assert screen.notices == [text for text in ordered if text in screen.notices]
         finally:
             await hub.close()
+
+
+async def test_malformed_wire_commands_keep_a_safe_correlated_result_envelope(tmp_path: Path) -> None:
+    from tests.protocol_exchanges import connect, receive
+
+    with PairingStore(tmp_path / "pairing.db") as pairing, EventLog(tmp_path / "events.db") as log:
+        phone = pairing.exchange(pairing.create_code("https://mac.example.ts.net"), "Phone", "iphone")
+        hub = make_hub(FakeBackend(FakeClock()), EventOutput(log, RecordingOutput()), RecordingMetrics())
+        door = Door(enabled=True, port=0, health=hub.health, pairing=pairing, hub=hub, log=log)
+        await door.start()
+        try:
+            async with aiohttp.ClientSession() as session, connect(session, door, phone.token) as socket:
+                await receive(socket)
+                cases: list[tuple[dict[str, Any] | str, str | None, str]] = [
+                    ({"version": 1, "id": "known-id", "type": "say_text", "payload": []}, "known-id", "invalid_payload"),
+                    ({"version": 2, "id": "version-id", "type": "say_text", "payload": {"text": "private-marker"}}, "version-id", "unsupported_version"),
+                    ({"version": 1, "id": "missing-payload", "type": "say_text"}, "missing-payload", "invalid_payload"),
+                    ({"version": 1, "type": "say_text", "payload": []}, None, "invalid_payload"),
+                    ({"version": 1, "id": 42, "type": "say_text", "payload": []}, None, "invalid_payload"),
+                    ('{"id":"undecodable",', None, "invalid_payload"),
+                ]
+                for body, expected_id, code in cases:
+                    if isinstance(body, str):
+                        await socket.send_str(body)
+                    else:
+                        await socket.send_json(body)
+                    response = await receive(socket)
+                    assert response["type"] == "command_result" and response["ok"] is False
+                    assert response["error"]["code"] == code
+                    assert response.get("id") == expected_id
+                    assert "private-marker" not in str(response)
+                assert log.after(0) == []
+        finally:
+            await door.close()
+            await hub.close()

@@ -77,6 +77,19 @@ async def exchanges(root: Path) -> dict[str, Any]:
             async with aiohttp.ClientSession() as session:
                 async with connect(session, door, first.token) as one, connect(session, door, second.token) as two:
                     initial = [await receive(one), await receive(two)]
+                    rejected: list[dict[str, Any]] = []
+                    invalid_commands: tuple[dict[str, Any], ...] = (
+                        {"version": 1, "id": "malformed-command", "type": "say_text", "payload": []},
+                        {"version": 2, "id": "unsupported-command", "type": "say_text", "payload": {"text": "Hello"}},
+                        {"version": 1, "type": "say_text", "payload": []},
+                    )
+                    for invalid in invalid_commands:
+                        await one.send_json(invalid)
+                        response = await receive(one)
+                        assert response["type"] == "command_result" and response["ok"] is False
+                        assert response.get("id") == invalid.get("id")
+                        rejected.append({"command": invalid, "result": response})
+                    cases["rejected_envelopes"] = rejected
                     say = command("say-1", "say_text", text="Hello")
                     await one.send_json(say)
                     partial: list[dict[str, Any]] = []

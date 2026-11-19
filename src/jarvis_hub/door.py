@@ -315,8 +315,7 @@ class Door:
                         body = json_object(message.data.encode("utf-8"))
                         result = await self._command(connection, body)
                     except (ValueError, RecursionError, UnicodeError):
-                        result = failure("invalid_payload", "Expected a valid command envelope")
-                        result["type"] = "command_result"
+                        result = self._command_error("invalid_payload", "Expected a valid command envelope")
                     self._enqueue(connection, result)
                 elif message.type == WSMsgType.BINARY:
                     await self._retire(connection, 1002)
@@ -327,12 +326,12 @@ class Door:
 
     async def _command(self, connection: _Connection, body: dict[str, Any]) -> dict[str, Any]:
         if type(body.get("version")) is not int or body["version"] != 1:
-            return {**failure("unsupported_version", "Use protocol version 1"), "type": "command_result",
-                    "supported_versions": [1], **({"id": body["id"]} if self._valid_id(body.get("id")) else {})}
+            return {**self._command_error("unsupported_version", "Use protocol version 1", body),
+                    "supported_versions": [1]}
         command_id, kind, payload = body.get("id"), body.get("type"), body.get("payload")
         if (not self._valid_id(command_id) or not isinstance(kind, str) or not kind or len(kind.encode("utf-8")) > 128
                 or not isinstance(payload, dict)):
-            raise ValueError("Invalid command envelope")
+            return self._command_error("invalid_payload", "Expected a valid command envelope", body)
         assert isinstance(command_id, str) and self._log is not None
         payload = cast(dict[str, Any], payload)
         status, result = self._log.reserve(connection.client.id, command_id, kind, payload)
@@ -354,6 +353,12 @@ class Door:
                 except Exception:
                     result = {"ok": False, "error": failure("outcome_unknown", "Operation outcome is unknown; reconcile with history")["error"]}
         return {"version": 1, "type": "command_result", "id": command_id, **result}
+
+    def _command_error(self, code: str, message: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        result = {**failure(code, message), "type": "command_result", "ok": False}
+        if body is not None and self._valid_id(body.get("id")):
+            result["id"] = body["id"]
+        return result
 
     @staticmethod
     def _valid_id(value: Any) -> bool:

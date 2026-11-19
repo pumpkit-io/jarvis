@@ -2,6 +2,68 @@
   "version": 1,
   "normalization": "Only generated client/request/reply IDs are replaced by first-seen ordinal IDs. Fixed fake wall time is 1000 seconds.",
   "exchanges": {
+    "rejected_envelopes": [
+      {
+        "command": {
+          "version": 1,
+          "id": "malformed-command",
+          "type": "say_text",
+          "payload": []
+        },
+        "result": {
+          "version": 1,
+          "error": {
+            "code": "invalid_payload",
+            "message": "Expected a valid command envelope",
+            "retry_after_seconds": null
+          },
+          "type": "command_result",
+          "ok": false,
+          "id": "malformed-command"
+        }
+      },
+      {
+        "command": {
+          "version": 2,
+          "id": "unsupported-command",
+          "type": "say_text",
+          "payload": {
+            "text": "Hello"
+          }
+        },
+        "result": {
+          "version": 1,
+          "error": {
+            "code": "unsupported_version",
+            "message": "Use protocol version 1",
+            "retry_after_seconds": null
+          },
+          "type": "command_result",
+          "ok": false,
+          "id": "unsupported-command",
+          "supported_versions": [
+            1
+          ]
+        }
+      },
+      {
+        "command": {
+          "version": 1,
+          "type": "say_text",
+          "payload": []
+        },
+        "result": {
+          "version": 1,
+          "error": {
+            "code": "invalid_payload",
+            "message": "Expected a valid command envelope",
+            "retry_after_seconds": null
+          },
+          "type": "command_result",
+          "ok": false
+        }
+      }
+    ],
     "typed_partial": {
       "initial": [
         {
