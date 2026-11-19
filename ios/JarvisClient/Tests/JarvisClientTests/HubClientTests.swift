@@ -10,6 +10,8 @@ actor FakeSocket: HubSocket {
     var closed = false
     var holdClose = false
     var closeWaiter: CheckedContinuation<Void, Never>?
+    var heldSendType: String?
+    var sendWaiter: CheckedContinuation<Void, Never>?
     let autoPresence: Bool
     init(autoPresence: Bool = true) { self.autoPresence = autoPresence; (frames, input) = AsyncThrowingStream.makeStream() }
     func receive() async throws -> SocketMessage {
@@ -21,6 +23,7 @@ actor FakeSocket: HubSocket {
         let command = try JSONDecoder().decode(HubCommand.self, from: data)
         sent.append(command)
         rawSent.append(data)
+        if command.type == heldSendType { await withCheckedContinuation { sendWaiter = $0 } }
         if autoPresence, command.type == "set_presence", command.payload["can_show_text"] == .bool(true) {
             input.yield(.text(Data("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(command.id)\",\"ok\":true,\"result\":{\"can_show_text\":true}}".utf8)))
         }
@@ -33,6 +36,8 @@ actor FakeSocket: HubSocket {
     }
     func blockClose() { holdClose = true }
     func releaseClose() { holdClose = false; closeWaiter?.resume(); closeWaiter = nil }
+    func blockSend(_ type: String) { heldSendType = type }
+    func releaseSend() { heldSendType = nil; sendWaiter?.resume(); sendWaiter = nil }
     func text(_ text: String) { input.yield(.text(Data(text.utf8))) }
     func ready(through: Int64 = 0) {
         input.yield(.text(Data("{\"version\":1,\"seq\":\(through + 1),\"time\":\"2026-11-19T00:00:00Z\",\"type\":\"status\",\"client_id\":\"test-status\",\"payload\":{\"ready\":true,\"usage_limit\":{\"limited\":false,\"resets_at\":null},\"quiet\":false,\"focus_client_id\":null,\"mac_voice_on\":true,\"silence\":false}}".utf8)))
