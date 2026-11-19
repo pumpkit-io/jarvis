@@ -116,10 +116,7 @@ public actor HubClient {
             let owner = generation
             await withCheckedContinuation { waiter in
                 presenceWaiter = waiter
-                presenceTimeout = Task {
-                    do { try await lifecycleSleep(2) } catch { return }
-                    await presenceExpired(command.id, owner: owner)
-                }
+                startPresenceDeadline(command.id, owner: owner)
                 Task {
                     do { try await socket.send(JSONEncoder().encode(command)) }
                     catch { await presenceExpired(command.id, owner: owner) }
@@ -224,8 +221,22 @@ public actor HubClient {
         }
     }
 
+    private func startPresenceDeadline(_ id: String, owner: UInt64) {
+        presenceTimeout?.cancel()
+        presenceTimeout = Task {
+            guard !Task.isCancelled else { return }
+            do { try await lifecycleSleep(2) } catch { return }
+            await presenceExpired(id, owner: owner)
+        }
+    }
+
     private func presenceExpired(_ id: String, owner: UInt64) async {
-        if presenceID == id, generation == owner { await retire() }
+        guard presenceID == id, generation == owner else { return }
+        if foreground, running, presenceDesired {
+            presenceID = nil
+            continuation.yield(.failure("The Hub did not acknowledge display presence. Reconnecting."))
+            await socket?.close()
+        } else { await retire() }
     }
 
     public func history(before: Int64? = nil, limit: Int = 100) async throws -> HistoryPage {
@@ -328,6 +339,7 @@ public actor HubClient {
                         guard foreground else { await retire(); return }
                         let presence = HubCommand(type: "set_presence", payload: ["can_show_text": .bool(true)])
                         presenceID = presence.id; presenceDesired = true
+                        startPresenceDeadline(presence.id, owner: owner)
                         try await opened.send(JSONEncoder().encode(presence))
                     case .event(let event):
                         guard event.seq > cursor else { continue }

@@ -134,12 +134,23 @@ func eventually(_ condition: @escaping () async -> Bool) async throws {
 
 actor FakeSleeper {
     var waits: [Double] = []
-    var waiter: CheckedContinuation<Void, any Error>?
+    var waiters: [UUID: CheckedContinuation<Void, any Error>] = [:]
+    var order: [UUID] = []
+    var pending: Int { waiters.count }
     func sleep(_ seconds: Double) async throws {
+        let id = UUID()
         waits.append(seconds)
-        try await withCheckedThrowingContinuation { waiter = $0 }
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try await withCheckedThrowingContinuation { waiters[id] = $0; order.append(id) }
+        } onCancel: { Task { await self.cancel(id) } }
     }
-    func advance() { waiter?.resume(); waiter = nil }
+    private func cancel(_ id: UUID) { waiters.removeValue(forKey: id)?.resume(throwing: CancellationError()) }
+    func advance() {
+        while !order.isEmpty {
+            if let waiter = waiters.removeValue(forKey: order.removeFirst()) { waiter.resume(); return }
+        }
+    }
 }
 
 @Test func retryBackoffIsBoundedAndResetsAfterReady() async throws {
@@ -323,8 +334,9 @@ func event(_ seq: Int, _ type: String, _ payload: String) -> String {
     try await eventually { await client.state == .ready }
     await socket.text(event(2, "speech_begin", #"{"speech_id":"draining","reply_id":"r","sample_rate":24000,"channels":1,"sample_width":2}"#))
     try await eventually { await client.cursor == 2 }
+    try await eventually { await clock.pending == 0 }
     let transition = Task { await client.setForeground(false, playingSpeechID: "draining") }
-    try await eventually { await clock.waits.count == 1 }
+    try await eventually { await clock.pending == 1 }
     await clock.advance()
     await transition.value
     #expect(await socket.closed)
@@ -520,4 +532,29 @@ func actualTransportOutcomesDetermineConnectionState(_ error: HubTransportError)
     #expect(await client.unansweredCommands.isEmpty)
     #expect(await client.state == .ready)
     await client.stop()
+}
+
+@Test func unansweredForegroundPresenceExpiresAndReconnectsWithFreshIdentity() async throws {
+    let transport = FakeTransport(autoPresence: false)
+    let clock = FakeSleeper()
+    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }),
+                           sleep: { _ in }, lifecycleSleep: { try await clock.sleep($0) })
+    await client.start()
+    try await eventually { await transport.socket(0) != nil }
+    let first = try #require(await transport.socket(0))
+    await first.ready()
+    try await eventually { await clock.waits.count == 1 }
+    let oldPresence = try #require(await first.sent.first)
+    await clock.advance()
+    try await eventually { await transport.socket(1) != nil }
+    #expect(await first.closed)
+    let replacement = try #require(await transport.socket(1))
+    await replacement.ready(through: 1)
+    try await eventually { await replacement.sent.count == 1 }
+    let newPresence = try #require(await replacement.sent.first)
+    #expect(oldPresence.id != newPresence.id)
+    await replacement.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(newPresence.id)\",\"ok\":true,\"result\":{\"can_show_text\":true}}")
+    try await eventually { await client.state == .ready }
+    #expect(await transport.cursors == [0, 1])
+    await client.stop(); await clock.advance()
 }

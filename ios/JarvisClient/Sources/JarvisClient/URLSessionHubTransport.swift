@@ -46,22 +46,24 @@ private final class RefuseRedirects: NSObject, URLSessionTaskDelegate {
     }
 }
 
-private final class URLSessionHubSocket: NSObject, HubSocket, URLSessionWebSocketDelegate, @unchecked Sendable {
+final class URLSessionHubSocket: NSObject, HubSocket, URLSessionWebSocketDelegate, @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Void, any Error>?
     private var opened = false
     private var ended = false
     private var session: URLSession!
-    private var task: URLSessionWebSocketTask!
+    private(set) var task: URLSessionWebSocketTask!
+    private let receiveMessage: (@Sendable () async throws -> URLSessionWebSocketTask.Message)?
 
-    init(request: URLRequest) {
+    init(request: URLRequest, receiveMessage: (@Sendable () async throws -> URLSessionWebSocketTask.Message)? = nil) {
+        self.receiveMessage = receiveMessage
         super.init()
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 15
         session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
         task = session.webSocketTask(with: request)
-        // A 300-second 24 kHz PCM clip can occupy 14.4 MB; text is bounded separately.
-        task.maximumMessageSize = 14_400_000
+        // V1 limits Client-to-Hub commands; retained Hub events have no size ceiling.
+        task.maximumMessageSize = Int.max
     }
 
     func open() async throws {
@@ -85,9 +87,11 @@ private final class URLSessionHubSocket: NSObject, HubSocket, URLSessionWebSocke
 
     func receive() async throws -> SocketMessage {
         do {
-            switch try await task.receive() {
+            let message: URLSessionWebSocketTask.Message
+            if let receiveMessage { message = try await receiveMessage() }
+            else { message = try await task.receive() }
+            switch message {
             case .string(let text):
-                guard text.utf8.count <= 65_536 else { throw HubProtocolError.invalidFrame }
                 return .text(Data(text.utf8))
             case .data(let data): return .binary(data)
             @unknown default: throw HubProtocolError.invalidFrame
