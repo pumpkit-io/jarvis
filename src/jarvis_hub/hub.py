@@ -861,7 +861,8 @@ class Hub:
             self._remote_spoken_owner = None
         self._persist_suspended = True
         try:
-            scope = self._scopes.admit(line.request_id, line.revision, line.segments or (line.text,), line.arrived)
+            scope = self._scopes.admit(line.request_id, line.revision, line.segments or (line.text,), line.arrived,
+                                       one_shot=line.client_id != TERMINAL)
             for task_id in scope.task_ids:
                 task = self._tasks.get(task_id)
                 if task is not None:
@@ -884,8 +885,6 @@ class Hub:
         async with self._admission_lock:
             if self._closing or self._input_ended.is_set() or not allowed():
                 raise ValueError("Hub is stopping")
-            if line.typed or line.client_id == TERMINAL:
-                self._remote_spoken_owner = None
             if not line.typed and line.request_id is not None and not self._owns_spoken(
                 (line.request_id, line.revision), line.client_id
             ):
@@ -897,6 +896,8 @@ class Hub:
         if text := line.text.strip():
             if self.clients.get(line.client_id) is None:
                 raise ValueError(f"Unknown Client {line.client_id}")
+            if line.typed or line.client_id == TERMINAL:
+                self._remote_spoken_owner = None
             if line.client_id != TERMINAL:
                 if self._floor is not None:
                     self._floor.typed_input()

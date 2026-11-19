@@ -4,7 +4,7 @@ The iPhone Client could recognise speech on the device and speak with Apple's vo
 
 Audio travels over HTTP uploads and one WebSocket, as uncompressed PCM. A Talk is half-duplex: an utterance goes up, then sentence clips come down, so there is no WebRTC or LiveKit transport. We revisit compression, streamed uploads or a real-time transport only if measured latency over cellular misses the target.
 
-Each Talk is a new Spoken request, with none of the Mac's resumed-speech revisions. A Talk during a reply is always an Interruption and skips the judge of ADR 0014, since a button press cannot be a Backchannel. The wake word, voice activity detection, Smart Turn and echo cancellation play no part in a Talk.
+Each Talk is a new Spoken request, with none of the Mac's resumed-speech revisions. Its full transcript is one immutable segment at revision zero, including when it exceeds the Mac's 6,000-character resumable-request budget. The Hub retains the same latest 64 resolved scopes; Mac recording and revision bounds stay unchanged. A Talk during a reply is always an Interruption and skips the judge of ADR 0014, since a button press cannot be a Backchannel. The wake word, voice activity detection, Smart Turn and echo cancellation play no part in a Talk.
 
 The User decided this on 2026-11-18.
 

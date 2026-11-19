@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import aiohttp
 import numpy as np
 import pytest
 
 from jarvis_hub.clients import Client
-from jarvis_hub.hub import Hub
+from jarvis_hub.hub import Hub, Line
 from jarvis_hub.door import Door
 from jarvis_hub.event_log import EventLog, EventOutput
 from jarvis_hub.pairing import PairingStore
@@ -614,3 +615,108 @@ async def test_malformed_utf8_http_and_websocket_ids_are_safe_rejections(tmp_pat
         await socket.send_json(command('valid-after-malformed', 'say_text', text='Still connected'))
         assert (await result(socket, 'valid-after-malformed'))['ok'] is True
         assert asr.calls == 0
+
+
+async def test_retired_mac_line_cannot_invalidate_a_phone_talk(tmp_path: Path) -> None:
+    from jarvis_hub.voice.state import Timing
+    from jarvis_hub.voice.voice_mode import VoiceMode
+    from tests.fakes import FakeTts, RecordingPlayer, ScriptedAudio, Tool
+
+    clock, metrics, output = FakeClock(), RecordingMetrics(), RecordingOutput()
+    audio, player = ScriptedAudio(clock), RecordingPlayer()
+    voice = VoiceMode(audio=audio, tts=FakeTts(), player=player, clock=clock, metrics=metrics,
+                      notice=output.notice, timing=Timing(follow_up_s=6, announce_follow_up_s=4, listen_s=6, chime_s=0.5, tail_s=0))
+    voice.start()
+    try:
+        async with rig(tmp_path, clock=clock, speech=voice.speech, floor=voice, speak_typed=False,
+                       talker=[[Tool('delegate', {'request': 'Phone Task'}), Text('Phone accepted.')]]) as (session, socket, door, hub, log, backend, asr, phone, _clock, _pairing):
+            lines = cast(AsyncGenerator[Line, None], voice.lines(hub.interrupt, hub.woke, hub.admit_spoken_revision))
+            queued = asyncio.ensure_future(anext(lines))
+            try:
+                await until(lambda: player.voices == ['ready'])
+                audio.wake()
+                audio.say('Retired Mac request')
+                stale = await asyncio.wait_for(queued, 2)
+                assert stale.request_id is not None
+                assert voice.owns((stale.request_id, stale.revision))
+                await socket.send_json(command('begin', 'talk_begin', talk_id='phone-talk'))
+                assert (await result(socket, 'begin'))['ok']
+                assert not voice.owns((stale.request_id, stale.revision))
+                before = list(player.events)
+                assert await hub.admit_line(stale) is None
+                assert player.events == before
+                assert not [e for e in log.after(0) if e.type == 'heard']
+                assert backend.session('talker').tool_results == []
+                async with session.post(f'http://127.0.0.1:{door.port}/v1/utterances/phone-talk', headers=headers(phone.token), data=PCM) as response:
+                    assert response.status == 200
+                await until(lambda: any(e.type == 'reply_end' for e in log.after(0)))
+                assert [e.payload['text'] for e in log.after(0) if e.type == 'heard'] == [asr.text]
+                tasks = [t for e in log.after(0) if e.type == 'task_snapshot' for t in e.payload['tasks']]
+                assert tasks and {task['title'] for task in tasks} == {'Phone Task'}
+            finally:
+                queued.cancel()
+                await asyncio.gather(queued, return_exceptions=True)
+                await lines.aclose()
+    finally:
+        await voice.close()
+
+
+async def test_five_minute_talk_retains_full_long_scope_and_approval_after_hub_restart(tmp_path: Path) -> None:
+    import json
+    from tests.fakes import Tool
+
+    transcript = 'Please inspect the build and preserve every condition. ' * 120 + 'Including this final condition.'
+    assert len(transcript) > 6001
+    path = tmp_path / 'state.json'
+    async with rig(tmp_path, Transcriber(transcript), state_path=path, talker=[
+        [Tool('delegate', {'request': 'Inspect long request'}), Text('Working.')],
+        [Tool('present_approval', {'approval_id': 'A1'}), Text('Shall I publish the prepared post?')],
+    ], orchestrator=[[Tool('report', {'task_id': 'T1', 'spoken': 'May I publish?', 'needs_user': True,
+            'approval': {'action': 'subagent_action', 'grants': ['x_post'], 'post': '812', 'post_action': 'post_now'}})]]) as (session, socket, door, _hub, log, backend, _asr, phone, _clock, _pairing):
+        token = phone.token
+        await socket.send_json(command('foreground', 'set_presence', can_show_text=True))
+        await result(socket, 'foreground')
+        await socket.send_json(command('begin', 'talk_begin', talk_id='long-talk'))
+        assert (await result(socket, 'begin'))['ok']
+        async with session.post(f'http://127.0.0.1:{door.port}/v1/utterances/long-talk', headers=headers(token), data=PCM * 2_400_000) as response:
+            assert response.status == 200
+            request_id = (await response.json())['result']['request_id']
+        await until(lambda: any(e.type == 'pending_approval' and e.payload['approvals'] for e in log.after(0)))
+        assert [e.payload['text'] for e in log.after(0) if e.type == 'heard'] == [transcript]
+        assert backend.session('talker').received[1] == f'<user lang="en">{transcript}</user>'
+        saved = json.loads(path.read_text())
+        [scope] = saved['spoken_scopes']
+        assert scope['id'] == request_id and scope['segments'] == [transcript]
+        assert scope['revision'] == 0 and scope['task_ids'] == ['T1'] and not scope['pending']
+        assert saved['tasks'][0]['words'] == [transcript]
+        assert saved['approvals'][0]['task_id'] == 'T1' and saved['approvals'][0]['task_revision'] == 0
+
+    with PairingStore(tmp_path / 'pairing.db') as pairing, EventLog(tmp_path / 'events.db', wall=lambda: 1000) as log:
+        backend = FakeBackend(FakeClock(), [[Tool('approve', {'approval_id': 'A1'}), Text('Please confirm the action first.')]])
+        hub = make_hub(backend, EventOutput(log, RecordingOutput()), RecordingMetrics(), state_path=path)
+        door = Door(enabled=True, port=0, health=hub.health, pairing=pairing, hub=hub, log=log)
+        await hub.start()
+        await door.start()
+        try:
+            async with aiohttp.ClientSession() as session, connect(session, door, token) as socket:
+                fresh: list[dict[str, Any]] = []
+                while not fresh or fresh[-1]['type'] != 'replay_complete':
+                    fresh.append(await receive(socket))
+                snapshots: list[dict[str, Any]] = []
+                while not snapshots or snapshots[-1]['type'] != 'pending_approval':
+                    snapshots.append(await receive(socket))
+                task_snapshot = next(e['payload']['tasks'] for e in snapshots if e['type'] == 'task_snapshot')
+                assert task_snapshot[0]['id'] == 'T1'
+                assert snapshots[-1]['payload']['approvals'][0]['task_id'] == 'T1'
+                await socket.send_json(command('status', 'say_text', text='What is the status of that request?'))
+                assert (await result(socket, 'status'))['ok']
+                await until(lambda: bool(backend.session('talker').tool_results))
+                restored = json.loads(path.read_text())
+                [scope] = restored['spoken_scopes']
+                assert scope['segments'] == [transcript] and scope['revision'] == 0
+                assert restored['tasks'][0]['words'] == [transcript]
+                assert restored['approvals'][0]['state'] == 'pending'
+                assert str(backend.session('talker').tool_results[0].result).startswith('Not approved:')
+        finally:
+            await door.close()
+            await hub.close()
