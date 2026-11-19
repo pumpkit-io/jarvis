@@ -2,7 +2,7 @@ import JarvisClient
 import SwiftUI
 
 struct ConversationView: View {
-    let connection: HubConnectionState = .unpaired
+    var connection: HubConnectionState = .unpaired
     @Environment(\.colorScheme) private var scheme
     @ScaledMetric(relativeTo: .body) private var scriptSize = 19
     @ScaledMetric(relativeTo: .subheadline) private var controlSize = 15
