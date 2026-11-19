@@ -28,8 +28,12 @@ struct ConversationView: View {
                             VStack(alignment: .leading) {
                                 if session.loadingHistory { ProgressView("Loading older history…") }
                                 else if session.connection.canSend {
-                                    Button("Older history") { Task { await session.loadOlderHistory() } }
-                                        .buttonStyle(.plain).underline()
+                                    Button { Task { await session.loadOlderHistory() } } label: {
+                                        Text("Older history").underline()
+                                            .frame(minWidth: 44, minHeight: 44, alignment: .leading)
+                                            .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
                                 } else { Text("Older history") }
                             }
                             .font(.system(size: controlSize))
