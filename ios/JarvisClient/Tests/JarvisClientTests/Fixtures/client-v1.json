@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "normalization": "Only generated client/request/reply IDs, including Focus references, are replaced by first-seen ordinal IDs. Fake wall time starts at 1000 seconds.",
+  "normalization": "Only generated client/request/reply IDs, including Focus references and speech IDs, are replaced by first-seen ordinal IDs. Fake wall time starts at 1000 seconds.",
   "exchanges": {
     "rejected_envelopes": [
       {
@@ -2532,6 +2532,283 @@
           }
         }
       ]
-    }
+    },
+    "speech_live": [
+      {
+        "version": 1,
+        "seq": 6,
+        "time": "1970-01-01T00:16:40Z",
+        "type": "heard",
+        "client_id": "client-7",
+        "payload": {
+          "request_id": "request-9",
+          "text": "Hello",
+          "spoken": true
+        }
+      },
+      {
+        "version": 1,
+        "seq": 7,
+        "time": "1970-01-01T00:16:40Z",
+        "type": "reply_delta",
+        "client_id": "client-7",
+        "payload": {
+          "reply_id": "reply-10",
+          "request_id": "request-9",
+          "text": "First sentence. Second sentence."
+        }
+      },
+      {
+        "version": 1,
+        "seq": 8,
+        "time": "1970-01-01T00:16:40Z",
+        "type": "reply_end",
+        "client_id": "client-7",
+        "payload": {
+          "reply_id": "reply-10",
+          "request_id": "request-9",
+          "text": "First sentence. Second sentence.",
+          "reason": "complete"
+        }
+      },
+      {
+        "version": 1,
+        "seq": 9,
+        "time": "1970-01-01T00:16:40Z",
+        "type": "speech_begin",
+        "client_id": "client-7",
+        "payload": {
+          "reply_id": "reply-10",
+          "speech_id": "speech-1",
+          "sample_rate": 24000,
+          "channels": 1,
+          "sample_width": 2
+        }
+      },
+      {
+        "version": 1,
+        "seq": 10,
+        "time": "1970-01-01T00:16:40Z",
+        "type": "speech_clip",
+        "client_id": "client-7",
+        "payload": {
+          "reply_id": "reply-10",
+          "speech_id": "speech-1",
+          "index": 0,
+          "text": "First sentence.",
+          "byte_length": 12
+        }
+      },
+      {
+        "binary_base64": "AYABwAAA/z//f/9/"
+      },
+      {
+        "version": 1,
+        "seq": 11,
+        "time": "1970-01-01T00:16:40Z",
+        "type": "speech_clip",
+        "client_id": "client-7",
+        "payload": {
+          "reply_id": "reply-10",
+          "speech_id": "speech-1",
+          "index": 1,
+          "text": "Second sentence.",
+          "byte_length": 12
+        }
+      },
+      {
+        "binary_base64": "AYABwAAA/z//f/9/"
+      },
+      {
+        "version": 1,
+        "seq": 12,
+        "time": "1970-01-01T00:16:40Z",
+        "type": "speech_end",
+        "client_id": "client-7",
+        "payload": {
+          "reply_id": "reply-10",
+          "speech_id": "speech-1",
+          "last_clip_index": 1
+        }
+      }
+    ],
+    "speech_reports": [
+      {
+        "command": {
+          "version": 1,
+          "id": "report-0-started",
+          "type": "playback_report",
+          "payload": {
+            "speech_id": "speech-1",
+            "clip_index": 0,
+            "state": "started"
+          }
+        },
+        "result": {
+          "version": 1,
+          "type": "command_result",
+          "id": "report-0-started",
+          "ok": true,
+          "result": {}
+        }
+      },
+      {
+        "command": {
+          "version": 1,
+          "id": "report-0-finished",
+          "type": "playback_report",
+          "payload": {
+            "speech_id": "speech-1",
+            "clip_index": 0,
+            "state": "finished"
+          }
+        },
+        "result": {
+          "version": 1,
+          "type": "command_result",
+          "id": "report-0-finished",
+          "ok": true,
+          "result": {}
+        }
+      },
+      {
+        "command": {
+          "version": 1,
+          "id": "report-1-finished",
+          "type": "playback_report",
+          "payload": {
+            "speech_id": "speech-1",
+            "clip_index": 1,
+            "state": "finished"
+          }
+        },
+        "result": {
+          "version": 1,
+          "type": "command_result",
+          "id": "report-1-finished",
+          "ok": true,
+          "result": {}
+        }
+      }
+    ],
+    "speech_replay": [
+      {
+        "version": 1,
+        "seq": 1,
+        "time": "1970-01-01T00:16:40Z",
+        "type": "status",
+        "client_id": "client-7",
+        "payload": {
+          "ready": true,
+          "usage_limit": {
+            "limited": false,
+            "resets_at": null
+          },
+          "quiet": false,
+          "focus_client_id": "terminal",
+          "mac_voice_on": true,
+          "silence": false
+        }
+      },
+      {
+        "version": 1,
+        "seq": 2,
+        "time": "1970-01-01T00:16:40Z",
+        "type": "status",
+        "client_id": "client-7",
+        "payload": {
+          "ready": true,
+          "usage_limit": {
+            "limited": false,
+            "resets_at": null
+          },
+          "quiet": false,
+          "focus_client_id": "terminal",
+          "mac_voice_on": true,
+          "silence": false
+        }
+      },
+      {
+        "version": 1,
+        "seq": 3,
+        "time": "1970-01-01T00:16:40Z",
+        "type": "task_snapshot",
+        "client_id": null,
+        "payload": {
+          "tasks": []
+        }
+      },
+      {
+        "version": 1,
+        "seq": 4,
+        "time": "1970-01-01T00:16:40Z",
+        "type": "pending_approval",
+        "client_id": null,
+        "payload": {
+          "approvals": []
+        }
+      },
+      {
+        "version": 1,
+        "seq": 5,
+        "time": "1970-01-01T00:16:40Z",
+        "type": "status",
+        "client_id": "client-7",
+        "payload": {
+          "ready": true,
+          "usage_limit": {
+            "limited": false,
+            "resets_at": null
+          },
+          "quiet": false,
+          "focus_client_id": "client-7",
+          "mac_voice_on": true,
+          "silence": false
+        }
+      },
+      {
+        "version": 1,
+        "seq": 6,
+        "time": "1970-01-01T00:16:40Z",
+        "type": "heard",
+        "client_id": "client-7",
+        "payload": {
+          "request_id": "request-9",
+          "text": "Hello",
+          "spoken": true
+        }
+      },
+      {
+        "version": 1,
+        "seq": 7,
+        "time": "1970-01-01T00:16:40Z",
+        "type": "reply_delta",
+        "client_id": "client-7",
+        "payload": {
+          "reply_id": "reply-10",
+          "request_id": "request-9",
+          "text": "First sentence. Second sentence."
+        }
+      },
+      {
+        "version": 1,
+        "seq": 8,
+        "time": "1970-01-01T00:16:40Z",
+        "type": "reply_end",
+        "client_id": "client-7",
+        "payload": {
+          "reply_id": "reply-10",
+          "request_id": "request-9",
+          "text": "First sentence. Second sentence.",
+          "reason": "complete"
+        }
+      },
+      {
+        "version": 1,
+        "type": "replay_complete",
+        "through_seq": 12,
+        "oldest_seq": 1
+      }
+    ]
   }
 }

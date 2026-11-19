@@ -126,7 +126,7 @@ class Speech(Protocol):
 
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
               destination: Player | None = None, allowed: Callable[[], bool] | None = None,
-              can_start: Callable[[], bool] | None = None) -> Callable[[], bool] | None: ...
+              can_start: Callable[[], bool] | None = None, reply_id: str | None = None) -> Callable[[], bool] | None: ...
 
     def say(self, name: ClipName, lang: Lang, *, in_reply: bool = False) -> None: ...
 
@@ -166,7 +166,7 @@ class Floor(Protocol):
 class _Silent:
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
               destination: Player | None = None, allowed: Callable[[], bool] | None = None,
-              can_start: Callable[[], bool] | None = None) -> None:
+              can_start: Callable[[], bool] | None = None, reply_id: str | None = None) -> None:
         pass
 
     def say(self, name: ClipName, lang: Lang, *, in_reply: bool = False) -> None:
@@ -313,6 +313,7 @@ class _TalkerInput:
     revision: int = 0
     spoken_owner: tuple[str, int] | None = None
     client_id: str = TERMINAL
+    audio_generation: int | None = None
     # The news this turn tells: all of a news turn, or the away opener a User's spoken turn opens with.
     news: News | None = None
     # The Backlog a User's turn opens with: context for the Talker, never told or counted as news.
@@ -420,6 +421,7 @@ class Hub:
         orchestrator_timeout: float = ORCHESTRATOR_TIMEOUT,
         speech: Speech | None = None,
         speak_typed: bool = True,
+        terminal_speech: bool | None = None,
         on_end_conversation: Callable[[], None] | None = None,
         on_stand_by: Callable[[], None] | None = None,
         on_model_ready: Callable[[], None] | None = None,
@@ -461,7 +463,7 @@ class Hub:
         ))
         self._backend = backend
         self._clock = clock
-        self.clients = Clients(terminal_speech=speech is not None, on_focus=self._persist, on_change=self._clients_changed)
+        self.clients = Clients(terminal_speech=(speech is not None if terminal_speech is None else terminal_speech), on_focus=self._persist, on_change=self._clients_changed)
         if isinstance(output, EventOutput):
             self._displays = _ClientOutput(output.destination, self.clients)
             output.destination = self._displays
@@ -477,9 +479,14 @@ class Hub:
         self._snapshot_expiry_at: float | None = None
         self._snapshot_expiry: asyncio.Task[None] | None = None
         self._admission_lock = asyncio.Lock()
+        self._audio_generation = 0
+        self._last_input_client = TERMINAL
+        self._remote_interrupted: str | None = None
+        self._speech_client_id: str | None = None
         self._client_players: dict[str, Player] = {}
         self._metrics = metrics
         self._orchestrator_timeout = orchestrator_timeout
+        self.speech_available = speech is not None
         self._speech: Speech = speech if speech is not None else _Silent()
         # In voice mode a typed line gets a text-only reply; with `--text --speak` it is spoken.
         self._speak_typed = speak_typed
@@ -790,11 +797,24 @@ class Hub:
             self._settled.clear()
         self._persist()
 
+    async def interrupt_client(self, client_id: str) -> None:
+        if (player := self._client_players.get(client_id)) is not None:
+            self._remote_interrupted = player.played()
+        if client_id == self._speech_client_id:
+            await self.interrupt()
+        elif (player := self._client_players.get(client_id)) is not None:
+            self._speech.retire(player)
+            self.set_client_playing(client_id, False)
+
     async def interrupt(self) -> bool:
         """Stop whatever is being said, and the Talker turn under way if its reply is spoken; a typed line's reply
         goes on. Returns whether a Talker turn was interrupted."""
         if self._news_delivery is not None and not self._news_delivery_told(self._news_delivery):
             self._hold_news_delivery(self._news_delivery)
+        for client_id, player in self._client_players.items():
+            if client_id != TERMINAL and player.pending() > 0:
+                self._remote_interrupted = player.played()
+                break
         self._speech.stop()
         turn = self._talker_gate.turn
         if turn is None or self._talker is None or not self._turn_spoken:
@@ -835,16 +855,21 @@ class Hub:
             return owner == self._remote_spoken_owner or owner in self._admitted_remote_owners
         return self._floor is None or self._floor.owns(owner)
 
-    async def begin_remote_talk(self, client_id: str) -> str:
+    async def begin_remote_talk(self, client_id: str, *, allowed: Callable[[], bool] = lambda: True) -> str:
         async with self._admission_lock:
-            if self._closing or self._input_ended.is_set() or self.clients.get(client_id) is None:
+            if self._closing or self._input_ended.is_set() or self.clients.get(client_id) is None or not allowed():
                 raise ValueError("Hub is stopping")
+            self._audio_generation += 1
+            self._last_input_client = client_id
             request_id = uuid.uuid4().hex
             self._remote_spoken_owner = (request_id, 0)
             self.set_client_talking(client_id, True)
             if self._floor is not None:
                 self._floor.typed_input()
             await self.interrupt()
+            if not allowed():
+                self.cancel_remote_talk(client_id, request_id)
+                raise ValueError("Client is disconnected")
             self.clients.take_focus(client_id)
             self.woke()
             return request_id
@@ -896,6 +921,9 @@ class Hub:
         if text := line.text.strip():
             if self.clients.get(line.client_id) is None:
                 raise ValueError(f"Unknown Client {line.client_id}")
+            if line.client_id != TERMINAL or self._last_input_client != TERMINAL:
+                self._audio_generation += 1
+            self._last_input_client = line.client_id
             if line.typed or line.client_id == TERMINAL:
                 self._remote_spoken_owner = None
             if line.client_id != TERMINAL:
@@ -935,11 +963,14 @@ class Hub:
             self.clients.take_focus(line.client_id)
             self._read_lang = lang = line.lang or detect_language(text, self._read_lang)
             message = user_message(text, lang, typed=line.typed)
-            if line.interrupted is not None:
-                message = f"{interrupted_message(line.interrupted)}\n{message}"
+            interrupted = line.interrupted if line.interrupted is not None else self._remote_interrupted
+            self._remote_interrupted = None
+            if interrupted is not None:
+                message = f"{interrupted_message(interrupted)}\n{message}"
             spoken = not line.typed or (self._speak_typed and line.client_id == TERMINAL)
             item = _TalkerInput("user", line.arrived, message, heard=text, lang=lang, typed=line.typed, spoken=spoken,
                                 request_id=request_id, revision=line.revision, client_id=line.client_id,
+                                audio_generation=self._audio_generation,
                                 spoken_owner=(line.request_id, line.revision)
                                 if not line.typed and line.request_id is not None else None)
             if item.spoken_owner is not None and line.client_id != TERMINAL:
@@ -1423,7 +1454,7 @@ class Hub:
                     scope_context = self._scopes.context() if authority else ""
                     message = "\n".join(part for part in (item.message, scope_context) if part)
                     end = await self._turn(message, kind=item.kind, arrived=item.arrived, spoken=item.spoken,
-                                           owner=owner, scope_authority=authority, news_delivery=delivery)
+                                           owner=owner, scope_authority=authority, news_delivery=delivery, audio_generation=item.audio_generation)
                 self._approvals.turn_ended(completed=end.outcome == "completed")
                 if delivery is not None and self._news_delivery is delivery:
                     if end.outcome == "completed" and delivery.speaks:
@@ -1622,6 +1653,7 @@ class Hub:
         owner: tuple[str, int] | None = None,
         scope_authority: dict[str, tuple[int, int]] | None = None,
         news_delivery: _NewsDelivery | None = None,
+        audio_generation: int | None = None,
     ) -> TurnEnd:
         session = session or self._talker
         assert session is not None
@@ -1648,10 +1680,13 @@ class Hub:
             self._news_delivery = None
         audible = self._turn_spoken and self._client_can_speak(destination_id)
         speech = self._speech if audible else _Silent()
+        if audible:
+            self._speech_client_id = destination_id
         player = self._client_players.get(destination_id)
-        receipt = speech.begin(self._lang, turn=turn, heard_at=arrived if kind == "user" else None, owner=owner,
+        receipt = speech.begin(self._lang, reply_id=self._output.reply_id, turn=turn, heard_at=arrived if kind == "user" else None, owner=owner,
                      destination=player,
-                     allowed=lambda: self._client_can_speak(destination_id)
+                     allowed=lambda: (audio_generation is None or audio_generation == self._audio_generation)
+                     and self._client_can_speak(destination_id)
                      and self._client_players.get(destination_id) is player
                      and (kind != "event" or self.clients.focus == destination_id),
                      can_start=lambda: destination_id == TERMINAL or bool(

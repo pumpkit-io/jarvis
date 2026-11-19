@@ -273,6 +273,7 @@ func event(_ seq: Int, _ type: String, _ payload: String) -> String {
     await socket.text(event(3, "speech_clip", #"{"speech_id":"s","reply_id":"r","index":0,"text":"a","byte_length":4}"#))
     socket.input.yield(.binary(Data([0, 0, 1, 0])))
     try await eventually { await client.cursor == 3 }
+    try await eventually { await captured.clips.count == 1 }
     #expect(await captured.clips == [Data([0, 0, 1, 0])])
     await socket.text(event(4, "speech_clip", #"{"speech_id":"s","reply_id":"r","index":1,"text":"b","byte_length":4}"#))
     socket.input.yield(.binary(Data([0, 0])))
@@ -557,4 +558,68 @@ func actualTransportOutcomesDetermineConnectionState(_ error: HubTransportError)
     try await eventually { await client.state == .ready }
     #expect(await transport.cursors == [0, 1])
     await client.stop(); await clock.advance()
+}
+
+@Test func pythonSpeechFixturePairsExactPcmWithoutReplayAudio() async throws {
+    let url = try #require(Bundle.module.url(forResource: "client-v1", withExtension: "json", subdirectory: "Fixtures"))
+    let root = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+    let exchanges = try #require(root["exchanges"] as? [String: Any])
+    let frames = try #require(exchanges["speech_live"] as? [[String: Any]])
+    let replay = try #require(exchanges["speech_replay"] as? [[String: Any]])
+    let transport = FakeTransport()
+    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }))
+    let captured = CapturedUpdates()
+    let reader = Task { for await update in client.updates { await captured.record(update) } }
+    await client.start()
+    try await eventually { await transport.socket(0) != nil }
+    let socket = try #require(await transport.socket(0))
+    await socket.ready()
+    try await eventually { await client.state == .ready }
+    for frame in frames {
+        if let encoded = frame["binary_base64"] as? String {
+            socket.input.yield(.binary(try #require(Data(base64Encoded: encoded))))
+        } else {
+            socket.input.yield(.text(try JSONSerialization.data(withJSONObject: frame)))
+        }
+    }
+    try await eventually { await captured.clips.count == 2 }
+    let expected = Data([1, 128, 1, 192, 0, 0, 255, 63, 255, 127, 255, 127])
+    #expect(await captured.clips == [expected, expected])
+    #expect(!replay.contains { ($0["type"] as? String)?.hasPrefix("speech_") == true })
+    await client.stop(); reader.cancel()
+}
+
+@Test func speechDownlinkDoesNotInheritUploadDurationLimit() async throws {
+    let transport = FakeTransport()
+    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }))
+    let captured = CapturedUpdates()
+    let reader = Task { for await update in client.updates { await captured.record(update) } }
+    await client.start()
+    try await eventually { await transport.socket(0) != nil }
+    let socket = try #require(await transport.socket(0))
+    await socket.ready()
+    try await eventually { await client.state == .ready }
+    let pcm = Data(repeating: 0, count: 14_400_002)
+    await socket.text(event(2, "speech_begin", #"{"speech_id":"long","reply_id":"r","sample_rate":24000,"channels":1,"sample_width":2}"#))
+    await socket.text(event(3, "speech_clip", "{\"speech_id\":\"long\",\"reply_id\":\"r\",\"index\":0,\"text\":\"Long sentence\",\"byte_length\":\(pcm.count)}"))
+    socket.input.yield(.binary(pcm))
+    try await eventually { await captured.clips.count == 1 }
+    #expect(await captured.clips.first?.count == pcm.count)
+    await client.stop(); reader.cancel()
+}
+
+@Test(arguments: ["speech_clip", "speech_end", "speech_stop"])
+func speechFramesCannotChangeCanonicalReplyIdentity(_ kind: String) async throws {
+    let transport = FakeTransport()
+    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }))
+    await client.start()
+    try await eventually { await transport.socket(0) != nil }
+    let socket = try #require(await transport.socket(0))
+    await socket.ready()
+    try await eventually { await client.state == .ready }
+    await socket.text(event(2, "speech_begin", #"{"speech_id":"s","reply_id":"original","sample_rate":24000,"channels":1,"sample_width":2}"#))
+    await socket.text(event(3, kind, #"{"speech_id":"s","reply_id":"other","index":0,"byte_length":2,"last_clip_index":-1,"reason":"interrupted"}"#))
+    try await eventually { await socket.closed }
+    #expect(await client.cursor == 2)
+    await client.stop()
 }

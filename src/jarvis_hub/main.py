@@ -37,7 +37,7 @@ from jarvis_hub.voice import language
 from jarvis_hub.voice.clips import ClipSettings, ClipStore
 from jarvis_hub.voice.engines import EngineChoice
 from jarvis_hub.voice.input import Listening
-from jarvis_hub.voice.player import Player, Samples, SoundPlayer
+from jarvis_hub.voice.player import NoLocalPlayer, Player, Samples, SoundPlayer
 from jarvis_hub.voice.speech import Speech, SpeechClock
 from jarvis_hub.voice.transcription import TranscriptionService
 from jarvis_hub.voice.state import Timing
@@ -308,8 +308,12 @@ async def text_mode(
                     voice.tts, player, clock, metrics=metrics, notice=output.notice,
                     on_ready=lambda: output.notice("Speech ready."),
                 )
+        local_speech = speech is not None
+        if speech is None and settings.remote:
+            speech = Speech(voice.tts if voice is not None else KokoroSynthesizer(), NoLocalPlayer(), clock, metrics=metrics, notice=output.notice)
         hub = settings_hub(
             settings, backend=backend, clock=clock, output=output, metrics=metrics, speech=speech,
+            terminal_speech=local_speech,
             on_model_ready=lambda: output.notice("Model ready."),
         )
         transcription = TranscriptionService() if settings.remote else None
@@ -322,14 +326,15 @@ async def text_mode(
             await asyncio.to_thread(language.warm_up)
             if speech is not None:
                 output.notice("Speech loading.")
-                speech.start()
-                speech.say("ready", "en")
+                speech.start(lazy=not local_speech)
+                if local_speech:
+                    speech.say("ready", "en")
             if interactive:
                 stdout.write(PROMPT)
                 stdout.flush()
             await hub.run(_typed_lines(stdin, clock))
-            if speech is not None:
-                await speech.idle()
+            if speech is not None and local_speech:
+                await speech.idle(local_only=True)
         finally:
             try:
                 try:

@@ -21,7 +21,7 @@ class BufferTranscriber(Protocol):
 
 
 class TalkHub(Protocol):
-    async def begin_remote_talk(self, client_id: str) -> str: ...
+    async def begin_remote_talk(self, client_id: str, *, allowed: Callable[[], bool] = lambda: True) -> str: ...
     def cancel_remote_talk(self, client_id: str, request_id: str) -> None: ...
     def set_client_talking(self, client_id: str, talking: bool) -> None: ...
     async def admit_line(self, line: Line, *, allowed: Callable[[], bool] = lambda: True) -> str | None: ...
@@ -63,7 +63,7 @@ class UploadedTalks:
         self._rates: dict[str, deque[float]] = {}
         self._closing = False
 
-    async def begin(self, client_id: str, talk_id: str) -> dict[str, Any]:
+    async def begin(self, client_id: str, talk_id: str, *, allowed: Callable[[], bool] = lambda: True) -> dict[str, Any]:
         current = self._current.get(client_id)
         if current is not None:
             if self._valid(current):
@@ -74,7 +74,7 @@ class UploadedTalks:
         talk = Talk(client_id, talk_id, '', self._now() + 330)
         self._talks[client_id, talk_id] = self._current[client_id] = talk
         try:
-            talk.request_id = await self._hub.begin_remote_talk(client_id)
+            talk.request_id = await self._hub.begin_remote_talk(client_id, allowed=allowed)
         except BaseException:
             self._finish(talk, 'cancelled')
             raise

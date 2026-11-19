@@ -24,6 +24,8 @@ class Event:
     client_id: str | None
     payload: dict[str, Any]
     replayable: bool = True
+    binary: bytes | None = None
+    audience: object | None = None
 
 
 def _event(row: tuple[Any, ...]) -> Event:
@@ -62,7 +64,9 @@ class EventLog:
         self._db.execute("UPDATE talks SET status = 'expired' WHERE status = 'active'")
         self._db.commit()
 
-    def append(self, type: str, payload: dict[str, Any], *, client_id: str | None = "terminal", replayable: bool = True) -> Event:
+    def append(self, type: str, payload: dict[str, Any], *, client_id: str | None = "terminal", replayable: bool = True, binary: bytes | None = None, audience: object | None = None) -> Event:
+        if binary is not None and replayable:
+            raise ValueError("Binary audio must be live-only")
         with self._lock:
             stamp = self._wall()
             encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False)
@@ -74,7 +78,7 @@ class EventLog:
                 if not replayable:
                     self._db.execute("DELETE FROM events WHERE seq = ?", (cursor.lastrowid,))
             assert cursor.lastrowid is not None
-            event = Event(cursor.lastrowid, stamp, type, client_id, json.loads(encoded), replayable)
+            event = Event(cursor.lastrowid, stamp, type, client_id, json.loads(encoded), replayable, binary, audience)
             # Schedule under the allocation lock so worker threads cannot reverse delivery order.
             for loop, callback in self._subscriptions.values():
                 loop.call_soon_threadsafe(callback, event)
@@ -174,6 +178,10 @@ class EventOutput:
         self._request_id: str | None = None
         self._client_id: str | None = None
         self._text = ""
+
+    @property
+    def reply_id(self) -> str | None:
+        return self._reply_id
 
     def begin_reply(self, client_id: str | None, request_id: str | None) -> None:
         with self._lock:
