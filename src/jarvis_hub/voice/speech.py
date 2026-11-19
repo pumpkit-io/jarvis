@@ -314,7 +314,8 @@ class Speech:
     def played(self) -> str:
         return self._last_player.played()
 
-    async def idle(self, *, stall_timeout: float | None = STALLED, local_only: bool = False) -> None:
+    async def idle(self, *, stall_timeout: float | None = STALLED, local_only: bool = False,
+                   destination: Player | None = None) -> None:
         """Wait for voice loading and playback; None disables the stalled-player timeout."""
         if self._loading is not None:
             with contextlib.suppress(Exception):
@@ -322,7 +323,7 @@ class Speech:
         await self._queue.join()
         def pending() -> float:
             return sum(p.pending() for p in self._players
-                       if (not local_only or p is self._player)
+                       if (not local_only or p is self._player) and (destination is None or p is destination)
                        and not any(retired is p for retired in self._retired_players))
 
         left, since = pending(), self._clock.now()
