@@ -121,6 +121,9 @@ class OpenWakeWord:
         # Without openWakeWord's own VAD gate, which cost bare "Jarvis" a take in Phase 0.
         self._model: Any = Model(wakeword_models=[WAKE_MODEL], inference_framework="onnx")
 
+    def reset(self) -> None:
+        self._model.reset()
+
     def score(self, chunk: Pcm) -> float:
         return float(self._model.predict(chunk)[WAKE_MODEL])
 
@@ -132,6 +135,9 @@ class SileroVad:
         from openwakeword.vad import VAD  # pyright: ignore[reportMissingTypeStubs]
 
         self._vad: Any = VAD()
+
+    def reset(self) -> None:
+        self._vad.reset_states()
 
     def probability(self, chunk: Pcm) -> float:
         return float(self._vad.predict(chunk, self.chunk))

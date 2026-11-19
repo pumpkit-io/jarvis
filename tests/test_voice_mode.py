@@ -2662,3 +2662,52 @@ async def test_the_ready_sound_waits_for_everything_else_to_be_ready() -> None:
     await until(lambda: player.voices == ["ready"])
     assert output.notices[-1] == "Ready."
     await voice.close()
+
+
+async def test_phone_activity_discards_an_unfinished_mac_turn_and_resumes_fresh(rig_for: MakeRig) -> None:
+    from jarvis_hub.clients import Client
+
+    rig = await rig_for([Text("Fresh request.")])
+    rig.hub.attach_client(Client("phone", "iphone", connected=True))
+    rig.audio.wake()
+    rig.audio.speech()
+    await rig.settle()
+    rig.hub.set_client_talking("phone", True)
+    rig.audio.say("Old microphone speech")
+    rig.audio.wake()
+    await rig.settle()
+    assert rig.user_messages() == []
+    assert rig.audio.capturing[-1:] == [False]
+    rig.hub.set_client_playing("phone", True)
+    rig.hub.set_client_talking("phone", False)
+    rig.audio.wake()
+    rig.audio.say("Phone playback echo")
+    await rig.settle()
+    assert rig.user_messages() == []
+    rig.hub.set_client_playing("phone", False)
+    rig.audio.wake()
+    rig.audio.say("Fresh Mac speech")
+    await until(lambda: bool(rig.user_messages()))
+    assert len(rig.user_messages()) == 1
+    assert "Fresh Mac speech" in rig.user_messages()[0]
+
+
+async def test_mac_resumes_only_after_every_active_remote_client_disconnects(rig_for: MakeRig) -> None:
+    from jarvis_hub.clients import Client
+
+    rig = await rig_for([Text("Back at the desk.")])
+    rig.hub.attach_client(Client("phone", "iphone", connected=True))
+    rig.hub.attach_client(Client("reference", "reference", connected=True))
+    rig.hub.set_client_talking("phone", True)
+    rig.hub.set_client_playing("reference", True)
+    rig.hub.clients.disconnect("phone")
+    rig.audio.wake()
+    rig.audio.say("Still phone audio")
+    await rig.settle()
+    assert rig.user_messages() == []
+    rig.hub.clients.disconnect("reference")
+    rig.audio.wake()
+    rig.audio.say("Back at the desk")
+    await until(lambda: bool(rig.user_messages()))
+    assert len(rig.user_messages()) == 1
+    assert "Back at the desk" in rig.user_messages()[0]

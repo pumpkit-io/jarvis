@@ -400,3 +400,53 @@ async def test_retired_mac_spoken_line_leaves_current_phone_reply_and_focus_unto
     finally:
         await hub.close()
         await voice.close()
+
+
+async def test_reported_phone_playback_cannot_be_interrupted_by_mac_echo() -> None:
+    import asyncio
+    from jarvis_hub.voice.state import BargeIn, Timing
+    from jarvis_hub.voice.voice_mode import VoiceMode, merge
+    from tests.fakes import ScriptedAudio, until
+
+    clock, metrics = FakeClock(), RecordingMetrics()
+    output, local, remote = RecordingOutput(), RecordingPlayer(), RecordingPlayer(hold=True)
+    audio = ScriptedAudio(clock)
+    voice = VoiceMode(audio=audio, tts=FakeTts(), player=local, clock=clock, metrics=metrics,
+                      notice=output.notice, timing=Timing(6, 4, 6, .5, tail_s=0))
+    backend = FakeBackend(clock, [[Text('Phone reply.')], [Text('Fresh Mac reply.')]])
+    hub = make_hub(backend, output, metrics, speech=voice.speech, floor=voice, speak_typed=False)
+    hub.attach_client(Client('phone', 'iphone', connected=True, can_speak=True), player=remote)
+    end = asyncio.Event()
+
+    async def inputs() -> AsyncIterator[Line]:
+        await until(lambda: local.voices == ['ready'])
+        yield Line('Phone request', clock.now(), typed=False, client_id='phone')
+        await end.wait()
+
+    await hub.start()
+    voice.start()
+    running = asyncio.create_task(hub.run(merge(inputs(), voice.lines(hub.interrupt, hub.woke))))
+    try:
+        await until(lambda: remote.texts == ['Phone reply.'])
+        hub.set_client_playing('phone', True)
+        stops = remote.events.count('stop')
+        audio.emit(BargeIn(clock.now(), clock.now()))
+        audio.wake()
+        audio.say('Phone echo')
+        for _ in range(50):
+            await asyncio.sleep(0)
+        assert remote.pending() > 0
+        assert remote.events.count('stop') == stops
+        assert [text for kind, text in output.log if kind == 'said'] == ['Phone request']
+        remote.finish()
+        hub.set_client_playing('phone', False)
+        audio.wake()
+        audio.say('Fresh Mac request')
+        await until(lambda: 'Fresh Mac reply.' in local.texts)
+        assert [text for kind, text in output.log if kind == 'said'] == ['Phone request', 'Fresh Mac request']
+        end.set()
+        await running
+    finally:
+        running.cancel()
+        await hub.close()
+        await voice.close()

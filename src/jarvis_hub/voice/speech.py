@@ -277,7 +277,7 @@ class Speech:
         """Wait for voice loading and playback; None disables the stalled-player timeout."""
         if self._loading is not None:
             with contextlib.suppress(Exception):
-                await self._loading
+                await asyncio.shield(self._loading)
         await self._queue.join()
         def pending() -> float:
             return sum(p.pending() for p in self._players if not any(retired is p for retired in self._retired_players))
