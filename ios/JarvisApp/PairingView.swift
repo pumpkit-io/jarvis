@@ -105,7 +105,7 @@ struct JarvisRootView: View {
             if session.loading {
                 ProgressView("Connecting…").frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if session.credentials != nil {
-                NavigationStack { ConversationView(session: session) }.tint(JarvisTheme(scheme: scheme).text)
+                NavigationStack { WorkspaceView(session: session) }.tint(JarvisTheme(scheme: scheme).text)
             } else {
                 PairingView(pairing: session.pairing, error: session.error, cameraRefused: cameraRefused,
                             scan: scan, submit: submit, settings: openSettings)

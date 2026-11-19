@@ -152,3 +152,9 @@ Only the light-theme Slate and Brass are darkened. The Talk key stays the only l
 The implementation Mac's Xcode 27.1 could generate the project, but `xcodebuild` failed before compiling: `IDESimulatorFoundation` could not load a required symbol from the installed `DVTDownloads` system framework. Xcode reported that first-launch setup was incomplete. Package build/tests and a direct iPhone SDK source type-check passed. Both themes were also inspected in offscreen macOS `NSHostingView` renders at 393 × 852 points; these are not iOS Simulator or device evidence. A full app build, simulator preview and signed device launch remain unverified until Xcode's system components are repaired and the phone/signing configuration is supplied. Do not treat these as completed device checks.
 
 Apple documents the [New York system serif](https://developer.apple.com/documentation/technologyoverviews/fonts) used for Jarvis's script. The generated project follows [XcodeGen's project specification](https://github.com/yonaskolb/XcodeGen/blob/master/Docs/ProjectSpec.md).
+
+## Tasks
+
+The Conversation header opens Tasks and shows the same open-Task count as the list. Tasks waiting for the User come first, with the full committed Approval question, followed by running Tasks and their last reports. Answer through Talk or return to Conversation to type; the list has no Approval action buttons.
+
+Tasks reuse the conversation's retained events. Cached Tasks stay readable offline and appear in secondary text with “Updating…” until a fresh Task snapshot arrives. Older history pages cannot restore a Task removed by a newer snapshot. The Talk and Voice controls share the same owners across Conversation and Tasks.

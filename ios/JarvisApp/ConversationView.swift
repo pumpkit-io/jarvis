@@ -3,6 +3,9 @@ import SwiftUI
 
 struct ConversationView: View {
     @Bindable var session: AppSession
+    var showsTalkControls = true
+    var openTasks: (() -> Void)? = nil
+    var typingChanged: (Bool) -> Void = { _ in }
     @Environment(\.colorScheme) private var scheme
     @ScaledMetric(relativeTo: .body) var scriptSize = 19
     @ScaledMetric(relativeTo: .subheadline) var controlSize = 15
@@ -15,17 +18,23 @@ struct ConversationView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text(session.connection.message)
-                Spacer()
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(session.connection.message).accessibilityAddTraits(.isHeader)
+                Spacer(minLength: 0)
+                if let openTasks {
+                    Button(action: openTasks) {
+                        Text("Tasks \(session.openTasks.count)").underline().frame(minHeight: 44)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Tasks, \(session.openTasks.count) open")
+                }
                 NavigationLink { SettingsView(session: session) } label: {
                     Text("Settings").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
                 }
             }
-                .font(.system(size: controlSize))
-                .foregroundStyle(theme.secondary)
-                .accessibilityAddTraits(.isHeader)
-                .padding(20)
+            .font(.system(size: controlSize))
+            .foregroundStyle(theme.secondary)
+            .padding(20)
             GeometryReader { viewport in
             ScrollViewReader { proxy in
                 ScrollView {
@@ -96,6 +105,8 @@ struct ConversationView: View {
             }
         }
         .background(theme.background)
+        .onChange(of: typing) { typingChanged(typing) }
+        .onDisappear { typingChanged(false) }
         .safeAreaInset(edge: .bottom, spacing: 0) { composer }
         .confirmationDialog("Restore as a new line?", isPresented: Binding(
             get: { recoveryCandidate != nil }, set: { if !$0 { recoveryCandidate = nil } }
@@ -204,16 +215,6 @@ struct ConversationView: View {
 
     private var composer: some View {
         VStack(spacing: 12) {
-            if let message = session.voiceMessage {
-                Text(message).foregroundStyle(theme.secondary)
-            }
-            if let message = session.talk.message {
-                Text(message).foregroundStyle(theme.secondary)
-                if session.talk.microphoneRefused {
-                    Link("Open Settings", destination: microphoneSettingsURL)
-                        .foregroundStyle(theme.secondary).underline().frame(minHeight: 44)
-                }
-            }
             if let message = session.draftValidationMessage ?? session.inputMessage {
                 Text(message).foregroundStyle(theme.secondary)
             }
@@ -237,31 +238,11 @@ struct ConversationView: View {
             .foregroundStyle(theme.secondary)
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.secondary, lineWidth: 1))
 
-            if !typing {
-                if controlSize > 20 {
-                    VStack(spacing: 12) {
-                        TalkKey(talk: session.talk, controlSize: controlSize)
-                        VoiceControl(session: session, controlSize: controlSize)
-                    }
-                } else {
-                    HStack(alignment: .top, spacing: 12) {
-                        TalkKey(talk: session.talk, controlSize: controlSize)
-                        VoiceControl(session: session, controlSize: controlSize)
-                    }
-                }
-            }
+            if showsTalkControls { TalkControls(session: session, controlSize: controlSize, showsKeys: !typing) }
         }
         .font(.system(size: controlSize))
         .padding(20)
         .background(theme.background)
-    }
-
-    private var microphoneSettingsURL: URL {
-        #if os(iOS)
-        URL(string: UIApplication.openSettingsURLString)!
-        #else
-        URL(string: "app-settings:")!
-        #endif
     }
 
     private func submit() { Task { await session.sendTypedLine() } }
