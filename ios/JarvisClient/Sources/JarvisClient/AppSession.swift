@@ -8,6 +8,63 @@ import Observation
     public private(set) var pairing = false
     public private(set) var error: PairingError?
     public private(set) var client: HubClient?
+    public private(set) var conversation = ConversationProjection()
+    public var draft = ""
+    public private(set) var typedLines: [TypedLine] = []
+    public private(set) var inputMessage: String?
+
+    public var draftValidationMessage: String? {
+        draft.utf8.count > 16_384 ? "Your line is too long. Use at most 16,384 UTF-8 bytes." : nil
+    }
+
+    public var canSubmit: Bool {
+        connection.canSend && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && draft.utf8.count <= 16_384 && !typedLines.contains {
+                $0.text == draft && ($0.outcome == .unanswered || $0.outcome == .outcomeUnknown)
+            }
+    }
+
+    public func sendTypedLine() async {
+        guard canSubmit, let client else {
+            if let message = draftValidationMessage { inputMessage = message }
+            return
+        }
+        let owner = generation
+        let text = draft
+        let command = HubCommand(type: "say_text", payload: ["text": .string(text)])
+        typedLines.append(TypedLine(command: command, outcome: .unanswered)); inputMessage = nil
+        do {
+            try await client.send(command)
+            guard generation == owner else { return }
+            if draft == text { draft = "" }
+        } catch {
+            let retained = await client.pendingCommands.contains(where: { $0.id == command.id })
+            guard generation == owner, let index = typedLines.firstIndex(where: { $0.id == command.id }) else { return }
+            if retained {
+                if typedLines[index].outcome == .unanswered { typedLines[index].outcome = .outcomeUnknown }
+            } else if typedLines[index].outcome == .unanswered {
+                typedLines.remove(at: index)
+                inputMessage = "Can't reach the Mac. Your line is still here to send."
+            }
+        }
+    }
+
+    private func receive(_ update: HubClientUpdate) {
+        switch update {
+        case .event(let event): conversation.ingest(event)
+        case .result(let result):
+            guard let index = typedLines.firstIndex(where: { $0.id == result.id }) else { return }
+            if result.ok { typedLines[index].outcome = .accepted }
+            else if result.error?.code == "outcome_unknown" { typedLines[index].outcome = .outcomeUnknown }
+            else { typedLines[index].outcome = .rejected(result.error?.message ?? "Jarvis could not accept your line.") }
+        case .failure:
+            for index in typedLines.indices where typedLines[index].outcome == .unanswered {
+                typedLines[index].outcome = .outcomeUnknown
+            }
+        default: break
+        }
+    }
+
     private let store: any PairingStore
     private let service: PairingService
     private let makeClient: (PairingCredentials) throws -> HubClient
@@ -63,6 +120,7 @@ import Observation
         updates?.cancel(); updates = nil; paths?.cancel(); paths = nil
         client = nil; credentials = nil; connection = .unpaired; pairing = false; loading = false
         do { try store.clear(); error = nil } catch { self.error = .storage }
+        conversation = ConversationProjection(); typedLines = []; draft = ""; inputMessage = nil
         await old?.stop()
     }
 
@@ -82,7 +140,7 @@ import Observation
                 if case .state(let state) = update {
                     if state == .unpaired { await self.unpair(); return }
                     self.connection = state
-                }
+                } else { self.receive(update) }
             }
         }
         if !foreground { await client.setForeground(false) }
