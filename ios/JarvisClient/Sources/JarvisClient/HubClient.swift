@@ -30,6 +30,7 @@ public enum HubTransportError: Error, Equatable, Sendable {
 public enum HubClientUpdate: Sendable {
     case state(HubConnectionState), event(HubEvent), audio(HubEvent, Data), result(CommandResult)
     case failure(String), replay(ReplayComplete), speechConnectionEnded(String)
+    case silence(Bool, pending: Bool, revision: UInt64)
 }
 
 public actor HubClient {
@@ -61,6 +62,11 @@ public actor HubClient {
     private var displayReady = false
     private var presenceDesired = false
     private var status: HubStatus?
+    private var desiredSilence: Bool?
+    private var silenceRevision: UInt64 = 0
+    private var silenceCommand: HubCommand?
+    private var silenceConfirmed = false
+    private var initialSettingsReady = false
     private var presenceID: String?
     private var presenceWaiter: CheckedContinuation<Void, Never>?
     private var presenceTimeout: Task<Void, Never>?
@@ -68,15 +74,48 @@ public actor HubClient {
     private var talkDeadlines: [String: Task<Void, Never>] = [:]
 
     /// The cache closure must finish durable storage before returning. A nil event commits a replay watermark.
-    public init(transport: HubTransport, cursor: Int64 = 0,
+    public init(transport: HubTransport, cursor: Int64 = 0, desiredSilence: Bool? = nil,
                 sleep: @escaping @Sendable (Double) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
                 lifecycleSleep: @escaping @Sendable (Double) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
                 acknowledgementSleep: @escaping @Sendable (Double) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
                 jitter: @escaping @Sendable () -> Double = { Double.random(in: 0.8...1.2) },
                 cache: @escaping @Sendable (HubEvent?, Int64) async throws -> Void = { _, _ in }) {
+        self.desiredSilence = desiredSilence
         self.transport = transport; self.cursor = max(0, cursor); self.sleep = sleep
         self.jitter = jitter; self.cache = cache; self.lifecycleSleep = lifecycleSleep; self.acknowledgementSleep = acknowledgementSleep
         (updates, continuation) = AsyncStream.makeStream()
+    }
+
+    public func setSilence(_ value: Bool, revision: UInt64 = 0) async {
+        silenceRevision = revision
+        guard desiredSilence != value || silenceCommand == nil && !silenceConfirmed else {
+            continuation.yield(.silence(value, pending: !silenceConfirmed, revision: silenceRevision)); return
+        }
+        desiredSilence = value; silenceConfirmed = false
+        if let old = silenceCommand { removePendingCommand(old.id) }
+        silenceCommand = HubCommand(type: "set_silence", payload: ["silence": .bool(value)])
+        continuation.yield(.silence(value, pending: true, revision: silenceRevision))
+        guard running, foreground, handover, let socket else { return }
+        do { try await sendSilence(socket, owner: generation) }
+        catch { await socket.close() }
+    }
+
+    private func sendSilence(_ socket: any HubSocket, owner: UInt64) async throws {
+        guard let value = desiredSilence else { return }
+        if silenceCommand == nil { silenceCommand = HubCommand(type: "set_silence", payload: ["silence": .bool(value)]) }
+        guard let command = silenceCommand else { return }
+        let data = try encodedCommand(command)
+        try retain(command, data: data)
+        try await socket.send(data)
+        if generation == owner { startRetryDeadline(command.id, owner: owner) }
+    }
+
+    private func beginDisplay(_ socket: any HubSocket, owner: UInt64) async throws {
+        guard generation == owner, foreground, presenceID == nil, !displayReady else { return }
+        let presence = HubCommand(type: "set_presence", payload: ["can_show_text": .bool(true)])
+        presenceID = presence.id; presenceDesired = true
+        startPresenceDeadline(presence.id, owner: owner)
+        try await socket.send(JSONEncoder().encode(presence))
     }
 
     public func start(paths: AsyncStream<Void>? = nil) async {
@@ -115,7 +154,7 @@ public actor HubClient {
         drainingSpeechID = value ? nil : playingSpeechID
         if !value { cancelRetries(); setState(.suspended) }
         if value {
-            if resumePlaying, let socket { await setPresence(true, socket: socket) }
+            if resumePlaying, silenceCommand == nil, let socket { await setPresence(true, socket: socket) }
             else if running { await replace() }
         } else if playing, handover, let socket {
             await setPresence(false, socket: socket)
@@ -181,7 +220,7 @@ public actor HubClient {
     public func finishTalkBegin(id: String) async -> Bool {
         if let result = results[id] { return result.ok }
         guard pendingCommands.contains(where: { $0.id == id && $0.type == "talk_begin" }), socket != nil, state.canSend else { return false }
-        removeTalkRetry(id)
+        removePendingCommand(id)
         return await withCheckedContinuation { waiter in
             finishingTalks[id] = waiter
             talkDeadlines[id] = Task {
@@ -191,7 +230,7 @@ public actor HubClient {
         }
     }
 
-    private func removeTalkRetry(_ id: String) {
+    private func removePendingCommand(_ id: String) {
         pendingCommands.removeAll { $0.id == id }
         pendingData.removeValue(forKey: id)
         retryTimers.removeValue(forKey: id)?.1.cancel()
@@ -199,7 +238,7 @@ public actor HubClient {
     }
 
     private func retireTalkBegins() {
-        for command in pendingCommands where command.type == "talk_begin" { removeTalkRetry(command.id) }
+        for command in pendingCommands where command.type == "talk_begin" { removePendingCommand(command.id) }
         for timer in talkDeadlines.values { timer.cancel() }; talkDeadlines.removeAll()
         for waiter in finishingTalks.values { waiter.resume(returning: false) }; finishingTalks.removeAll()
     }
@@ -207,7 +246,7 @@ public actor HubClient {
     /// End capture intent without allowing a lost begin acknowledgement to become a later Talk.
     public func retireTalkBegin(id: String) async {
         let uncertain = pendingCommands.contains(where: { $0.id == id && $0.type == "talk_begin" }) || finishingTalks[id] != nil
-        removeTalkRetry(id)
+        removePendingCommand(id)
         talkDeadlines.removeValue(forKey: id)?.cancel()
         finishingTalks.removeValue(forKey: id)?.resume(returning: false)
         // Closing also releases a floor admitted by the Hub whose acknowledgement was lost.
@@ -358,7 +397,7 @@ public actor HubClient {
                 let opened = try await transport.connect(cursor)
                 current = opened
                 guard generation == owner, foreground, running else { await opened.close(); return }
-                socket = opened; handover = false; displayReady = false; status = nil
+                socket = opened; handover = false; displayReady = false; status = nil; silenceConfirmed = false; initialSettingsReady = false
                 var header: HubEvent?
                 var speechID: String?
                 var speechReplyID: String?
@@ -409,6 +448,16 @@ public actor HubClient {
                             unansweredCommands.remove(id)
                             results[id] = result
                             continuation.yield(.result(result))
+                            if silenceCommand?.id == id, let value = desiredSilence {
+                                silenceCommand = nil
+                                silenceConfirmed = result.ok && result.result?["silence"] == .bool(value)
+                                continuation.yield(.silence(value, pending: !silenceConfirmed, revision: silenceRevision))
+                                guard silenceConfirmed else {
+                                    continuation.yield(.failure("The Hub could not confirm the Voice setting. Reconnect to reconcile it."))
+                                    refreshState(); continue
+                                }
+                                try await beginDisplay(opened, owner: owner)
+                            }
                             refreshState()
                         }
                     case .error(let error): continuation.yield(.failure(error.message))
@@ -419,10 +468,13 @@ public actor HubClient {
                         cursor = replay.through_seq; handover = true
                         continuation.yield(.replay(replay))
                         guard foreground else { await retire(); return }
-                        let presence = HubCommand(type: "set_presence", payload: ["can_show_text": .bool(true)])
-                        presenceID = presence.id; presenceDesired = true
-                        startPresenceDeadline(presence.id, owner: owner)
-                        try await opened.send(JSONEncoder().encode(presence))
+                        if desiredSilence != nil {
+                            if let value = desiredSilence { continuation.yield(.silence(value, pending: true, revision: silenceRevision)) }
+                            try await sendSilence(opened, owner: owner)
+                        } else {
+                            if let status { continuation.yield(.silence(status.silence, pending: false, revision: silenceRevision)) }
+                            try await beginDisplay(opened, owner: owner)
+                        }
                     case .event(let event):
                         guard event.seq > cursor else { continue }
                         if !event.replayable && !handover { throw HubProtocolError.invalidFrame }
@@ -447,7 +499,11 @@ public actor HubClient {
                         }
                         try await commit(event, owner: owner)
                         guard generation == owner else { return }
-                        if event.kind == .status { status = try event.decodePayload(HubStatus.self); if handover { refreshState() } }
+                        if event.kind == .status {
+                            status = try event.decodePayload(HubStatus.self)
+                            if desiredSilence == nil, let status { continuation.yield(.silence(status.silence, pending: false, revision: silenceRevision)) }
+                            if handover { refreshState() }
+                        }
                         continuation.yield(.event(event))
                     }
                 }
@@ -491,6 +547,8 @@ public actor HubClient {
     private func refreshState() {
         guard foreground else { setState(.suspended); return }
         guard displayReady else { return }
+        guard initialSettingsReady || desiredSilence == nil || silenceConfirmed else { setState(.connecting); return }
+        initialSettingsReady = true
         guard !pendingCommands.contains(where: { $0.type == "talk_cancel" }) else { setState(.connecting); return }
         if let status {
             if status.usage_limit.limited { setState(.usageLimited(resetTime: status.usage_limit.resets_at)) }

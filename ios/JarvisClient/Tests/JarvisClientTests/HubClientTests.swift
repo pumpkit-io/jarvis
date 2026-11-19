@@ -632,3 +632,102 @@ func speechFramesCannotChangeCanonicalReplyIdentity(_ kind: String) async throws
     #expect(await client.cursor == 2)
     await client.stop()
 }
+
+@Test func storedSilenceIsAcknowledgedBeforePresenceAndReadyInput() async throws {
+    let socket = FakeSocket()
+    let client = HubClient(transport: HubTransport(connect: { _ in socket }), desiredSilence: true)
+    await client.start()
+    await socket.ready()
+    try await eventually { await socket.sent.count == 1 }
+    let off = try #require(await socket.sent.first)
+    #expect(off.type == "set_silence")
+    #expect(off.payload == ["silence": .bool(true)])
+    #expect(await client.state.canSend == false)
+    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(off.id)\",\"ok\":true,\"result\":{\"silence\":true}}")
+    try await eventually { await client.state == .ready }
+    #expect(await socket.sent.map(\.type) == ["set_silence", "set_presence"])
+    await client.stop()
+}
+
+func acknowledgeSilence(_ socket: FakeSocket, _ command: HubCommand, value: Bool) async {
+    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(command.id)\",\"ok\":true,\"result\":{\"silence\":\(value)}}")
+}
+
+@Test func latestSilenceChoiceSupersedesRetainedCommandAndLateAcknowledgement() async throws {
+    let transport = FakeTransport()
+    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }), sleep: { _ in })
+    await client.start()
+    try await eventually { await transport.socket(0) != nil }
+    let first = try #require(await transport.socket(0))
+    await first.ready()
+    try await eventually { await client.state == .ready }
+    await client.setSilence(false)
+    let old = try #require(await first.sent.last)
+    first.input.finish(throwing: URLError(.networkConnectionLost))
+    try await eventually { await transport.socket(1) != nil }
+    await client.setSilence(true)
+    let second = try #require(await transport.socket(1))
+    await second.ready(through: 3)
+    try await eventually { await second.sent.count == 1 }
+    let latest = try #require(await second.sent.first)
+    #expect(latest.type == "set_silence" && latest.payload["silence"] == .bool(true))
+    #expect(latest.id != old.id)
+    await acknowledgeSilence(second, old, value: false)
+    try await Task.sleep(for: .milliseconds(10))
+    #expect(await second.sent.count == 1)
+    await client.setSilence(false)
+    let newest = try #require(await second.sent.last)
+    await acknowledgeSilence(second, latest, value: true)
+    #expect(await client.state.canSend == false)
+    await acknowledgeSilence(second, newest, value: false)
+    try await eventually { await client.state == .ready }
+    #expect(await second.sent.map(\.type) == ["set_silence", "set_silence", "set_presence"])
+    #expect(await client.pendingCommands.isEmpty)
+    await client.stop()
+}
+
+@Test func unchangedUncertainSilenceRetainsOriginalIdentityBeforeReconnectPresence() async throws {
+    let transport = FakeTransport()
+    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }), desiredSilence: true, sleep: { _ in })
+    await client.start()
+    try await eventually { await transport.socket(0) != nil }
+    let first = try #require(await transport.socket(0))
+    await first.ready()
+    try await eventually { await first.sent.count == 1 }
+    let original = try #require(await first.sent.first)
+    first.input.finish(throwing: URLError(.networkConnectionLost))
+    try await eventually { await transport.socket(1) != nil }
+    let second = try #require(await transport.socket(1))
+    await second.ready(through: 4)
+    try await eventually { await second.sent.count == 1 }
+    #expect(await second.sent.first == original)
+    await acknowledgeSilence(second, original, value: true)
+    try await eventually { await client.state == .ready }
+    #expect(await second.sent.map(\.type) == ["set_silence", "set_presence"])
+    await client.stop()
+}
+
+@Test func noLocalChoicePreservesHubSilenceAndOfflineChoiceWaitsForForeground() async throws {
+    let transport = FakeTransport()
+    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }))
+    await client.start()
+    try await eventually { await transport.socket(0) != nil }
+    let first = try #require(await transport.socket(0))
+    await first.text(event(1, "status", #"{"ready":true,"usage_limit":{"limited":false,"resets_at":null},"quiet":false,"focus_client_id":null,"mac_voice_on":true,"silence":true}"#))
+    await first.text(#"{"version":1,"type":"replay_complete","through_seq":1}"#)
+    try await eventually { await client.state == .ready }
+    #expect(await first.sent.map(\.type) == ["set_presence"])
+    await client.setForeground(false)
+    await client.setSilence(true)
+    #expect(await first.sent.map(\.type) == ["set_presence"])
+    await client.setForeground(true)
+    try await eventually { await transport.socket(1) != nil }
+    let second = try #require(await transport.socket(1))
+    await second.ready(through: 3)
+    try await eventually { await second.sent.count == 1 }
+    let off = try #require(await second.sent.first)
+    await acknowledgeSilence(second, off, value: true)
+    try await eventually { await client.state == .ready }
+    #expect(await second.sent.map(\.type) == ["set_silence", "set_presence"])
+    await client.stop()
+}
