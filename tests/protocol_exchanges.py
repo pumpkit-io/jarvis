@@ -17,9 +17,44 @@ from jarvis_hub.event_log import EventLog, EventOutput
 from jarvis_hub.hub import Hub, Line
 from jarvis_hub.pairing import PairingStore
 from jarvis_hub.protocol import wire_event
-from tests.fakes import FakeBackend, FakeClock, RecordingMetrics, RecordingOutput, Text, Gate, make_hub, until
+from tests.fakes import FakeBackend, FakeClock, RecordingMetrics, RecordingOutput, Text, Gate, Limited, Tool, make_hub, until
 
 FIXTURE = Path(__file__).resolve().parents[1] / "ios/JarvisClient/Tests/JarvisClientTests/Fixtures/client-v1.json"
+
+
+SNAPSHOTS = {"status", "task_snapshot", "pending_approval"}
+
+
+async def receive_conversation(socket: aiohttp.ClientWebSocketResponse) -> dict[str, Any]:
+    while True:
+        frame = await receive(socket)
+        if frame["type"] not in SNAPSHOTS:
+            return frame
+
+
+class WireCapture:
+    def __init__(self) -> None:
+        self.streams: dict[aiohttp.ClientWebSocketResponse, list[dict[str, Any]]] = {}
+
+    async def read(self, socket: aiohttp.ClientWebSocketResponse) -> dict[str, Any]:
+        frame = await receive(socket)
+        self.streams.setdefault(socket, []).append(frame)
+        return frame
+
+    async def until(self, socket: aiohttp.ClientWebSocketResponse, kind: str) -> list[dict[str, Any]]:
+        frames = [await self.read(socket)]
+        while frames[-1]["type"] != kind:
+            frames.append(await self.read(socket))
+        return frames
+
+    async def receive(self, socket: aiohttp.ClientWebSocketResponse) -> dict[str, Any]:
+        while True:
+            frame = await self.read(socket)
+            if frame["type"] not in SNAPSHOTS:
+                return frame
+
+    def frames(self) -> list[list[dict[str, Any]]]:
+        return list(self.streams.values())
 
 
 async def receive(socket: aiohttp.ClientWebSocketResponse) -> dict[str, Any]:
@@ -47,9 +82,9 @@ def normalize(value: Any) -> Any:
             return {k: visit(v, k) for k, v in cast(dict[str, Any], item).items()}
         if isinstance(item, list):
             return [visit(v) for v in cast(list[Any], item)]
-        if isinstance(item, str) and key in {"client_id", "request_id", "reply_id"} and item != TERMINAL:
+        if isinstance(item, str) and key in {"client_id", "focus_client_id", "request_id", "reply_id"} and item != TERMINAL:
             if item not in identities:
-                prefix = key.removesuffix("_id")
+                prefix = "client" if key == "focus_client_id" else key.removesuffix("_id")
                 counters[prefix] = counters.get(prefix, 0) + 1
                 identities[item] = f"{prefix}-{counters[prefix]}"
             return identities[item]
@@ -59,6 +94,7 @@ def normalize(value: Any) -> Any:
 
 
 async def exchanges(root: Path) -> dict[str, Any]:
+    capture = WireCapture()
     root.mkdir(parents=True, exist_ok=True)
     with PairingStore(root / "pairing.db") as pairing, EventLog(root / "events.db", wall=lambda: 1000) as log:
         first = pairing.exchange(pairing.create_code("https://mac.example.ts.net"), "Phone", "iphone")
@@ -71,12 +107,12 @@ async def exchanges(root: Path) -> dict[str, Any]:
         door = Door(enabled=True, port=0, health=hub.health, pairing=pairing, hub=hub, log=log, now=clock.now)
         await hub.start()
         await door.start()
-        artifact: dict[str, Any] = {"version": 1, "normalization": "Only generated client/request/reply IDs are replaced by first-seen ordinal IDs. Fixed fake wall time is 1000 seconds.", "exchanges": {}}
+        artifact: dict[str, Any] = {"version": 1, "normalization": "Only generated client/request/reply IDs, including Focus references, are replaced by first-seen ordinal IDs. Fake wall time starts at 1000 seconds.", "exchanges": {}}
         cases = artifact["exchanges"]
         try:
             async with aiohttp.ClientSession() as session:
                 async with connect(session, door, first.token) as one, connect(session, door, second.token) as two:
-                    initial = [await receive(one), await receive(two)]
+                    initial = [await capture.receive(one), await capture.receive(two)]
                     rejected: list[dict[str, Any]] = []
                     invalid_commands: tuple[dict[str, Any], ...] = (
                         {"version": 1, "id": "malformed-command", "type": "say_text", "payload": []},
@@ -85,7 +121,7 @@ async def exchanges(root: Path) -> dict[str, Any]:
                     )
                     for invalid in invalid_commands:
                         await one.send_json(invalid)
-                        response = await receive(one)
+                        response = await capture.receive(one)
                         assert response["type"] == "command_result" and response["ok"] is False
                         assert response.get("id") == invalid.get("id")
                         rejected.append({"command": invalid, "result": response})
@@ -95,52 +131,53 @@ async def exchanges(root: Path) -> dict[str, Any]:
                     partial: list[dict[str, Any]] = []
                     result = None
                     while result is None or not any(e["type"] == "reply_delta" for e in partial):
-                        frame = await receive(one)
+                        frame = await capture.receive(one)
                         if frame["type"] == "command_result":
                             result = frame
                         else:
                             partial.append(frame)
                     assert [e["type"] for e in partial] == ["heard", "reply_delta"]
-                    assert [await receive(two), await receive(two)] == partial
+                    assert [await capture.receive(two), await capture.receive(two)] == partial
                     assert result is not None and result["ok"]
                     await one.send_json(say)
-                    repeated = await receive(one)
+                    repeated = await capture.receive(one)
                     assert repeated == result
                     await one.send_json(command("say-1", "say_text", text="Different"))
-                    conflict = await receive(one)
+                    conflict = await capture.receive(one)
                     assert conflict["error"]["code"] == "id_conflict"
                     cases["typed_partial"] = {"initial": initial, "command": say, "events": partial, "result": result,
                                                "retry_result": repeated, "conflict_result": conflict}
                     await one.close()
                     clock.advance(1)
                     finish_reply.set()
-                    await until(lambda: len(log.after(0)) == 4)
-                    suffix = [await receive(two), await receive(two)]
+                    await until(lambda: len([e for e in log.after(0) if e.type not in SNAPSHOTS]) == 4)
+                    suffix = [await capture.receive(two), await capture.receive(two)]
                     assert [e["type"] for e in suffix] == ["reply_delta", "reply_end"]
                     async with connect(session, door, first.token, after=partial[-1]["seq"]) as resumed:
-                        replay = [await receive(resumed), await receive(resumed), await receive(resumed)]
+                        replay = [await capture.receive(resumed), await capture.receive(resumed), await capture.receive(resumed)]
                         assert replay[:2] == suffix
                         assert replay[-1]["type"] == "replay_complete"
-                        assert partial + suffix == [wire_event(e) for e in log.after(0)]
+                        assert partial + suffix == [wire_event(e) for e in log.after(0) if e.type not in SNAPSHOTS]
                         assert suffix[-1]["payload"]["text"] == "One two."
                         cases["reconnect_during_reply"] = {"after": partial[-1]["seq"], "frames": replay}
                         async with session.get(f"http://127.0.0.1:{door.port}/v1/history?limit=2", headers={"Authorization": f"Bearer {first.token}"}) as response:
                             newest = await response.json()
-                        async with session.get(f"http://127.0.0.1:{door.port}/v1/history?before={newest['next_before']}&limit=2", headers={"Authorization": f"Bearer {first.token}"}) as response:
+                        async with session.get(f"http://127.0.0.1:{door.port}/v1/history?before={newest['next_before']}&limit=100", headers={"Authorization": f"Bearer {first.token}"}) as response:
                             older = await response.json()
-                        assert older["events"] + newest["events"] == partial + suffix
+                        assert [e for e in older["events"] + newest["events"] if e["type"] not in SNAPSHOTS] == partial + suffix
                         assert newest["has_more"] and not older["has_more"]
-                        await resumed.send_json(command("ack-1", "acknowledge", seq=4))
-                        ack = await receive(resumed)
+                        ack_seq = log.high_water
+                        await resumed.send_json(command("ack-1", "acknowledge", seq=ack_seq))
+                        ack = await capture.receive(resumed)
                         await resumed.send_json(command("ack-2", "acknowledge", seq=1))
-                        low_ack = await receive(resumed)
-                        assert ack["result"] == low_ack["result"] == {"seq": 4}
+                        low_ack = await capture.receive(resumed)
+                        assert ack["result"] == low_ack["result"] == {"seq": ack_seq}
                         cases["history_acknowledge"] = {"newest": newest, "older": older, "ack": ack, "lower_ack": low_ack}
-                        async with connect(session, door, first.token, after=4) as replacement:
-                            replacement_replay = await receive(replacement)
+                        async with connect(session, door, first.token, after=log.high_water) as replacement:
+                            replacement_replay = await capture.receive(replacement)
                             await until(lambda: (client := hub.clients.get(first.client.id)) is not None and client.connected)
                             await replacement.send_json(say)
-                            assert await receive(replacement) == result
+                            assert await capture.receive(replacement) == result
                             process = await asyncio.create_subprocess_exec(
                                 sys.executable, "-c",
                                 "from pathlib import Path; import sys; from jarvis_hub.pairing import PairingStore; "
@@ -160,7 +197,9 @@ async def exchanges(root: Path) -> dict[str, Any]:
         finally:
             await door.close()
             await hub.close()
+        cases["typed_wire_streams"] = capture.frames()
         cases.update(await concurrent_restart(root / "restart"))
+        cases.update(await snapshot_exchanges(root / "snapshots"))
         return normalize(artifact)
 
 
@@ -177,6 +216,9 @@ class DelayedAdmission:
         self.admitted = asyncio.Event()
         self.release = asyncio.Event()
 
+    def publish_client_snapshots(self, client_id: str) -> None:
+        self.hub.publish_client_snapshots(client_id)
+
     def attach_client(self, client: Client) -> None:
         self.hub.attach_client(client)
 
@@ -188,6 +230,7 @@ class DelayedAdmission:
 
 
 async def concurrent_restart(root: Path) -> dict[str, Any]:
+    capture = WireCapture()
     root.mkdir(parents=True)
     with PairingStore(root / "pairing.db") as pairing:
         first = pairing.exchange(pairing.create_code("https://mac.example.ts.net"), "Phone", "iphone")
@@ -202,31 +245,32 @@ async def concurrent_restart(root: Path) -> dict[str, Any]:
         try:
             async with aiohttp.ClientSession() as session:
                 async with connect(session, door, first.token) as original:
-                    await receive(original)
+                    await capture.receive(original)
                     say = command("concurrent", "say_text", text="Accept once")
                     await original.send_json(say)
                     await asyncio.wait_for(delayed.admitted.wait(), 2)
-                    await until(lambda: len(log.after(0)) == 3)
-                    async with connect(session, door, first.token, after=3) as replacement:
-                        assert (await receive(replacement))["type"] == "replay_complete"
+                    await until(lambda: len([e for e in log.after(0) if e.type not in SNAPSHOTS]) == 3)
+                    async with connect(session, door, first.token, after=log.high_water) as replacement:
+                        assert (await capture.receive(replacement))["type"] == "replay_complete"
                         await replacement.send_json(command("concurrent", "say_text", text="Conflict while pending"))
-                        conflict = await receive(replacement)
+                        conflict = await capture.receive(replacement)
                         assert conflict["error"]["code"] == "id_conflict"
                         await replacement.send_json(say)
                         delayed.release.set()
-                        result = await receive(replacement)
+                        result = await capture.receive(replacement)
                         assert result["ok"]
                         await replacement.send_json(say)
-                        repeated = await receive(replacement)
+                        repeated = await capture.receive(replacement)
                         assert repeated == result
                         cases["concurrent_retry"] = {"command": say, "conflict": conflict,
-                            "result": result, "repeated": repeated, "events": [wire_event(e) for e in log.after(0)]}
+                            "result": result, "repeated": repeated, "events": [wire_event(e) for e in log.after(0) if e.type not in SNAPSHOTS]}
                         delayed.release.clear()
                         delayed.admitted.clear()
                         uncertain = command("interrupted-admission", "say_text", text="Do not duplicate after restart")
                         await replacement.send_json(uncertain)
                         await asyncio.wait_for(delayed.admitted.wait(), 2)
-                        await until(lambda: len(log.after(0)) == 6)
+                        await until(lambda: len([e for e in log.after(0) if e.type not in SNAPSHOTS]) == 6)
+                        restart_cursor = log.high_water
                         await door.close()
                 assert len(backend.session("talker").received) == 3
         finally:
@@ -240,16 +284,93 @@ async def concurrent_restart(root: Path) -> dict[str, Any]:
             await restarted_hub.start()
             await restarted_door.start()
             try:
-                async with aiohttp.ClientSession() as session, connect(session, restarted_door, first.token, after=6) as socket:
-                    await receive(socket)
+                async with aiohttp.ClientSession() as session, connect(session, restarted_door, first.token, after=restart_cursor) as socket:
+                    await capture.receive(socket)
                     await socket.send_json(uncertain)
-                    unknown = await receive(socket)
+                    unknown = await capture.receive(socket)
                     assert unknown["error"]["code"] == "outcome_unknown"
-                    assert restarted_log.high_water == 6 and restarted_log.after(0) == []
+                    assert [e for e in restarted_log.after(0) if e.type not in SNAPSHOTS] == []
                     await socket.send_json(say)
-                    assert await receive(socket) == result
+                    assert await capture.receive(socket) == result
                     cases["restart_outcome_unknown"] = {"command": uncertain, "result": unknown}
             finally:
                 await restarted_door.close()
                 await restarted_hub.close()
+        cases["retry_wire_streams"] = capture.frames()
         return cases
+
+
+async def snapshot_exchanges(root: Path) -> dict[str, Any]:
+    from dataclasses import replace
+
+    root.mkdir(parents=True)
+    capture = WireCapture()
+    warm = asyncio.Event()
+    question = "The launch thread is ready, sir. Shall I publish it now, exactly as shown?"
+    clock = FakeClock()
+    backend = FakeBackend(clock, [
+        [Tool("quiet_mode", {"on": True}), Tool("delegate", {"request": "Prepare launch", "context": "private context"}), Text("Preparing.")],
+        [Tool("present_approval", {"approval_id": "A1"}), Text(question)],
+        [Tool("cancel", {"task_id": "T1"}), Text("Cancelled.")],
+        [Limited(60)], [Text("Recovered.")],
+    ], warm_up=[Gate(warm)], orchestrator=[[Tool("report", {"task_id": "T1", "spoken": "May I publish?", "needs_user": True,
+        "approval": {"action": "subagent_action", "grants": ["x_post"], "post": "812", "post_action": "post_now"}})]])
+    with PairingStore(root / "pairing.db") as pairing, EventLog(root / "events.db", wall=clock.now) as log:
+        phone = pairing.exchange(pairing.create_code("https://mac.example.ts.net"), "Phone", "iphone")
+        hub = make_hub(backend, EventOutput(log, RecordingOutput()), RecordingMetrics())
+        door = Door(enabled=True, port=0, health=hub.health, pairing=pairing, hub=hub, log=log)
+        await hub.start()
+        await door.start()
+        commands: list[dict[str, Any]] = []
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with connect(session, door, phone.token) as socket:
+                    await capture.until(socket, "replay_complete")
+                    await capture.until(socket, "pending_approval")
+                    warm.set()
+                    assert (await capture.until(socket, "status"))[-1]["payload"]["ready"]
+                    for visible in (True, False, True):
+                        control = command(f"presence-{len(commands)}", "set_presence", can_show_text=visible)
+                        commands.append(control)
+                        await socket.send_json(control)
+                        assert (await capture.until(socket, "command_result"))[-1]["result"] == {"can_show_text": visible}
+                    launch = command("launch", "say_text", text="Prepare launch")
+                    commands.append(launch)
+                    await socket.send_json(launch)
+                    pending = await capture.until(socket, "pending_approval")
+                    assert pending[-1]["payload"]["approvals"][0]["question"] == question
+                    assert "private context" not in str(pending)
+                    terminal = hub.clients.get(TERMINAL)
+                    client = hub.clients.get(phone.client.id)
+                    assert terminal is not None and client is not None
+                    hub.attach_client(replace(terminal, can_speak=True))
+                    assert (await capture.until(socket, "status"))[-1]["payload"]["mac_voice_on"]
+                    hub.attach_client(replace(client, silence=True))
+                    assert (await capture.until(socket, "status"))[-1]["payload"]["silence"]
+                async with connect(session, door, phone.token) as resumed:
+                    await capture.until(resumed, "replay_complete")
+                    fresh = await capture.until(resumed, "pending_approval")
+                    assert fresh[-1]["payload"]["approvals"][0]["question"] == question
+                    assert [frame["type"] for frame in fresh][-3:] == ["status", "task_snapshot", "pending_approval"]
+                    cancel = command("cancel", "say_text", text="Cancel this task")
+                    commands.append(cancel)
+                    await resumed.send_json(cancel)
+                    assert (await capture.until(resumed, "pending_approval"))[-1]["payload"] == {"approvals": []}
+                    await capture.until(resumed, "reply_end")
+                    limited = command("limited", "say_text", text="Try something else")
+                    commands.append(limited)
+                    await resumed.send_json(limited)
+                    frames = await capture.until(resumed, "status")
+                    assert frames[-1]["payload"]["usage_limit"] == {"limited": True, "resets_at": "1970-01-01T00:17:40Z"}
+                    clock.advance(61)
+                    retry = command("recovered", "say_text", text="Try again")
+                    commands.append(retry)
+                    await resumed.send_json(retry)
+                    frames = await capture.until(resumed, "status")
+                    while frames[-1]["payload"]["usage_limit"]["limited"]:
+                        frames += await capture.until(resumed, "status")
+                    assert frames[-1]["payload"]["ready"]
+            return {"snapshots_and_presence": {"commands": commands, "streams": capture.frames()}}
+        finally:
+            await door.close()
+            await hub.close()

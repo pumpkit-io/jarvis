@@ -98,6 +98,7 @@ class _Reply:
     owner: tuple[str, int] | None = None
     player: Player | None = None
     allowed: Callable[[], bool] | None = None
+    can_start: Callable[[], bool] | None = None
     splitter: SentenceSplitter = field(default_factory=SentenceSplitter)
     chunks: int = 0
     first_chunk: float | None = None
@@ -191,15 +192,16 @@ class Speech:
         self._queue.put_nowait(_Cached(name, lang, reply, generation))
 
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
-              destination: Player | None = None, allowed: Callable[[], bool] | None = None) -> Callable[[], bool]:
+              destination: Player | None = None, allowed: Callable[[], bool] | None = None,
+              can_start: Callable[[], bool] | None = None) -> Callable[[], bool]:
         """Bind a reply's destination and return a completion check unaffected by later replies.
-        `heard_at` keeps the User's speech-end timestamp; availability is rechecked before synthesis and delivery."""
+        `can_start` gates only the first audio; `allowed` continues to guard an active reply."""
         player = destination if destination is not None else self._player
         if not any(p is player for p in self._players):
             self._players.append(player)
         self._retired_players = [retired for retired in self._retired_players if retired is not player]
         self._last_player = player
-        self._reply = _Reply(turn, lang, self._clock.now(), heard_at, owner=owner, player=player, allowed=allowed)
+        self._reply = _Reply(turn, lang, self._clock.now(), heard_at, owner=owner, player=player, allowed=allowed, can_start=can_start)
         self._prune_replies()
         self._replies[turn] = self._reply
         reply = self._reply
@@ -360,17 +362,27 @@ class Speech:
             ))
         }
 
+    @staticmethod
+    def _reply_allowed(reply: _Reply) -> bool:
+        if reply.stopped or (reply.allowed is not None and not reply.allowed()):
+            return False
+        if reply.first_audio is None and reply.can_start is not None and not reply.can_start():
+            # Dropping the opening must never allow a later sentence to start this reply.
+            reply.stopped = True
+            return False
+        return True
+
     async def _handle(self, item: _Say | _Cached | _End) -> None:
         match item:
             case _Say(reply, text):
-                if reply.stopped or (reply.allowed is not None and not reply.allowed()):
+                if not self._reply_allowed(reply):
                     return
                 generation = self._generation
                 voice = voice_for(reply.lang)
                 samples = await asyncio.get_running_loop().run_in_executor(
                     self._thread, self._tts.synthesize, text, voice
                 )
-                if generation == self._generation and not reply.stopped and (reply.allowed is None or reply.allowed()):
+                if generation == self._generation and self._reply_allowed(reply):
                     self._play(Clip(text, voice, samples, self._tts.sample_rate), reply, sentence=True)
             case _Cached(name, lang, reply, cue_generation):
                 if cue_generation is not None and cue_generation != self._local_cue_generation:
@@ -387,7 +399,7 @@ class Speech:
         """Plays `clip` after what is queued; returns when it starts."""
         player = reply.player if reply is not None and reply.player is not None else self._player
         if any(retired is player for retired in self._retired_players) or (
-            reply is not None and (reply.stopped or (reply.allowed is not None and not reply.allowed()))
+            reply is not None and not self._reply_allowed(reply)
         ):
             return self._clock.now()
         self._prune_replies()

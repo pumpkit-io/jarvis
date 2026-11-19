@@ -105,6 +105,7 @@ class Approval:
     outcome: str = ""
     task_revision: int = 0
     authorization_id: str | None = None
+    question: str | None = None
 
     @property
     def tools(self) -> tuple[str, ...]:
@@ -155,6 +156,7 @@ _SAVED = Fields(
         "outcome",
         "task_revision",
         "authorization_id",
+        "question",
     ),
     times=frozenset({"created", "approved"}),
 )
@@ -375,6 +377,15 @@ class Approvals:
         self._presenting.add(approval.id)
         return f"Ask whether to proceed with {approval.id}: {approval.text}"
 
+    def record_question(self, text: str) -> None:
+        """The caller supplies the completed visible reply, never the action description."""
+        if not text.strip():
+            return
+        for approval_id in self._presenting:
+            self._all[approval_id].question = text
+        if self._presenting:
+            self._on_change()
+
     def turn_ended(self, *, completed: bool) -> None:
         if completed:
             self._presented.update(self._presenting)
@@ -581,7 +592,7 @@ class Approvals:
     def load(records: list[dict[str, Any]], from_wall: TimeShift) -> list[Approval]:
         approvals: list[Approval] = []
         for r in records:
-            approval = Approval(**_SAVED.load({"task_revision": 0, "authorization_id": None, **r}, from_wall))
+            approval = Approval(**_SAVED.load({"task_revision": 0, "authorization_id": None, "question": None, **r}, from_wall))
             numbered(approval.id, "A")
             one_of(approval.state, get_args(ApprovalState))
             approvals.append(approval)
@@ -603,6 +614,8 @@ class Approvals:
 
     def _invalid(self, approval: Approval) -> str | None:
         """Why no request could have made `approval`, by the same checks as a fresh one; None when one could."""
+        if approval.question is not None and not isinstance(cast(object, approval.question), str):
+            return "The presented question must be text."
         if approval.action not in get_args(ApprovalAction):
             return f"{approval.action!r} is not an Approval action."
         spec = {
