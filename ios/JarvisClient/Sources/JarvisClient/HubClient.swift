@@ -117,7 +117,7 @@ public actor HubClient {
         if value {
             if resumePlaying, let socket { await setPresence(true, socket: socket) }
             else if running { await replace() }
-        } else if playing, displayReady, let socket {
+        } else if playing, handover, let socket {
             await setPresence(false, socket: socket)
         } else { await retire() }
     }

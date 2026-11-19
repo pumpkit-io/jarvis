@@ -190,6 +190,161 @@ actor SpeechWait {
     await session.unpair()
 }
 
+@MainActor @Test(arguments: [false, true], [false, true]) func interclipWindowKeepsOwnedBackgroundDrain(repeatedScene: Bool, expireOriginalWindow: Bool) async throws {
+    let output = FakeSpeechOutput(), audio = SpeechSession(), socket = FakeSocket(), clock = SpeechWait()
+    let store = MemoryPairingStore(); store.record = try testPairingCredentials()
+    let player = SpeechPlayer(session: audio, output: output, wait: { await clock.sleep() })
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
+                             makePaths: { nil }, playback: player)
+    await session.launch(); await socket.ready()
+    try await eventuallySession { session.connection.canSend }
+    await socket.text(event(2, "speech_begin", #"{"speech_id":"s","reply_id":"r","sample_rate":24000,"channels":1,"sample_width":2}"#))
+    await socket.text(event(3, "speech_clip", #"{"speech_id":"s","reply_id":"r","index":0,"text":"One.","byte_length":2}"#))
+    socket.input.yield(.binary(Data([1, 0])))
+    try await eventuallySession { output.bytes.count == 1 }
+    if !repeatedScene { output.callbacks[0](); try await eventuallySession { await clock.calls == 1 } }
+    let inactive = Task { await session.setForeground(false) }
+    try await eventuallySession {
+        let closed = await socket.closed
+        return await socket.sent.contains { $0.payload["can_show_text"] == .bool(false) } || closed
+    }
+    let presence = try #require(await socket.sent.last { $0.payload["can_show_text"] == .bool(false) })
+    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(presence.id)\",\"ok\":true,\"result\":{\"can_show_text\":false}}")
+    await inactive.value
+    if repeatedScene { output.callbacks[0](); try await eventuallySession { await clock.calls == 1 } }
+    await session.setForeground(false)
+    #expect(await socket.closed == false)
+    #expect(audio.active)
+    #expect(await clock.calls == 1)
+    #expect(await socket.sent.filter { $0.payload["can_show_text"] == .bool(false) }.count == 1)
+    if expireOriginalWindow {
+        await clock.advance()
+        try await eventuallySession { await socket.closed && !audio.active }
+        #expect(output.bytes.count == 1)
+        #expect(await clock.calls == 1)
+        await session.unpair()
+        return
+    }
+    await socket.text(event(4, "speech_clip", #"{"speech_id":"s","reply_id":"r","index":1,"text":"Two.","byte_length":2}"#))
+    socket.input.yield(.binary(Data([2, 0])))
+    try await eventuallySession { output.bytes.count == 2 }
+    try #require(output.callbacks.count == 2)
+    #expect(player.sentence == "Two.")
+    await clock.advance()
+    output.callbacks[1]()
+    try await eventuallySession { await clock.calls == 2 }
+    await clock.advance()
+    try await eventuallySession { await socket.closed && !audio.active }
+    let reports = await socket.sent.filter { $0.type == "playback_report" }
+    #expect(reports.map { $0.payload["state"] } == [.string("started"), .string("finished"), .string("started"), .string("finished")])
+    await session.unpair()
+}
+
+@MainActor @Test(arguments: [false, true]) func inactivePlaybackCannotOpenBackgroundWindow(expired: Bool) async throws {
+    let output = FakeSpeechOutput(), audio = SpeechSession(), socket = FakeSocket(), clock = SpeechWait()
+    let store = MemoryPairingStore(); store.record = try testPairingCredentials()
+    let player = SpeechPlayer(session: audio, output: output, wait: { await clock.sleep() })
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
+                             makePaths: { nil }, playback: player)
+    await session.launch(); await socket.ready()
+    try await eventuallySession { session.connection.canSend }
+    await socket.text(event(2, "speech_begin", #"{"speech_id":"s","reply_id":"r","sample_rate":24000,"channels":1,"sample_width":2}"#))
+    try await eventuallySession { player.speechID == "s" }
+    if expired {
+        await socket.text(event(3, "speech_clip", #"{"speech_id":"s","reply_id":"r","index":0,"text":"One.","byte_length":2}"#))
+        socket.input.yield(.binary(Data([1, 0])))
+        try await eventuallySession { output.bytes.count == 1 }
+        output.callbacks[0]()
+        try await eventuallySession { await clock.calls == 1 }
+        await clock.advance()
+        try await eventuallySession { !audio.active }
+    }
+    await session.setForeground(false)
+    #expect(await socket.closed)
+    #expect(!audio.active)
+    #expect(await socket.sent.contains { $0.payload["can_show_text"] == .bool(false) } == false)
+    #expect(player.speechID == nil)
+    await session.unpair()
+}
+
+@MainActor @Test(arguments: [false, true]) func departureDuringForegroundPresenceWaitKeepsOwnedPlayback(resuming: Bool) async throws {
+    let output = FakeSpeechOutput(), audio = SpeechSession(), socket = FakeSocket(autoPresence: false)
+    let store = MemoryPairingStore(); store.record = try testPairingCredentials()
+    let player = SpeechPlayer(session: audio, output: output)
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
+                             makePaths: { nil }, playback: player)
+    await session.launch(); await socket.ready()
+    try await eventuallySession { await socket.sent.contains { $0.type == "set_presence" } }
+    var pendingTrue = try #require(await socket.sent.last { $0.type == "set_presence" })
+    if resuming {
+        await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(pendingTrue.id)\",\"ok\":true,\"result\":{\"can_show_text\":true}}")
+        try await eventuallySession { session.connection.canSend }
+    }
+    await socket.text(event(2, "speech_begin", #"{"speech_id":"s","reply_id":"r","sample_rate":24000,"channels":1,"sample_width":2}"#))
+    await socket.text(event(3, "speech_clip", #"{"speech_id":"s","reply_id":"r","index":0,"text":"One.","byte_length":2}"#))
+    socket.input.yield(.binary(Data([1, 0])))
+    await socket.text(event(4, "speech_end", #"{"speech_id":"s","reply_id":"r","last_clip_index":0}"#))
+    try await eventuallySession { output.bytes.count == 1 }
+    var resume: Task<Void, Never>?
+    if resuming {
+        let firstDeparture = Task { await session.setForeground(false) }
+        try await eventuallySession { await socket.sent.contains { $0.payload["can_show_text"] == .bool(false) } }
+        let presence = try #require(await socket.sent.last { $0.type == "set_presence" })
+        await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(presence.id)\",\"ok\":true,\"result\":{\"can_show_text\":false}}")
+        await firstDeparture.value
+        resume = Task { await session.setForeground(true) }
+        try await eventuallySession { await socket.sent.last { $0.type == "set_presence" }?.payload["can_show_text"] == .bool(true) }
+        pendingTrue = try #require(await socket.sent.last { $0.type == "set_presence" })
+    }
+    let departure = Task { await session.setForeground(false) }
+    try await eventuallySession {
+        let closed = await socket.closed
+        return await socket.sent.last { $0.type == "set_presence" }?.payload["can_show_text"] == .bool(false) || closed
+    }
+    #expect(await socket.closed == false)
+    let pendingFalse = try #require(await socket.sent.last { $0.type == "set_presence" && $0.payload["can_show_text"] == .bool(false) })
+    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(pendingTrue.id)\",\"ok\":true,\"result\":{\"can_show_text\":true}}")
+    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(pendingFalse.id)\",\"ok\":true,\"result\":{\"can_show_text\":false}}")
+    await departure.value; await resume?.value
+    #expect(session.connection == .suspended)
+    #expect(audio.active && player.sentence == "One.")
+    #expect(await socket.closed == false)
+    output.callbacks[0]()
+    try await eventuallySession { await socket.closed && !audio.active }
+    #expect(await socket.sent.last { $0.type == "playback_report" }?.payload["state"] == .string("finished"))
+    await session.unpair()
+}
+
+@MainActor @Test func repeatedDepartureWaitsForFinalPlaybackReceipt() async throws {
+    let output = FakeSpeechOutput(), audio = SpeechSession(), socket = FakeSocket()
+    let store = MemoryPairingStore(); store.record = try testPairingCredentials()
+    let player = SpeechPlayer(session: audio, output: output)
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
+                             makePaths: { nil }, playback: player)
+    await session.launch(); await socket.ready()
+    try await eventuallySession { session.connection.canSend }
+    await socket.text(event(2, "speech_begin", #"{"speech_id":"s","reply_id":"r","sample_rate":24000,"channels":1,"sample_width":2}"#))
+    await socket.text(event(3, "speech_clip", #"{"speech_id":"s","reply_id":"r","index":0,"text":"One.","byte_length":2}"#))
+    socket.input.yield(.binary(Data([1, 0])))
+    await socket.text(event(4, "speech_end", #"{"speech_id":"s","reply_id":"r","last_clip_index":0}"#))
+    try await eventuallySession { await socket.sent.contains { $0.payload["state"] == .string("started") } }
+    let departure = Task { await session.setForeground(false) }
+    try await eventuallySession { await socket.sent.contains { $0.payload["can_show_text"] == .bool(false) } }
+    let presence = try #require(await socket.sent.last { $0.type == "set_presence" })
+    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(presence.id)\",\"ok\":true,\"result\":{\"can_show_text\":false}}")
+    await departure.value
+    await socket.blockSend("playback_report")
+    output.callbacks[0]()
+    try await eventuallySession { await socket.sendWaiter != nil }
+    #expect(!audio.active)
+    await session.setForeground(false)
+    #expect(await socket.closed == false)
+    await socket.releaseSend()
+    try await eventuallySession { await socket.closed }
+    #expect(await socket.sent.filter { $0.type == "playback_report" }.map { $0.payload["state"] } == [.string("started"), .string("finished")])
+    await session.unpair()
+}
+
 @MainActor @Test func repeatedNonActiveScenesPreserveMissingPresenceDeadline() async throws {
     let output = FakeSpeechOutput(), audio = SpeechSession(), socket = FakeSocket(), clock = FakeSleeper()
     let store = MemoryPairingStore(); store.record = try testPairingCredentials()

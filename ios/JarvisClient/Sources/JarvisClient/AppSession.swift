@@ -123,7 +123,7 @@ import Observation
             default: break
             }
         case .audio(let event, let pcm):
-            if foreground || backgroundSpeechID == playback.speechID,
+            if foreground || backgroundSpeechID == playback.speechID && playback.activeSpeechID != nil,
                let id = event.string("speech_id"), let reply = event.string("reply_id"),
                let index = event.integer("index"), let text = event.string("text") {
                 playback.append(speechID: id, replyID: reply, index: index, text: text, pcm: pcm)
@@ -184,14 +184,15 @@ import Observation
         }, drained: { [weak self] id in
             guard let self else { return }
             self.talk.speaking = false
-            if self.backgroundSpeechID == id { self.backgroundSpeechID = nil }
             if self.speechID == id { self.speechID = nil }
             guard let client = self.client else { return }
-            let previous = self.playbackDelivery
+            let previous = self.playbackDelivery, owner = self.generation
             self.playbackDelivery = Task {
                 await previous?.value
                 guard !Task.isCancelled else { return }
                 await client.playbackDrained(speechID: id)
+                guard self.generation == owner, self.client === client else { return }
+                if self.backgroundSpeechID == id { self.backgroundSpeechID = nil }
             }
         })
     }
@@ -265,7 +266,7 @@ import Observation
         let transition = foregroundGeneration, owner = generation, client = client
         if !value { await talk.cancel() }
         guard foregroundGeneration == transition, generation == owner, self.client === client else { return }
-        let playing = playback.playingSpeechID
+        let playing = playback.activeSpeechID ?? backgroundSpeechID
         backgroundSpeechID = value ? nil : playing
         if !value && playing == nil { playback.stop(reportStopped: false) }
         await client?.setForeground(value, playingSpeechID: value ? nil : playing)

@@ -16,6 +16,7 @@ import Observation
     public private(set) var messages: [String: String] = [:]
     public private(set) var missedReplies: Set<String> = []
     public var playingSpeechID: String? { sentence == nil ? nil : speechID }
+    public private(set) var activeSpeechID: String?
     private struct Clip { let index: Int64; let text: String; let pcm: Data }
     private let session: any TalkAudioSession
     private let output: any SpeechOutput
@@ -60,6 +61,7 @@ import Observation
                 self.finishedCallbacks.insert(index)
                 self.completeReadyClips(owner: owner)
             }
+            activeSpeechID = speechID
             if queue.count == 1 { sentence = clip.text; emit("started", index: clip.index) }
         } catch { messages[replyID] = "Could not play this reply. Tap Play to try again."; stop() }
     }
@@ -74,7 +76,7 @@ import Observation
         guard let id = self.speechID else { return }
         if reportStopped { emit("stopped", index: lastFinishedIndex) }
         generation &+= 1; watchdog?.cancel(); watchdog = nil
-        output.stop(); session.releasePlayback(); queue = []; sentence = nil
+        output.stop(); session.releasePlayback(); activeSpeechID = nil; queue = []; sentence = nil
         self.speechID = nil; replyID = nil
         drained(id)
     }
@@ -105,14 +107,14 @@ import Observation
         watchdog = Task { [weak self, wait] in
             do { try await wait() } catch { return }
             guard !Task.isCancelled, let self, self.generation == owner, self.sentence == nil else { return }
-            self.output.stop(); self.session.releasePlayback()
+            self.output.stop(); self.session.releasePlayback(); self.activeSpeechID = nil
             if let id = self.speechID { self.drained(id) }
         }
     }
     private func finish() {
         guard let id = speechID else { return }
         if let replyID, nextIndex > 0 { missedReplies.remove(replyID); heardReplies.insert(replyID) }
-        output.stop(); session.releasePlayback(); speechID = nil; replyID = nil; sentence = nil
+        output.stop(); session.releasePlayback(); activeSpeechID = nil; speechID = nil; replyID = nil; sentence = nil
         drained(id)
     }
 }
