@@ -76,6 +76,8 @@ Ask for status or to cancel a Task by name. Quiet mode holds routine Announcemen
 
 The optional door stays off with `JARVIS_REMOTE=off` (the default). Set `JARVIS_REMOTE=on` and `JARVIS_REMOTE_PORT=8765` in `.env` to listen on `127.0.0.1`. Only that loopback address is accepted. Both text and voice mode own the listener; ending terminal input stops it and the Hub.
 
+With the door enabled, ordinary `./jarvis --text` accepts spoken phone requests and returns sentence audio to that phone. It lazily loads one Kokoro pipeline and one Parakeet service without opening a Mac microphone or speaker. Terminal typing stays text-only unless `--speak` is selected. Phone playback reports determine what was heard; reconnecting restores text history without replaying audio.
+
 `GET /v1/health` returns protocol `version: 1`, model readiness, the Mac name and the Usage limit. It requires a device token under [protocol v1](docs/protocol/client-v1.md), following Spec #91's every-request authentication rule over #101's health exception. Unpaired and revoked tokens receive HTTP 401. The running Hub looks up each token in the durable device store on every request; CLI revocation takes effect on the next HTTP call. The health response exposes no paths, configuration or credentials.
 
 After completing the account checklist below, run this on the Mac, using the configured port:

@@ -11,6 +11,9 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from aiohttp import WSMsgType, web
+import numpy as np
+
+from jarvis_hub.voice.player import Clip, Player, RemotePlayer
 
 from jarvis_hub.clients import Client, Clients
 from jarvis_hub.event_log import Event, EventLog
@@ -26,14 +29,19 @@ if TYPE_CHECKING:
 
 class Conversation(Protocol):
     clients: Clients
+    speech_available: bool
 
-    async def begin_remote_talk(self, client_id: str) -> str: ...
+    async def begin_remote_talk(self, client_id: str, *, allowed: Callable[[], bool] = lambda: True) -> str: ...
 
     def cancel_remote_talk(self, client_id: str, request_id: str) -> None: ...
 
     def set_client_talking(self, client_id: str, talking: bool) -> None: ...
 
-    def attach_client(self, client: Client) -> None: ...
+    def attach_client(self, client: Client, *, player: Player | None = None) -> None: ...
+
+    def set_client_playing(self, client_id: str, playing: bool) -> None: ...
+
+    async def interrupt_client(self, client_id: str) -> None: ...
 
     def publish_client_snapshots(self, client_id: str) -> None: ...
 
@@ -48,6 +56,36 @@ class _Connection:
     subscription: object | None = None
     writer: asyncio.Task[None] | None = None
     closing: bool = False
+    player: RemotePlayer | None = None
+
+
+class _SpeechTransport:
+    def __init__(self, publish: Callable[[str, dict[str, Any], bytes | None], None], playing: Callable[[bool], None]) -> None:
+        self._publish, self._playing = publish, playing
+        self._replies: dict[str, str] = {}
+
+    def publish(self, kind: str, payload: dict[str, Any], binary: bytes | None = None) -> None:
+        speech_id = payload["speech_id"]
+        if speech_id in self._replies:
+            self._publish(kind, {"reply_id": self._replies[speech_id], **payload}, binary)
+
+    def begin(self, speech_id: str, reply_id: str) -> None:
+        self._replies = {speech_id: reply_id}
+        self.publish("speech_begin", {"speech_id": speech_id, "sample_rate": 24000, "channels": 1, "sample_width": 2})
+
+    def send_clip(self, speech_id: str, index: int, clip: Clip) -> None:
+        if clip.sample_rate != 24000:
+            raise ValueError("Remote speech requires 24000 Hz mono PCM")
+        pcm = (np.clip(clip.samples, -1, 1) * 32767).astype("<i2").tobytes()
+        self.publish("speech_clip", {"speech_id": speech_id, "index": index, "text": clip.text, "byte_length": len(pcm)}, pcm)
+        self._playing(True)
+
+    def end(self, speech_id: str, last_clip_index: int) -> None:
+        self.publish("speech_end", {"speech_id": speech_id, "last_clip_index": last_clip_index})
+
+    def stop(self, speech_id: str) -> None:
+        self.publish("speech_stop", {"speech_id": speech_id, "reason": "interrupted"})
+        self._playing(False)
 
 
 class Door:
@@ -217,6 +255,9 @@ class Door:
         if writer is not None and writer is not asyncio.current_task():
             writer.cancel()
             await asyncio.gather(writer, return_exceptions=True)
+        while not connection.queue.empty():
+            connection.queue.get_nowait()
+            connection.queue.task_done()
         await connection.socket.close(code=code)
 
     async def _watch_revocations(self) -> None:
@@ -234,18 +275,26 @@ class Door:
         try:
             while self._current(connection):
                 frames = await connection.queue.get()
-                if not self._active(connection):
-                    self._retire_soon(connection, 1008)
-                    return
-                # One queue item keeps future speech headers and their binary frame together.
-                for frame in frames:
-                    async with asyncio.timeout(5):
-                        if isinstance(frame, bytes):
-                            await connection.socket.send_bytes(frame)
-                        else:
-                            await connection.socket.send_json(frame)
+                try:
+                    if not self._active(connection):
+                        self._retire_soon(connection, 1008)
+                        return
+                    # A speech header and its binary frame must be one writer item.
+                    for frame in frames:
+                        async with asyncio.timeout(5):
+                            if isinstance(frame, bytes):
+                                await connection.socket.send_bytes(frame)
+                            else:
+                                await connection.socket.send_json(frame)
+                finally:
+                    frames = ()
+                    frame = None
+                    connection.queue.task_done()
         except (OSError, ConnectionError, TimeoutError, RuntimeError):
             self._retire_soon(connection, 1013)
+        finally:
+            frames = ()
+            frame = None
 
     @staticmethod
     def _upload_response(command_id: str, result: dict[str, Any]) -> web.Response:
@@ -373,11 +422,13 @@ class Door:
         buffered: list[Event] = []
 
         def live(event: Event) -> None:
+            if event.audience is not None and event.audience is not connection:
+                return
             eligible = (event.client_id in (None, client.id) if not event.replayable else
                         event.type != "status" or event.client_id == client.id)
             if eligible:
                 if ready:
-                    self._enqueue(connection, wire_event(event))
+                    self._enqueue(connection, wire_event(event), *(() if event.binary is None else (event.binary,)))
                 else:
                     buffered.append(event)
 
@@ -393,14 +444,25 @@ class Door:
                 self._talks.disconnect(client.id)
             self._connections[client.id] = connection
             existing = self._hub.clients.get(client.id)
-            self._hub.attach_client(Client(client.id, "iphone" if client.kind == "iphone" else "reference", connected=True, can_show_text=False,
-                                           silence=existing.silence if existing is not None else False))
+            def publish(kind: str, payload: dict[str, Any], binary: bytes | None) -> None:
+                if self._active(connection):
+                    assert self._log is not None
+                    self._log.append(kind, payload, client_id=client.id, replayable=False, binary=binary, audience=connection)
+
+            def playing(active: bool) -> None:
+                if self._current(connection) and self._hub is not None:
+                    self._hub.set_client_playing(client.id, active)
+
+            connection.player = RemotePlayer(_SpeechTransport(publish, playing))
+            self._hub.attach_client(Client(client.id, "iphone" if client.kind == "iphone" else "reference", connected=True, can_show_text=False, can_speak=self._hub.speech_available,
+                                           silence=existing.silence if existing is not None else False), player=connection.player)
             # Replay is queued before scheduled append notifications can run on this loop.
             complete: dict[str, Any] = {"version": 1, "type": "replay_complete", "through_seq": mark, "oldest_seq": oldest}
             if pruned:
                 complete["history_pruned"] = True
-            self._enqueue(connection, *(wire_event(event) for event in replay), complete,
-                          *(wire_event(event) for event in buffered))
+            self._enqueue(connection, *(wire_event(event) for event in replay), complete)
+            for event in buffered:
+                self._enqueue(connection, wire_event(event), *(() if event.binary is None else (event.binary,)))
             ready = True
             self._on_replay(client.id)
             connection.writer = asyncio.create_task(self._write(connection))
@@ -481,7 +543,30 @@ class Door:
         try:
             if not self._active(connection):
                 raise ValueError("Client is disconnected")
-            if kind == "say_text":
+            if kind in ("playback_report", "interrupt"):
+                speech_id = payload.get("speech_id")
+                index = payload.get("clip_index" if kind == "playback_report" else "last_clip_index")
+                player = connection.player
+                if not isinstance(speech_id, str) or type(index) is not int or player is None:
+                    raise ValueError("Unknown speech")
+                if kind == "interrupt":
+                    if set(payload) != {"speech_id", "last_clip_index"} or not player.heard_through(speech_id, index):
+                        raise ValueError("Unknown speech")
+                    await self._hub.interrupt_client(connection.client.id)
+                    result = {"ok": True, "result": {"speech_id": speech_id, "stopped": True}}
+                else:
+                    state = payload.get("state")
+                    if set(payload) != {"speech_id", "clip_index", "state"} or state not in ("started", "finished", "stopped"):
+                        raise ValueError("Invalid report")
+                    if state == "stopped":
+                        if not player.accepts(speech_id, index):
+                            raise ValueError("Unknown speech")
+                        await self._hub.interrupt_client(connection.client.id)
+                    elif not player.report(speech_id, index, state):
+                        raise ValueError("Unknown speech")
+                    self._hub.set_client_playing(connection.client.id, player.pending() > 0)
+                    result = {"ok": True, "result": {}}
+            elif kind == "say_text":
                 text = payload.get("text")
                 if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > 16384:
                     raise ValueError("text must be nonempty and at most 16384 UTF-8 bytes")
@@ -494,7 +579,7 @@ class Door:
                 if set(payload) != {"talk_id"} or not self._valid_id(talk_id) or self._talks is None:
                     raise ValueError("A Talk identifier is required")
                 assert isinstance(talk_id, str)
-                result = (await self._talks.begin(connection.client.id, talk_id) if kind == "talk_begin"
+                result = (await self._talks.begin(connection.client.id, talk_id, allowed=lambda: self._active(connection)) if kind == "talk_begin"
                           else self._talks.cancel(connection.client.id, talk_id))
             elif kind == "set_presence":
                 visible = payload.get("can_show_text")

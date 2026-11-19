@@ -288,6 +288,7 @@ public actor HubClient {
                 socket = opened; handover = false; displayReady = false; status = nil
                 var header: HubEvent?
                 var speechID: String?
+                var speechReplyID: String?
                 var nextClip: Int64 = 0
                 while generation == owner, !Task.isCancelled {
                     let message = try await opened.receive()
@@ -347,17 +348,20 @@ public actor HubClient {
                         switch event.kind {
                         case .speechBegin:
                             guard event.integer("sample_rate") == 24_000, event.integer("channels") == 1,
-                                  event.integer("sample_width") == 2, let id = event.string("speech_id") else { throw HubProtocolError.malformedAudio }
+                                  event.integer("sample_width") == 2, let id = event.string("speech_id"),
+                                  let reply = event.string("reply_id") else { throw HubProtocolError.malformedAudio }
                             if !foreground, id != drainingSpeechID { await retire(); return }
-                            speechID = id; activeSpeechID = id; nextClip = 0
+                            speechID = id; speechReplyID = reply; activeSpeechID = id; nextClip = 0
                         case .speechClip:
-                            guard event.string("speech_id") == speechID, event.integer("index") == nextClip,
-                                  let length = event.integer("byte_length"), length >= 0, length <= 14_400_000,
+                            guard event.string("speech_id") == speechID, event.string("reply_id") == speechReplyID, event.integer("index") == nextClip,
+                                  let length = event.integer("byte_length"), length >= 0,
                                   length.isMultiple(of: 2) else { throw HubProtocolError.malformedAudio }
                             nextClip += 1; header = event; continue
                         case .speechEnd:
-                            guard event.string("speech_id") == speechID, event.integer("last_clip_index") == nextClip - 1 else { throw HubProtocolError.malformedAudio }
-                        case .speechStop: speechID = nil
+                            guard event.string("speech_id") == speechID, event.string("reply_id") == speechReplyID, event.integer("last_clip_index") == nextClip - 1 else { throw HubProtocolError.malformedAudio }
+                        case .speechStop:
+                            guard event.string("speech_id") == speechID, event.string("reply_id") == speechReplyID else { throw HubProtocolError.malformedAudio }
+                            speechID = nil; speechReplyID = nil
                         default: break
                         }
                         try await commit(event, owner: owner)

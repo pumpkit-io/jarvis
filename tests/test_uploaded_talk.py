@@ -346,7 +346,8 @@ async def test_two_clients_same_talk_counter_have_distinct_scopes_and_approval_t
             assert saved['approvals'][0]['task_id'] == 'T1'
 
 
-async def test_remote_text_launch_transcribes_without_any_mac_audio_device(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("ending", ["disconnect", "eof"])
+async def test_remote_text_launch_transcribes_without_any_mac_audio_device(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ending: str) -> None:
     import io
     import threading
     from dataclasses import replace
@@ -357,8 +358,12 @@ async def test_remote_text_launch_transcribes_without_any_mac_audio_device(tmp_p
 
     done = threading.Event()
     class Input(io.StringIO):
+        sent = False
         def __next__(self) -> str:
             assert done.wait(5)
+            if not self.sent and ending != "eof":
+                self.sent = True
+                return "Typed request\n"
             raise StopIteration
     class Model:
         def transcribe(self, audio: Samples, *, after: float = 0.0) -> str:
@@ -381,28 +386,61 @@ async def test_remote_text_launch_transcribes_without_any_mac_audio_device(tmp_p
         pytest.fail('Remote --text must not open a Mac audio device or load microphone engines')
     monkeypatch.setattr(entry, 'TranscriptionService', Service)
     monkeypatch.setattr(entry, 'Door', CaptureDoor)
-    for name in ['SoundPlayer', 'KokoroSynthesizer', 'VoiceMode']:
+    for name in ['SoundPlayer', 'VoiceMode']:
         monkeypatch.setattr(entry, name, no_audio)
     monkeypatch.setattr(engines, 'load_engines', no_audio)
+    from tests.fakes import FakeTts
+    synthesizers: list[FakeTts] = []
+    def tts() -> FakeTts:
+        fake = FakeTts()
+        synthesizers.append(fake)
+        return fake
+    monkeypatch.setattr(entry, 'KokoroSynthesizer', tts)
     config = replace(settings(tmp_path), remote=True, remote_port=0)
     with PairingStore(config.runtime_dir / 'events.sqlite3') as pairing:
         phone = pairing.exchange(pairing.create_code('https://mac.example.ts.net'), 'Phone', 'iphone')
-    backend = FakeBackend(FakeClock(), [[Text('Good evening, sir.')]])
+    backend = FakeBackend(FakeClock(), [[Text('Good evening, sir.')], [Text('Typed stays silent.')]])
     running = asyncio.create_task(entry.text_mode(settings=config, environ={}, backend=backend, clock=backend.clock,
                                 stdin=Input(), stdout=io.StringIO(), stderr=io.StringIO()))
     try:
         await until(lambda: bool(doors and doors[0].port))
         async with aiohttp.ClientSession() as session, connect(session, doors[0], phone.token) as socket:
+            await socket.send_json(command('presence', 'set_presence', can_show_text=True))
+            assert (await result(socket, 'presence'))['ok']
+            assert len(synthesizers) == 1 and synthesizers[0].calls == []
             await socket.send_json(command('begin', 'talk_begin', talk_id='talk'))
             assert (await result(socket, 'begin'))['ok']
             async with session.post(f'http://127.0.0.1:{doors[0].port}/v1/utterances/talk', headers=headers(phone.token), data=PCM) as response:
                 assert response.status == 200
+            clips = 0
+            while True:
+                frame = await receive(socket)
+                if frame['type'] == 'speech_clip':
+                    binary = await socket.receive()
+                    assert binary.type == aiohttp.WSMsgType.BINARY
+                    assert len(binary.data) == frame['payload']['byte_length'] > 0
+                    clips += 1
+                if frame['type'] == 'status':
+                    assert frame['payload']['mac_voice_on'] is False
+                if frame['type'] == 'speech_end':
+                    break
+            assert clips == 1
+            if ending == "eof":
+                done.set()
+                await asyncio.wait_for(asyncio.shield(running), 2)
         assert len(services) == 1
     finally:
         done.set()
-        await running
+        if ending == "eof" and not running.done():
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+        else:
+            await running
     assert services[0].closes == 1
     assert doors[0].port is None
+
+    assert len(synthesizers) == 1
+    assert not any(text == 'Typed stays silent.' for text, _ in synthesizers[0].calls)
 
 
 async def test_independently_admitted_uploads_keep_fifo_behind_a_gated_turn(tmp_path: Path) -> None:
