@@ -607,3 +607,100 @@ actor HeldUploadResponse {
     #expect(await next.sent.contains(where: { $0.payload["talk_id"] == .string(oldID) }) == false)
     await session.unpair()
 }
+
+@MainActor @Test func delayedBackgroundCancellationCannotSuspendLaterForegroundIntent() async throws {
+    let transport = FakeTransport(), recorder = FakeTalkRecorder(), store = MemoryPairingStore()
+    store.record = try testPairingCredentials()
+    let session = AppSession(store: store, makeClient: { _ in
+        HubClient(transport: HubTransport(connect: { await transport.connect($0) }))
+    }, makePaths: { nil }, talk: TalkController(recorder: recorder, permission: { true }))
+    await session.launch()
+    try await eventuallySession { await transport.socket(0) != nil }
+    let socket = try #require(await transport.socket(0))
+    await socket.ready()
+    try await eventuallySession { session.talk.canPress }
+    await session.talk.press()
+    let begin = try #require(await socket.sent.first(where: { $0.type == "talk_begin" }))
+    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(begin.id)\",\"ok\":true,\"result\":{}}")
+    await socket.blockSend("talk_cancel")
+    let background = Task { await session.setForeground(false) }
+    try await eventuallySession { await socket.sendWaiter != nil }
+    #expect(!recorder.active)
+    await session.setForeground(true)
+    try await eventuallySession { await transport.socket(1) != nil }
+    let next = try #require(await transport.socket(1))
+    await next.ready(through: 2)
+    try await eventuallySession { await next.sent.contains(where: { $0.type == "talk_cancel" }) }
+    let cancel = try #require(await next.sent.first(where: { $0.type == "talk_cancel" }))
+    await next.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(cancel.id)\",\"ok\":true,\"result\":{}}")
+    try await eventuallySession { await session.client?.state == .ready }
+    await socket.releaseSend(); await background.value
+    #expect(await session.client?.state == .ready)
+    #expect(await next.closed == false)
+    try await eventuallySession { session.talk.canPress }
+    session.draft = "Still here"
+    #expect(session.canSubmit)
+    await session.unpair()
+}
+
+@MainActor @Test(arguments: [false, true])
+func delayedLifecycleCancellationCannotRetireNewPairing(overlappingUnpair: Bool) async throws {
+    let first = FakeSocket(), next = FakeSocket(), recorder = FakeTalkRecorder(), store = MemoryPairingStore()
+    store.record = try testPairingCredentials()
+    var connections = 0
+    let service = PairingService { _ in
+        (Data(#"{"version":1,"client_id":"iphone-2","device_token":"new-secret","mac_name":"Mac","origin":"https://mac.example"}"#.utf8), 201)
+    }
+    let session = AppSession(store: store, service: service, makeClient: { _ in
+        connections += 1
+        let socket = connections == 1 ? first : next
+        return HubClient(transport: HubTransport(connect: { _ in socket }))
+    }, makePaths: { nil }, talk: TalkController(recorder: recorder, permission: { true }))
+    await session.launch(); await first.ready()
+    try await eventuallySession { session.talk.canPress }
+    await session.talk.press()
+    let begin = try #require(await first.sent.first(where: { $0.type == "talk_begin" }))
+    await first.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(begin.id)\",\"ok\":true,\"result\":{}}")
+    session.draft = "Departing draft"
+    #expect(session.canSubmit)
+    await first.blockSend("talk_cancel")
+    let delayed = Task {
+        if overlappingUnpair { await session.unpair() }
+        else { await session.setForeground(false) }
+    }
+    try await eventuallySession { await first.sendWaiter != nil }
+    #expect(!recorder.active)
+    #expect(!session.talk.canPress)
+    if overlappingUnpair { #expect(!session.canSubmit) }
+    await session.unpair()
+    await session.setForeground(true)
+    await session.pair(try PairingInput(origin: "https://mac.example", code: "001234"))
+    await next.ready()
+    try await eventuallySession { session.connection == .ready }
+    let replacement = try #require(session.client)
+    session.draft = "A new line"
+    #expect(session.canSubmit)
+    let clears = store.clears
+    await first.releaseSend(); await delayed.value
+    #expect(session.client === replacement)
+    #expect(session.credentials?.deviceToken == "new-secret")
+    #expect(store.record?.deviceToken == "new-secret")
+    #expect(store.clears == clears)
+    #expect(await replacement.state == .ready)
+    #expect(await next.closed == false)
+    #expect(session.canSubmit)
+    try await eventuallySession { session.talk.canPress }
+    await session.talk.press()
+    let freshID = try #require(session.talk.talkID)
+    let cancel = try #require(await first.sent.first(where: { $0.type == "talk_cancel" }))
+    await first.text(event(3, "heard", #"{"request_id":"old-request","text":"old transcript","spoken":true}"#))
+    await first.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(cancel.id)\",\"ok\":true,\"result\":{}}")
+    await first.text(event(4, "speech_begin", #"{"speech_id":"old-speech","reply_id":"r","sample_rate":24000,"channels":1,"sample_width":2}"#))
+    #expect(session.credentials?.deviceToken == "new-secret")
+    #expect(session.talk.talkID == freshID)
+    #expect(session.talk.state == .recording)
+    #expect(session.conversation.rows.isEmpty)
+    #expect(session.speechID == nil)
+    #expect(recorder.active)
+    await session.unpair()
+}

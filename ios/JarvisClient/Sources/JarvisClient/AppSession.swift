@@ -126,6 +126,7 @@ import Observation
     private var updates: Task<Void, Never>?
     private var generation: UInt64 = 0
     private var foreground = true
+    private var foregroundGeneration: UInt64 = 0
     private var launched = false
 
     public init(store: any PairingStore, service: PairingService = .urlSession,
@@ -175,11 +176,14 @@ import Observation
     /// Invalidates in-flight pairing before clearing the sole durable credential record.
     public func unpair() async {
         generation &+= 1
-        await talk.cancel()
-        let old = client
+        let owner = generation, old = client
         updates?.cancel(); updates = nil; paths?.cancel(); paths = nil
-        await talk.setReady(false); speechID = nil; stopPlayback()
-        client = nil; credentials = nil; connection = .unpaired; pairing = false; loading = false
+        connection = .unpaired; speechID = nil; stopPlayback()
+        await talk.cancel()
+        guard generation == owner, client === old else { await old?.stop(); return }
+        await talk.setReady(false)
+        guard generation == owner, client === old else { await old?.stop(); return }
+        client = nil; credentials = nil; pairing = false; loading = false
         do { try store.clear(); error = nil } catch { self.error = .storage }
         conversation = ConversationProjection(); typedLines = []; draft = ""; inputMessage = nil
         await old?.stop()
@@ -187,7 +191,10 @@ import Observation
 
     public func setForeground(_ value: Bool) async {
         foreground = value
+        foregroundGeneration &+= 1
+        let transition = foregroundGeneration, owner = generation, client = client
         if !value { await talk.cancel() }
+        guard foregroundGeneration == transition, generation == owner, self.client === client else { return }
         await client?.setForeground(value)
     }
 
@@ -206,13 +213,14 @@ import Observation
         paths = makePaths()
         updates = Task { [weak self] in
             for await update in client.updates {
-                guard !Task.isCancelled, let self, self.generation == owner else { return }
+                guard !Task.isCancelled, let self, self.generation == owner, self.client === client else { return }
                 if case .state(let state) = update {
                     if state == .unpaired { await self.unpair(); return }
                     self.connection = state
                     await self.talk.setReady(state.canSend)
                 } else {
                     if case .result(let result) = update { await self.talk.receive(result) }
+                    guard self.generation == owner, self.client === client else { return }
                     self.receive(update)
                 }
             }
