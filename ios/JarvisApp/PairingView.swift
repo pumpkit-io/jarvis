@@ -92,6 +92,7 @@ struct PairingView: View {
 struct JarvisRootView: View {
     @State private var session: AppSession
     @Environment(\.scenePhase) private var phase
+    @Environment(\.colorScheme) private var scheme
     #if os(iOS)
     @State private var camera = PairingCamera(request: { await AVCaptureDevice.requestAccess(for: .video) })
     @State private var scanning = false
@@ -104,7 +105,7 @@ struct JarvisRootView: View {
             if session.loading {
                 ProgressView("Connecting…").frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if session.credentials != nil {
-                ConversationView(session: session)
+                NavigationStack { ConversationView(session: session) }.tint(JarvisTheme(scheme: scheme).text)
             } else {
                 PairingView(pairing: session.pairing, error: session.error, cameraRefused: cameraRefused,
                             scan: scan, submit: submit, settings: openSettings)

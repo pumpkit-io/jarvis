@@ -256,3 +256,76 @@ actor HeldPairing {
     try await eventuallySession { !session.voicePending }
     await session.unpair()
 }
+
+@MainActor @Test func focusLabelFollowsCanonicalStatusAcrossLateAcknowledgement() async throws {
+    let socket = FakeSocket(), store = MemoryPairingStore(); store.record = try testPairingCredentials()
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) }, makePaths: { nil })
+    await session.launch(); await socket.ready()
+    try await eventuallySession { session.connection.canSend }
+    await session.takeFocus()
+    let command = try #require(await socket.sent.first { $0.type == "take_focus" })
+    #expect(command.payload.isEmpty)
+    #expect(session.focusPending && !session.focusHere)
+    await socket.text(event(2, "status", #"{"ready":true,"usage_limit":{"limited":false,"resets_at":null},"quiet":false,"focus_client_id":"iphone-1","mac_voice_on":true,"silence":false}"#))
+    try await eventuallySession { session.focusHere }
+    await socket.text(event(3, "status", #"{"ready":true,"usage_limit":{"limited":false,"resets_at":null},"quiet":false,"focus_client_id":"terminal","mac_voice_on":true,"silence":false}"#))
+    try await eventuallySession { !session.focusHere }
+    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(command.id)\",\"ok\":true,\"result\":{\"focus_client_id\":\"iphone-1\"}}")
+    try await eventuallySession { !session.focusPending }
+    #expect(!session.focusHere)
+    await session.unpair()
+}
+
+@MainActor @Test func disconnectedFocusDoesNotQueueAndGestureSurvivesRestartThenUnpairClearsIt() async throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let settings = VoiceSettingStore(directory: directory), store = MemoryPairingStore()
+    store.record = try testPairingCredentials()
+    let first = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in throw URLError(.notConnectedToInternet) })) }, voiceStore: settings, makePaths: { nil })
+    await first.launch(); await first.takeFocus()
+    #expect(first.focusMessage == "Couldn't reach the Mac. Not changed.")
+    await first.setTalkGesture(.tap)
+    let second = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in throw URLError(.notConnectedToInternet) })) }, voiceStore: settings, makePaths: { nil })
+    await second.launch()
+    #expect(second.talk.gesture == .tap)
+    await second.unpair()
+    #expect(try settings.loadGesture(testPairingCredentials()) == nil)
+    await first.unpair()
+}
+
+@MainActor @Test func uncertainFocusRetainsOneRequestAndDoesNotClaimNotChanged() async throws {
+    let socket = FakeSocket(), store = MemoryPairingStore(); store.record = try testPairingCredentials()
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
+                             makePaths: { nil }, sendCommand: { client, command in
+        try await client.send(command)
+        if command.type == "take_focus" { throw URLError(.networkConnectionLost) }
+    })
+    await session.launch(); await socket.ready()
+    try await eventuallySession { session.connection.canSend }
+    await session.takeFocus(); await session.takeFocus()
+    #expect(session.focusPending)
+    #expect(session.focusMessage?.contains("not confirmed") == true)
+    #expect(await socket.sent.filter { $0.type == "take_focus" }.count == 1)
+    await session.unpair()
+}
+
+@MainActor @Test func newestGesturePersistsWhileOldCaptureCancellationWriteIsHeld() async throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let settings = VoiceSettingStore(directory: directory), store = MemoryPairingStore(), socket = FakeSocket(), recorder = FakeTalkRecorder()
+    store.record = try testPairingCredentials()
+    let talk = TalkController(recorder: recorder, permission: { true })
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) }, voiceStore: settings,
+                             makePaths: { nil }, talk: talk)
+    await session.launch(); await socket.ready()
+    try await eventuallySession { session.connection.canSend }
+    await talk.press(); await socket.blockSend("talk_cancel")
+    let first = Task { await session.setTalkGesture(.tap) }
+    try await eventuallySession { await socket.sendWaiter != nil }
+    #expect(!recorder.active)
+    await session.setTalkGesture(.hold)
+    await socket.releaseSend(); await first.value
+    #expect(talk.gesture == .hold)
+    #expect(try settings.loadGesture(testPairingCredentials()) == .hold)
+    await session.unpair()
+}

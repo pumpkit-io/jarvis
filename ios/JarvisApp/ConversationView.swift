@@ -15,7 +15,13 @@ struct ConversationView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(session.connection.message)
+            HStack {
+                Text(session.connection.message)
+                Spacer()
+                NavigationLink { SettingsView(session: session) } label: {
+                    Text("Settings").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                }
+            }
                 .font(.system(size: controlSize))
                 .foregroundStyle(theme.secondary)
                 .accessibilityAddTraits(.isHeader)

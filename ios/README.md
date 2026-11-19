@@ -98,6 +98,14 @@ Public package tests cover restart through the production factory, offline choic
 
 Waiting on User: installed-iPhone Voice off mid-sentence, AirPods/current-route behavior, physical session release, offline relaunch, VoiceOver, Dynamic Type, safe areas and signed launch. Host renders, fake audio tests and SDK linking do not establish those device results. No live Hub, model, device or account action was used.
 
+## Settings
+
+Open Settings from the Conversation screen. Hold to talk remains the default. With Tap to start and stop selected, the first tap starts the same Talk recorder and the next sends it. Tap to interrupt stops the current reply before recording. Sliding up cancels; changing gesture or leaving the Talk control cancels an active capture without sending it. Leaving the screen after release keeps the admitted upload intact. Permission, backgrounding, disconnect and unpair guards still apply. The gesture is stored privately beside this pairing's Voice choice and is removed on unpair.
+
+Send updates here requests Focus without starting a conversation or model turn. Updates come to this iPhone follows current sequenced Hub status, including another Client taking Focus; a late command acknowledgement cannot override it. Definite offline failure says “Couldn't reach the Mac. Not changed.” An unanswered request remains pending under its original identity and is described as unconfirmed, since it may already have reached the Hub. The Settings screen shows the paired Mac's name and confirms Unpair this iPhone before invoking the existing credential, history, audio and preference cleanup.
+
+Package tests use fake sockets, recorders, permission gates and private temporary stores. They cover tap capture/send, delayed permission, old-view cleanup, gesture changes during capture, restart and unpair, stale Focus results and uncertain delivery. Device gestures, permission prompts, VoiceOver and signed navigation remain manual checks.
+
 ## Install on your iPhone
 
 Complete these once:
