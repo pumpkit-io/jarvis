@@ -4,7 +4,8 @@ import threading
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
+from uuid import uuid4
 
 import numpy as np
 from numpy.typing import NDArray
@@ -255,3 +256,74 @@ class SoundPlayer:
         if self._target < self._gain:
             return np.maximum(self._gain - step * np.arange(1, frames + 1), 0.0)
         return np.minimum(self._gain + step * np.arange(frames), 1.0)
+
+
+class ClipTransport(Protocol):
+    def send_clip(self, speech_id: str, index: int, clip: Clip) -> None: ...
+
+    def stop(self, speech_id: str) -> None: ...
+
+
+class RemotePlayer:
+    """Sending audio does not establish that it was heard; only finished reports do."""
+
+    def __init__(self, transport: ClipTransport) -> None:
+        self._transport = transport
+        self._speech_id: str | None = None
+        self._clips: list[tuple[str, float]] = []
+        self._finished = -1
+        self._stopped = True
+
+    def play(self, clip: Clip, *, starts_reply: bool = False) -> None:
+        if starts_reply or self._speech_id is None or self._stopped:
+            self._speech_id = uuid4().hex
+            self._clips.clear()
+            self._finished = -1
+            self._stopped = False
+        index = len(self._clips)
+        self._clips.append((clip.text, clip.seconds))
+        try:
+            self._transport.send_clip(self._speech_id, index, clip)
+        except Exception:
+            self._stopped = True
+            raise
+
+    def report(self, speech_id: str, index: int, state: Literal["started", "finished", "stopped"]) -> bool:
+        """Reject unknown streams/clips and out-of-order completions; stopped streams stay frozen."""
+        if speech_id != self._speech_id or self._stopped:
+            return False
+        if state == "stopped" and index == -1:
+            self._stopped = True
+            return True
+        if index < 0 or index >= len(self._clips):
+            return False
+        if state == "finished":
+            if index > self._finished + 1:
+                return False
+            self._finished = max(self._finished, index)
+        elif state == "stopped":
+            self._stopped = True
+        elif state != "started":
+            return False
+        return True
+
+    def pause(self) -> None:
+        # A remote Talk interrupts outright; only the Mac uses Backchannel pause and rewind.
+        pass
+
+    def resume(self, rewind_ms: int = REWIND_MS) -> None:
+        pass
+
+    def stop(self) -> None:
+        if self._speech_id is not None and not self._stopped:
+            self._stopped = True
+            self._transport.stop(self._speech_id)
+
+    def played(self) -> str:
+        return " ".join(text for text, _ in self._clips[:self._finished + 1] if text)
+
+    def pending(self) -> float:
+        return 0.0 if self._stopped else sum(seconds for _, seconds in self._clips[self._finished + 1:])
+
+    def close(self) -> None:
+        self.stop()
