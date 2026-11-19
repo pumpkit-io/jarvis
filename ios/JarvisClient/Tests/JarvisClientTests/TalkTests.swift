@@ -671,7 +671,10 @@ func delayedLifecycleCancellationCannotRetireNewPairing(overlappingUnpair: Bool)
     try await eventuallySession { await first.sendWaiter != nil }
     #expect(!recorder.active)
     #expect(!session.talk.canPress)
-    if overlappingUnpair { #expect(!session.canSubmit) }
+    if overlappingUnpair {
+        #expect(!session.canSubmit)
+        #expect(!session.talk.ready)
+    }
     await session.unpair()
     await session.setForeground(true)
     await session.pair(try PairingInput(origin: "https://mac.example", code: "001234"))

@@ -179,9 +179,9 @@ import Observation
         let owner = generation, old = client
         updates?.cancel(); updates = nil; paths?.cancel(); paths = nil
         connection = .unpaired; speechID = nil; stopPlayback()
-        await talk.cancel()
-        guard generation == owner, client === old else { await old?.stop(); return }
         await talk.setReady(false)
+        guard generation == owner, client === old else { await old?.stop(); return }
+        await talk.cancel()
         guard generation == owner, client === old else { await old?.stop(); return }
         client = nil; credentials = nil; pairing = false; loading = false
         do { try store.clear(); error = nil } catch { self.error = .storage }
