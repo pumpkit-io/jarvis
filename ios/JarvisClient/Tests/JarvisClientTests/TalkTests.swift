@@ -707,3 +707,154 @@ func delayedLifecycleCancellationCannotRetireNewPairing(overlappingUnpair: Bool)
     #expect(recorder.active)
     await session.unpair()
 }
+
+@MainActor @Test func tapStartsAndSendsThroughTheSameRecorderAndLabels() async throws {
+    let recorder = FakeTalkRecorder(), wire = TalkWire()
+    let talk = TalkController(recorder: recorder, permission: { true })
+    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { wire.retired.append($0) },
+                   upload: { try await wire.upload($0, $1, $2) })
+    await talk.setGesture(.tap)
+    #expect(talk.label == "Tap to talk")
+    await talk.tap()
+    #expect(recorder.active)
+    #expect(talk.label == "Tap to send. Slide up to cancel.")
+    await talk.tap()
+    #expect(!recorder.active)
+    #expect(wire.uploads.count == 1)
+    #expect(wire.commands.map(\.type) == ["talk_begin"])
+}
+
+@MainActor @Test func gestureChangeAndOldViewCleanupCannotCancelReleasedOrNewTalk() async throws {
+    let recorder = FakeTalkRecorder(), wire = TalkWire()
+    let talk = TalkController(recorder: recorder, permission: { true })
+    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { wire.retired.append($0) },
+                   upload: { try await wire.upload($0, $1, $2) })
+    let old = UUID(), current = UUID()
+    await talk.press(interaction: old)
+    await talk.setGesture(.tap)
+    #expect(!recorder.active && wire.uploads.isEmpty)
+    await talk.press(interaction: current)
+    await talk.cancelInteraction(old)
+    await talk.releaseInteraction(old).value
+    #expect(recorder.active)
+    await talk.release()
+    await talk.cancelInteraction(current)
+    #expect(wire.uploads.count == 1)
+    #expect(wire.commands.filter { $0.type == "talk_cancel" }.count == 1)
+}
+
+@MainActor @Test func delayedTapPermissionIsInvalidatedBySecondTapOrGestureChange() async throws {
+    for change in [false, true] {
+        let recorder = FakeTalkRecorder(), wire = TalkWire(), permission = HeldMicrophonePermission()
+        let talk = TalkController(recorder: recorder, permission: { await permission.request() })
+        talk.configure(ready: true, send: { try await wire.send($0) }, retire: { wire.retired.append($0) },
+                       upload: { try await wire.upload($0, $1, $2) })
+        await talk.setGesture(.tap)
+        let first = Task { await talk.tap() }
+        try await eventuallySession { permission.waiter != nil }
+        if change { await talk.setGesture(.hold) } else { await talk.tap() }
+        permission.grant(); await first.value
+        #expect(!recorder.active && recorder.starts == 0)
+        #expect(wire.commands.isEmpty && wire.uploads.isEmpty)
+    }
+}
+
+@MainActor @Test func tapPermissionMayFinishAfterFingerReleaseWhileItsIntentIsStillOwned() async throws {
+    let recorder = FakeTalkRecorder(), wire = TalkWire(), permission = HeldMicrophonePermission()
+    let talk = TalkController(recorder: recorder, permission: { await permission.request() })
+    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { wire.retired.append($0) },
+                   upload: { try await wire.upload($0, $1, $2) })
+    await talk.setGesture(.tap)
+    let first = Task { await talk.tap() }
+    try await eventuallySession { permission.waiter != nil }
+    permission.grant(); await first.value
+    #expect(recorder.active)
+    await talk.tap()
+    #expect(!recorder.active && wire.uploads.count == 1)
+}
+
+@MainActor @Test func cancelledDeferredPressCannotOutliveItsReplacementInteraction() async throws {
+    let recorder = FakeTalkRecorder(), wire = TalkWire()
+    let talk = TalkController(recorder: recorder, permission: { true })
+    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { wire.retired.append($0) },
+                   upload: { try await wire.upload($0, $1, $2) })
+    let old = UUID(), replacement = UUID()
+    let deferred = Task { await talk.press(interaction: old) }
+    deferred.cancel()
+    await talk.press(interaction: replacement)
+    await deferred.value
+    await talk.cancelInteraction(replacement)
+    #expect(recorder.starts == 1 && !recorder.active)
+    #expect(wire.commands.map(\.type) == ["talk_begin", "talk_cancel"])
+    #expect(wire.uploads.isEmpty)
+}
+
+@MainActor @Test func secondTapBeforeDeferredStartCannotLeaveTheMicrophoneRunning() async throws {
+    let recorder = FakeTalkRecorder(), wire = TalkWire()
+    let talk = TalkController(recorder: recorder, permission: { true })
+    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { wire.retired.append($0) },
+                   upload: { try await wire.upload($0, $1, $2) })
+    let intent = UUID()
+    let deferred = Task { await talk.press(interaction: intent) }
+    await talk.releaseInteraction(intent, pendingPress: deferred).value
+    await deferred.value
+    #expect(recorder.starts == 0 && !recorder.active)
+    #expect(wire.commands.isEmpty && wire.uploads.isEmpty)
+}
+
+@MainActor final class CancellableBeginWire {
+    var commands: [HubCommand] = []
+    var deliveredBegin: String?
+    var admissionIDs: [String] = []
+    var waitingForWrite = false
+    private let writes: AsyncStream<Void>
+    private let writeInput: AsyncStream<Void>.Continuation
+    private var acknowledged: Bool?
+    private var admissionWaiter: CheckedContinuation<Bool, Never>?
+
+    init() { (writes, writeInput) = AsyncStream.makeStream() }
+
+    func send(_ command: HubCommand) async throws {
+        commands.append(command)
+        guard command.type == "talk_begin" else { return }
+        waitingForWrite = true
+        for await _ in writes { break }
+        try Task.checkCancellation()
+        deliveredBegin = command.id
+    }
+
+    func finishWrite() { writeInput.yield(()); writeInput.finish() }
+
+    func acknowledge() {
+        let accepted = deliveredBegin != nil
+        acknowledged = accepted
+        admissionWaiter?.resume(returning: accepted); admissionWaiter = nil
+    }
+
+    func admit(_ id: String) async -> Bool {
+        admissionIDs.append(id)
+        if let acknowledged { return acknowledged }
+        return await withCheckedContinuation { admissionWaiter = $0 }
+    }
+}
+
+@MainActor @Test func releasePreservesCancellableBeginWriteUntilItsAcknowledgementAndUploadsOnce() async throws {
+    let recorder = FakeTalkRecorder(), wire = CancellableBeginWire(), uploads = TalkWire()
+    let talk = TalkController(recorder: recorder, permission: { true })
+    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { uploads.retired.append($0) },
+                   upload: { try await uploads.upload($0, $1, $2) }, admission: { await wire.admit($0) })
+    let intent = UUID()
+    let press = Task { await talk.press(interaction: intent) }
+    try await eventuallySession { wire.waitingForWrite && recorder.active }
+    let begin = try #require(wire.commands.first)
+    let release = talk.releaseInteraction(intent, pendingPress: press)
+    try await eventuallySession { !recorder.active }
+    #expect(uploads.uploads.isEmpty)
+    wire.finishWrite(); await press.value
+    wire.acknowledge(); await release.value
+    #expect(wire.deliveredBegin == begin.id)
+    #expect(wire.admissionIDs == [begin.id])
+    #expect(wire.commands.map(\.type) == ["talk_begin"])
+    #expect(uploads.uploads.count == 1)
+    #expect(begin.payload["talk_id"] == uploads.uploads.first.map { .string($0.0) })
+}

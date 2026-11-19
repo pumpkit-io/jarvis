@@ -28,6 +28,9 @@ struct ConversationView: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel("Tasks, \(session.openTasks.count) open")
                 }
+                NavigationLink { SettingsView(session: session) } label: {
+                    Text("Settings").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                }
             }
             .font(.system(size: controlSize))
             .foregroundStyle(theme.secondary)

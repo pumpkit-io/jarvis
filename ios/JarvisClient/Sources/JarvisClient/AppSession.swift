@@ -16,6 +16,12 @@ import Observation
     public private(set) var loadingHistory = false
     public private(set) var hasOlderHistory = true
     public private(set) var historyMessage: String?
+    public private(set) var focusHere = false
+    public private(set) var focusPending = false
+    public private(set) var focusMessage: String?
+    public private(set) var gestureMessage: String?
+    private var gestureRevision: UInt64 = 0
+    private var focusCommand: HubCommand?
     public private(set) var voiceOn = true
     public private(set) var voicePending = false
     public private(set) var voiceMessage: String?
@@ -126,6 +132,10 @@ import Observation
             conversation.ingest(event); talk.receive(event)
             if event.kind == .taskSnapshot && !tasksReplaying { tasksNeedRefresh = false }
             switch event.kind {
+            case .status:
+                if let status = try? event.decodePayload(HubStatus.self) {
+                    focusHere = status.focus_client_id == credentials?.clientID
+                }
             case .speechBegin:
                 if voiceOn, let id = event.string("speech_id"), let reply = event.string("reply_id"), foreground {
                     playback.begin(speechID: id, replyID: reply)
@@ -149,6 +159,12 @@ import Observation
                 talk.speaking = playback.playingSpeechID != nil
             }
         case .result(let result):
+            if focusCommand?.id == result.id {
+                focusCommand = nil; focusPending = false
+                focusMessage = result.ok ? nil : result.error?.code == "outcome_unknown"
+                    ? "Focus is not confirmed. Check the current status before trying again."
+                    : "Couldn't reach the Mac. Not changed."
+            }
             if let entry = replayCommands.first(where: { $0.value.id == result.id }) {
                 replayCommands.removeValue(forKey: entry.key)
                 replayMessages[entry.key] = result.ok ? nil : result.error?.message ?? "Jarvis could not play this reply."
@@ -171,6 +187,7 @@ import Observation
         case .speechConnectionEnded(let id):
             playback.stop(speechID: id, reportStopped: false)
         case .failure:
+            if focusPending { focusMessage = "Focus is not confirmed. Waiting for the Mac to reconcile it." }
             if voicePending && !voicePersistenceFailed {
                 voiceMessage = "Voice setting isn't confirmed. It remains selected here; reconnect to reconcile it."
             }
@@ -274,6 +291,36 @@ import Observation
         }
     }
 
+    public func setTalkGesture(_ value: TalkGesture) async {
+        guard let credentials else { return }
+        let owner = generation
+        gestureRevision &+= 1
+        let revision = gestureRevision
+        await talk.setGesture(value)
+        guard generation == owner, gestureRevision == revision, self.credentials == credentials else { return }
+        do { try voiceStore?.saveGesture(value, for: credentials); gestureMessage = nil }
+        catch { gestureMessage = "Talk gesture changed for this session, but could not be saved. Try again." }
+    }
+
+    public func takeFocus() async {
+        guard !focusPending else { return }
+        guard connection.canSend, let client else { focusMessage = "Couldn't reach the Mac. Not changed."; return }
+        let owner = generation, command = HubCommand(type: "take_focus")
+        focusCommand = command; focusPending = true; focusMessage = "Waiting for the Mac to confirm."
+        do { try await sendCommand(client, command) }
+        catch {
+            let delivery = await client.delivery(of: command.id)
+            guard generation == owner, self.client === client, focusCommand?.id == command.id else { return }
+            switch delivery {
+            case .pending: focusMessage = "Focus is not confirmed. Waiting for the Mac to reconcile it."
+            case .completed(let result): receive(.result(result))
+            case .absent:
+                focusCommand = nil; focusPending = false
+                focusMessage = "Couldn't reach the Mac. Not changed."
+            }
+        }
+    }
+
     public func setVoiceOn(_ value: Bool) async {
         guard let credentials, let client else { return }
         let silence = !value, owner = generation
@@ -348,6 +395,7 @@ import Observation
         do {
             if let oldCredentials { try voiceStore?.clear(oldCredentials) }
         } catch { historyClearFailed = true }
+        focusHere = false; focusPending = false; focusCommand = nil; focusMessage = nil; gestureMessage = nil
         voiceOn = true; explicitSilence = nil; voicePending = false; voiceMessage = nil; voicePersistenceFailed = false; voiceRevision = 0
         do { try store.clear(); error = historyClearFailed ? .storage : nil } catch { self.error = .storage }
         tasksNeedRefresh = true; tasksReplaying = true
@@ -385,6 +433,9 @@ import Observation
             }
             guard generation == owner else { return }
         }
+        let gesture = try voiceStore?.loadGesture(credentials) ?? .hold
+        await talk.setGesture(gesture)
+        guard generation == owner else { return }
         explicitSilence = try voiceStore?.load(credentials)
         voiceOn = !(explicitSilence ?? false); voicePending = explicitSilence != nil
         let client: HubClient

@@ -5,6 +5,8 @@ struct TalkKey: View {
     @Bindable var talk: TalkController
     var controlSize: CGFloat
     @Environment(\.colorScheme) private var scheme
+    @State private var interaction: UUID?
+    @State private var pressTask: Task<Void, Never>?
     @State private var held = false
     @State private var gestureStarted = false
     @State private var gestureCancelled = false
@@ -32,27 +34,60 @@ struct TalkKey: View {
             .onChanged { value in
                 if !gestureStarted {
                     gestureStarted = true
-                    if talk.canPress {
+                    if talk.gesture == .hold, talk.canPress {
                         held = true
-                        Task { await talk.press() }
+                        start()
                     }
                 }
                 guard !gestureCancelled else { return }
-                if held, value.translation.height < -60 {
+                if (held || talk.gesture == .tap && recording), value.translation.height < -60 {
                     held = false; gestureCancelled = true
-                    Task { await talk.cancel() }
+                    cancel()
                 }
             }
             .onEnded { _ in
-                gestureStarted = false; gestureCancelled = false
-                guard held else { return }
-                held = false
-                Task { await talk.release() }
+                gestureStarted = false
+                let cancelled = gestureCancelled; gestureCancelled = false
+                guard !cancelled else { return }
+                if talk.gesture == .tap {
+                    if recording || talk.state == .authorizing || pressTask != nil { send() }
+                    else if talk.canPress { start() }
+                } else if held {
+                    held = false
+                    send()
+                }
             })
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
-        .accessibilityHint("Hold while speaking. Release to send. Slide up to cancel.")
+        .accessibilityAction {
+            if recording || talk.state == .authorizing || pressTask != nil { send() }
+            else if talk.canPress { start() }
+        }
+        .accessibilityAction(named: "Cancel Talk") { cancel() }
+        .accessibilityHint(talk.gesture == .hold ? "Hold while speaking. Release to send. Slide up to cancel." : "Tap to start. Tap again to send. Slide up to cancel.")
         .accessibilityValue(recording ? "Recording, \(talk.elapsed) seconds" : talk.ready ? talk.label : "Unavailable")
-        .onDisappear { held = false; Task { await talk.cancel() } }
+        .onDisappear { held = false; gestureStarted = false; gestureCancelled = false; cancel() }
+    }
+
+    private func start() {
+        pressTask?.cancel()
+        let id = UUID(); interaction = id
+        pressTask = Task {
+            await talk.press(interaction: id)
+            if interaction == id { pressTask = nil }
+        }
+    }
+
+    private func send() {
+        guard let id = interaction else { return }
+        talk.releaseInteraction(id, pendingPress: pressTask)
+        pressTask = nil; interaction = nil
+    }
+
+    private func cancel() {
+        pressTask?.cancel(); pressTask = nil
+        guard let id = interaction else { return }
+        interaction = nil
+        Task { await talk.cancelInteraction(id) }
     }
 }
