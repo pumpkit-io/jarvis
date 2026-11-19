@@ -12,6 +12,13 @@ import Observation
     public private(set) var loadingHistory = false
     public private(set) var hasOlderHistory = true
     public private(set) var historyMessage: String?
+    public private(set) var voiceOn = true
+    public private(set) var voicePending = false
+    public private(set) var voiceMessage: String?
+    private let voiceStore: VoiceSettingStore?
+    private var explicitSilence: Bool?
+    private var voicePersistenceFailed = false
+    private var voiceRevision: UInt64 = 0
     private var history: HistoryStore?
     private var historyBefore: Int64?
     public var draft = ""
@@ -115,7 +122,7 @@ import Observation
             conversation.ingest(event); talk.receive(event)
             switch event.kind {
             case .speechBegin:
-                if let id = event.string("speech_id"), let reply = event.string("reply_id"), foreground {
+                if voiceOn, let id = event.string("speech_id"), let reply = event.string("reply_id"), foreground {
                     playback.begin(speechID: id, replyID: reply)
                     speechID = id; lastCompletedClip = -1
                 }
@@ -130,7 +137,7 @@ import Observation
             default: break
             }
         case .audio(let event, let pcm):
-            if foreground || backgroundSpeechID == playback.speechID && playback.activeSpeechID != nil,
+            if voiceOn, foreground || backgroundSpeechID == playback.speechID && playback.activeSpeechID != nil,
                let id = event.string("speech_id"), let reply = event.string("reply_id"),
                let index = event.integer("index"), let text = event.string("text") {
                 playback.append(speechID: id, replyID: reply, index: index, text: text, pcm: pcm)
@@ -145,11 +152,20 @@ import Observation
             if result.ok { typedLines[index].outcome = .accepted }
             else if result.error?.code == "outcome_unknown" { typedLines[index].outcome = .outcomeUnknown }
             else { typedLines[index].outcome = .rejected(result.error?.message ?? "Jarvis could not accept your line.") }
+        case .silence(let silence, let pending, let revision):
+            guard revision == voiceRevision, explicitSilence == nil || explicitSilence == silence else { return }
+            voiceOn = !silence; voicePending = pending
+            voiceMessage = voicePersistenceFailed ? "Voice changed for this session, but could not be saved. Try again."
+                : pending ? "Voice setting saved here. Waiting for the Mac to confirm." : nil
+            if silence { silencePlayback() }
         case .replay(let replay):
             if replay.history_pruned == true { historyMessage = "Some older history is no longer available on the Mac." }
         case .speechConnectionEnded(let id):
             playback.stop(speechID: id, reportStopped: false)
         case .failure:
+            if voicePending && !voicePersistenceFailed {
+                voiceMessage = "Voice setting isn't confirmed. It remains selected here; reconnect to reconcile it."
+            }
             for index in typedLines.indices where typedLines[index].outcome == .unanswered {
                 typedLines[index].outcome = .deliveryUncertain
             }
@@ -174,6 +190,7 @@ import Observation
 
     public init(store: any PairingStore, service: PairingService = .urlSession,
                 makeClient: ((PairingCredentials) throws -> HubClient)? = nil,
+                voiceStore: VoiceSettingStore? = nil,
                 historyDirectory: URL? = nil, historyNow: @escaping @Sendable () -> Date = { Date() },
                 makeTransport: @escaping (PairingCredentials) throws -> HubTransport = {
                     try .urlSession(origin: $0.origin, token: $0.deviceToken)
@@ -181,6 +198,9 @@ import Observation
                 talk: TalkController? = nil, playback: SpeechPlayer? = nil, uploadTalk: TalkUpload = TalkUpload(),
                 stopPlayback: @escaping @MainActor () -> Void = {},
                 sendCommand: @escaping @Sendable (HubClient, HubCommand) async throws -> Void = { try await $0.send($1) }) {
+        self.voiceStore = voiceStore
+            ?? historyDirectory.map { VoiceSettingStore(directory: $0.appendingPathComponent("Voice")) }
+            ?? (makeClient == nil ? .applicationStore : nil)
         self.store = store; self.service = service; self.makeClient = makeClient; self.makePaths = makePaths
         self.sendCommand = sendCommand
         self.historyDirectory = historyDirectory; self.historyNow = historyNow; self.makeTransport = makeTransport
@@ -246,10 +266,24 @@ import Observation
         }
     }
 
+    public func setVoiceOn(_ value: Bool) async {
+        guard let credentials, let client else { return }
+        let silence = !value, owner = generation
+        voiceRevision &+= 1
+        let revision = voiceRevision
+        voiceOn = value; explicitSilence = silence; voicePending = true
+        if silence { silencePlayback() }
+        voicePersistenceFailed = false
+        do { try voiceStore?.save(silence, for: credentials) }
+        catch { voicePersistenceFailed = true; voiceMessage = "Voice changed for this session, but could not be saved. Try again." }
+        guard generation == owner, self.client === client else { return }
+        await client.setSilence(silence, revision: revision)
+    }
+
     public func silencePlayback() { playback.stop(reportStopped: false); stopPlayback(); talk.speaking = false }
 
     public func replay(replyID: String) async {
-        guard connection.canSend, let client else { return }
+        guard voiceOn, connection.canSend, let client else { return }
         let owner = generation
         let command = replayCommands[replyID] ?? HubCommand(type: "replay_speech", payload: ["reply_id": .string(replyID)])
         replayCommands[replyID] = command; replayMessages[replyID] = nil
@@ -291,6 +325,7 @@ import Observation
     public func unpair() async {
         generation &+= 1
         let owner = generation, old = client, oldHistory = history
+        let oldCredentials = credentials
         history = nil
         updates?.cancel(); updates = nil; paths?.cancel(); paths = nil
         connection = .unpaired; speechID = nil; playback.stop(reportStopped: false); stopPlayback()
@@ -302,6 +337,10 @@ import Observation
         await talk.cancel()
         guard generation == owner, client === old else { await old?.stop(); return }
         client = nil; credentials = nil; pairing = false; loading = false
+        do {
+            if let oldCredentials { try voiceStore?.clear(oldCredentials) }
+        } catch { historyClearFailed = true }
+        voiceOn = true; explicitSilence = nil; voicePending = false; voiceMessage = nil; voicePersistenceFailed = false; voiceRevision = 0
         do { try store.clear(); error = historyClearFailed ? .storage : nil } catch { self.error = .storage }
         conversation = ConversationProjection(); historyBefore = nil; hasOlderHistory = true; loadingHistory = false; historyMessage = nil; typedLines = []; draft = ""; inputMessage = nil
         playback.reset(); replayCommands = [:]; replayMessages = [:]
@@ -337,6 +376,8 @@ import Observation
             }
             guard generation == owner else { return }
         }
+        explicitSilence = try voiceStore?.load(credentials)
+        voiceOn = !(explicitSilence ?? false); voicePending = explicitSilence != nil
         let client: HubClient
         if let makeClient { client = try makeClient(credentials) }
         else {
@@ -344,6 +385,8 @@ import Observation
             client = HubClient(transport: try makeTransport(credentials), cursor: cached.cursor,
                                cache: { event, cursor in try await cache?.commit(event, through: cursor) })
         }
+        if let explicitSilence { await client.setSilence(explicitSilence, revision: voiceRevision) }
+        guard generation == owner else { await client.stop(); return }
         self.history = history
         for event in cached.events { conversation.ingest(event) }
         historyBefore = cached.events.first?.seq

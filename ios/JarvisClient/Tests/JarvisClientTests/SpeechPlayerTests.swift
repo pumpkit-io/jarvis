@@ -395,7 +395,7 @@ actor SpeechWait {
     await session.unpair()
 }
 
-@MainActor @Test(arguments: ["silence", "hub_stop"]) func localSilenceAndHubStopReleaseWithoutFeedbackInterrupt(_ action: String) async throws {
+@MainActor @Test(arguments: ["silence", "voice_control", "hub_stop"]) func localSilenceAndHubStopReleaseWithoutFeedbackInterrupt(_ action: String) async throws {
     let output = FakeSpeechOutput(), audio = SpeechSession(), socket = FakeSocket(), store = MemoryPairingStore()
     store.record = try testPairingCredentials()
     let player = SpeechPlayer(session: audio, output: output)
@@ -407,6 +407,7 @@ actor SpeechWait {
     socket.input.yield(.binary(Data([1, 0])))
     try await eventuallySession { audio.active }
     if action == "silence" { session.silencePlayback() }
+    else if action == "voice_control" { await session.setVoiceOn(false) }
     else {
         await socket.text(event(4, "speech_stop", #"{"speech_id":"s","reply_id":"r","reason":"interrupt"}"#))
         try await eventuallySession { !audio.active }
@@ -666,5 +667,32 @@ actor HeldReplayError {
     await socket.releaseSend()
     try await eventuallySession { await socket.closed }
     #expect(await socket.sent.filter { $0.type == "playback_report" }.map { $0.payload["state"] } == [.string("started"), .string("finished")])
+    await session.unpair()
+}
+
+@MainActor @Test func lateVoiceOnResultCannotRestoreSpeechAfterLatestVoiceOff() async throws {
+    let output = FakeSpeechOutput(), audio = SpeechSession(), socket = FakeSocket(), store = MemoryPairingStore()
+    store.record = try testPairingCredentials()
+    let player = SpeechPlayer(session: audio, output: output)
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) }, makePaths: { nil }, playback: player)
+    await session.launch(); await socket.ready()
+    try await eventuallySession { session.connection.canSend }
+    await session.setVoiceOn(true)
+    let on = try #require(await socket.sent.last { $0.type == "set_silence" })
+    await session.setVoiceOn(false)
+    let off = try #require(await socket.sent.last { $0.type == "set_silence" })
+    await acknowledgeSilence(socket, on, value: false)
+    await socket.text(event(2, "speech_begin", #"{"speech_id":"s","reply_id":"r","sample_rate":24000,"channels":1,"sample_width":2}"#))
+    await socket.text(event(3, "speech_clip", #"{"speech_id":"s","reply_id":"r","index":0,"text":"Old audio.","byte_length":2}"#))
+    socket.input.yield(.binary(Data([1, 0])))
+    await acknowledgeSilence(socket, off, value: true)
+    try await eventuallySession { !session.voicePending }
+    #expect(!session.voiceOn && !audio.active && output.bytes.isEmpty)
+    await session.setVoiceOn(true)
+    let newOn = try #require(await socket.sent.last { $0.type == "set_silence" })
+    await acknowledgeSilence(socket, newOn, value: false)
+    try await eventuallySession { !session.voicePending }
+    #expect(output.bytes.isEmpty)
+    #expect(await socket.sent.contains { $0.type == "replay_speech" } == false)
     await session.unpair()
 }

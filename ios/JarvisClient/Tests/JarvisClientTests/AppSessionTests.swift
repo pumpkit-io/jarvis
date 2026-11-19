@@ -119,3 +119,140 @@ actor HeldPairing {
     #expect(session.client == nil)
     #expect(store.record == nil)
 }
+
+@MainActor @Test func offlineVoiceChoiceSurvivesFactoryRestartAndWaitsBeforeHeldNewsPresence() async throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = MemoryPairingStore(); store.record = try testPairingCredentials()
+    let first = AppSession(store: store, historyDirectory: directory,
+                           makeTransport: { _ in HubTransport(connect: { _ in throw URLError(.cannotConnectToHost) }) }, makePaths: { nil })
+    await first.launch()
+    await first.setVoiceOn(false)
+    #expect(!first.voiceOn && first.voicePending)
+    await first.client?.stop()
+    let socket = FakeSocket()
+    let second = AppSession(store: store, historyDirectory: directory,
+                            makeTransport: { _ in HubTransport(connect: { _ in socket }) }, makePaths: { nil })
+    await second.launch()
+    #expect(!second.voiceOn)
+    await socket.ready()
+    try await eventuallySession { await socket.sent.count == 1 }
+    let off = try #require(await socket.sent.first)
+    #expect(off.type == "set_silence" && off.payload["silence"] == .bool(true))
+    #expect(!second.connection.canSend)
+    await acknowledgeSilence(socket, off, value: true)
+    try await eventuallySession { second.connection.canSend && !second.voicePending }
+    #expect(!second.voiceOn)
+    #expect(await socket.sent.map(\.type) == ["set_silence", "set_presence"])
+    await socket.text(event(2, "reply_end", #"{"reply_id":"held-news","text":"Task complete.","reason":"complete"}"#))
+    try await eventuallySession { second.conversation.rows.contains { $0.text == "Task complete." } }
+    #expect(second.playback.playingSpeechID == nil)
+    await second.unpair()
+    #expect(try VoiceSettingStore(directory: directory.appendingPathComponent("Voice")).load(testPairingCredentials()) == nil)
+}
+
+@Test func voiceStoreSeparatesPairingsAndNeverStoresCredentials() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = VoiceSettingStore(directory: directory)
+    let first = try testPairingCredentials()
+    let other = try PairingCredentials(origin: first.origin, clientID: "another-phone", deviceToken: "other-secret", macName: "Mac")
+    #expect(try store.load(first) == nil)
+    try store.save(true, for: first)
+    #expect(try store.load(first) == true)
+    #expect(try store.load(other) == nil)
+    let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+    #expect(files.count == 1)
+    #expect(try Data(contentsOf: files[0]) == Data("true".utf8))
+    try store.clear(first)
+    #expect(try store.load(first) == nil)
+}
+
+@MainActor @Test func voiceChangeLeavesLiveTalkRecordingAndReadinessAlone() async throws {
+    let recorder = FakeTalkRecorder(), socket = FakeSocket(), store = MemoryPairingStore()
+    store.record = try testPairingCredentials()
+    let talk = TalkController(recorder: recorder, permission: { true })
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
+                             makePaths: { nil }, talk: talk)
+    await session.launch(); await socket.ready()
+    try await eventuallySession { session.connection.canSend }
+    await talk.press()
+    #expect(recorder.active)
+    await session.setVoiceOn(false)
+    let off = try #require(await socket.sent.last { $0.type == "set_silence" })
+    try await Task.sleep(for: .milliseconds(10))
+    #expect(recorder.active && talk.state == .recording && talk.ready)
+    #expect(session.connection.canSend)
+    await acknowledgeSilence(socket, off, value: true)
+    try await eventuallySession { !session.voicePending }
+    #expect(recorder.active && talk.state == .recording)
+    await session.unpair()
+}
+
+@MainActor @Test func failedVoicePersistenceStaysVisibleAfterHubAcknowledgement() async throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let socket = FakeSocket(), store = MemoryPairingStore(); store.record = try testPairingCredentials()
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
+                             voiceStore: VoiceSettingStore(directory: directory), makePaths: { nil })
+    await session.launch(); await socket.ready()
+    try await eventuallySession { session.connection.canSend }
+    try Data().write(to: directory)
+    await session.setVoiceOn(false)
+    let off = try #require(await socket.sent.last { $0.type == "set_silence" })
+    await acknowledgeSilence(socket, off, value: true)
+    try await eventuallySession { !session.voicePending }
+    #expect(session.voiceMessage?.contains("could not be saved") == true)
+    #expect(!session.voiceOn)
+    try FileManager.default.removeItem(at: directory)
+    await session.setVoiceOn(false)
+    try await eventuallySession { !session.voicePending && session.voiceMessage == nil }
+    await session.unpair()
+}
+
+
+@MainActor @Test func noSavedChoiceLearnsHubSilenceWithoutCreatingLocalPreference() async throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let socket = FakeSocket(), store = MemoryPairingStore(); store.record = try testPairingCredentials()
+    let voiceStore = VoiceSettingStore(directory: directory)
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
+                             voiceStore: voiceStore, makePaths: { nil })
+    await session.launch()
+    await socket.text(event(1, "status", #"{"ready":true,"usage_limit":{"limited":false,"resets_at":null},"quiet":false,"focus_client_id":null,"mac_voice_on":true,"silence":true}"#))
+    await socket.text(#"{"version":1,"type":"replay_complete","through_seq":1}"#)
+    try await eventuallySession { session.connection.canSend && !session.voiceOn }
+    #expect(await socket.sent.map(\.type) == ["set_presence"])
+    #expect(try voiceStore.load(testPairingCredentials()) == nil)
+    await session.unpair()
+}
+
+@MainActor @Test func queuedEarlierOffConfirmationCannotConfirmLatestOffChoice() async throws {
+    let socket = FakeSocket(), store = MemoryPairingStore(), recorder = FakeTalkRecorder()
+    store.record = try testPairingCredentials()
+    let talk = TalkController(recorder: recorder, permission: { true })
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
+                             makePaths: { nil }, talk: talk)
+    await session.launch(); await socket.ready()
+    try await eventuallySession { session.connection.canSend }
+    await talk.press()
+    let begin = try #require(await socket.sent.last { $0.type == "talk_begin" })
+    await socket.blockSend("talk_cancel")
+    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(begin.id)\",\"ok\":false,\"error\":{\"code\":\"busy\",\"message\":\"Try again\",\"retry_after_seconds\":null}}")
+    try await eventuallySession { await socket.sent.contains { $0.type == "talk_cancel" } }
+    await session.setVoiceOn(false)
+    let earlierOff = try #require(await socket.sent.last { $0.type == "set_silence" })
+    await acknowledgeSilence(socket, earlierOff, value: true)
+    try await eventuallySession { await session.client?.results[earlierOff.id] != nil }
+    await session.setVoiceOn(true)
+    await session.setVoiceOn(false)
+    let latestOff = try #require(await socket.sent.last { $0.type == "set_silence" })
+    #expect(latestOff.id != earlierOff.id)
+    await socket.releaseSend()
+    await socket.text(event(2, "reply_end", #"{"reply_id":"barrier","text":"Consumer resumed.","reason":"complete"}"#))
+    try await eventuallySession { session.conversation.rows.contains { $0.text == "Consumer resumed." } }
+    #expect(!session.voiceOn && session.voicePending)
+    await acknowledgeSilence(socket, latestOff, value: true)
+    try await eventuallySession { !session.voicePending }
+    await session.unpair()
+}

@@ -101,11 +101,15 @@ async def test_voice_mode_remote_stop_interrupts_active_talker(tmp_path: Path, s
             assert f'<interrupted spoken="{heard}"/>' in backend.session('talker').received[-1]
 
 
-async def test_silence_stops_only_destination_while_model_text_continues(tmp_path: Path) -> None:
+@pytest.mark.parametrize("voice_mode", [False, True])
+async def test_silence_stops_only_destination_while_model_text_continues(tmp_path: Path, voice_mode: bool) -> None:
     gate = asyncio.Event()
     tts, local = FakeTts(), RecordingPlayer()
     backend = FakeBackend(FakeClock(), [[Text('Opening. '), Gate(gate), Text('Ending.')], [Text('Mac reply.')]])
-    async with remote_rig(tmp_path, backend, tts=tts, local=local) as (session, door, hub, _log, _backend, phones, _pairing):
+    clock = backend.clock
+    voice = VoiceMode(audio=ScriptedAudio(clock), tts=tts, player=local, clock=clock,
+                      metrics=RecordingMetrics(), notice=lambda _: None, timing=Timing(6, 4, 6, .5)) if voice_mode else None
+    async with remote_rig(tmp_path, backend, voice=voice, tts=tts, local=local) as (session, door, hub, _log, _backend, phones, _pairing):
         async with connect(session, door, phones[0].token) as socket:
             await foreground(socket)
             await hub.admit_line(Line('Phone', 0, typed=False, client_id=phones[0].client.id))
@@ -192,7 +196,8 @@ async def test_silence_on_phone_leaves_active_mac_reply_untouched(tmp_path: Path
             assert local.events.count('stop') == stops
 
 
-async def test_reconnected_silent_focus_tells_held_news_as_text_once(tmp_path: Path) -> None:
+@pytest.mark.parametrize("offline_choice", [False, True])
+async def test_reconnected_silent_focus_tells_held_news_as_text_once(tmp_path: Path, offline_choice: bool) -> None:
     arrival, reported = asyncio.Event(), asyncio.Event()
     tts = FakeTts()
     backend = FakeBackend(FakeClock(), [[Tool('delegate', {'request': 'Fix typo', 'context': ''})],
@@ -203,14 +208,21 @@ async def test_reconnected_silent_focus_tells_held_news_as_text_once(tmp_path: P
         token = phones[0].token
         async with connect(session, door, token) as socket:
             await foreground(socket)
-            assert (await control(socket, 'off', 'set_silence', silence=True))['ok']
+            if not offline_choice:
+                assert (await control(socket, 'off', 'set_silence', silence=True))['ok']
             assert (await control(socket, 'task', 'say_text', text='Fix typo'))['ok']
             await until(lambda: len(backend.all_sessions('orchestrator')) == 1)
         await until(lambda: (client := hub.clients.get(phones[0].client.id)) is not None and not client.connected)
         arrival.set()
         await reported.wait()
         async with connect(session, door, token) as socket:
-            await foreground(socket)
+            await through(socket, 'replay_complete')
+            if offline_choice:
+                result = await control(socket, 'offline-off', 'set_silence', silence=True)
+                assert result['ok'] and result['result'] == {'silence': True}
+                client = hub.clients.get(phones[0].client.id)
+                assert client is not None and client.silence and not client.can_show_text
+            await socket.send_json(command('visible-after-silence', 'set_presence', can_show_text=True))
             frames = await through(socket, 'reply_end')
             assert frames[-1]['payload']['text'] == 'Two updates, sir.'
             assert not any(frame['type'].startswith('speech_') for frame in frames)

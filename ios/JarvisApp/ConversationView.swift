@@ -156,7 +156,7 @@ struct ConversationView: View {
                     .underline()
                     .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
-                    .disabled(!session.connection.canSend)
+                    .disabled(!session.voiceOn || !session.connection.canSend)
                     .accessibilityLabel("Play reply")
                 if let message = session.replayMessages[String(row.id.dropFirst(6))] ?? session.playback.messages[String(row.id.dropFirst(6))] {
                     Text(message).font(.system(size: controlSize)).foregroundStyle(theme.secondary)
@@ -198,6 +198,9 @@ struct ConversationView: View {
 
     private var composer: some View {
         VStack(spacing: 12) {
+            if let message = session.voiceMessage {
+                Text(message).foregroundStyle(theme.secondary)
+            }
             if let message = session.talk.message {
                 Text(message).foregroundStyle(theme.secondary)
                 if session.talk.microphoneRefused {
@@ -232,22 +235,12 @@ struct ConversationView: View {
                 if controlSize > 20 {
                     VStack(spacing: 12) {
                         TalkKey(talk: session.talk, controlSize: controlSize)
-                        Text("Voice · Coming soon")
-                            .foregroundStyle(theme.secondary)
-                            .frame(minHeight: 44)
+                        VoiceControl(session: session, controlSize: controlSize)
                     }
                 } else {
                     HStack(alignment: .top, spacing: 12) {
                         TalkKey(talk: session.talk, controlSize: controlSize)
-                        VStack(spacing: 6) {
-                            Text("Voice")
-                            Text("Coming\nsoon").multilineTextAlignment(.center)
-                        }
-                        .padding(12)
-                        .frame(minWidth: 60, minHeight: 88)
-                        .foregroundStyle(theme.secondary)
-                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.secondary, lineWidth: 1))
-                        .accessibilityElement(children: .combine)
+                        VoiceControl(session: session, controlSize: controlSize)
                     }
                 }
             }
@@ -271,4 +264,28 @@ struct ConversationView: View {
 private struct ConversationBottom: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+struct VoiceControl: View {
+    @Bindable var session: AppSession
+    var controlSize: CGFloat
+    @Environment(\.colorScheme) private var scheme
+    private var theme: JarvisTheme { JarvisTheme(scheme: scheme) }
+
+    var body: some View {
+        Button { Task { await session.setVoiceOn(!session.voiceOn) } } label: {
+            Text(session.voiceOn ? "Voice on" : "Voice off")
+                .font(.system(size: controlSize))
+                .multilineTextAlignment(.center)
+                .padding(12)
+                .frame(minWidth: 72, minHeight: controlSize > 20 ? 44 : 88)
+                .frame(maxWidth: controlSize > 20 ? .infinity : nil)
+                .contentShape(Rectangle())
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.secondary, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(theme.secondary)
+        .accessibilityHint(session.voiceOn ? "Turn off speech on this phone" : "Turn on speech on this phone")
+        .accessibilityValue(session.voicePending ? "Waiting for the Mac" : session.voiceOn ? "On" : "Off")
+    }
 }
