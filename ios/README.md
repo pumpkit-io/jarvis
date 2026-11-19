@@ -1,6 +1,6 @@
 # Jarvis on iPhone
 
-The app target is in `JarvisApp/`. Shared Client logic is in the `JarvisClient` Swift package, which builds and tests on the Mac without a phone. On first launch, Pairing accepts the QR printed by `./jarvis pair` or its HTTPS origin and six-digit code. The paired app opens the Conversation skeleton with the live connection state. Talk, typing and Voice remain Coming soon until their tickets wire them to the Hub. Pairing requests camera permission only when Scan is pressed; it never requests microphone access.
+The app target is in `JarvisApp/`. Shared Client logic is in the `JarvisClient` Swift package, which builds and tests on the Mac without a phone. On first launch, Pairing accepts the QR printed by `./jarvis pair` or its HTTPS origin and six-digit code. The paired app opens the live Conversation script and typed composer. Talk and Voice remain Coming soon until their tickets wire them to the Hub. Pairing requests camera permission only when Scan is pressed; it never requests microphone access.
 
 ## Hub client package
 
@@ -13,6 +13,16 @@ The app lifecycle and audio owners must use the package policy. Call `setForegro
 Pass `HubNetworkPaths.changes` to `start(paths:)` to replace attempts after network changes. Retain the path owner, call `stop()` and cancel the path owner when unpairing, and create a new transport/client for new pairing credentials. Path availability is only a hint: only actual HTTP/transport responses distinguish a reachable Mac proxy with a stopped Hub from a timeout or unreachable Mac. The app's `AppSession` owns the single updates consumer, network-path owner and foreground policy. It loads one coherent Keychain credential record, starts a fresh Client for that identity, and clears credentials on token refusal. In-flight pairing is generation-guarded so an old response cannot restore an unpaired identity. Recorder, player and conversation persistence remain later tickets.
 
 Swift tests read the single Python-generated `Tests/JarvisClientTests/Fixtures/client-v1.json` resource directly and replay its typed exchange through the client. Fake transport, HTTP, clock, cache, path and lifecycle seams test retries, generation ownership, audio framing, reachability and background policy without starting a Hub or spending model usage. The native receive seam injects Foundation WebSocket messages while keeping the real adapter conversion and native buffer configuration. A Python-loopback recording of 70 KB shown text and a reply exercises that boundary through cache and reconnect. The 64 KiB limit applies to outbound Client commands; native receives use the platform integer maximum because v1 defines no Hub event size ceiling. These tests do not establish a real URLSession handshake, device connection or iOS background execution.
+
+## Conversation
+
+`AppSession` is the only consumer of `HubClient.updates`. It routes replayable events through the package's `ConversationProjection`, which retains canonical events and groups script rows by request/reply identity. Sequence deduplication handles reconnect replay; older events can enter the same projection in sequence order for later history support. Live deltas append, while `reply_end` replaces the text with the authoritative final reply. Both Clients appear without source filtering. A show arriving before text creates the reply anchor; an unassociated show has its own stable Details anchor. Details use native disclosure and literal selectable text, with no remote content loading.
+
+The typed composer sends `say_text` only after actual Client readiness. Empty lines and lines over 16,384 UTF-8 bytes cannot send. Each submission retains its original command and tracks acknowledgement separately from local transport completion. A write failure or unanswered result remains uncertain; the same pending text cannot create a new command id. The Client owns exact-id retry and reconnect. A definitive rejection keeps its original words selectable and offers Restore line. Terminal `outcome_unknown` results offer Review and restore line, with explicit confirmation after checking the conversation; restoration only fills the composer, and a separate Send action creates a new command. A still-retained uncertain request cannot use this recovery path and continues to retry its original id. Restoration never replaces a newer draft: the original words stay available to copy until the current draft is finished or cleared. Known preflight failure is reconciled against the Client’s retained command and completed result in one actor turn. A generic queued connection failure cannot turn a command that was never retained into a phantom pending request. The original words remain in the composer, or stay selectable and restorable if a newer draft exists. Late send completion preserves a known result and an explicitly restored draft. Unpairing clears the script and pending line state, with generation checks preventing old async completions from changing a new session. The script and draft are memory-only; durable history belongs to the later cache ticket and must reuse this projection. The defaulted `AppSession.sendCommand` boundary delegates directly to `HubClient.send`; fake tests can hold that boundary while an actual fake-socket disconnect reaches the real Client preflight guard. Separate controlled socket tests deliver accepted/rejected results before a late write error. Tests observe public session recovery, draft and result behavior, without manipulating private queues.
+
+The screen follows the accepted palette and script typography, keeps Details expansion keyed to stable rows, and follows incoming text only while the latest content is in view. Conversation gaps over one hour use event timestamps. Status comes directly from the Client, including warmup and Usage-limit reset information; stale text remains readable offline. The composer sits in the safe-area inset and hides the future Talk/Voice placeholders while typing. Keyboard, scrolling gestures and VoiceOver still need installed-device verification.
+
+Native macOS-hosted renders at 393 × 852 points were inspected for populated, streaming, empty, offline, Usage-limit and expanded Details states in both themes. Rejection, terminal uncertainty, newer-draft preservation and restored-composer recovery states were also inspected in both themes. Separate 38/30-point base-type stress renders check wrapping at twice the normal 19/15-point sizes. The host does not exercise iOS Dynamic Type, safe areas or the on-screen keyboard. Swift 6 direct iPhone SDK compilation and linking cover the package and full native app; these are not a signed device build or launch.
 
 ## Pairing
 
@@ -34,7 +44,7 @@ xcodebuild -project ios/Jarvis.xcodeproj -scheme Jarvis \
   -derivedDataPath ios/.build CODE_SIGNING_ALLOWED=NO build
 ```
 
-`project.yml` is the checked-in project definition. The generated Xcode project, plist and build output are ignored. Open `ios/Jarvis.xcodeproj` after generating it to use the Dark and Light SwiftUI previews. Swift checks run locally; there is no Swift CI.
+`project.yml` is the checked-in project definition. The generated Xcode project, plist and build output are ignored. Open `ios/Jarvis.xcodeproj` after generating it to inspect the app in Xcode. Swift checks run locally; there is no Swift CI.
 
 ## Install on your iPhone
 
@@ -71,7 +81,7 @@ Ratios were computed with the `ui-design` skill's `scripts/contrast-check.py`. T
 | Adjusted light Talk key | `#806020` | Linen | 4.95:1 |
 | Light Talk label | Linen | `#806020` | 4.95:1 |
 
-Only the light-theme Slate and Brass are darkened. The Talk key stays the only large coloured element. The red Signal is reserved for recording and is not used by this skeleton. Dynamic Type scales both type sizes, the script scrolls, and the bottom controls are kept above the safe area. The screen contains no invented conversation, Tasks or readiness claim.
+Only the light-theme Slate and Brass are darkened. The Talk key stays the only large coloured element. The red Signal is reserved for recording and is not used until recording is implemented. Dynamic Type scales both type sizes, the script scrolls, and the bottom controls are kept above the safe area. The screen contains no invented conversation, Tasks or readiness claim.
 
 ## Verification still needing the device
 

@@ -8,10 +8,89 @@ import Observation
     public private(set) var pairing = false
     public private(set) var error: PairingError?
     public private(set) var client: HubClient?
+    public private(set) var conversation = ConversationProjection()
+    public var draft = ""
+    public private(set) var typedLines: [TypedLine] = []
+    public private(set) var inputMessage: String?
+
+    public var draftValidationMessage: String? {
+        draft.utf8.count > 16_384 ? "Your line is too long. Use at most 16,384 UTF-8 bytes." : nil
+    }
+
+    public var canSubmit: Bool {
+        connection.canSend && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && draft.utf8.count <= 16_384 && !typedLines.contains {
+                $0.text == draft && ($0.outcome == .unanswered || $0.outcome == .deliveryUncertain || $0.outcome == .outcomeUnknown)
+            }
+    }
+
+    @discardableResult public func recoverTypedLine(id: String) -> Bool {
+        guard let index = typedLines.firstIndex(where: { $0.id == id }),
+              typedLines[index].canRecover,
+              draft.isEmpty || draft == typedLines[index].text else { return false }
+        draft = typedLines[index].text
+        typedLines[index].outcome = .recovered
+        return true
+    }
+
+    public func sendTypedLine() async {
+        guard canSubmit, let client else {
+            if let message = draftValidationMessage { inputMessage = message }
+            return
+        }
+        let owner = generation
+        let text = draft
+        let command = HubCommand(type: "say_text", payload: ["text": .string(text)])
+        typedLines.append(TypedLine(command: command, outcome: .unanswered)); inputMessage = nil
+        do {
+            try await sendCommand(client, command)
+            guard generation == owner else { return }
+            if draft == text && typedLines.first(where: { $0.id == command.id })?.outcome != .recovered { draft = "" }
+        } catch {
+            let delivery = await client.delivery(of: command.id)
+            guard generation == owner, let index = typedLines.firstIndex(where: { $0.id == command.id }) else { return }
+            if typedLines[index].outcome == .accepted {
+                if draft == text { draft = "" }
+                return
+            }
+            guard typedLines[index].outcome == .unanswered || typedLines[index].outcome == .deliveryUncertain else { return }
+            switch delivery {
+            case .pending: typedLines[index].outcome = .deliveryUncertain
+            case .completed(let result):
+                receive(.result(result))
+                if result.ok && draft == text { draft = "" }
+            case .absent:
+                if draft == text {
+                    typedLines.remove(at: index)
+                    inputMessage = "Can't reach the Mac. Your line is still here to send."
+                } else {
+                    typedLines[index].outcome = .notSent
+                }
+            }
+        }
+    }
+
+    private func receive(_ update: HubClientUpdate) {
+        switch update {
+        case .event(let event): conversation.ingest(event)
+        case .result(let result):
+            guard let index = typedLines.firstIndex(where: { $0.id == result.id }) else { return }
+            if result.ok { typedLines[index].outcome = .accepted }
+            else if result.error?.code == "outcome_unknown" { typedLines[index].outcome = .outcomeUnknown }
+            else { typedLines[index].outcome = .rejected(result.error?.message ?? "Jarvis could not accept your line.") }
+        case .failure:
+            for index in typedLines.indices where typedLines[index].outcome == .unanswered {
+                typedLines[index].outcome = .deliveryUncertain
+            }
+        default: break
+        }
+    }
+
     private let store: any PairingStore
     private let service: PairingService
     private let makeClient: (PairingCredentials) throws -> HubClient
     private let makePaths: () -> HubNetworkPaths?
+    private let sendCommand: @Sendable (HubClient, HubCommand) async throws -> Void
     private var paths: HubNetworkPaths?
     private var updates: Task<Void, Never>?
     private var generation: UInt64 = 0
@@ -21,8 +100,10 @@ import Observation
     public init(store: any PairingStore, service: PairingService = .urlSession,
                 makeClient: @escaping (PairingCredentials) throws -> HubClient = {
                     HubClient(transport: try .urlSession(origin: $0.origin, token: $0.deviceToken))
-                }, makePaths: @escaping () -> HubNetworkPaths? = { HubNetworkPaths() }) {
+                }, makePaths: @escaping () -> HubNetworkPaths? = { HubNetworkPaths() },
+                sendCommand: @escaping @Sendable (HubClient, HubCommand) async throws -> Void = { try await $0.send($1) }) {
         self.store = store; self.service = service; self.makeClient = makeClient; self.makePaths = makePaths
+        self.sendCommand = sendCommand
     }
 
     public func launch() async {
@@ -63,6 +144,7 @@ import Observation
         updates?.cancel(); updates = nil; paths?.cancel(); paths = nil
         client = nil; credentials = nil; connection = .unpaired; pairing = false; loading = false
         do { try store.clear(); error = nil } catch { self.error = .storage }
+        conversation = ConversationProjection(); typedLines = []; draft = ""; inputMessage = nil
         await old?.stop()
     }
 
@@ -82,13 +164,25 @@ import Observation
                 if case .state(let state) = update {
                     if state == .unpaired { await self.unpair(); return }
                     self.connection = state
-                }
+                } else { self.receive(update) }
             }
         }
         if !foreground { await client.setForeground(false) }
         guard generation == owner else { await client.stop(); return }
         await client.start(paths: paths?.changes)
         if generation != owner { await client.stop() }
+    }
+}
+
+private enum CommandDelivery: Sendable {
+    case pending, completed(CommandResult), absent
+}
+
+private extension HubClient {
+    // Read retention and results in one actor turn so an arriving result cannot fall between two snapshots.
+    func delivery(of id: String) -> CommandDelivery {
+        if let result = results[id] { return .completed(result) }
+        return pendingCommands.contains { $0.id == id } ? .pending : .absent
     }
 }
 
