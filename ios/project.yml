@@ -1,0 +1,45 @@
+name: Jarvis
+options:
+  bundleIdPrefix: io.pumpkit
+  createIntermediateGroups: true
+packages:
+  JarvisClient:
+    path: JarvisClient
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    CODE_SIGN_STYLE: Automatic
+    TARGETED_DEVICE_FAMILY: "1"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  Jarvis:
+    type: application
+    platform: iOS
+    sources:
+      - JarvisApp
+    dependencies:
+      - package: JarvisClient
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.pumpkit.jarvis
+    info:
+      path: .generated/Info.plist
+      properties:
+        CFBundleDisplayName: Jarvis
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSMicrophoneUsageDescription: Jarvis records only while you use the Talk key.
+        NSCameraUsageDescription: Scan the pairing code shown by Jarvis on your Mac.
+        UIBackgroundModes:
+          - audio
+schemes:
+  Jarvis:
+    build:
+      targets:
+        Jarvis: all
+    run:
+      config: Debug
