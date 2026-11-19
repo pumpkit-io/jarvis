@@ -353,7 +353,7 @@ class RecordingOutput:
         self.log: list[tuple[str, str]] = []
         self.on_text: asyncio.Event = asyncio.Event()
 
-    def heard(self, text: str, *, typed: bool = True) -> None:
+    def heard(self, text: str, *, typed: bool = True, client_id: str = "terminal") -> None:
         self.log.append(("heard" if typed else "said", text))
 
     def reply(self, text: str) -> None:

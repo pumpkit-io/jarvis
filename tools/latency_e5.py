@@ -141,22 +141,16 @@ async def real_run(args: argparse.Namespace) -> None:
                 from_client: Json = {}
                 canonical_completed = False
                 timing = None
+                reply = None
+                audio_requested = False
                 audio_status, audio_reason = 'unavailable', None
                 try:
                     async with asyncio.timeout(args.timeout):
                         result, timing = await client.upload(path)
                         reply = await client.reply(result['request_id'])
                         canonical_completed = True
-                        reply_id = reply['payload']['reply_id']
-                        if client.silence or not reply['payload']['text'] or reply['payload']['reason'] != 'complete':
-                            audio_status = 'not_requested'
-                        else:
-                            await client.wait(lambda: reply_id in client.audio_done_replies
-                                              or reply_id in client.unavailable_audio_replies)
-                            audio_status = 'complete' if reply_id in client.audio_done_replies else 'unavailable'
-                            audio_reason = None if audio_status == 'complete' else 'disconnected'
-                            if reply_id in client.audio_stop_reasons:
-                                audio_status, audio_reason = 'unavailable', client.audio_stop_reasons[reply_id]
+                        audio_requested = client.audio_requested(reply)
+                        await client.wait_audio(reply, requested=audio_requested)
                 except Exception as error:
                     audio_reason = 'deadline' if isinstance(error, TimeoutError) else type(error).__name__
                 if timing is not None:
@@ -165,7 +159,10 @@ async def real_run(args: argparse.Namespace) -> None:
                     from_client = {'release_upload_start': None, 'body_handoff_end': None,
                                    'first_matching_clip_received': None, 'upload_duration_seconds': None,
                                    'release_to_first_clip_seconds': None, 'handoff_to_first_clip_seconds': None}
-                if audio_status == 'unavailable' and from_client['first_matching_clip_received'] is not None:
+                if reply is not None:
+                    audio_status, audio_reason = client.audio_outcome(reply, requested=audio_requested,
+                        first_clip=from_client['first_matching_clip_received'] is not None, failure=audio_reason)
+                elif from_client['first_matching_clip_received'] is not None:
                     audio_status = 'partial'
                 return {**from_client, 'canonical_completed': canonical_completed, 'audio_status': audio_status,
                         'audio_reason': audio_reason, 'request_uncertain': not canonical_completed,

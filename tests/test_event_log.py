@@ -79,7 +79,7 @@ def test_output_is_durable_before_it_reaches_the_screen(tmp_path: Path, kind: st
                 [event] = reader.after(0)
                 assert event.type == expected
 
-        def heard(self, text: str, *, typed: bool = True) -> None:
+        def heard(self, text: str, *, typed: bool = True, client_id: str = "terminal") -> None:
             self.record("heard")
 
         def reply(self, text: str) -> None:

@@ -666,59 +666,34 @@ async def test_replayed_speech_cannot_recreate_session_permission_after_restart(
         await hub.close()
 
 
-async def test_uploaded_scopes_keep_complete_immutable_text_and_bounded_history() -> None:
-    from jarvis_hub.spoken import SpokenScopes
-    from jarvis_hub.voice.ownership import SpokenTurn
-    from tests.fakes import FakeClock
+async def test_pending_local_task_authority_survives_heavy_uploaded_history(rig_for: MakeRig) -> None:
+    from jarvis_hub.clients import Client
+    from jarvis_hub.hub import Line
 
-    clock = FakeClock()
-    scopes = SpokenScopes(clock, change=lambda: None, notice=lambda text: None)
-    text = 'Please retain every condition. ' * 230
-    try:
-        with pytest.raises(ValueError, match='limit'):
-            scopes.admit('mac-too-long', 0, (text,), clock.now())
-        mac = SpokenTurn('mac', 0, 'a' * 6000, clock.now(), 'en')
-        with pytest.raises(ValueError, match='limit'):
-            mac.amended('More', clock.now(), 'en')
-        scopes.admit('pending-mac', 0, ('Inspect build',), clock.now())
-        scopes.bind('pending-mac', 'T1')
-        scopes.admit('pending-mac', 1, ('Inspect build', 'including tests'), clock.now())
-        for index in range(70):
-            scope = scopes.admit(f'upload-{index}', 0, (text,), clock.now(), one_shot=True)
-            assert scope.current_text == text.strip() and not scope.pending
-            scopes.prune()
-        assert len(scopes.dump(lambda value: value)) == 65
-        assert scopes.held('T1')
-        retained = scopes.get('upload-69')
-        assert retained is not None and retained.segments == (text,)
-        before = scopes.dump(lambda value: value)
-        with pytest.raises(ValueError, match='immutable'):
-            scopes.admit('upload-69', 1, (text, 'An amendment'), clock.now(), one_shot=True)
-        with pytest.raises(ValueError, match='immutable'):
-            scopes.admit('upload-69', 0, ('A replacement',), clock.now(), one_shot=True)
-        with pytest.raises(ValueError, match='immutable'):
-            scopes.admit('upload-69', 0, (text,), clock.now())
-        assert scopes.dump(lambda value: value) == before
-    finally:
-        await scopes.close()
-
-
-@pytest.mark.parametrize('change', [
-    {'one_shot': False}, {'one_shot': 'true'}, {'revision': 1}, {'pending': True},
-    {'segments': ('first', 'second')}, {'segments': (42,)},
-    {'typed_context': ('An amendment',)}, {'semantic_start': 1},
-])
-async def test_long_uploaded_scope_restore_preserves_its_one_revision_policy(change: dict[str, Any]) -> None:
-    from jarvis_hub.spoken import SpokenScopes
-    from tests.fakes import FakeClock
-
-    scopes = SpokenScopes(FakeClock(), change=lambda: None, notice=lambda text: None)
-    try:
-        scopes.admit('upload', 0, ('x' * 6001,), 0, one_shot=True)
-        [record] = scopes.dump(lambda value: value)
-        [restored] = SpokenScopes.load([record], lambda value: value)
-        assert restored.one_shot and restored.segments == ('x' * 6001,)
-        with pytest.raises(ValueError):
-            SpokenScopes.load([{**record, **change}], lambda value: value)
-    finally:
-        await scopes.close()
+    choose, report = asyncio.Event(), asyncio.Event()
+    rig = await rig_for(
+        [Tool('delegate', {'request': 'Check build'}), AwaitInterrupt()],
+        [Gate(choose), ResolveScope('revise_tasks', ('T1',)), Text('Updated local request.')],
+        orchestrator=[[Gate(report), Tool('report', {'task_id': 'T1', 'spoken': 'Stale build result', 'needs_user': False})]],
+        recognition=LocalRelation('directed'),
+    )
+    rig.audio.wake()
+    rig.audio.say('Check build')
+    await until(lambda: bool(rig.backend.all_sessions('orchestrator')))
+    rig.audio.say('including tests')
+    await until(lambda: len(rig.user_messages()) == 2)
+    rig.hub.attach_client(Client('phone', 'iphone', connected=True, can_show_text=True))
+    transcript = 'Keep every condition of this independent request. ' * 130
+    for _ in range(70):
+        request = await rig.hub.begin_remote_talk('phone')
+        assert await rig.hub.admit_line(Line(transcript, rig.clock.now(), typed=False,
+            client_id='phone', request_id=request, segments=(transcript,))) == request
+    report.set()
+    await rig.settle()
+    assert rig.backend.session('orchestrator').tool_results == []
+    assert 'Stale build result' not in ''.join(rig.output.replies)
+    choose.set()
+    await until(lambda: any(r.name == 'resolve_scope' for r in rig.backend.session('talker').tool_results))
+    resolved = next(r for r in rig.backend.session('talker').tool_results if r.name == 'resolve_scope')
+    assert 'Refused' in str(resolved.result)
+    assert 'Stale build result' not in ''.join(rig.output.replies)

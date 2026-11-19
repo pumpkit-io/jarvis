@@ -22,7 +22,7 @@ Small actions have a 44-point minimum touch height. The Talk key has an 88-point
 
 ## Motion
 
-There are no custom animation durations or easing tokens. Conversation follows new text while the reader is near the bottom, preserves older reading position and uses native scrolling, disclosure and navigation. Recording changes the key colour, label and elapsed timer. Playback highlights the current sentence. Connection, pending and failure states use visible text rather than decorative motion.
+There are no custom animation durations or easing tokens. Conversation follows new text while the reader is near the bottom, preserves older reading position and uses native scrolling, disclosure and navigation. The Talk key scales to 0.98 while pressed and returns to full size on release or cancellation, without a timed animation. Recording changes the key colour, label and elapsed timer. Playback highlights the current sentence. Connection, pending and failure states use visible text rather than decorative motion.
 
 ## Voice
 

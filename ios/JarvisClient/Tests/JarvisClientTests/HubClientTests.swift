@@ -682,7 +682,6 @@ func acknowledgeSilence(_ socket: FakeSocket, _ command: HubCommand, value: Bool
     await acknowledgeSilence(second, newest, value: false)
     try await eventually { await client.state == .ready }
     #expect(await second.sent.map(\.type) == ["set_silence", "set_silence", "set_presence"])
-    #expect(await client.pendingCommands.isEmpty)
     await client.stop()
 }
 

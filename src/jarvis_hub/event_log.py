@@ -229,7 +229,7 @@ class EventOutput:
         with self._lock:
             self._append("heard", {"request_id": request_id or uuid.uuid4().hex, "text": text, "spoken": not typed}, client_id)
             if display:
-                self.destination.heard(text, typed=typed)
+                self.destination.heard(text, typed=typed, client_id=client_id)
 
     def reply(self, text: str) -> None:
         with self._lock:

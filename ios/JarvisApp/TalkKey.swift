@@ -27,6 +27,7 @@ struct TalkKey: View {
         .padding(.vertical, 12)
         .foregroundStyle(recording ? Color.white : theme.keyText)
         .background(recording ? theme.signal : theme.brass, in: RoundedRectangle(cornerRadius: 10))
+        .scaleEffect(gestureStarted && !gestureCancelled ? 0.98 : 1)
         .opacity(talk.canPress || recording || talk.state == .authorizing ? 1 : 0.55)
         .disabled(!talk.ready || talk.state == .uploading || talk.state == .thinking)
         .contentShape(Rectangle())
