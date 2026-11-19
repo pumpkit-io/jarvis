@@ -8,6 +8,7 @@ struct ConversationView: View {
     @ScaledMetric(relativeTo: .subheadline) var controlSize = 15
     @FocusState private var typing: Bool
     @State private var followsLatest = true
+    @State private var readingAnchor: String?
     @State private var recoveryCandidate: String?
     @State var expandedDetails: Set<String> = []
     private var theme: JarvisTheme { JarvisTheme(scheme: scheme) }
@@ -22,7 +23,22 @@ struct ConversationView: View {
             GeometryReader { viewport in
             ScrollViewReader { proxy in
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 32) {
+                    LazyVStack(alignment: .leading, spacing: 32) {
+                        if session.hasOlderHistory {
+                            VStack(alignment: .leading) {
+                                if session.loadingHistory { ProgressView("Loading older history…") }
+                                else if session.connection.canSend {
+                                    Button("Older history") { Task { await session.loadOlderHistory() } }
+                                        .buttonStyle(.plain).underline()
+                                } else { Text("Older history") }
+                            }
+                            .font(.system(size: controlSize))
+                            .foregroundStyle(theme.secondary).frame(minHeight: 44)
+                            .task(id: session.connection.canSend) { await session.loadOlderHistory() }
+                        }
+                        if let message = session.historyMessage {
+                            Text(message).font(.system(size: controlSize)).foregroundStyle(theme.secondary)
+                        }
                         if session.conversation.rows.isEmpty {
                             Text("Nothing said yet. Hold the key and ask Jarvis something.")
                                 .font(.system(size: scriptSize, design: .serif))
@@ -37,7 +53,7 @@ struct ConversationView: View {
                                         .foregroundStyle(theme.secondary)
                                 }
                                 scriptRow(row)
-                            }
+                            }.id(row.id)
                         }
                         ForEach(session.typedLines.filter { !$0.message.isEmpty }) { line in
                             typedLineStatus(line)
@@ -48,17 +64,20 @@ struct ConversationView: View {
                                     value: marker.frame(in: .named("script")).maxY)
                             })
                     }
+                    .scrollTargetLayout()
                     .foregroundStyle(theme.text)
                     .frame(maxWidth: 640, alignment: .leading)
                     .frame(maxWidth: .infinity)
                     .padding(20)
                 }
+                .scrollPosition(id: $readingAnchor)
                 .coordinateSpace(name: "script")
                 .onPreferenceChange(ConversationBottom.self) { bottom in
                     followsLatest = bottom <= viewport.size.height + 60
                 }
-                .onChange(of: session.conversation.rows) {
-                    if followsLatest { proxy.scrollTo("latest", anchor: .bottom) }
+                .onChange(of: session.conversation.rows) { previous, current in
+                    let prepended = previous.first.map { old in current.first.map { $0.sequence < old.sequence } ?? false } ?? false
+                    if followsLatest && !prepended { proxy.scrollTo("latest", anchor: .bottom) }
                 }
                 .onChange(of: session.typedLines) {
                     if followsLatest { proxy.scrollTo("latest", anchor: .bottom) }
