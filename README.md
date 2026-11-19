@@ -80,14 +80,22 @@ With the door enabled, ordinary `./jarvis --text` accepts spoken phone requests 
 
 `GET /v1/health` returns protocol `version: 1`, model readiness, the Mac name and the Usage limit. It requires a device token under [protocol v1](docs/protocol/client-v1.md), following Spec #91's every-request authentication rule over #101's health exception. Unpaired and revoked tokens receive HTTP 401. The running Hub looks up each token in the durable device store on every request; CLI revocation takes effect on the next HTTP call. The health response exposes no paths, configuration or credentials.
 
-After completing the account checklist below, run this on the Mac, using the configured port:
+Inspect the current Serve configuration before changing it:
 
 ```sh
-tailscale serve --bg http://127.0.0.1:8765
 tailscale serve status
 ```
 
-Set `JARVIS_REMOTE_ORIGIN` to the HTTPS origin printed by Serve, for example `https://mac.example.ts.net`. Then run `./jarvis pair` in another terminal. It prints a six-digit code and a terminal QR containing protocol version, origin and code. `./jarvis pair --origin https://mac.example.ts.net` overrides the configured origin for that code. Pairing never guesses the address from an HTTP Host header.
+Preserve existing services. On the implementation Mac, HTTPS 443 already serves an unrelated service on loopback port 3000. Do not replace it. Choose an unused HTTPS port after checking status; for example, if 8443 is free:
+
+```sh
+tailscale serve --bg --https=8443 http://127.0.0.1:8765
+tailscale serve status
+```
+
+If HTTPS 443 is unused, `tailscale serve --bg --https=443 http://127.0.0.1:8765` uses the default HTTPS origin. These commands are setup instructions, not actions already performed. Do not reset Serve, overwrite an occupied route, or use Funnel. The installed CLI's `serve --help` documents `--bg` and `--https`.
+
+Set `JARVIS_REMOTE_ORIGIN` to the exact HTTPS origin printed for Jarvis, including a nondefault port, for example `https://mac.example.ts.net:8443`. Use a root origin: v1 Clients do not support a non-root path prefix. Then run `./jarvis pair` in another terminal. It prints a six-digit code and a terminal QR containing protocol version, origin and code. `./jarvis pair --origin https://mac.example.ts.net:8443` overrides the configured origin for that code. Pairing never guesses the address from an HTTP Host header.
 
 The code expires after five minutes and works once; creating another invalidates the previous code. Pairing requests need the running remote-enabled Hub, although the CLI can create the code while it is stopped. Five failed exchanges in five minutes lock pairing for five minutes. The lockout survives a Hub restart and creating a new code. A lost successful response needs a new code; the token is never returned again.
 
@@ -102,6 +110,10 @@ Waiting on the User, these account and device steps have not been performed or v
 - [ ] Restrict the tailnet ACL to the User's own devices reaching this Mac's Serve HTTPS port; remove broader rules that grant the same access.
 - [ ] Run Serve, verify its HTTPS origin from the iPhone and verify that another unauthorized tailnet device cannot reach it.
 - [ ] Scan the terminal QR on the physical iPhone, then check that authenticated health works and unpaired/revoked tokens are refused over HTTPS and cellular.
+
+The [iPhone setup and real-device checklist](docs/notes/iphone-real-device-verification.md) records every physical check as Waiting on User until it is observed. Build and install with [the iPhone instructions](ios/README.md#install-on-your-iphone).
+
+This slice requires a terminal running `./jarvis` on a Mac that stays awake and on power. It has no background service or keep-awake mechanism. The phone speaks news only while the app is open or an existing reply is still playing; opening the app does not take Focus. After talking to the Mac and leaving, Focus stays on the Mac until an input or explicit Focus request moves it, so news can still speak to the room. A free Personal Team app expires every 7 days and needs rebuilding from the Mac. There are no push notifications, always-on listening, Wake word on the phone, or fresh Talks while disconnected. Music coexistence remains an experiment for the next slice.
 
 ## Settings
 

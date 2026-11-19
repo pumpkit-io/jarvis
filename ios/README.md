@@ -1,6 +1,6 @@
 # Jarvis on iPhone
 
-The app target is in `JarvisApp/`. Shared Client logic is in the `JarvisClient` Swift package, which builds and tests on the Mac without a phone. On first launch, Pairing accepts the QR printed by `./jarvis pair` or its HTTPS origin and six-digit code. The paired app opens the live Conversation script and typed composer. The Talk key records while held and sends on release. Voice remains Coming soon until its ticket wires the control to the Hub. Pairing requests camera permission only when Scan is pressed; microphone permission is requested on the first Talk press.
+The app target is in `JarvisApp/`. Shared Client logic is in the `JarvisClient` Swift package, which builds and tests on the Mac without a phone. On first launch, Pairing accepts the QR printed by `./jarvis pair` or its HTTPS origin and six-digit code. The paired app opens the live Conversation script and typed composer. The Talk key records while held and sends on release. Voice on/off controls speech on this iPhone; Settings provides Hold or Tap gestures, Focus and confirmed unpairing. Pairing requests camera permission only when Scan is pressed; microphone permission is requested on the first Talk press.
 
 ## Hub client package
 
@@ -54,7 +54,7 @@ Waiting on the User's hands: install and exercise the hold, slide-up, permission
 
 Run `./jarvis pair` on the Mac with its configured HTTPS origin. Scan the QR or choose Type the code and enter that same origin and all six digits, including leading zeroes. Camera refusal leaves manual entry available and provides a Settings link. Scan capture stops on acceptance, dismissal and backgrounding.
 
-The unauthenticated pairing POST uses an ephemeral URLSession, refuses redirects and validates the entire response, protocol version and normalized origin before saving credentials. It never retries automatically: if the successful response was lost, create a new code on the Mac. The returned token, origin, Client id and display names live together in a single `WhenUnlockedThisDeviceOnly` Keychain item, behind the fakeable `PairingStore` boundary. No credentials are written to preferences, logs or files. `AppSession.unpair()` exposes cleanup for the later Settings screen.
+The unauthenticated pairing POST uses an ephemeral URLSession, refuses redirects and validates the entire response, protocol version and normalized origin before saving credentials. It never retries automatically: if the successful response was lost, create a new code on the Mac. The returned token, origin, Client id and display names live together in a single `WhenUnlockedThisDeviceOnly` Keychain item, behind the fakeable `PairingStore` boundary. No credentials are written to preferences, logs or files. The Settings screen calls `AppSession.unpair()` after confirmation.
 
 Fake POST/store/session/permission tests run without a Hub, camera, microphone or Keychain access. Light/dark Pairing states have been inspected in native macOS-hosted phone-size renders; direct Swift 6 iOS 17 SDK compilation and linking cover package and app sources. Neither proves actual camera scanning or Keychain behavior on an installed iPhone. Those checks, including install/relaunch, token revocation against a real Hub and permission changes in system Settings, still need the device.
 
@@ -141,15 +141,17 @@ Ratios were computed with the `ui-design` skill's `scripts/contrast-check.py`. T
 | Adjusted light Talk key | `#806020` | Linen | 4.95:1 |
 | Light Talk label | Linen | `#806020` | 4.95:1 |
 
-Only the light-theme Slate and Brass are darkened. The Talk key stays the only large coloured element. The red Signal is reserved for recording and is not used until recording is implemented. Dynamic Type scales both type sizes, the script scrolls, and the bottom controls are kept above the safe area. The screen contains no invented conversation, Tasks or readiness claim.
+Only the light-theme Slate and Brass are darkened. The Talk key stays the only large coloured element. The red Signal marks active recording. Dynamic Type scales both type sizes, the script scrolls, and the bottom controls are kept above the safe area. The screen contains no invented conversation, Tasks or readiness claim.
 
 ## Verification still needing the device
+
+Use the [real-device checklist](../docs/notes/iphone-real-device-verification.md) for setup, cellular/AirPods, two-Client room, security, lifecycle and accessibility checks. Every physical result remains Waiting on User.
 
 - Install and launch under the actual Personal Team, then trust the profile if prompted.
 - Check the empty script in light and dark themes, portrait and landscape, and with larger text.
 - Confirm the weekly rebuild installs over the existing app.
 
-The implementation Mac's Xcode 27.1 could generate the project, but `xcodebuild` failed before compiling: `IDESimulatorFoundation` could not load a required symbol from the installed `DVTDownloads` system framework. Xcode reported that first-launch setup was incomplete. Package build/tests and a direct iPhone SDK source type-check passed. Both themes were also inspected in offscreen macOS `NSHostingView` renders at 393 × 852 points; these are not iOS Simulator or device evidence. A full app build, simulator preview and signed device launch remain unverified until Xcode's system components are repaired and the phone/signing configuration is supplied. Do not treat these as completed device checks.
+The implementation Mac's Xcode 27.1 could generate the project, but `xcodebuild` failed before compiling: `IDESimulatorFoundation` could not load a required symbol from the installed `DVTDownloads` system framework. Xcode reported that first-launch setup was incomplete. Package build/tests and direct Swift 6 iOS 17 SDK compilation and linking passed. Both themes were also inspected in offscreen macOS `NSHostingView` renders at 393 × 852 points; these are not iOS Simulator or device evidence. A later process-local framework probe could enumerate the generated project; enumeration does not establish packaging. A full app package, simulator preview and signed device launch remain unverified by these checks. The actual phone version, Team and signing configuration still need the User. Do not treat these as completed device checks.
 
 Apple documents the [New York system serif](https://developer.apple.com/documentation/technologyoverviews/fonts) used for Jarvis's script. The generated project follows [XcodeGen's project specification](https://github.com/yonaskolb/XcodeGen/blob/master/Docs/ProjectSpec.md).
 
