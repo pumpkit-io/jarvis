@@ -273,6 +273,7 @@ func event(_ seq: Int, _ type: String, _ payload: String) -> String {
     await socket.text(event(3, "speech_clip", #"{"speech_id":"s","reply_id":"r","index":0,"text":"a","byte_length":4}"#))
     socket.input.yield(.binary(Data([0, 0, 1, 0])))
     try await eventually { await client.cursor == 3 }
+    try await eventually { await captured.clips.count == 1 }
     #expect(await captured.clips == [Data([0, 0, 1, 0])])
     await socket.text(event(4, "speech_clip", #"{"speech_id":"s","reply_id":"r","index":1,"text":"b","byte_length":4}"#))
     socket.input.yield(.binary(Data([0, 0])))
