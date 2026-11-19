@@ -36,15 +36,19 @@ public actor HubClient {
     public private(set) var state: HubConnectionState = .connecting
     public private(set) var cursor: Int64
     public private(set) var pendingCommands: [HubCommand] = []
+    public private(set) var unansweredCommands: Set<String> = []
     public private(set) var results: [String: CommandResult] = [:]
     public nonisolated let updates: AsyncStream<HubClientUpdate>
     private let continuation: AsyncStream<HubClientUpdate>.Continuation
     private let transport: HubTransport
     private let sleep: @Sendable (Double) async throws -> Void
+    private let acknowledgementSleep: @Sendable (Double) async throws -> Void
     private let lifecycleSleep: @Sendable (Double) async throws -> Void
     private let jitter: @Sendable () -> Double
     private let cache: @Sendable (HubEvent?, Int64) async throws -> Void
     private var socket: (any HubSocket)?
+    private var retryTimers: [String: (UUID, Task<Void, Never>)] = [:]
+    private var pendingData: [String: Data] = [:]
     private var task: Task<Void, Never>?
     private var generation: UInt64 = 0
     private var foreground = true
@@ -65,10 +69,11 @@ public actor HubClient {
     public init(transport: HubTransport, cursor: Int64 = 0,
                 sleep: @escaping @Sendable (Double) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
                 lifecycleSleep: @escaping @Sendable (Double) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
+                acknowledgementSleep: @escaping @Sendable (Double) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
                 jitter: @escaping @Sendable () -> Double = { Double.random(in: 0.8...1.2) },
                 cache: @escaping @Sendable (HubEvent?, Int64) async throws -> Void = { _, _ in }) {
         self.transport = transport; self.cursor = max(0, cursor); self.sleep = sleep
-        self.jitter = jitter; self.cache = cache; self.lifecycleSleep = lifecycleSleep
+        self.jitter = jitter; self.cache = cache; self.lifecycleSleep = lifecycleSleep; self.acknowledgementSleep = acknowledgementSleep
         (updates, continuation) = AsyncStream.makeStream()
     }
 
@@ -102,7 +107,7 @@ public actor HubClient {
         foreground = value
         playing = playingSpeechID != nil && playingSpeechID == activeSpeechID
         drainingSpeechID = value ? nil : playingSpeechID
-        if !value { setState(.suspended) }
+        if !value { cancelRetries(); setState(.suspended) }
         if value {
             if running { await replace() }
         } else if playing, displayReady, let socket {
@@ -131,14 +136,14 @@ public actor HubClient {
 
     public func send(_ command: HubCommand) async throws {
         guard running, foreground, handover, displayReady, state.canSend, let socket else { throw HubProtocolError.notConnected }
-        guard !command.id.isEmpty, results[command.id] == nil else { throw HubProtocolError.commandIDConflict }
-        if let existing = pendingCommands.first(where: { $0.id == command.id }) {
-            guard existing == command else { throw HubProtocolError.commandIDConflict }
-        } else { pendingCommands.append(command) }
+        let data = try encodedCommand(command)
+        try retain(command, data: data)
         // A successful send only reaches the local kernel. Keep the original command until its result.
         let owner = generation
-        do { try await socket.send(JSONEncoder().encode(command)) }
-        catch {
+        do {
+            try await socket.send(pendingData[command.id] ?? data)
+            if generation == owner { startRetryDeadline(command.id, owner: owner) }
+        } catch {
             if generation == owner { await socket.close() }
             throw error
         }
@@ -149,10 +154,74 @@ public actor HubClient {
               case .string(let speechID) = command.payload["speech_id"],
               foreground ? speechID == activeSpeechID : playing && speechID == drainingSpeechID else { throw HubProtocolError.notConnected }
         guard results[command.id] == nil else { return }
+        let data = try encodedCommand(command)
+        try retain(command, data: data)
+        let owner = generation
+        do {
+            try await socket.send(pendingData[command.id] ?? data)
+            if generation == owner { startRetryDeadline(command.id, owner: owner) }
+        } catch {
+            if generation == owner { await socket.close() }
+            throw error
+        }
+    }
+
+    private func startRetryDeadline(_ id: String, owner: UInt64) {
+        guard pendingData[id] != nil else { return }
+        retryTimers.removeValue(forKey: id)?.1.cancel()
+        let token = UUID()
+        let timer = Task {
+            for attempt in 0..<3 {
+                guard !Task.isCancelled else { return }
+                do { try await acknowledgementSleep(5) } catch { return }
+                guard await retryUnanswered(id, owner: owner, token: token, expired: attempt == 2) else { return }
+            }
+        }
+        retryTimers[id] = (token, timer)
+    }
+
+    private func retryUnanswered(_ id: String, owner: UInt64, token: UUID, expired: Bool) async -> Bool {
+        guard generation == owner, retryTimers[id]?.0 == token, let data = pendingData[id],
+              handover, let socket, foreground || pendingCommands.contains(where: {
+                  $0.id == id && $0.type == "playback_report" && playing
+              }) else { return false }
+        if expired {
+            retryTimers.removeValue(forKey: id)
+            unansweredCommands.insert(id)
+            continuation.yield(.failure("Command \(id) has no acknowledgement. Its outcome is still unknown; check history before sending a new request."))
+            return false
+        }
+        do { try await socket.send(data); return true }
+        catch {
+            if generation == owner { await socket.close() }
+            return false
+        }
+    }
+
+    private func cancelRetries() {
+        for (_, timer) in retryTimers.values { timer.cancel() }
+        retryTimers.removeAll()
+    }
+
+    private func encodedCommand(_ command: HubCommand) throws -> Data {
+        guard command.version == 1, !command.id.isEmpty, command.id.utf8.count <= 256,
+              command.id.unicodeScalars.allSatisfy({ $0.value >= 32 }),
+              !command.type.isEmpty, command.type.utf8.count <= 128 else { throw HubProtocolError.invalidFrame }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(command)
+        guard data.count <= 65_536 else { throw HubProtocolError.invalidFrame }
+        return data
+    }
+
+    private func retain(_ command: HubCommand, data: Data) throws {
+        guard results[command.id] == nil else { throw HubProtocolError.commandIDConflict }
         if let existing = pendingCommands.first(where: { $0.id == command.id }) {
             guard existing == command else { throw HubProtocolError.commandIDConflict }
-        } else { pendingCommands.append(command) }
-        try await socket.send(JSONEncoder().encode(command))
+        } else {
+            pendingCommands.append(command)
+            pendingData[command.id] = data
+        }
     }
 
     private func presenceExpired(_ id: String, owner: UInt64) async {
@@ -178,6 +247,7 @@ public actor HubClient {
         generation &+= 1
         let owner = generation
         task?.cancel(); task = nil
+        cancelRetries()
         let old = socket; socket = nil; handover = false; displayReady = false; presenceID = nil; activeSpeechID = nil
         presenceTimeout?.cancel(); presenceTimeout = nil
         presenceWaiter?.resume(); presenceWaiter = nil
@@ -224,8 +294,8 @@ public actor HubClient {
                     let frame = try HubFrame.decode(bytes)
                     switch frame {
                     case .commandResult(let result):
-                        if result.id == presenceID {
-                            presenceID = nil
+                        if let presenceID, result.id == presenceID {
+                            self.presenceID = nil
                             presenceTimeout?.cancel(); presenceTimeout = nil
                             let accepted = result.ok && result.result?["can_show_text"] == .bool(presenceDesired)
                             if !accepted { await retire(); return }
@@ -235,11 +305,16 @@ public actor HubClient {
                                 displayReady = true; failures = 0; refreshState()
                                 for command in pendingCommands {
                                     guard generation == owner, foreground else { return }
-                                    try await opened.send(JSONEncoder().encode(command))
+                                    guard let data = pendingData[command.id] else { throw HubProtocolError.invalidFrame }
+                                    try await opened.send(data)
+                                    if generation == owner { startRetryDeadline(command.id, owner: owner) }
                                 }
                             }
                         } else if let id = result.id, pendingCommands.contains(where: { $0.id == id }) {
                             pendingCommands.removeAll { $0.id == id }
+                            pendingData.removeValue(forKey: id)
+                            retryTimers.removeValue(forKey: id)?.1.cancel()
+                            unansweredCommands.remove(id)
                             results[id] = result
                             continuation.yield(.result(result))
                         }
@@ -281,6 +356,7 @@ public actor HubClient {
                 }
             } catch {
                 guard generation == owner else { await current?.close(); return }
+                cancelRetries()
                 socket = nil; handover = false; displayReady = false; presenceID = nil; activeSpeechID = nil
                 presenceTimeout?.cancel(); presenceTimeout = nil
                 presenceWaiter?.resume(); presenceWaiter = nil
@@ -318,8 +394,8 @@ public actor HubClient {
         guard displayReady else { return }
         if let status {
             if status.usage_limit.limited { setState(.usageLimited(resetTime: status.usage_limit.resets_at)) }
-            else { setState(status.ready ? .ready : .hubStopped) }
-        } else { setState(.ready) }
+            else { setState(status.ready ? .ready : .connecting) }
+        } else { setState(.connecting) }
     }
 }
 

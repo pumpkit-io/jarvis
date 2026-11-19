@@ -6,6 +6,7 @@ actor FakeSocket: HubSocket {
     nonisolated let frames: AsyncThrowingStream<SocketMessage, any Error>
     nonisolated let input: AsyncThrowingStream<SocketMessage, any Error>.Continuation
     var sent: [HubCommand] = []
+    var rawSent: [Data] = []
     var closed = false
     var holdClose = false
     var closeWaiter: CheckedContinuation<Void, Never>?
@@ -19,6 +20,7 @@ actor FakeSocket: HubSocket {
     func send(_ data: Data) async throws {
         let command = try JSONDecoder().decode(HubCommand.self, from: data)
         sent.append(command)
+        rawSent.append(data)
         if autoPresence, command.type == "set_presence", command.payload["can_show_text"] == .bool(true) {
             input.yield(.text(Data("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(command.id)\",\"ok\":true,\"result\":{\"can_show_text\":true}}".utf8)))
         }
@@ -32,6 +34,10 @@ actor FakeSocket: HubSocket {
     func blockClose() { holdClose = true }
     func releaseClose() { holdClose = false; closeWaiter?.resume(); closeWaiter = nil }
     func text(_ text: String) { input.yield(.text(Data(text.utf8))) }
+    func ready(through: Int64 = 0) {
+        input.yield(.text(Data("{\"version\":1,\"seq\":\(through + 1),\"time\":\"2026-11-19T00:00:00Z\",\"type\":\"status\",\"client_id\":\"test-status\",\"payload\":{\"ready\":true,\"usage_limit\":{\"limited\":false,\"resets_at\":null},\"quiet\":false,\"focus_client_id\":null,\"mac_voice_on\":true,\"silence\":false}}".utf8)))
+        text("{\"version\":1,\"type\":\"replay_complete\",\"through_seq\":\(through + 1)}")
+    }
 }
 
 actor FakeTransport {
@@ -57,16 +63,16 @@ func eventually(_ condition: @escaping () async -> Bool) async throws {
     try await eventually { await transport.socket(0) != nil }
     await #expect(throws: HubProtocolError.self) { try await client.send(HubCommand(id: "early", type: "say_text")) }
     let first = try #require(await transport.socket(0))
-    await first.text(#"{"version":1,"type":"replay_complete","through_seq":7,"oldest_seq":null}"#)
+    await first.ready(through: 7)
     try await eventually { await client.state == .ready }
     let command = HubCommand(id: "same", type: "say_text", payload: ["text": .string("hello")])
     try await client.send(command)
     first.input.finish(throwing: URLError(.networkConnectionLost))
     try await eventually { await transport.socket(1) != nil }
     let second = try #require(await transport.socket(1))
-    await second.text(#"{"version":1,"type":"replay_complete","through_seq":9,"oldest_seq":null}"#)
+    await second.ready(through: 9)
     try await eventually { await second.sent.contains(command) }
-    #expect(await transport.cursors == [0, 7])
+    #expect(await transport.cursors == [0, 8])
     await second.text(#"{"version":1,"type":"command_result","id":"same","ok":false,"error":{"code":"outcome_unknown","message":"Check history","retry_after_seconds":null}}"#)
     try await eventually { await client.pendingCommands.isEmpty }
     #expect(await client.results["same"]?.error?.code == "outcome_unknown")
@@ -79,10 +85,10 @@ func eventually(_ condition: @escaping () async -> Bool) async throws {
     await client.start()
     try await eventually { await transport.socket(0) != nil }
     let socket = try #require(await transport.socket(0))
-    await socket.text(#"{"version":1,"type":"replay_complete","through_seq":0}"#)
+    await socket.ready(through: 0)
     try await eventually { await client.state == .ready }
-    await socket.text(event(1, "speech_begin", #"{"speech_id":"draining","reply_id":"r","sample_rate":24000,"channels":1,"sample_width":2}"#))
-    try await eventually { await client.cursor == 1 }
+    await socket.text(event(2, "speech_begin", #"{"speech_id":"draining","reply_id":"r","sample_rate":24000,"channels":1,"sample_width":2}"#))
+    try await eventually { await client.cursor == 2 }
     let transition = Task { await client.setForeground(false, playingSpeechID: "draining") }
     try await eventually { await socket.sent.contains(where: { $0.payload["can_show_text"] == .bool(false) }) }
     let presence = try #require(await socket.sent.first(where: { $0.payload["can_show_text"] == .bool(false) }))
@@ -114,7 +120,7 @@ func eventually(_ condition: @escaping () async -> Bool) async throws {
     try await eventually { await transport.socket(1) != nil }
     let current = try #require(await transport.socket(1))
     old.input.finish(throwing: URLError(.networkConnectionLost))
-    await current.text(#"{"version":1,"type":"replay_complete","through_seq":4}"#)
+    await current.ready(through: 4)
     try await eventually { await client.state == .ready }
     #expect(await current.closed == false)
     await client.setForeground(false)
@@ -157,7 +163,7 @@ actor FakeSleeper {
     }
     #expect(await clock.waits == [1, 2, 4, 8, 15, 15])
     let socket = attempts.socket
-    await socket.text(#"{"version":1,"type":"replay_complete","through_seq":0}"#)
+    await socket.ready(through: 0)
     try await eventually { await client.state == .ready }
     socket.input.finish(throwing: URLError(.networkConnectionLost))
     try await eventually { await clock.waits.count == 7 }
@@ -172,7 +178,7 @@ actor FakeSleeper {
     await client.start()
     try await eventually { await transport.socket(0) != nil }
     let first = try #require(await transport.socket(0))
-    await first.text(#"{"version":1,"type":"replay_complete","through_seq":0}"#)
+    await first.ready(through: 0)
     try await eventually { await first.sent.contains(where: { $0.type == "set_presence" }) }
     #expect(await client.state == .connecting)
     await client.setForeground(false)
@@ -180,7 +186,7 @@ actor FakeSleeper {
     await client.setForeground(true)
     try await eventually { await transport.socket(1) != nil }
     let second = try #require(await transport.socket(1))
-    await second.text(#"{"version":1,"type":"replay_complete","through_seq":0}"#)
+    await second.ready(through: 1)
     try await eventually { await second.sent.contains(where: { $0.type == "set_presence" }) }
     let firstID = try #require(await first.sent.first?.id)
     let secondID = try #require(await second.sent.first?.id)
@@ -194,7 +200,7 @@ actor CapturedUpdates {
     var events: [HubEvent] = []
     var clips: [Data] = []
     func record(_ update: HubClientUpdate) {
-        if case .event(let event) = update { events.append(event) }
+        if case .event(let event) = update, event.client_id != "test-status" { events.append(event) }
         if case .audio(_, let data) = update { clips.append(data) }
     }
 }
@@ -204,11 +210,10 @@ actor CapturedUpdates {
     let fixture = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
     let exchanges = try #require(fixture["exchanges"] as? [String: Any])
     let exchange = try #require(exchanges["typed_partial"] as? [String: Any])
-    let frames = try #require(exchange["events"] as? [[String: Any]])
-    let initial = try #require(exchange["initial"] as? [[String: Any]])
-    let replay = try #require(initial.first(where: { $0["type"] as? String == "replay_complete" }))
     let command = try JSONDecoder().decode(HubCommand.self, from: JSONSerialization.data(withJSONObject: try #require(exchange["command"])))
-    let expected = try frames.map { try HubFrame.decode(JSONSerialization.data(withJSONObject: $0)) }
+    let streams = exchanges["typed_wire_streams"] as? [[[String: Any]]]
+    let frames = try streams?.first ?? #require(exchange["events"] as? [[String: Any]])
+    let expected = try frames.filter { $0["seq"] != nil }.map { try HubFrame.decode(JSONSerialization.data(withJSONObject: $0)) }
     let transport = FakeTransport()
     let captured = CapturedUpdates()
     let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }))
@@ -216,15 +221,26 @@ actor CapturedUpdates {
     await client.start()
     try await eventually { await transport.socket(0) != nil }
     let socket = try #require(await transport.socket(0))
-    socket.input.yield(.text(try JSONSerialization.data(withJSONObject: replay)))
-    try await eventually { await client.state == .ready }
-    try await client.send(command)
-    for frame in frames { socket.input.yield(.text(try JSONSerialization.data(withJSONObject: frame))) }
-    socket.input.yield(.text(try JSONSerialization.data(withJSONObject: try #require(exchange["result"]))))
-    try await eventually { await client.results[command.id] != nil }
+    if streams == nil {
+        let initial = try #require(exchange["initial"] as? [[String: Any]])
+        let replay = try #require(initial.first(where: { $0["type"] as? String == "replay_complete" }))
+        socket.input.yield(.text(try JSONSerialization.data(withJSONObject: replay)))
+    }
+    var submitted = false
+    for frame in frames {
+        if streams != nil, !submitted, frame["type"] as? String == "heard" {
+            try await eventually { await client.state == .ready }
+            try await client.send(command)
+            submitted = true
+        }
+        socket.input.yield(.text(try JSONSerialization.data(withJSONObject: frame)))
+    }
     try await eventually { await captured.events.count == expected.count }
     #expect(await captured.events.map(HubFrame.event) == expected)
-    #expect(await socket.sent.contains(command))
+    if streams != nil {
+        try await eventually { await client.results[command.id] != nil }
+        #expect(await socket.sent.contains(command))
+    }
     await client.stop(); reader.cancel()
 }
 
@@ -240,17 +256,17 @@ func event(_ seq: Int, _ type: String, _ payload: String) -> String {
     await client.start()
     try await eventually { await transport.socket(0) != nil }
     let socket = try #require(await transport.socket(0))
-    await socket.text(#"{"version":1,"type":"replay_complete","through_seq":0}"#)
+    await socket.ready(through: 0)
     try await eventually { await client.state == .ready }
-    await socket.text(event(1, "speech_begin", #"{"speech_id":"s","reply_id":"r","sample_rate":24000,"channels":1,"sample_width":2}"#))
-    await socket.text(event(2, "speech_clip", #"{"speech_id":"s","reply_id":"r","index":0,"text":"a","byte_length":4}"#))
+    await socket.text(event(2, "speech_begin", #"{"speech_id":"s","reply_id":"r","sample_rate":24000,"channels":1,"sample_width":2}"#))
+    await socket.text(event(3, "speech_clip", #"{"speech_id":"s","reply_id":"r","index":0,"text":"a","byte_length":4}"#))
     socket.input.yield(.binary(Data([0, 0, 1, 0])))
-    try await eventually { await client.cursor == 2 }
+    try await eventually { await client.cursor == 3 }
     #expect(await captured.clips == [Data([0, 0, 1, 0])])
-    await socket.text(event(3, "speech_clip", #"{"speech_id":"s","reply_id":"r","index":1,"text":"b","byte_length":4}"#))
+    await socket.text(event(4, "speech_clip", #"{"speech_id":"s","reply_id":"r","index":1,"text":"b","byte_length":4}"#))
     socket.input.yield(.binary(Data([0, 0])))
     try await eventually { await socket.closed }
-    #expect(await client.cursor == 2)
+    #expect(await client.cursor == 3)
     #expect(await captured.clips.count == 1)
     await client.stop(); reader.cancel()
 }
@@ -264,7 +280,7 @@ func event(_ seq: Int, _ type: String, _ payload: String) -> String {
     await client.start()
     try await eventually { await transport.socket(0) != nil }
     let socket = try #require(await transport.socket(0))
-    await socket.text(#"{"version":1,"type":"replay_complete","through_seq":10,"history_pruned":true}"#)
+    await socket.ready(through: 10)
     try await eventually { await client.state == .ready }
     await socket.text(event(14, "future_event", #"{"optional":true}"#))
     await socket.text(event(14, "future_event", #"{"optional":true}"#))
@@ -283,16 +299,16 @@ func event(_ seq: Int, _ type: String, _ payload: String) -> String {
     let clock = FakeSleeper()
     let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }),
                            sleep: { try await clock.sleep($0) }, cache: { event, _ in
-        if event != nil { throw CocoaError(.fileWriteOutOfSpace) }
+        if event?.kind == .notice { throw CocoaError(.fileWriteOutOfSpace) }
     })
     await client.start()
     try await eventually { await transport.socket(0) != nil }
     let socket = try #require(await transport.socket(0))
-    await socket.text(#"{"version":1,"type":"replay_complete","through_seq":5}"#)
+    await socket.ready(through: 5)
     try await eventually { await client.state == .ready }
-    await socket.text(event(6, "notice", #"{"text":"must not be lost"}"#))
+    await socket.text(event(7, "notice", #"{"text":"must not be lost"}"#))
     try await eventually { await socket.closed }
-    #expect(await client.cursor == 5)
+    #expect(await client.cursor == 6)
     await client.stop(); await clock.advance()
 }
 
@@ -303,10 +319,10 @@ func event(_ seq: Int, _ type: String, _ payload: String) -> String {
     await client.start()
     try await eventually { await transport.socket(0) != nil }
     let socket = try #require(await transport.socket(0))
-    await socket.text(#"{"version":1,"type":"replay_complete","through_seq":0}"#)
+    await socket.ready(through: 0)
     try await eventually { await client.state == .ready }
-    await socket.text(event(1, "speech_begin", #"{"speech_id":"draining","reply_id":"r","sample_rate":24000,"channels":1,"sample_width":2}"#))
-    try await eventually { await client.cursor == 1 }
+    await socket.text(event(2, "speech_begin", #"{"speech_id":"draining","reply_id":"r","sample_rate":24000,"channels":1,"sample_width":2}"#))
+    try await eventually { await client.cursor == 2 }
     let transition = Task { await client.setForeground(false, playingSpeechID: "draining") }
     try await eventually { await clock.waits.count == 1 }
     await clock.advance()
@@ -363,18 +379,18 @@ func actualTransportOutcomesDetermineConnectionState(_ error: HubTransportError)
     await client.start()
     try await eventually { await transport.socket(0) != nil }
     let socket = try #require(await transport.socket(0))
-    await socket.text(#"{"version":1,"type":"replay_complete","through_seq":0}"#)
+    await socket.ready(through: 0)
     try await eventually { await client.state == .ready }
-    await socket.text(event(1, "speech_begin", #"{"speech_id":"old","reply_id":"r","sample_rate":24000,"channels":1,"sample_width":2}"#))
-    try await eventually { await client.cursor == 1 }
+    await socket.text(event(2, "speech_begin", #"{"speech_id":"old","reply_id":"r","sample_rate":24000,"channels":1,"sample_width":2}"#))
+    try await eventually { await client.cursor == 2 }
     let transition = Task { await client.setForeground(false, playingSpeechID: "old") }
     try await eventually { await socket.sent.contains(where: { $0.payload["can_show_text"] == .bool(false) }) }
     let presence = try #require(await socket.sent.last)
     await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(presence.id)\",\"ok\":true,\"result\":{\"can_show_text\":false}}")
     await transition.value
-    await socket.text(event(2, "speech_begin", #"{"speech_id":"new","reply_id":"other","sample_rate":24000,"channels":1,"sample_width":2}"#))
+    await socket.text(event(3, "speech_begin", #"{"speech_id":"new","reply_id":"other","sample_rate":24000,"channels":1,"sample_width":2}"#))
     try await eventually { await socket.closed }
-    #expect(await client.cursor == 1)
+    #expect(await client.cursor == 2)
     #expect(await transport.sockets.count == 1)
     await client.stop()
 }
@@ -394,5 +410,114 @@ func actualTransportOutcomesDetermineConnectionState(_ error: HubTransportError)
     await oldReplacement.value
     try await Task.sleep(for: .milliseconds(10))
     #expect(await transport.sockets.count == 2)
+    await client.stop()
+}
+
+@Test func runningWarmupAndMissingStatusStayConnectingUntilPositiveReadiness() async throws {
+    let transport = FakeTransport()
+    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }))
+    await client.start()
+    try await eventually { await transport.socket(0) != nil }
+    let socket = try #require(await transport.socket(0))
+    await socket.text(#"{"version":1,"type":"replay_complete","through_seq":0}"#)
+    try await eventually { await socket.sent.contains(where: { $0.type == "set_presence" }) }
+    try await Task.sleep(for: .milliseconds(5))
+    #expect(await client.state == .connecting)
+    await socket.text(event(1, "status", #"{"ready":false,"usage_limit":{"limited":false,"resets_at":null},"quiet":false,"focus_client_id":null,"mac_voice_on":true,"silence":false}"#))
+    try await eventually { await client.cursor == 1 }
+    #expect(await client.state == .connecting)
+    await #expect(throws: HubProtocolError.self) { try await client.send(HubCommand(type: "say_text")) }
+    await socket.text(event(2, "status", #"{"ready":true,"usage_limit":{"limited":false,"resets_at":null},"quiet":false,"focus_client_id":null,"mac_voice_on":true,"silence":false}"#))
+    try await eventually { await client.state == .ready }
+    try await client.send(HubCommand(id: "after-warmup", type: "say_text"))
+    await client.stop()
+}
+
+@Test func invalidLocalCommandsNeverEnterPendingOrDamageHealthyConnection() async throws {
+    let transport = FakeTransport()
+    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }))
+    await client.start()
+    try await eventually { await transport.socket(0) != nil }
+    let socket = try #require(await transport.socket(0))
+    await socket.ready()
+    try await eventually { await client.state == .ready }
+    let commands = [
+        HubCommand(id: "nan", type: "say_text", payload: ["number": .number(.nan)]),
+        HubCommand(id: "inf", type: "say_text", payload: ["number": .number(.infinity)]),
+        HubCommand(id: "negative-inf", type: "say_text", payload: ["number": .number(-.infinity)]),
+        HubCommand(id: "huge", type: "say_text", payload: ["text": .string(String(repeating: "a", count: 65_537))]),
+        HubCommand(id: "", type: "say_text"),
+        HubCommand(id: "control\n", type: "say_text"),
+        HubCommand(id: String(repeating: "é", count: 129), type: "say_text"),
+        HubCommand(id: "bad-type", type: ""),
+    ]
+    for command in commands {
+        await #expect(throws: (any Error).self) { try await client.send(command) }
+        #expect(await client.pendingCommands.isEmpty)
+        #expect(await socket.closed == false)
+    }
+    let valid = HubCommand(id: "valid", type: "say_text", payload: ["text": .string("hello")])
+    try await client.send(valid)
+    await client.pathChanged()
+    try await eventually { await transport.socket(1) != nil }
+    let second = try #require(await transport.socket(1))
+    await second.ready(through: 1)
+    try await eventually { await second.sent.contains(valid) }
+    #expect(await second.sent.filter { $0.type != "set_presence" } == [valid])
+    await second.text(#"{"version":1,"type":"command_result","id":"valid","ok":true,"result":{"request_id":"request-1"}}"#)
+    try await eventually { await client.pendingCommands.isEmpty }
+    await client.stop()
+}
+
+@Test func healthySocketRetriesExactBytesThenKeepsUnansweredOutcomeVisible() async throws {
+    let transport = FakeTransport()
+    let clock = FakeSleeper()
+    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }),
+                           acknowledgementSleep: { try await clock.sleep($0) })
+    await client.start()
+    try await eventually { await transport.socket(0) != nil }
+    let socket = try #require(await transport.socket(0))
+    await socket.ready()
+    try await eventually { await client.state == .ready }
+    let command = HubCommand(id: "unanswered", type: "say_text", payload: ["text": .string("hello")])
+    try await client.send(command)
+    for attempt in 1...3 {
+        try await eventually { await clock.waits.count == attempt }
+        await clock.advance()
+        if attempt < 3 { try await eventually { await socket.sent.filter { $0.id == command.id }.count == attempt + 1 } }
+    }
+    try await eventually { await client.unansweredCommands.contains(command.id) }
+    #expect(await clock.waits == [5, 5, 5])
+    let sent = await socket.rawSent.filter { (try? JSONDecoder().decode(HubCommand.self, from: $0).id) == command.id }
+    #expect(sent.count == 3)
+    #expect(Set(sent).count == 1)
+    #expect(await client.pendingCommands == [command])
+    #expect(await socket.closed == false)
+    await socket.text(#"{"version":1,"type":"command_result","id":"unanswered","ok":false,"error":{"code":"outcome_unknown","message":"Check history","retry_after_seconds":null}}"#)
+    try await eventually { await client.pendingCommands.isEmpty }
+    #expect(await client.results[command.id]?.error?.code == "outcome_unknown")
+    #expect(await client.unansweredCommands.isEmpty)
+    await client.stop()
+}
+
+@Test func acknowledgementCancelsDeadlineWithoutRetryingOrDamagingConnection() async throws {
+    let transport = FakeTransport()
+    let clock = FakeSleeper()
+    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }),
+                           acknowledgementSleep: { try await clock.sleep($0) })
+    await client.start()
+    try await eventually { await transport.socket(0) != nil }
+    let socket = try #require(await transport.socket(0))
+    await socket.ready()
+    try await eventually { await client.state == .ready }
+    try await client.send(HubCommand(id: "acknowledged", type: "say_text"))
+    try await eventually { await clock.waits.count == 1 }
+    await socket.text(#"{"version":1,"type":"command_result","id":"acknowledged","ok":true,"result":{"request_id":"r"}}"#)
+    try await eventually { await client.pendingCommands.isEmpty }
+    await clock.advance()
+    try await Task.sleep(for: .milliseconds(5))
+    #expect(await socket.sent.filter { $0.id == "acknowledged" }.count == 1)
+    #expect(await client.unansweredCommands.isEmpty)
+    #expect(await client.state == .ready)
     await client.stop()
 }
