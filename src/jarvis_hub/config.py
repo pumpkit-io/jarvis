@@ -81,6 +81,7 @@ class Settings:
     max_subagents: int = 3
     remote: bool = False
     remote_port: int = 8765
+    remote_origin: str | None = None
 
 
 def parse_env(data: bytes) -> dict[str, str]:
@@ -243,4 +244,5 @@ def load_settings(
         max_subagents=count("JARVIS_MAX_SUBAGENTS", 3),
         remote=choice("JARVIS_REMOTE", "off", ("off", "on")) == "on",
         remote_port=remote_port,
+        remote_origin=values.get("JARVIS_REMOTE_ORIGIN") or None,
     )
