@@ -125,9 +125,10 @@ async def test_silence_stops_only_destination_while_model_text_continues(tmp_pat
             assert frames[-1]['payload']['reason'] == 'complete'
             assert not any(frame['type'] == 'speech_clip' for frame in frames)
             assert 'Ending.' not in [text for text, _ in tts.calls]
+            previous_local = list(local.texts)
             await hub.admit_line(Line('Mac', 0, typed=False))
             await through(socket, 'reply_end')
-            await until(lambda: local.texts == ['Mac reply.'])
+            await until(lambda: local.texts == [*previous_local, 'Mac reply.'])
 
 
 @pytest.mark.parametrize("in_process", [False, True])
