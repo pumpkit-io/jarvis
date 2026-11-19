@@ -17,7 +17,7 @@ from jarvis_hub.voice.assessment import Assessment, Candidate
 from jarvis_hub.voice.ownership import MAX_REQUEST_CHARACTERS, SpokenTurn
 from jarvis_hub.voice.bargein_log import BargeInLog
 from jarvis_hub.voice.language import Lang
-from jarvis_hub.voice.player import Player
+from jarvis_hub.voice.player import Player, RemotePlayer
 from jarvis_hub.voice.speech import STALLED, ClipName, Metrics, Speech, SpeechClock
 from jarvis_hub.voice.state import (
     CAPTURING,
@@ -135,6 +135,13 @@ class _ObservedSpeech:
         self._heard_at = heard_at
         self._owner = owner
         return self._speech.begin(lang, turn=turn, heard_at=heard_at, owner=owner, destination=destination, allowed=allowed, can_start=can_start, reply_id=reply_id)
+
+    def replay(self, text: str, lang: Lang, *, destination: RemotePlayer, reply_id: str,
+               allowed: Callable[[], bool]) -> str:
+        return self._speech.replay(text, lang, destination=destination, reply_id=reply_id, allowed=allowed)
+
+    def stop_replay(self, destination: Player) -> bool:
+        return self._speech.stop_replay(destination)
 
     def feed(self, text: str) -> None:
         if not self._dropping:

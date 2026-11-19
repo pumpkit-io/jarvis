@@ -19,11 +19,13 @@ class Client:
 
 
 class Clients:
-    def __init__(self, *, terminal_speech: bool, on_focus: Callable[[], None], on_change: Callable[[], None] = lambda: None) -> None:
+    def __init__(self, *, terminal_speech: bool, on_focus: Callable[[], None], on_change: Callable[[], None] = lambda: None,
+                 save_silence: Callable[[str, bool], None] | None = None) -> None:
         self._clients = {TERMINAL: Client(TERMINAL, "terminal", connected=True, can_speak=terminal_speech)}
         self._focus = TERMINAL
         self._on_focus = on_focus
         self._on_change = on_change
+        self._save_silence: Callable[[str, bool], None] = save_silence or (lambda client_id, silence: None)
 
     @property
     def focus(self) -> str:
@@ -38,8 +40,15 @@ class Clients:
     def register(self, client: Client) -> None:
         if not client.id:
             raise ValueError("A Client needs an id")
+        previous = self._clients.get(client.id)
+        if previous is None or previous.silence != client.silence:
+            # Persist before change callbacks can release held news.
+            self._save_silence(client.id, client.silence)
         self._clients[client.id] = client
         self._on_change()
+
+    def set_silence(self, client_id: str, silence: bool) -> None:
+        self.register(replace(self._clients[client_id], silence=silence))
 
     def disconnect(self, client_id: str) -> None:
         client = self._clients[client_id]
