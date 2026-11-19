@@ -29,7 +29,7 @@ public enum HubTransportError: Error, Equatable, Sendable {
 
 public enum HubClientUpdate: Sendable {
     case state(HubConnectionState), event(HubEvent), audio(HubEvent, Data), result(CommandResult)
-    case failure(String), replay(ReplayComplete), speechConnectionEnded(String)
+    case failure(String), replayStarted, replay(ReplayComplete), speechConnectionEnded(String)
     case silence(Bool, pending: Bool, revision: UInt64)
 }
 
@@ -394,6 +394,7 @@ public actor HubClient {
         while running, foreground, generation == owner, !Task.isCancelled {
             var current: (any HubSocket)?
             do {
+                continuation.yield(.replayStarted)
                 let opened = try await transport.connect(cursor)
                 current = opened
                 guard generation == owner, foreground, running else { await opened.close(); return }
