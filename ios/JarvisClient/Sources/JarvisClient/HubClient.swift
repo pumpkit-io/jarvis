@@ -106,6 +106,9 @@ public actor HubClient {
 
     /// Call before surrendering foreground time. Only already-playing audio may drain in the background.
     public func setForeground(_ value: Bool, playingSpeechID: String? = nil) async {
+        if !value, !foreground, playing, let playingSpeechID,
+           playingSpeechID == drainingSpeechID, playingSpeechID == activeSpeechID,
+           socket != nil, handover { return }
         let resumePlaying = value && !foreground && playing && drainingSpeechID == activeSpeechID && socket != nil && handover
         foreground = value
         playing = resumePlaying || playingSpeechID != nil && playingSpeechID == activeSpeechID
