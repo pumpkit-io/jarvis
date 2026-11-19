@@ -162,3 +162,46 @@ import Testing
     #expect(await socket.closed == false)
     await session.unpair()
 }
+
+private final class TaskDisplayClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = Date(timeIntervalSince1970: 1000)
+    func now() -> Date { lock.withLock { value } }
+    func advance() { lock.withLock { value = Date(timeIntervalSince1970: 2000) } }
+}
+
+@MainActor @Test func unrelatedTaskReportPreservesKnownApprovalExpiryWhileOffline() async throws {
+    let socket = FakeSocket(), clock = TaskDisplayClock()
+    let store = MemoryPairingStore(); store.record = try testPairingCredentials()
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
+                             historyNow: { clock.now() }, makePaths: { nil })
+    await session.launch(); await socket.ready()
+    await socket.text(event(10, "task_snapshot", #"{"tasks":[{"id":"waiting","title":"Merge","state":"needs_user","last_report":"Prepared.","approval_question":"May I merge the fix?"},{"id":"other","title":"Other Task","state":"working","last_report":"Started.","approval_question":null}]}"#))
+    await socket.text(event(11, "pending_approval", #"{"approvals":[{"id":"a","task_id":"waiting","question":"May I merge the fix?","expires_at":"1970-01-01T00:25:00Z"}]}"#))
+    await socket.text(event(12, "task_snapshot", #"{"tasks":[{"id":"waiting","title":"Merge","state":"needs_user","last_report":"Prepared.","approval_question":"May I merge the fix?"},{"id":"other","title":"Other Task","state":"working","last_report":"Tests are running.","approval_question":null}]}"#))
+    try await eventuallySession { session.openTasks.last?.lastReport == "Tests are running." }
+    #expect(session.openTasks.first?.approvalQuestion == "May I merge the fix?")
+    await session.setForeground(false)
+    clock.advance()
+    #expect(session.openTasks.first?.approvalQuestion == nil)
+    #expect(session.openTasks.map(\.title) == ["Merge", "Other Task"])
+    await session.unpair()
+}
+
+@MainActor @Test func newTaskQuestionReplacesOldExpiryAndNewPendingSnapshotCanSupersedeOrClearIt() async throws {
+    let socket = FakeSocket()
+    let store = MemoryPairingStore(); store.record = try testPairingCredentials()
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
+                             historyNow: { Date(timeIntervalSince1970: 2000) }, makePaths: { nil })
+    await session.launch(); await socket.ready()
+    await socket.text(event(10, "task_snapshot", #"{"tasks":[{"id":"waiting","title":"Merge","state":"needs_user","last_report":"Prepared.","approval_question":"Old question?"}]}"#))
+    await socket.text(event(11, "pending_approval", #"{"approvals":[{"id":"a","task_id":"waiting","question":"Old question?","expires_at":"1970-01-01T00:25:00Z"}]}"#))
+    await socket.text(event(12, "task_snapshot", #"{"tasks":[{"id":"waiting","title":"Merge","state":"needs_user","last_report":"New plan.","approval_question":"Shall I merge the revised fix?"}]}"#))
+    try await eventuallySession { session.openTasks.first?.approvalQuestion == "Shall I merge the revised fix?" }
+    await socket.text(event(13, "pending_approval", #"{"approvals":[{"id":"b","task_id":"waiting","question":"Shall I publish instead?","expires_at":"1970-01-01T00:50:00Z"}]}"#))
+    try await eventuallySession { session.openTasks.first?.approvalQuestion == "Shall I publish instead?" }
+    await socket.text(event(14, "pending_approval", #"{"approvals":[]}"#))
+    try await eventuallySession { session.openTasks.first?.approvalQuestion == nil }
+    #expect(session.openTasks.first?.title == "Merge")
+    await session.unpair()
+}
