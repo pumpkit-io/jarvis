@@ -364,8 +364,13 @@ class Speech:
 
     @staticmethod
     def _reply_allowed(reply: _Reply) -> bool:
-        return (not reply.stopped and (reply.allowed is None or reply.allowed())
-                and (reply.first_audio is not None or reply.can_start is None or reply.can_start()))
+        if reply.stopped or (reply.allowed is not None and not reply.allowed()):
+            return False
+        if reply.first_audio is None and reply.can_start is not None and not reply.can_start():
+            # Dropping the opening must never allow a later sentence to start this reply.
+            reply.stopped = True
+            return False
+        return True
 
     async def _handle(self, item: _Say | _Cached | _End) -> None:
         match item:

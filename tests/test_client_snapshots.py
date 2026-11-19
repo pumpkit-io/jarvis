@@ -317,17 +317,21 @@ async def test_an_incomplete_question_is_not_published_as_pending(tmp_path: Path
             await hub.close()
 
 
-async def test_background_before_first_sentence_does_not_start_speech(tmp_path: Path) -> None:
+@pytest.mark.parametrize("foreground_between_chunks", [False, True])
+async def test_background_before_first_sentence_cannot_resume_reply_tail(tmp_path: Path, foreground_between_chunks: bool) -> None:
     from dataclasses import replace
 
     from jarvis_hub.hub import Line
     from jarvis_hub.voice.speech import Speech
     from tests.fakes import FakeTts, RecordingPlayer, Set, until
 
-    thinking, answer = asyncio.Event(), asyncio.Event()
+    thinking, answer, opening, tail = (asyncio.Event() for _ in range(4))
     clock, output, metrics = FakeClock(), RecordingOutput(), RecordingMetrics()
     local, remote = RecordingPlayer(), RecordingPlayer()
-    backend = FakeBackend(clock, [[Set(thinking), Gate(answer), Text("Ready now.")]])
+    backend = FakeBackend(clock, [
+        [Set(thinking), Gate(answer), Text("The deployment failed. "), Set(opening), Gate(tail), Text("Check the logs.")],
+        [Text("A complete later reply.")],
+    ])
     speech = Speech(FakeTts(), local, clock, metrics=metrics, notice=output.notice)
     with PairingStore(tmp_path / "pairing.db") as pairing, EventLog(tmp_path / "events.db", wall=lambda: 1000) as log:
         phone = pairing.exchange(pairing.create_code("https://mac.example.ts.net"), "Phone", "iphone")
@@ -349,9 +353,23 @@ async def test_background_before_first_sentence_does_not_start_speech(tmp_path: 
                 await socket.send_json(command("background", "set_presence", can_show_text=False))
                 assert (await through(socket, "command_result"))[-1]["ok"]
                 answer.set()
-                await until(lambda: output.replies == ["Ready now."])
+                await opening.wait()
+                await speech.idle()
+                if foreground_between_chunks:
+                    await socket.send_json(command("foreground-again", "set_presence", can_show_text=True))
+                    assert (await through(socket, "command_result"))[-1]["ok"]
+                tail.set()
+                await until(lambda: output.replies == ["The deployment failed. Check the logs."])
                 await speech.idle()
                 assert remote.texts == local.texts == []
+                if not foreground_between_chunks:
+                    await socket.send_json(command("foreground-again", "set_presence", can_show_text=True))
+                    assert (await through(socket, "command_result"))[-1]["ok"]
+                await hub.admit_line(Line("Another request", clock.now(), typed=False, client_id=phone.client.id))
+                await until(lambda: len(output.replies) == 2)
+                await speech.idle()
+                assert remote.texts == ["A complete later reply."]
+                assert local.texts == []
         finally:
             await door.close()
             await hub.close()
