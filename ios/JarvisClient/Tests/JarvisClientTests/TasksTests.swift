@@ -84,3 +84,81 @@ import Testing
     await session.unpair()
     #expect(session.openTasks.isEmpty)
 }
+
+@MainActor @Test func healthyTalkCancellationDoesNotMakeTasksWaitForAnotherSnapshot() async throws {
+    let socket = FakeSocket()
+    let store = MemoryPairingStore(); store.record = try testPairingCredentials()
+    let controller = TalkController(recorder: FakeTalkRecorder(), permission: { true })
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
+                             makePaths: { nil }, talk: controller)
+    await session.launch(); await socket.ready()
+    try await eventuallySession { session.connection.canSend }
+    await socket.text(event(2, "task_snapshot", #"{"tasks":[{"id":"working","title":"Write tests","state":"working","last_report":"Running.","approval_question":null}]}"#))
+    try await eventuallySession { !session.updatingTasks }
+    await controller.press()
+    let begin = try #require(await socket.sent.first { $0.type == "talk_begin" })
+    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(begin.id)\",\"ok\":true,\"result\":{}}")
+    try await eventuallySession { await session.client?.results[begin.id]?.ok == true }
+    await controller.cancel()
+    let cancel = try #require(await socket.sent.first { $0.type == "talk_cancel" })
+    try await eventuallySession { !session.connection.canSend }
+    #expect(!session.updatingTasks)
+    #expect(session.openTasks.map(\.title) == ["Write tests"])
+    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(cancel.id)\",\"ok\":true,\"result\":{}}")
+    try await eventuallySession { session.connection.canSend }
+    #expect(!session.updatingTasks)
+    #expect(session.openTasks.map(\.title) == ["Write tests"])
+    await session.unpair()
+}
+
+@MainActor @Test func actualReconnectKeepsTasksUpdatingUntilAFreshSnapshot() async throws {
+    let transport = FakeTransport()
+    let store = MemoryPairingStore(); store.record = try testPairingCredentials()
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { await transport.connect($0) })) }, makePaths: { nil })
+    await session.launch()
+    try await eventuallySession { await transport.socket(0) != nil }
+    let first = try #require(await transport.socket(0))
+    await first.ready()
+    await first.text(event(2, "task_snapshot", #"{"tasks":[{"id":"working","title":"Write tests","state":"working","last_report":"Running.","approval_question":null}]}"#))
+    try await eventuallySession { session.connection.canSend && !session.updatingTasks }
+    await session.client?.pathChanged()
+    try await eventuallySession { await transport.socket(1) != nil }
+    let second = try #require(await transport.socket(1))
+    try await eventuallySession { session.updatingTasks }
+    #expect(session.openTasks.map(\.title) == ["Write tests"])
+    await second.text(event(3, "task_snapshot", #"{"tasks":[{"id":"working","title":"Write tests","state":"working","last_report":"Still running.","approval_question":null}]}"#))
+    try await eventuallySession { session.openTasks.first?.lastReport == "Still running." }
+    #expect(session.updatingTasks)
+    await second.ready(through: 3)
+    try await eventuallySession { session.connection.canSend }
+    #expect(session.updatingTasks)
+    await second.text(event(5, "task_snapshot", #"{"tasks":[]}"#))
+    try await eventuallySession { !session.updatingTasks }
+    #expect(session.openTasks.isEmpty)
+    await session.unpair()
+}
+
+@MainActor @Test func healthyForegroundRenewalDoesNotMakeTasksWaitForAnotherSnapshot() async throws {
+    let socket = FakeSocket(), output = FakeSpeechOutput(), audio = SpeechSession()
+    let store = MemoryPairingStore(); store.record = try testPairingCredentials()
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
+                             makePaths: { nil }, playback: SpeechPlayer(session: audio, output: output))
+    await session.launch(); await socket.ready()
+    await socket.text(event(2, "task_snapshot", #"{"tasks":[]}"#))
+    try await eventuallySession { session.connection.canSend && !session.updatingTasks }
+    await socket.text(event(3, "speech_begin", #"{"speech_id":"speech","reply_id":"reply","sample_rate":24000,"channels":1,"sample_width":2}"#))
+    await socket.text(event(4, "speech_clip", #"{"speech_id":"speech","reply_id":"reply","index":0,"text":"Working.","byte_length":2}"#))
+    socket.input.yield(.binary(Data([1, 0])))
+    try await eventuallySession { output.bytes == [Data([1, 0])] }
+    let background = Task { await session.setForeground(false) }
+    try await eventuallySession { await socket.sent.contains { $0.payload["can_show_text"] == .bool(false) } }
+    let presence = try #require(await socket.sent.last { $0.type == "set_presence" })
+    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(presence.id)\",\"ok\":true,\"result\":{\"can_show_text\":false}}")
+    await background.value
+    await session.setForeground(true)
+    try await eventuallySession { session.connection.canSend }
+    #expect(!session.updatingTasks)
+    #expect(audio.active)
+    #expect(await socket.closed == false)
+    await session.unpair()
+}

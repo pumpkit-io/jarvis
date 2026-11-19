@@ -10,6 +10,7 @@ import Observation
     public private(set) var client: HubClient?
     public private(set) var conversation = ConversationProjection()
     private var tasksNeedRefresh = true
+    private var tasksReplaying = true
     public var updatingTasks: Bool { tasksNeedRefresh && (connection == .connecting || connection.canSend) }
     public var openTasks: [OpenTask] { OpenTask.current(in: conversation.events, now: historyNow()) }
     public private(set) var loadingHistory = false
@@ -129,7 +130,7 @@ import Observation
         switch update {
         case .event(let event):
             conversation.ingest(event); talk.receive(event)
-            if event.kind == .taskSnapshot { tasksNeedRefresh = false }
+            if event.kind == .taskSnapshot && !tasksReplaying { tasksNeedRefresh = false }
             switch event.kind {
             case .status:
                 if let status = try? event.decodePayload(HubStatus.self) {
@@ -178,7 +179,10 @@ import Observation
             voiceMessage = voicePersistenceFailed ? "Voice changed for this session, but could not be saved. Try again."
                 : pending ? "Voice setting saved here. Waiting for the Mac to confirm." : nil
             if silence { silencePlayback() }
+        case .replayStarted:
+            tasksNeedRefresh = true; tasksReplaying = true
         case .replay(let replay):
+            tasksReplaying = false
             if replay.history_pruned == true { historyMessage = "Some older history is no longer available on the Mac." }
         case .speechConnectionEnded(let id):
             playback.stop(speechID: id, reportStopped: false)
@@ -394,7 +398,7 @@ import Observation
         focusHere = false; focusPending = false; focusCommand = nil; focusMessage = nil; gestureMessage = nil
         voiceOn = true; explicitSilence = nil; voicePending = false; voiceMessage = nil; voicePersistenceFailed = false; voiceRevision = 0
         do { try store.clear(); error = historyClearFailed ? .storage : nil } catch { self.error = .storage }
-        tasksNeedRefresh = true
+        tasksNeedRefresh = true; tasksReplaying = true
         conversation = ConversationProjection(); historyBefore = nil; hasOlderHistory = true; loadingHistory = false; historyMessage = nil; typedLines = []; draft = ""; inputMessage = nil
         playback.reset(); replayCommands = [:]; replayMessages = [:]
         await old?.stop()
@@ -465,7 +469,6 @@ import Observation
                 if case .state(let state) = update {
                     if state == .unpaired { await self.unpair(); return }
                     self.connection = state
-                    if !state.canSend { self.tasksNeedRefresh = true }
                     await self.talk.setReady(state.canSend)
                 } else {
                     if case .result(let result) = update { await self.talk.receive(result) }
