@@ -4,18 +4,48 @@ import Foundation
 @MainActor public protocol TalkAudioSession: AnyObject {
     func activate() throws
     func release()
+    func activatePlayback() throws
+    func releasePlayback()
+}
+
+public extension TalkAudioSession {
+    func activatePlayback() throws { try activate() }
+    func releasePlayback() { release() }
 }
 
 @MainActor public final class NativeTalkAudioSession: TalkAudioSession {
+    private enum Owner { case recording, playback }
+    private var owner: Owner?
     public init() {}
     public func activate() throws {
+        guard owner == nil || owner == .recording else { throw HubProtocolError.invalidFrame }
         #if os(iOS)
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
         try session.setActive(true)
         #endif
+        owner = .recording
+    }
+    public func activatePlayback() throws {
+        if owner == .playback { return }
+        guard owner == nil || owner == .playback else { throw HubProtocolError.invalidFrame }
+        #if os(iOS)
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playback, mode: .spokenAudio, options: [])
+        try session.setActive(true)
+        #endif
+        owner = .playback
+    }
+    public func releasePlayback() {
+        guard owner == .playback else { return }
+        deactivate()
     }
     public func release() {
+        guard owner == .recording else { return }
+        deactivate()
+    }
+    private func deactivate() {
+        owner = nil
         #if os(iOS)
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         #endif
