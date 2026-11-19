@@ -12,6 +12,31 @@ import Observation
     public var draft = ""
     public private(set) var typedLines: [TypedLine] = []
     public private(set) var inputMessage: String?
+    public let talk: TalkController
+    public private(set) var speechID: String?
+    private var lastCompletedClip: Int64 = -1
+    private let uploadTalk: TalkUpload
+    private let stopPlayback: @MainActor () -> Void
+
+    public func reportCompletedClip(speechID: String, index: Int64) {
+        guard self.speechID == speechID else { return }
+        lastCompletedClip = max(lastCompletedClip, index)
+    }
+
+    public func playbackDrained(speechID: String) async {
+        guard self.speechID == speechID else { return }
+        self.speechID = nil; talk.speaking = false
+        await client?.playbackDrained(speechID: speechID)
+    }
+
+    private func interruptSpeech() async {
+        stopPlayback()
+        guard let speechID, let client else { return }
+        self.speechID = nil; talk.speaking = false
+        try? await sendCommand(client, HubCommand(type: "interrupt", payload: [
+            "speech_id": .string(speechID), "last_clip_index": .integer(lastCompletedClip)
+        ]))
+    }
 
     public var draftValidationMessage: String? {
         draft.utf8.count > 16_384 ? "Your line is too long. Use at most 16,384 UTF-8 bytes." : nil
@@ -72,7 +97,13 @@ import Observation
 
     private func receive(_ update: HubClientUpdate) {
         switch update {
-        case .event(let event): conversation.ingest(event)
+        case .event(let event):
+            conversation.ingest(event); talk.receive(event)
+            if event.kind == .speechBegin {
+                speechID = event.string("speech_id"); lastCompletedClip = -1; talk.speaking = true
+            } else if event.kind == .speechStop {
+                speechID = nil; talk.speaking = false; stopPlayback()
+            }
         case .result(let result):
             guard let index = typedLines.firstIndex(where: { $0.id == result.id }) else { return }
             if result.ok { typedLines[index].outcome = .accepted }
@@ -101,9 +132,13 @@ import Observation
                 makeClient: @escaping (PairingCredentials) throws -> HubClient = {
                     HubClient(transport: try .urlSession(origin: $0.origin, token: $0.deviceToken))
                 }, makePaths: @escaping () -> HubNetworkPaths? = { HubNetworkPaths() },
+                talk: TalkController? = nil, uploadTalk: TalkUpload = TalkUpload(),
+                stopPlayback: @escaping @MainActor () -> Void = {},
                 sendCommand: @escaping @Sendable (HubClient, HubCommand) async throws -> Void = { try await $0.send($1) }) {
         self.store = store; self.service = service; self.makeClient = makeClient; self.makePaths = makePaths
         self.sendCommand = sendCommand
+        self.talk = talk ?? TalkController(recorder: NativeTalkRecorder(), permission: { await NativeTalkRecorder.requestPermission() })
+        self.uploadTalk = uploadTalk; self.stopPlayback = stopPlayback
     }
 
     public func launch() async {
@@ -140,8 +175,10 @@ import Observation
     /// Invalidates in-flight pairing before clearing the sole durable credential record.
     public func unpair() async {
         generation &+= 1
+        await talk.cancel()
         let old = client
         updates?.cancel(); updates = nil; paths?.cancel(); paths = nil
+        await talk.setReady(false); speechID = nil; stopPlayback()
         client = nil; credentials = nil; connection = .unpaired; pairing = false; loading = false
         do { try store.clear(); error = nil } catch { self.error = .storage }
         conversation = ConversationProjection(); typedLines = []; draft = ""; inputMessage = nil
@@ -150,6 +187,7 @@ import Observation
 
     public func setForeground(_ value: Bool) async {
         foreground = value
+        if !value { await talk.cancel() }
         await client?.setForeground(value)
     }
 
@@ -157,6 +195,13 @@ import Observation
         guard generation == owner else { return }
         let client = try makeClient(credentials)
         self.credentials = credentials; self.client = client; connection = .connecting
+        talk.configure(ready: false, send: { [weak self] command in
+            guard let self, self.generation == owner, self.client === client else { throw HubProtocolError.notConnected }
+            try await self.sendCommand(client, command)
+        }, retire: { await client.retireTalkBegin(id: $0) }, upload: { [weak self] id, commandID, pcm in
+            guard let self, self.generation == owner else { throw CancellationError() }
+            return try await self.uploadTalk.send(credentials: credentials, talkID: id, commandID: commandID, pcm: pcm)
+        }, admission: { await client.finishTalkBegin(id: $0) }, stopSpeech: { [weak self] in await self?.interruptSpeech() })
         paths = makePaths()
         updates = Task { [weak self] in
             for await update in client.updates {
@@ -164,7 +209,11 @@ import Observation
                 if case .state(let state) = update {
                     if state == .unpaired { await self.unpair(); return }
                     self.connection = state
-                } else { self.receive(update) }
+                    await self.talk.setReady(state.canSend)
+                } else {
+                    if case .result(let result) = update { await self.talk.receive(result) }
+                    self.receive(update)
+                }
             }
         }
         if !foreground { await client.setForeground(false) }

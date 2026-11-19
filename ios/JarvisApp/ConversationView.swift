@@ -146,6 +146,13 @@ struct ConversationView: View {
 
     private var composer: some View {
         VStack(spacing: 12) {
+            if let message = session.talk.message {
+                Text(message).foregroundStyle(theme.secondary)
+                if session.talk.microphoneRefused {
+                    Link("Open Settings", destination: microphoneSettingsURL)
+                        .foregroundStyle(theme.secondary).underline().frame(minHeight: 44)
+                }
+            }
             if let message = session.draftValidationMessage ?? session.inputMessage {
                 Text(message).foregroundStyle(theme.secondary)
             }
@@ -171,15 +178,7 @@ struct ConversationView: View {
 
             if !typing {
                 HStack(alignment: .top, spacing: 12) {
-                    VStack(spacing: 6) {
-                        Text("Hold to talk").fontWeight(.semibold)
-                        Text("Coming soon")
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 88)
-                    .padding(.vertical, 12)
-                    .foregroundStyle(theme.keyText)
-                    .background(theme.brass, in: RoundedRectangle(cornerRadius: 10))
-                    .accessibilityElement(children: .combine)
+                    TalkKey(talk: session.talk, controlSize: controlSize)
                     VStack(spacing: 6) {
                         Text("Voice")
                         Text("Coming\nsoon").multilineTextAlignment(.center)
@@ -195,6 +194,14 @@ struct ConversationView: View {
         .font(.system(size: controlSize))
         .padding(20)
         .background(theme.background)
+    }
+
+    private var microphoneSettingsURL: URL {
+        #if os(iOS)
+        URL(string: UIApplication.openSettingsURLString)!
+        #else
+        URL(string: "app-settings:")!
+        #endif
     }
 
     private func submit() { Task { await session.sendTypedLine() } }
