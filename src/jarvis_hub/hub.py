@@ -326,10 +326,12 @@ def _told(news: News, *, ready: bool = False) -> _TalkerInput:
 
 
 @dataclass
-class _Announcement:
+class _NewsDelivery:
     news: News
     client_id: str
     speaks: bool
+    follows_focus: bool
+    turn: int | None = None
     held: bool = False
     reply: str | None = None
 
@@ -452,6 +454,7 @@ class Hub:
         self._metrics = metrics
         self._orchestrator_timeout = orchestrator_timeout
         self._speech: Speech = speech if speech is not None else _Silent()
+        self._speech_turn: int | None = None
         # In voice mode a typed line gets a text-only reply; with `--text --speak` it is spoken.
         self._speak_typed = speak_typed
         self._on_end_conversation = on_end_conversation
@@ -484,7 +487,7 @@ class Hub:
         self._needs_user: dict[str, str] = {}
         # Held news on the Talker in the turn under way, saved until that turn ends.
         self._telling: tuple[Leaf, ...] = ()
-        self._announcement: _Announcement | None = None
+        self._news_delivery: _NewsDelivery | None = None
         # Set whenever a line or news is posted for the Talker.
         self._arrived = asyncio.Event()
         self._clients_updated = asyncio.Event()
@@ -530,7 +533,7 @@ class Hub:
         # Orchestrator's messages, which stay unanswered and so saved, and the news the limited Talker could not take.
         self._deferred: list[_OrchestratorInput] = []
         self._parked_news: list[News] = []
-        self._announcing: set[asyncio.Task[None]] = set()
+        self._delivering_news: set[asyncio.Task[None]] = set()
         # Whether a Talker reply is on screen or being said.
         self._replying = False
         self._authorizations = Authorizations()
@@ -597,7 +600,14 @@ class Hub:
             return
         await reading
         self._input_ended.set()
-        if self._focus_available():
+        if self.clients.focus != TERMINAL:
+            for news in self._news:
+                self._held.extend(news.leaves())
+            self._news.clear()
+            self._arrived.set()
+            self._clients_updated.set()
+            self._persist()
+        elif self._focus_available():
             self._release_held()
         if self._pending == len(self._held):
             self._settled.set()
@@ -623,29 +633,31 @@ class Hub:
         # Adapters may attach before start restores the saved news.
         if not self._loops:
             return
-        announcement = self._announcement
-        if announcement is not None:
-            client = self.clients.get(announcement.client_id)
+        delivery = self._news_delivery
+        if delivery is not None:
+            client = self.clients.get(delivery.client_id)
             visible = bool(client is not None and client.connected and client.can_show_text)
-            can_speak = self._client_can_speak(announcement.client_id)
-            same_focus = announcement.client_id == self.clients.focus
-            told = self._announcement_told(announcement)
-            if announcement.speaks and (not same_focus or not can_speak):
+            can_speak = self._client_can_speak(delivery.client_id)
+            retargeted = delivery.follows_focus and delivery.client_id != self.clients.focus
+            told = self._news_delivery_told(delivery)
+            if delivery.speaks and (retargeted or not can_speak):
                 self._speech.stop()
-                if announcement.client_id == TERMINAL and self._floor is not None:
+                if delivery.client_id == TERMINAL and self._floor is not None:
                     self._floor.typed_input()
-            if same_focus and visible and not can_speak:
-                announcement.speaks = False
-                if announcement.reply is not None:
-                    self._announcement = None
-            elif not same_focus or not (can_speak if announcement.speaks else visible):
-                self._announcement = None
+            if not retargeted and visible and not can_speak:
+                delivery.speaks = False
+                if delivery.reply is not None:
+                    self._news_delivery = None
+            elif retargeted or not (can_speak if delivery.speaks else visible):
+                self._news_delivery = None
                 if not told:
-                    self._hold_announcement(announcement)
+                    self._hold_news_delivery(delivery)
         if not self._focus_available():
             for news in self._news:
                 self._held.extend(news.leaves())
             self._news.clear()
+        elif self._input_ended.is_set() and self.clients.focus != TERMINAL:
+            pass
         elif not self._quiet_mode:
             self._release_held()
         else:
@@ -664,27 +676,33 @@ class Hub:
         return bool(client is not None and client.connected and client.can_speak and not client.silence
                     and (client_id == TERMINAL or client_id in self._client_players))
 
-    def _announcement_told(self, announcement: _Announcement) -> bool:
-        return announcement.reply is not None and (
-            not announcement.speaks or " ".join(announcement.reply.split()) == " ".join(self._speech.played().split())
+    def _news_delivery_told(self, delivery: _NewsDelivery) -> bool:
+        return delivery.reply is not None and (
+            not delivery.speaks or (
+                delivery.turn == self._speech_turn
+                and " ".join(delivery.reply.split()) == " ".join(self._speech.played().split())
+            )
         )
 
-    def _hold_announcement(self, announcement: _Announcement) -> None:
-        self._announcement = None
-        if announcement.held:
+    def _hold_news_delivery(self, delivery: _NewsDelivery) -> None:
+        self._news_delivery = None
+        if delivery.held:
             return
-        announcement.held = True
-        self._held.extend(announcement.news.leaves())
+        delivery.held = True
+        self._held.extend(delivery.news.leaves())
         self._telling = ()
-        self._pending += announcement.news.count
-        self._settled.clear()
+        self._pending += delivery.news.count
+        if self._input_ended.is_set() and self._pending == len(self._held):
+            self._settled.set()
+        else:
+            self._settled.clear()
         self._persist()
 
     async def interrupt(self) -> bool:
         """Stop whatever is being said, and the Talker turn under way if its reply is spoken; a typed line's reply
         goes on. Returns whether a Talker turn was interrupted."""
-        if self._announcement is not None and not self._announcement_told(self._announcement):
-            self._hold_announcement(self._announcement)
+        if self._news_delivery is not None and not self._news_delivery_told(self._news_delivery):
+            self._hold_news_delivery(self._news_delivery)
         self._speech.stop()
         turn = self._talker_gate.turn
         if turn is None or self._talker is None or not self._turn_spoken:
@@ -699,7 +717,7 @@ class Hub:
         await self._waits.close()
         await self._subagents.close()
         await self._limit.close()
-        for announcing in [*self._announcing, *self._carrying_out]:
+        for announcing in [*self._delivering_news, *self._carrying_out]:
             announcing.cancel()
         if self._carrying_out:
             await asyncio.wait(self._carrying_out)
@@ -868,7 +886,7 @@ class Hub:
 
     def _queue(self, news: News) -> None:
         """News waits for Jarvis to be quiet; in Quiet mode only what gets through it waits, and the rest is held."""
-        if not self._focus_available():
+        if not self._focus_available() or (self._input_ended.is_set() and self.clients.focus != TERMINAL):
             self._held.extend(news.leaves())
             return
         if self._quiet_mode:
@@ -997,7 +1015,9 @@ class Hub:
     def _unheard(self) -> list[Leaf]:
         """News the User has not heard: held by Quiet mode (in the turn under way, waiting or held), or the Backlog."""
         waiting = [leaf for news in self._news for leaf in news.away_leaves()]
-        telling = self._announcement.news.leaves() if self._announcement is not None else self._telling
+        telling = self._telling
+        if self._news_delivery is not None:
+            telling = () if self._news_delivery_told(self._news_delivery) else self._news_delivery.news.leaves()
         return [*telling, *waiting, *self._held, *self._backlog]
 
     def _restore_quiet_mode(self, held: list[Leaf], quiet_mode: bool, needs_user: dict[str, str]) -> None:
@@ -1204,10 +1224,8 @@ class Hub:
                 continue
             # How many of the item's posted items wait for the usage limit to reset: they stay pending.
             parked = 0
-            announcement: _Announcement | None = None
+            delivery: _NewsDelivery | None = None
             try:
-                if item.kind == "user":
-                    self._announcement = None
                 if item.lang:
                     self._lang = item.lang
                 if item.heard:
@@ -1221,10 +1239,14 @@ class Hub:
                 self._user_source = uuid.uuid4().hex if self._user_text else ""
                 self._user_client_id = item.client_id
                 self._telling = item.news.away_leaves() if item.news else ()
-                if item.kind == "event" and item.news:
-                    announcement = _Announcement(item.news, self.clients.focus,
-                                                 speaks=item.spoken and self._client_can_speak(self.clients.focus))
-                    self._announcement = announcement
+                if item.news:
+                    if self._news_delivery is not None and not self._news_delivery_told(self._news_delivery):
+                        self._hold_news_delivery(self._news_delivery)
+                    destination = item.client_id if item.kind == "user" else self.clients.focus
+                    delivery = _NewsDelivery(item.news, destination,
+                                             speaks=item.spoken and self._client_can_speak(destination),
+                                             follows_focus=item.kind == "event")
+                    self._news_delivery = delivery
                 self._approvals.turn_began(self._user_text)
                 if item.kind == "user" and self._limit.blocks("talker"):
                     end = self._limited_reply(item)
@@ -1237,16 +1259,16 @@ class Hub:
                         scope_context = self._scopes.context() if authority else ""
                         message = "\n".join(part for part in (item.message, scope_context) if part)
                         end = await self._turn(message, kind=item.kind, arrived=item.arrived, spoken=item.spoken,
-                                               owner=owner, scope_authority=authority)
+                                               owner=owner, scope_authority=authority, news_delivery=delivery)
                 self._approvals.turn_ended(completed=end.outcome == "completed")
-                if announcement is not None and self._announcement is announcement:
-                    if end.outcome == "completed" and announcement.speaks:
-                        finishing = asyncio.create_task(self._announcement_finished(announcement))
-                        self._announcing.add(finishing)
-                        finishing.add_done_callback(self._announcing.discard)
+                if delivery is not None and self._news_delivery is delivery:
+                    if end.outcome == "completed" and delivery.speaks:
+                        finishing = asyncio.create_task(self._news_delivery_finished(delivery))
+                        self._delivering_news.add(finishing)
+                        finishing.add_done_callback(self._delivering_news.discard)
                     else:
-                        self._announcement = None
-                if end.outcome == "limited" and not (announcement is not None and announcement.held):
+                        self._news_delivery = None
+                if end.outcome == "limited" and not (delivery is not None and delivery.held):
                     # The news was not told, so the Talker gets it again after the reset.
                     parked = self._park(item)
             finally:
@@ -1259,10 +1281,13 @@ class Hub:
                 self._scopes.prune()
             upcoming = await self._restart_if_full(end.context)
 
-    async def _announcement_finished(self, announcement: _Announcement) -> None:
+    async def _news_delivery_finished(self, delivery: _NewsDelivery) -> None:
         await self._speech.idle(stall_timeout=None)
-        if self._announcement is announcement:
-            self._announcement = None
+        if self._news_delivery is delivery:
+            if self._news_delivery_told(delivery):
+                self._news_delivery = None
+            else:
+                self._hold_news_delivery(delivery)
             self._persist()
 
     async def _next_input(self) -> _TalkerInput:
@@ -1277,10 +1302,14 @@ class Hub:
             await self._talker_gate.before_next_turn()
             if not self._talker_inbox.empty():
                 return self._talker_inbox.get_nowait()
-            if self._news and not self._focus_available():
+            if self._news and (
+                not self._focus_available() or (self._input_ended.is_set() and self.clients.focus != TERMINAL)
+            ):
                 for news in self._news:
                     self._held.extend(news.leaves())
                 self._news.clear()
+                if self._input_ended.is_set() and self._pending == len(self._held):
+                    self._settled.set()
                 self._persist()
             if self._news and self._input_ended.is_set() and self.clients.focus == TERMINAL and (
                 self._floor is not None or not self._client_can_speak(TERMINAL)
@@ -1421,6 +1450,7 @@ class Hub:
         session: AgentSession | None = None,
         owner: tuple[str, int] | None = None,
         scope_authority: dict[str, tuple[int, int]] | None = None,
+        news_delivery: _NewsDelivery | None = None,
     ) -> TurnEnd:
         session = session or self._talker
         assert session is not None
@@ -1442,8 +1472,15 @@ class Hub:
         self._turn_spoken = show and spoken
         self._turn_answers_user = self._turn_spoken and kind == "user"
         destination_id = self._user_client_id if kind == "user" else self.clients.focus
-        announcement = self._announcement if kind == "event" else None
-        speech = self._speech if self._turn_spoken and self._client_can_speak(destination_id) else _Silent()
+        delivery = news_delivery
+        if self._news_delivery is not None and self._news_delivery is not delivery and self._news_delivery_told(self._news_delivery):
+            self._news_delivery = None
+        audible = self._turn_spoken and self._client_can_speak(destination_id)
+        speech = self._speech if audible else _Silent()
+        if delivery is not None:
+            delivery.turn = turn
+        if audible:
+            self._speech_turn = turn
         speech.begin(self._lang, turn=turn, heard_at=arrived if kind == "user" else None, owner=owner,
                      destination=self._client_players.get(destination_id),
                      allowed=lambda: self._client_can_speak(destination_id)
@@ -1508,8 +1545,8 @@ class Hub:
                 self._on_model_ready()
         if show and (shown.strip() or end.outcome != "failed"):
             self._exchanges.append((message, shown))
-        if announcement is not None and end.outcome == "completed":
-            announcement.reply = shown
+        if delivery is not None and end.outcome == "completed":
+            delivery.reply = shown
 
         def ms(t: float | None) -> int | None:
             return None if t is None else round((t - arrived) * 1000)
@@ -1746,6 +1783,8 @@ class Hub:
         """A held Talker needs no model call to show its availability."""
         speech = self._speech if item.spoken else _Silent()
         self._turn_count += 1
+        if item.spoken:
+            self._speech_turn = self._turn_count
         speech.begin(self._lang, turn=self._turn_count, heard_at=item.arrived)
         self._limit_notice(self._limit.tell())
         self._persist()
