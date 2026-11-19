@@ -145,3 +145,91 @@ def test_the_barge_in_windows_reach_the_voice_state_machine() -> None:
     voice = timing(VoiceSettings(bargein_decide_ms=600, bargein_guard_ms=400))
 
     assert (voice.decide_s, voice.guard_s) == (0.6, 0.4)
+
+
+async def test_voice_launcher_remote_replay_and_interrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from dataclasses import replace
+
+    import aiohttp
+
+    import jarvis_hub.main as entry
+    from jarvis_hub.door import Door
+    from jarvis_hub.pairing import PairingStore
+    from jarvis_hub.voice.transcription import TranscriptionService
+    from tests.fakes import AwaitInterrupt
+    from tests.protocol_exchanges import command, connect
+    from tests.test_remote_speech import control, foreground, through
+
+    class Transcriber:
+        def transcribe(self, audio: Samples, *, after: float = 0.0) -> str:
+            return 'Hello from the phone'
+
+    class Transcription(TranscriptionService):
+        def __init__(self) -> None:
+            super().__init__(Transcriber)
+
+    doors: list[Door] = []
+
+    class ListeningDoor(Door):
+        def __init__(self, **options: Any) -> None:
+            super().__init__(**options)
+            doors.append(self)
+
+    monkeypatch.setattr(entry, 'TranscriptionService', Transcription)
+    monkeypatch.setattr(entry, 'Door', ListeningDoor)
+    config = replace(settings(tmp_path), remote=True, remote_port=0)
+    with PairingStore(config.runtime_dir / 'events.sqlite3') as pairing:
+        phone = pairing.exchange(pairing.create_code('https://mac.example.ts.net'), 'Phone', 'iphone')
+    clock = FakeClock()
+    backend = FakeBackend(clock, [[Text('Retained reply.')], [Text('Opening. '), AwaitInterrupt(), Text('Too late.')]])
+    microphone, player, stdin = ScriptedMicrophone(clock), RecordingPlayer(), HeldStdin()
+
+    def open_player(rate: int, on_played: Callable[[Samples, int], None]) -> RecordingPlayer:
+        return player
+
+    def open_listener(choice: EngineChoice, listening: Listening, record: Any, notice: Any, clips: Any) -> ScriptedMicrophone:
+        return microphone
+
+    running = asyncio.create_task(entry.voice_mode(
+        settings=config, environ={}, backend=backend, clock=clock, stdin=stdin,
+        stdout=io.StringIO(), stderr=io.StringIO(),
+        ears=Ears(FakeTts(), open_player, open_listener), headphones=True,
+    ))
+    try:
+        await until(lambda: microphone.started and player.voices == ['ready'])
+        async with aiohttp.ClientSession() as session, connect(session, doors[0], phone.token) as socket:
+            await foreground(socket)
+
+            async def talk(identity: str) -> None:
+                assert (await control(socket, identity, 'talk_begin', talk_id=identity))['ok']
+                async with session.post(f'http://127.0.0.1:{doors[0].port}/v1/utterances/{identity}', data=b'\x00\x00', headers={
+                    'Authorization': f'Bearer {phone.token}', 'Idempotency-Key': f'upload-{identity}',
+                    'Content-Type': 'application/octet-stream', 'X-Jarvis-Audio-Format': 'pcm_s16le_16000_mono',
+                }) as response:
+                    assert response.status == 200
+
+            await talk('old')
+            original = await through(socket, 'speech_end')
+            reply_id = next(f['payload']['reply_id'] for f in original if f['type'] == 'speech_begin')
+            await socket.send_json(command('replay', 'replay_speech', reply_id=reply_id))
+            replay = await through(socket, 'command_result')
+            assert replay[-1]['ok']
+            replay_id = replay[-1]['result']['speech_id']
+            audio = await through(socket, 'speech_end')
+            assert [f['payload']['text'] for f in audio if f['type'] == 'speech_clip'] == ['Retained reply.']
+            assert next(f['payload'] for f in audio if f['type'] == 'speech_begin') == {
+                'reply_id': reply_id, 'speech_id': replay_id, 'channels': 1, 'sample_rate': 24000, 'sample_width': 2}
+            assert (await control(socket, 'stop-replay', 'interrupt', speech_id=replay_id, last_clip_index=-1))['ok']
+            await talk('current')
+            opening = await through(socket, 'speech_clip')
+            speech_id = next(f['payload']['speech_id'] for f in opening if f['type'] == 'speech_begin')
+            await socket.send_json(command('stop-current', 'interrupt', speech_id=speech_id, last_clip_index=0))
+            stopped = await through(socket, 'command_result')
+            assert stopped[-1]['ok']
+            assert any(f['type'] == 'speech_stop' and f['payload']['speech_id'] == speech_id for f in stopped)
+    finally:
+        stdin.done.set()
+        await asyncio.wait_for(running, 5)
+    assert player.texts == ['']
+    assert microphone.closed and player.closed
+    assert all(session.closed for session in backend.sessions)
