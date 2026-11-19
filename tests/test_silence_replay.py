@@ -5,7 +5,9 @@ from pathlib import Path
 import pytest
 
 from jarvis_hub.hub import Line
-from tests.fakes import FakeBackend, FakeClock, FakeTts, Gate, RecordingPlayer, Set, Text, Tool, until
+from jarvis_hub.voice.state import Timing
+from jarvis_hub.voice.voice_mode import VoiceMode
+from tests.fakes import AwaitInterrupt, FakeBackend, FakeClock, FakeTts, Gate, RecordingMetrics, RecordingPlayer, ScriptedAudio, Set, Text, Tool, until
 from tests.protocol_exchanges import command, connect, receive
 from tests.test_remote_speech import control, foreground, remote_rig, through
 
@@ -28,10 +30,14 @@ async def test_silence_still_delivers_spoken_text_and_replay_is_refused(tmp_path
             assert not any(text.startswith('First sentence.') for text, _ in tts.calls)
 
 
-async def test_replay_preserves_active_reply_ingress_and_focus(tmp_path: Path) -> None:
+@pytest.mark.parametrize("voice_mode", [False, True])
+async def test_replay_preserves_active_reply_ingress_and_focus(tmp_path: Path, voice_mode: bool) -> None:
     gate = asyncio.Event()
     backend = FakeBackend(FakeClock(), [[Text('Retained reply.')], [Text('Current opening. '), Gate(gate), Text('Current ending.')]])
-    async with remote_rig(tmp_path, backend) as (session, door, hub, log, backend, phones, _pairing):
+    clock = backend.clock
+    voice = VoiceMode(audio=ScriptedAudio(clock), tts=FakeTts(), player=RecordingPlayer(), clock=clock,
+                      metrics=RecordingMetrics(), notice=lambda _: None, timing=Timing(6, 4, 6, .5)) if voice_mode else None
+    async with remote_rig(tmp_path, backend, voice=voice) as (session, door, hub, _log, backend, phones, _pairing):
         async with connect(session, door, phones[0].token) as socket:
             await foreground(socket)
             await hub.admit_line(Line('Old', 0, typed=False, client_id=phones[0].client.id))
@@ -59,11 +65,40 @@ async def test_replay_preserves_active_reply_ingress_and_focus(tmp_path: Path) -
             stale = await control(socket, 'stale', 'playback_report', speech_id=replay_id, clip_index=0, state='finished')
             assert stale['error']['code'] == 'invalid_payload'
             assert hub.clients.focus == 'terminal'
-            replies = [e for e in log.after(0) if e.type == 'reply_end']
-            assert [e.payload['text'] for e in replies] == ['Retained reply.', 'Current opening. Current ending.']
             assert len(backend.sessions[0].received) == 3
             missing = await control(socket, 'missing', 'replay_speech', reply_id='unknown')
             assert missing['error']['code'] == 'reply_not_found'
+            assert (await control(socket, 'history-barrier', 'set_presence', can_show_text=True))['ok']
+            async with connect(session, door, phones[0].token) as history:
+                frames = await through(history, 'replay_complete')
+                replies = [f['payload'] for f in frames if f['type'] == 'reply_end']
+                assert [(r['reply_id'], r['text']) for r in replies] == [
+                    (reply_id, 'Retained reply.'), (current_reply, 'Current opening. Current ending.')]
+
+
+@pytest.mark.parametrize("stop_command", ["interrupt", "playback_report"])
+async def test_voice_mode_remote_stop_interrupts_active_talker(tmp_path: Path, stop_command: str) -> None:
+    clock = FakeClock()
+    backend = FakeBackend(clock, [[Text('Opening. '), AwaitInterrupt(), Text('Too late.')], [Text('Next reply.')]])
+    voice = VoiceMode(audio=ScriptedAudio(clock), tts=FakeTts(), player=RecordingPlayer(), clock=clock,
+                      metrics=RecordingMetrics(), notice=lambda _: None, timing=Timing(6, 4, 6, .5))
+    async with remote_rig(tmp_path, backend, voice=voice) as (session, door, hub, _log, _backend, phones, _pairing):
+        async with connect(session, door, phones[0].token) as socket:
+            await foreground(socket)
+            await hub.admit_line(Line('Phone', 0, typed=False, client_id=phones[0].client.id))
+            opening = await through(socket, 'speech_clip')
+            stream = next(f['payload']['speech_id'] for f in opening if f['type'] == 'speech_begin')
+            payload = {'last_clip_index': 0} if stop_command == 'interrupt' else {'clip_index': 0, 'state': 'stopped'}
+            await socket.send_json(command('stop', stop_command, speech_id=stream, **payload))
+            stopped = await through(socket, 'command_result')
+            assert stopped[-1]['ok']
+            assert any(f['type'] == 'speech_stop' and f['payload']['speech_id'] == stream for f in stopped)
+            assert not hub.clients.remote_activity
+            await hub.admit_line(Line('Continue', 0, typed=False, client_id=phones[0].client.id))
+            resumed = await through(socket, 'speech_end')
+            assert [f['payload']['text'] for f in resumed if f['type'] == 'speech_clip'] == ['Next reply.']
+            heard = 'Opening.' if stop_command == 'interrupt' else ''
+            assert f'<interrupted spoken="{heard}"/>' in backend.session('talker').received[-1]
 
 
 async def test_silence_stops_only_destination_while_model_text_continues(tmp_path: Path) -> None:
