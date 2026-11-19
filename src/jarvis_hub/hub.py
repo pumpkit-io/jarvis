@@ -305,6 +305,7 @@ class _TalkerInput:
     news: News | None = None
     # The Backlog a User's turn opens with: context for the Talker, never told or counted as news.
     backlog: str = ""
+    news_ready: bool = False
 
     @property
     def message(self) -> str:
@@ -320,8 +321,8 @@ class _TalkerInput:
         return (1 if self.kind == "user" else 0) + (self.news.count if self.news else 0)
 
 
-def _told(news: News) -> _TalkerInput:
-    return _TalkerInput("event", news.arrived, news=news)
+def _told(news: News, *, ready: bool = False) -> _TalkerInput:
+    return _TalkerInput("event", news.arrived, news=news, news_ready=ready)
 
 
 @dataclass
@@ -628,9 +629,7 @@ class Hub:
             visible = bool(client is not None and client.connected and client.can_show_text)
             can_speak = self._client_can_speak(announcement.client_id)
             same_focus = announcement.client_id == self.clients.focus
-            told = announcement.reply is not None and (
-                not announcement.speaks or " ".join(announcement.reply.split()) == " ".join(self._speech.played().split())
-            )
+            told = self._announcement_told(announcement)
             if announcement.speaks and (not same_focus or not can_speak):
                 self._speech.stop()
                 if announcement.client_id == TERMINAL and self._floor is not None:
@@ -642,11 +641,7 @@ class Hub:
             elif not same_focus or not (can_speak if announcement.speaks else visible):
                 self._announcement = None
                 if not told:
-                    announcement.held = True
-                    self._held.extend(announcement.news.leaves())
-                    self._telling = ()
-                    self._pending += announcement.news.count
-                    self._settled.clear()
+                    self._hold_announcement(announcement)
         if not self._focus_available():
             for news in self._news:
                 self._held.extend(news.leaves())
@@ -669,9 +664,27 @@ class Hub:
         return bool(client is not None and client.connected and client.can_speak and not client.silence
                     and (client_id == TERMINAL or client_id in self._client_players))
 
+    def _announcement_told(self, announcement: _Announcement) -> bool:
+        return announcement.reply is not None and (
+            not announcement.speaks or " ".join(announcement.reply.split()) == " ".join(self._speech.played().split())
+        )
+
+    def _hold_announcement(self, announcement: _Announcement) -> None:
+        self._announcement = None
+        if announcement.held:
+            return
+        announcement.held = True
+        self._held.extend(announcement.news.leaves())
+        self._telling = ()
+        self._pending += announcement.news.count
+        self._settled.clear()
+        self._persist()
+
     async def interrupt(self) -> bool:
         """Stop whatever is being said, and the Talker turn under way if its reply is spoken; a typed line's reply
         goes on. Returns whether a Talker turn was interrupted."""
+        if self._announcement is not None and not self._announcement_told(self._announcement):
+            self._hold_announcement(self._announcement)
         self._speech.stop()
         turn = self._talker_gate.turn
         if turn is None or self._talker is None or not self._turn_spoken:
@@ -1177,8 +1190,14 @@ class Hub:
                 item = replace(item, news=rest)
                 if item.kind == "event" and rest is None:
                     continue
-            if item.kind == "event" and item.news is not None and not self._focus_available():
-                self._held.extend(item.news.leaves())
+            if item.kind == "event" and item.news is not None and (
+                not self._focus_available()
+                or (not item.news_ready and (
+                    self._floor is not None or self.clients.focus != TERMINAL or self._client_can_speak(TERMINAL)
+                ))
+            ):
+                self._queue(item.news)
+                self._arrived.set()
                 if self._input_ended.is_set() and self._pending == len(self._held):
                     self._settled.set()
                 self._persist()
@@ -1263,13 +1282,15 @@ class Hub:
                     self._held.extend(news.leaves())
                 self._news.clear()
                 self._persist()
-            if self._news and self._input_ended.is_set() and self.clients.focus == TERMINAL:
-                return replace(_told(self._news.popleft()), spoken=False)
+            if self._news and self._input_ended.is_set() and self.clients.focus == TERMINAL and (
+                self._floor is not None or not self._client_can_speak(TERMINAL)
+            ):
+                return replace(_told(self._news.popleft(), ready=True), spoken=False)
             if self._news and quiet and (self.clients.focus != TERMINAL or self._floor is None or self._floor.announce()):
                 # Everything waiting goes as one Announcement rather than one Follow-up window each.
                 news = News.joined(self._news)
                 self._news.clear()
-                return _told(news)
+                return _told(news, ready=True)
             quiet = await self._line_or_quiet()
 
     async def _line_or_quiet(self) -> bool:
