@@ -578,8 +578,16 @@ async def test_focus_move_during_mac_announcement_leaves_mac_available_for_next_
         await until(lambda: remote.texts == ["One update, sir: ready."])
         assert local.voices.count("closing") == closing
         local.hold = False
+        chimes = local.voices.count("chime")
         audio.wake()
         await until(lambda: audio.capturing[-1:] == [True])
+        await until(lambda: local.voices.count("chime") == chimes + 1)
+        clock.advance(6.1)
+        await until(lambda: local.voices.count("closing") == closing + 1)
+        await until(lambda: audio.capturing[-1:] == [False])
+        audio.wake()
+        await until(lambda: audio.capturing[-1:] == [True])
+        await until(lambda: local.voices.count("chime") == chimes + 2)
         audio.say("At the desk again")
         await until(lambda: "Back at the desk." in local.texts)
         assert remote.texts == ["One update, sir: ready."]

@@ -126,6 +126,7 @@ class _Cached:
     name: ClipName
     lang: Lang
     reply: _Reply | None = None
+    cue_generation: int | None = None
 
 
 @dataclass(frozen=True)
@@ -169,6 +170,7 @@ class Speech:
         self._reply: _Reply | None = None
         self._replies: dict[int, _Reply] = {}
         self._generation = 0
+        self._local_cue_generation = 0
         self._worker: asyncio.Task[None] | None = None
         self._loading: asyncio.Future[None] | None = None
 
@@ -179,7 +181,14 @@ class Speech:
 
     def say(self, name: ClipName, lang: Lang, *, in_reply: bool = False) -> None:
         """Queue a nonverbal cue; `in_reply` associates its playback with the reply `begin` opened."""
-        self._queue.put_nowait(_Cached(name, lang, self._reply if in_reply else None))
+        reply = self._reply if in_reply else None
+        if in_reply and reply is None:
+            return
+        generation = None
+        if reply is None:
+            self._retired_players = [retired for retired in self._retired_players if retired is not self._player]
+            generation = self._local_cue_generation
+        self._queue.put_nowait(_Cached(name, lang, reply, generation))
 
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
               destination: Player | None = None, allowed: Callable[[], bool] | None = None) -> Callable[[], bool]:
@@ -243,8 +252,10 @@ class Speech:
                 self._notice(f"Could not stop speech: {type(e).__name__}: {e}")
 
     def retire(self, destination: Player | None) -> None:
-        """Stop this destination and exclude it from playback waits until a new reply binds it."""
+        """Stop this output and its playback waits until a new reply or local cue reactivates it."""
         player = destination if destination is not None else self._player
+        if player is self._player:
+            self._local_cue_generation += 1
         self._prune_replies()
         for reply in self._replies.values():
             if reply.player is player:
@@ -361,7 +372,11 @@ class Speech:
                 )
                 if generation == self._generation and not reply.stopped and (reply.allowed is None or reply.allowed()):
                     self._play(Clip(text, voice, samples, self._tts.sample_rate), reply, sentence=True)
-            case _Cached(name, lang, reply):
+            case _Cached(name, lang, reply, cue_generation):
+                if cue_generation is not None and cue_generation != self._local_cue_generation:
+                    return
+                if reply is not None and reply.stopped:
+                    return
                 starts = self._play(self._cache[name, lang], reply, sentence=False)
                 if name == "chime" and self._on_chime is not None:
                     self._on_chime(starts)
