@@ -50,6 +50,8 @@ class EventLog:
             CREATE TABLE IF NOT EXISTS talks (
                 client_id TEXT NOT NULL, id TEXT NOT NULL, request_id TEXT NOT NULL, status TEXT NOT NULL,
                 PRIMARY KEY(client_id, id));
+            CREATE TABLE IF NOT EXISTS reply_languages (reply_id TEXT PRIMARY KEY, lang TEXT NOT NULL, time REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS client_settings (client_id TEXT PRIMARY KEY, silence INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS retention (
                 singleton INTEGER PRIMARY KEY CHECK(singleton = 1), pruned_through INTEGER NOT NULL);
             INSERT OR IGNORE INTO retention VALUES (1, 0);
@@ -58,6 +60,7 @@ class EventLog:
         self._db.execute("UPDATE retention SET pruned_through = MAX(pruned_through, "
                          "COALESCE((SELECT MAX(seq) FROM events WHERE time < ?), 0)) WHERE singleton = 1", (cutoff,))
         self._db.execute("DELETE FROM events WHERE time < ?", (cutoff,))
+        self._db.execute("DELETE FROM reply_languages WHERE time < ?", (cutoff,))
         unknown = json.dumps({"ok": False, "error": {"code": "outcome_unknown",
             "message": "Previous operation outcome is unknown; reconcile with history", "retry_after_seconds": None}})
         self._db.execute("UPDATE commands SET status = 'complete', result = ? WHERE status != 'complete'", (unknown,))
@@ -126,13 +129,37 @@ class EventLog:
                 "ORDER BY seq DESC LIMIT ?", (before, before, client_id, limit + 1)).fetchall()
             return [_event(row) for row in reversed(rows[:limit])], len(rows) > limit
 
+    def silence(self, client_id: str) -> bool:
+        with self._lock:
+            row = self._db.execute("SELECT silence FROM client_settings WHERE client_id = ?", (client_id,)).fetchone()
+            return bool(row and row[0])
+
+    def set_silence(self, client_id: str, silence: bool) -> None:
+        with self._lock, self._db:
+            self._db.execute("INSERT OR REPLACE INTO client_settings VALUES (?, ?)", (client_id, silence))
+
+    def set_reply_language(self, reply_id: str, lang: str) -> None:
+        with self._lock, self._db:
+            self._db.execute("INSERT OR REPLACE INTO reply_languages VALUES (?, ?, ?)", (reply_id, lang, self._wall()))
+
+    def retained_reply(self, reply_id: str) -> tuple[str, str] | None:
+        with self._lock:
+            rows = self._db.execute("SELECT payload FROM events WHERE type = 'reply_end' AND time >= ? ORDER BY seq DESC",
+                                    (self._wall() - 30 * 86400,)).fetchall()
+            for (encoded,) in rows:
+                payload = json.loads(encoded)
+                if payload.get("reply_id") == reply_id:
+                    row = self._db.execute("SELECT lang FROM reply_languages WHERE reply_id = ?", (reply_id,)).fetchone()
+                    return payload["text"], row[0] if row else "en"
+            return None
+
     def reserve(self, client_id: str, command_id: str, kind: str,
                 payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
         encoded = json.dumps([kind, payload], ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
         digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
         with self._lock, self._db:
             inserted = self._db.execute("INSERT OR IGNORE INTO commands VALUES (?, ?, ?, ?, 'reserved', NULL)",
-                             (client_id, command_id, kind if kind in {"say_text", "acknowledge", "set_presence", "talk_begin", "talk_cancel", "upload"} else "unknown", digest))
+                             (client_id, command_id, kind if kind in {"say_text", "acknowledge", "set_presence", "talk_begin", "talk_cancel", "upload", "set_silence", "replay_speech"} else "unknown", digest))
             row = self._db.execute("SELECT digest, status, result FROM commands WHERE client_id = ? AND id = ?",
                                    (client_id, command_id)).fetchone()
             if row[0] != digest:

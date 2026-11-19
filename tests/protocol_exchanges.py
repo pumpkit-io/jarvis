@@ -222,6 +222,7 @@ class DelayedAdmission:
         self.cancel_remote_talk = hub.cancel_remote_talk
         self.set_client_talking = hub.set_client_talking
         self.set_client_playing = hub.set_client_playing
+        self.replay_speech = hub.replay_speech
         self.interrupt_client = hub.interrupt_client
         self.admitted = asyncio.Event()
         self.release = asyncio.Event()
@@ -490,6 +491,8 @@ async def speech_exchange(root: Path) -> dict[str, Any]:
         frames: list[dict[str, Any]] = []
         replay: list[dict[str, Any]] = []
         reports: list[dict[str, Any]] = []
+        controls: list[dict[str, Any]] = []
+        requested: list[dict[str, Any]] = []
         try:
             async with aiohttp.ClientSession() as session:
                 async with connect(session, door, phone.token) as socket:
@@ -526,13 +529,34 @@ async def speech_exchange(root: Path) -> dict[str, Any]:
                             pass
                         reports.append({'command': report, 'result': response})
                     assert not hub.clients.remote_activity
+                    reply_id = next(frame['payload']['reply_id'] for frame in frames if frame.get('type') == 'speech_begin')
+                    for control in [command('silence-on', 'set_silence', silence=True),
+                                    command('silenced-replay', 'replay_speech', reply_id=reply_id),
+                                    command('silence-off', 'set_silence', silence=False),
+                                    command('missing-reply', 'replay_speech', reply_id='missing')]:
+                        await socket.send_json(control)
+                        while (response := await receive(socket)).get('id') != control['id']:
+                            pass
+                        controls.append({'command': control, 'result': response})
+                    await socket.send_json(command('requested-replay', 'replay_speech', reply_id=reply_id))
+                    while True:
+                        frame = await receive(socket)
+                        if frame['type'] not in SNAPSHOTS:
+                            requested.append(frame)
+                        if frame['type'] == 'speech_clip':
+                            binary = await socket.receive()
+                            assert binary.type == aiohttp.WSMsgType.BINARY
+                            requested.append({'binary_base64': base64.b64encode(binary.data).decode('ascii')})
+                        if frame['type'] == 'speech_end':
+                            break
                 async with connect(session, door, phone.token) as socket:
                     while True:
                         frame = await receive(socket)
                         replay.append(frame)
                         if frame['type'] == 'replay_complete':
                             break
-            return {'speech_live': frames, 'speech_reports': reports, 'speech_replay': replay}
+            return {'speech_live': frames, 'speech_reports': reports, 'speech_replay': replay,
+                    'speech_controls': controls, 'speech_requested_replay': requested}
         finally:
             tts.hold.set()
             await door.close()

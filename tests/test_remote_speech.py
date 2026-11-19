@@ -81,12 +81,12 @@ async def test_spoken_reply_has_ordered_private_pcm_and_reported_playback(tmp_pa
 
 
 @asynccontextmanager
-async def remote_rig(tmp_path: Path, backend: FakeBackend | None = None, voice: VoiceMode | None = None, begin_entered: asyncio.Event | None = None) -> AsyncGenerator[tuple[aiohttp.ClientSession, Door, Hub, EventLog, FakeBackend, list[PairingResult], PairingStore]]:
+async def remote_rig(tmp_path: Path, backend: FakeBackend | None = None, voice: VoiceMode | None = None, begin_entered: asyncio.Event | None = None, tts: FakeTts | None = None, local: RecordingPlayer | None = None) -> AsyncGenerator[tuple[aiohttp.ClientSession, Door, Hub, EventLog, FakeBackend, list[PairingResult], PairingStore]]:
     clock, metrics = FakeClock(), RecordingMetrics()
     with EventLog(tmp_path / 'events.db') as log, PairingStore(tmp_path / 'pairing.db') as pairing:
         phones = [pairing.exchange(pairing.create_code('https://mac.example.ts.net'), name, 'iphone') for name in ('One', 'Two')]
         output = EventOutput(log, RecordingOutput())
-        speech = voice.speech if voice is not None else Speech(FakeTts(), RecordingPlayer(), clock, metrics=metrics, notice=output.notice)
+        speech = voice.speech if voice is not None else Speech(tts or FakeTts(), local or RecordingPlayer(), clock, metrics=metrics, notice=output.notice)
         backend = backend or FakeBackend(clock, [[Text('First sentence. Second sentence.')], [Text('New reply.')], [Text('Third reply.')]])
         hub = make_hub(backend, output, metrics, speech=speech, floor=voice)
         adapter = DelayedAdmission(hub)

@@ -35,6 +35,8 @@ class Conversation(Protocol):
 
     def cancel_remote_talk(self, client_id: str, request_id: str) -> None: ...
 
+    def replay_speech(self, client_id: str, reply_id: str, text: str, lang: str) -> str: ...
+
     def set_client_talking(self, client_id: str, talking: bool) -> None: ...
 
     def attach_client(self, client: Client, *, player: Player | None = None) -> None: ...
@@ -60,8 +62,9 @@ class _Connection:
 
 
 class _SpeechTransport:
-    def __init__(self, publish: Callable[[str, dict[str, Any], bytes | None], None], playing: Callable[[bool], None]) -> None:
-        self._publish, self._playing = publish, playing
+    def __init__(self, publish: Callable[[str, dict[str, Any], bytes | None], None], playing: Callable[[bool], None],
+                 silenced: Callable[[], bool]) -> None:
+        self._publish, self._playing, self._silenced = publish, playing, silenced
         self._replies: dict[str, str] = {}
 
     def publish(self, kind: str, payload: dict[str, Any], binary: bytes | None = None) -> None:
@@ -84,7 +87,7 @@ class _SpeechTransport:
         self.publish("speech_end", {"speech_id": speech_id, "last_clip_index": last_clip_index})
 
     def stop(self, speech_id: str) -> None:
-        self.publish("speech_stop", {"speech_id": speech_id, "reason": "interrupted"})
+        self.publish("speech_stop", {"speech_id": speech_id, "reason": "silence" if self._silenced() else "interrupted"})
         self._playing(False)
 
 
@@ -443,7 +446,6 @@ class Door:
             if previous is not None and self._talks is not None:
                 self._talks.disconnect(client.id)
             self._connections[client.id] = connection
-            existing = self._hub.clients.get(client.id)
             def publish(kind: str, payload: dict[str, Any], binary: bytes | None) -> None:
                 if self._active(connection):
                     assert self._log is not None
@@ -453,9 +455,13 @@ class Door:
                 if self._current(connection) and self._hub is not None:
                     self._hub.set_client_playing(client.id, active)
 
-            connection.player = RemotePlayer(_SpeechTransport(publish, playing))
+            def silenced() -> bool:
+                client_state = self._hub.clients.get(client.id) if self._hub is not None else None
+                return client_state is not None and client_state.silence
+
+            connection.player = RemotePlayer(_SpeechTransport(publish, playing, silenced))
             self._hub.attach_client(Client(client.id, "iphone" if client.kind == "iphone" else "reference", connected=True, can_show_text=False, can_speak=self._hub.speech_available,
-                                           silence=existing.silence if existing is not None else False), player=connection.player)
+                                           silence=self._log.silence(client.id)), player=connection.player)
             # Replay is queued before scheduled append notifications can run on this loop.
             complete: dict[str, Any] = {"version": 1, "type": "replay_complete", "through_seq": mark, "oldest_seq": oldest}
             if pruned:
@@ -590,6 +596,25 @@ class Door:
                     raise ValueError("Client is disconnected")
                 self._hub.attach_client(replace(client, can_show_text=visible))
                 result = {"ok": True, "result": {"can_show_text": visible}}
+            elif kind == "set_silence":
+                silence = payload.get("silence")
+                if type(silence) is not bool or set(payload) != {"silence"}:
+                    raise ValueError("silence must be a boolean")
+                self._hub.clients.set_silence(connection.client.id, silence)
+                result = {"ok": True, "result": {"silence": silence}}
+            elif kind == "replay_speech":
+                reply_id = payload.get("reply_id")
+                if set(payload) != {"reply_id"} or not self._valid_id(reply_id):
+                    raise ValueError("A reply identifier is required")
+                assert isinstance(reply_id, str)
+                client = self._hub.clients.get(connection.client.id)
+                if client is not None and client.silence:
+                    result = rejected("silenced", "Voice is off for this Client")
+                elif (reply := self._log.retained_reply(reply_id)) is None:
+                    result = rejected("reply_not_found", "That reply is no longer available")
+                else:
+                    speech_id = self._hub.replay_speech(connection.client.id, reply_id, *reply)
+                    result = {"ok": True, "result": {"speech_id": speech_id, "reply_id": reply_id}}
             elif kind == "acknowledge":
                 seq = sequence(payload.get("seq"))
                 if seq > self._log.high_water:

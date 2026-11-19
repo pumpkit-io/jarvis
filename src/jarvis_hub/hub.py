@@ -48,7 +48,7 @@ from jarvis_hub.event_log import EventOutput
 from jarvis_hub.tasks import Task, Tasks, no_task
 from jarvis_hub.voice.language import Lang, detect_language
 from jarvis_hub.voice.speech import ClipName
-from jarvis_hub.voice.player import Player
+from jarvis_hub.voice.player import RemotePlayer, Player
 from jarvis_hub.waits import Check, Watcher, Waits, WaitSetup, cancelled_event, check_event, watcher_event
 
 
@@ -128,6 +128,11 @@ class Speech(Protocol):
               destination: Player | None = None, allowed: Callable[[], bool] | None = None,
               can_start: Callable[[], bool] | None = None, reply_id: str | None = None) -> Callable[[], bool] | None: ...
 
+    def replay(self, text: str, lang: Lang, *, destination: RemotePlayer, reply_id: str,
+               allowed: Callable[[], bool]) -> str: ...
+
+    def stop_replay(self, destination: Player) -> bool: ...
+
     def say(self, name: ClipName, lang: Lang, *, in_reply: bool = False) -> None: ...
 
     def feed(self, text: str) -> None: ...
@@ -168,6 +173,13 @@ class _Silent:
               destination: Player | None = None, allowed: Callable[[], bool] | None = None,
               can_start: Callable[[], bool] | None = None, reply_id: str | None = None) -> None:
         pass
+
+    def replay(self, text: str, lang: Lang, *, destination: RemotePlayer, reply_id: str,
+               allowed: Callable[[], bool]) -> str:
+        raise ValueError("Speech is unavailable")
+
+    def stop_replay(self, destination: Player) -> bool:
+        return False
 
     def say(self, name: ClipName, lang: Lang, *, in_reply: bool = False) -> None:
         pass
@@ -463,7 +475,11 @@ class Hub:
         ))
         self._backend = backend
         self._clock = clock
-        self.clients = Clients(terminal_speech=(speech is not None if terminal_speech is None else terminal_speech), on_focus=self._persist, on_change=self._clients_changed)
+        self.clients = Clients(
+            terminal_speech=(speech is not None if terminal_speech is None else terminal_speech),
+            on_focus=self._persist, on_change=self._clients_changed,
+            save_silence=output.log.set_silence if isinstance(output, EventOutput) and output.log is not None else None,
+        )
         if isinstance(output, EventOutput):
             self._displays = _ClientOutput(output.destination, self.clients)
             output.destination = self._displays
@@ -710,6 +726,14 @@ class Hub:
             self._client_players[client.id] = player
         self._clients_changed()
 
+    def replay_speech(self, client_id: str, reply_id: str, text: str, lang: str) -> str:
+        player = self._client_players.get(client_id)
+        if not isinstance(player, RemotePlayer) or not self._client_can_speak(client_id):
+            raise ValueError("Client cannot speak")
+        return self._speech.replay(text, "it" if lang == "it" else "en", destination=player, reply_id=reply_id,
+                                   allowed=lambda: self._client_can_speak(client_id)
+                                   and self._client_players.get(client_id) is player)
+
     def set_client_talking(self, client_id: str, talking: bool) -> None:
         self.clients.set_talking(client_id, talking)
 
@@ -798,6 +822,9 @@ class Hub:
         self._persist()
 
     async def interrupt_client(self, client_id: str) -> None:
+        if (player := self._client_players.get(client_id)) is not None and self._speech.stop_replay(player):
+            self.set_client_playing(client_id, False)
+            return
         if (player := self._client_players.get(client_id)) is not None:
             self._remote_interrupted = player.played()
         if client_id == self._speech_client_id:
@@ -1678,6 +1705,8 @@ class Hub:
         delivery = news_delivery
         if self._news_delivery is not None and self._news_delivery is not delivery and self._news_delivery_told(self._news_delivery):
             self._news_delivery = None
+        if self._output.log is not None and self._output.reply_id is not None:
+            self._output.log.set_reply_language(self._output.reply_id, self._lang)
         audible = self._turn_spoken and self._client_can_speak(destination_id)
         speech = self._speech if audible else _Silent()
         if audible:

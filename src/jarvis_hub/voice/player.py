@@ -311,15 +311,18 @@ class RemotePlayer:
         self._stopped = True
         self._ended = False
 
-    def begin_reply(self, reply_id: str) -> None:
+    def begin_reply(self, reply_id: str, *, speech_id: str | None = None) -> None:
         self.stop()
-        self._speech_id = uuid4().hex
+        self._speech_id = speech_id or uuid4().hex
         self._clips.clear()
         self._finished = -1
         self._stopped = False
         self._ended = False
         if begin := getattr(self._transport, "begin", None):
             begin(self._speech_id, reply_id)
+
+    def owns(self, speech_id: str) -> bool:
+        return self._speech_id == speech_id and not self._stopped
 
     def end_reply(self) -> None:
         self._ended = True
