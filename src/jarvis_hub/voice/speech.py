@@ -12,6 +12,7 @@ from collections.abc import Callable
 from concurrent.futures import Executor, Future
 from dataclasses import dataclass, field
 from typing import Any, Literal, ParamSpec, Protocol, TypeVar
+from uuid import uuid4
 
 import numpy as np
 
@@ -99,6 +100,8 @@ class _Reply:
     owner: tuple[str, int] | None = None
     player: Player | None = None
     reply_id: str | None = None
+    speech_id: str = field(default_factory=lambda: uuid4().hex)
+    stream_started: bool = False
     allowed: Callable[[], bool] | None = None
     can_start: Callable[[], bool] | None = None
     splitter: SentenceSplitter = field(default_factory=SentenceSplitter)
@@ -172,6 +175,8 @@ class Speech:
         self._cache: dict[tuple[ClipName, Lang], Clip] = {}
         self._reply: _Reply | None = None
         self._replies: dict[int, _Reply] = {}
+        self._replay_turn = 0
+        self._replays: dict[RemotePlayer, _Reply] = {}
         self._generation = 0
         self._local_cue_generation = 0
         self._worker: asyncio.Task[None] | None = None
@@ -211,6 +216,35 @@ class Speech:
         self._replies[turn] = self._reply
         reply = self._reply
         return lambda: self._reply_played(reply)
+
+    def replay(self, text: str, lang: Lang, *, destination: RemotePlayer, reply_id: str,
+               allowed: Callable[[], bool]) -> str:
+        """Queue retained text without replacing the Talker's active input stream."""
+        self.start()
+        if previous := self._replays.get(destination):
+            previous.stopped = True
+            if destination.owns(previous.speech_id):
+                destination.stop()
+        self._replay_turn -= 1
+        reply = _Reply(self._replay_turn, lang, self._clock.now(), None, player=destination,
+                       reply_id=reply_id, allowed=allowed)
+        self._replays[destination] = reply
+        if not any(p is destination for p in self._players):
+            self._players.append(destination)
+        self._retired_players = [p for p in self._retired_players if p is not destination]
+        self._replies[reply.turn] = reply
+        self._say(reply.splitter.feed(text) + reply.splitter.end_block(), reply)
+        reply.closed = True
+        self._queue.put_nowait(_End(reply))
+        return reply.speech_id
+
+    def stop_replay(self, destination: Player) -> bool:
+        reply = self._replays.get(destination) if isinstance(destination, RemotePlayer) else None
+        if reply is None or not isinstance(destination, RemotePlayer) or not destination.owns(reply.speech_id):
+            return False
+        reply.stopped = True
+        destination.stop()
+        return True
 
     def feed(self, text: str) -> None:
         reply = self._reply
@@ -308,8 +342,8 @@ class Speech:
         for player in self._players:
             player.close()
 
-    def _say(self, chunks: list[str]) -> None:
-        reply = self._reply
+    def _say(self, chunks: list[str], reply: _Reply | None = None) -> None:
+        reply = reply or self._reply
         assert reply is not None
         for chunk in chunks:
             if reply.first_chunk is None:
@@ -400,7 +434,7 @@ class Speech:
                 if name == "chime" and self._on_chime is not None:
                     self._on_chime(starts)
             case _End(reply):
-                if not reply.stopped and reply.first_audio is not None and isinstance(reply.player, RemotePlayer):
+                if not reply.stopped and reply.first_audio is not None and isinstance(reply.player, RemotePlayer) and reply.player.owns(reply.speech_id):
                     reply.player.end_reply()
                 self._record_reply(reply)
 
@@ -427,8 +461,12 @@ class Speech:
             elif sentence and player.pending() == 0:
                 reply.gaps += 1
             reply.audio_s += clip.seconds
-        if starts_reply and isinstance(player, RemotePlayer) and reply is not None and reply.reply_id is not None:
-            player.begin_reply(reply.reply_id)
+        if isinstance(player, RemotePlayer) and reply is not None and reply.reply_id is not None:
+            if not player.owns(reply.speech_id):
+                if reply.stream_started:
+                    reply.speech_id = uuid4().hex
+                reply.stream_started = True
+                player.begin_reply(reply.reply_id, speech_id=reply.speech_id)
             starts_reply = False
         receipt = player.play(clip, starts_reply=starts_reply)
         if reply is not None and sentence and clip.seconds > 0:
