@@ -67,16 +67,22 @@ public struct ConversationProjection: Sendable {
 }
 
 public struct TypedLine: Identifiable, Equatable, Sendable {
-    public enum Outcome: Equatable, Sendable { case unanswered, outcomeUnknown, accepted, rejected(String) }
+    public enum Outcome: Equatable, Sendable { case unanswered, deliveryUncertain, outcomeUnknown, accepted, rejected(String), recovered }
     public let command: HubCommand
     public var outcome: Outcome
     public var id: String { command.id }
     public var text: String { if case .string(let text) = command.payload["text"] { text } else { "" } }
+    public var canRecover: Bool {
+        if outcome == .outcomeUnknown { return true }
+        if case .rejected = outcome { return true }
+        return false
+    }
     public var message: String {
         switch outcome {
         case .unanswered: "Waiting for Jarvis to acknowledge your line."
+        case .deliveryUncertain: "Your line may have reached Jarvis. Reconnecting will retry the same request."
         case .outcomeUnknown: "Your line may have reached Jarvis. Its outcome is unknown; check the conversation before sending it again."
-        case .accepted: ""
+        case .accepted, .recovered: ""
         case .rejected(let message): message
         }
     }

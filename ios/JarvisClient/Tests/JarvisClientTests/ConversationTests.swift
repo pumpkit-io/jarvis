@@ -118,9 +118,11 @@ actor UncertainTypedSocket: HubSocket {
     session.draft = "Maybe delivered"
     await session.sendTypedLine()
     #expect(session.draft == "Maybe delivered")
-    #expect(session.typedLines.first?.outcome == .outcomeUnknown)
+    #expect(session.typedLines.first?.outcome == .deliveryUncertain)
     #expect(!session.canSubmit)
     let line = try #require(session.typedLines.first)
+    #expect(!line.canRecover)
+    #expect(!session.recoverTypedLine(id: line.id))
     #expect(await session.client?.pendingCommands.contains(line.command) == true)
     await session.sendTypedLine()
     #expect(session.typedLines.count == 1)
@@ -147,5 +149,63 @@ actor UncertainTypedSocket: HubSocket {
     try await eventuallySession { session.connection == .ready }
     #expect(session.conversation.rows.map(\.text) == ["On the Mac"])
     #expect(await transport.cursors == [0, 2])
+    await session.unpair()
+}
+
+@MainActor @Test func definitivelyRejectedLineRemainsRecoverableWithoutReplacingNewerDraft() async throws {
+    let socket = FakeSocket()
+    let store = MemoryPairingStore(); store.record = try testPairingCredentials()
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) }, makePaths: { nil })
+    await session.launch(); await socket.ready()
+    try await eventuallySession { session.connection == .ready }
+    session.draft = "Original line"
+    await session.sendTypedLine()
+    let original = try #require(session.typedLines.first)
+    session.draft = "Newer draft"
+    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(original.id)\",\"ok\":false,\"error\":{\"code\":\"invalid_payload\",\"message\":\"Hub is stopping\",\"retry_after_seconds\":null}}")
+    try await eventuallySession { session.typedLines.first?.outcome == .rejected("Hub is stopping") }
+    #expect(session.typedLines.first?.canRecover == true)
+    #expect(session.typedLines.first?.text == "Original line")
+    #expect(!session.recoverTypedLine(id: original.id))
+    #expect(session.draft == "Newer draft")
+    session.draft = ""
+    #expect(session.recoverTypedLine(id: original.id))
+    #expect(session.draft == "Original line")
+    #expect(session.typedLines.first?.outcome == .recovered)
+    #expect(session.canSubmit)
+    await session.sendTypedLine()
+    let restored = try #require(session.typedLines.last)
+    #expect(restored.id != original.id)
+    #expect(restored.text == original.text)
+    await session.unpair()
+}
+
+@MainActor @Test func terminalUnknownRequiresDeliberateRecoveryBeforeANewCommand() async throws {
+    let socket = FakeSocket()
+    let store = MemoryPairingStore(); store.record = try testPairingCredentials()
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) }, makePaths: { nil })
+    await session.launch(); await socket.ready()
+    try await eventuallySession { session.connection == .ready }
+    session.draft = "Unconfirmed line"
+    await session.sendTypedLine()
+    let original = try #require(session.typedLines.first)
+    #expect(!original.canRecover)
+    #expect(!session.recoverTypedLine(id: original.id))
+    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(original.id)\",\"ok\":false,\"error\":{\"code\":\"outcome_unknown\",\"message\":\"Check history\",\"retry_after_seconds\":null}}")
+    try await eventuallySession { session.typedLines.first?.outcome == .outcomeUnknown }
+    session.draft = "Unconfirmed line"
+    #expect(!session.canSubmit)
+    #expect(session.typedLines.first?.canRecover == true)
+    #expect(await session.client?.pendingCommands.isEmpty == true)
+    session.draft = "A newer draft"
+    #expect(!session.recoverTypedLine(id: original.id))
+    #expect(session.draft == "A newer draft")
+    session.draft = "Unconfirmed line"
+    #expect(session.recoverTypedLine(id: original.id))
+    #expect(session.canSubmit)
+    #expect(await socket.sent.filter { $0.type == "say_text" }.count == 1)
+    await session.sendTypedLine()
+    #expect(session.typedLines.last?.id != original.id)
+    #expect(await socket.sent.filter { $0.type == "say_text" }.count == 2)
     await session.unpair()
 }

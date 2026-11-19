@@ -8,6 +8,7 @@ struct ConversationView: View {
     @ScaledMetric(relativeTo: .subheadline) var controlSize = 15
     @FocusState private var typing: Bool
     @State private var followsLatest = true
+    @State private var recoveryCandidate: String?
     @State var expandedDetails: Set<String> = []
     private var theme: JarvisTheme { JarvisTheme(scheme: scheme) }
 
@@ -39,10 +40,7 @@ struct ConversationView: View {
                             }
                         }
                         ForEach(session.typedLines.filter { !$0.message.isEmpty }) { line in
-                            Text(line.message)
-                            .font(.system(size: controlSize))
-                            .foregroundStyle(theme.secondary)
-                            .accessibilityElement(children: .combine)
+                            typedLineStatus(line)
                         }
                         Color.clear.frame(height: 1).id("latest")
                             .background(GeometryReader { marker in
@@ -62,11 +60,49 @@ struct ConversationView: View {
                 .onChange(of: session.conversation.rows) {
                     if followsLatest { proxy.scrollTo("latest", anchor: .bottom) }
                 }
+                .onChange(of: session.typedLines) {
+                    if followsLatest { proxy.scrollTo("latest", anchor: .bottom) }
+                }
             }
             }
         }
         .background(theme.background)
         .safeAreaInset(edge: .bottom, spacing: 0) { composer }
+        .confirmationDialog("Restore as a new line?", isPresented: Binding(
+            get: { recoveryCandidate != nil }, set: { if !$0 { recoveryCandidate = nil } }
+        ), titleVisibility: .visible) {
+            Button("I've checked: restore line") {
+                if let id = recoveryCandidate { session.recoverTypedLine(id: id) }
+                recoveryCandidate = nil
+            }
+            Button("Cancel", role: .cancel) { recoveryCandidate = nil }
+        } message: {
+            Text("Check the conversation first. This line may already have reached Jarvis. Sending it again can repeat it. Restoring only puts it in the typing field.")
+        }
+    }
+
+    private func typedLineStatus(_ line: TypedLine) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(line.message)
+            if line.canRecover {
+                Text(verbatim: line.text).textSelection(.enabled)
+                Button {
+                    if line.outcome == .outcomeUnknown { recoveryCandidate = line.id }
+                    else { session.recoverTypedLine(id: line.id) }
+                } label: {
+                    Text(line.outcome == .outcomeUnknown ? "Review and restore line" : "Restore line")
+                        .underline()
+                        .frame(minHeight: 44)
+                }
+                .buttonStyle(.plain)
+                .disabled(!session.draft.isEmpty && session.draft != line.text)
+                if !session.draft.isEmpty && session.draft != line.text {
+                    Text("Finish or clear your current draft to restore this line. You can also copy the text above.")
+                }
+            }
+        }
+        .font(.system(size: controlSize))
+        .foregroundStyle(theme.secondary)
     }
 
     private func gapDate(_ index: Int) -> Date? {

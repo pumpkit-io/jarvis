@@ -20,8 +20,17 @@ import Observation
     public var canSubmit: Bool {
         connection.canSend && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && draft.utf8.count <= 16_384 && !typedLines.contains {
-                $0.text == draft && ($0.outcome == .unanswered || $0.outcome == .outcomeUnknown)
+                $0.text == draft && ($0.outcome == .unanswered || $0.outcome == .deliveryUncertain || $0.outcome == .outcomeUnknown)
             }
+    }
+
+    @discardableResult public func recoverTypedLine(id: String) -> Bool {
+        guard let index = typedLines.firstIndex(where: { $0.id == id }),
+              typedLines[index].canRecover,
+              draft.isEmpty || draft == typedLines[index].text else { return false }
+        draft = typedLines[index].text
+        typedLines[index].outcome = .recovered
+        return true
     }
 
     public func sendTypedLine() async {
@@ -41,7 +50,7 @@ import Observation
             let retained = await client.pendingCommands.contains(where: { $0.id == command.id })
             guard generation == owner, let index = typedLines.firstIndex(where: { $0.id == command.id }) else { return }
             if retained {
-                if typedLines[index].outcome == .unanswered { typedLines[index].outcome = .outcomeUnknown }
+                if typedLines[index].outcome == .unanswered { typedLines[index].outcome = .deliveryUncertain }
             } else if typedLines[index].outcome == .unanswered {
                 typedLines.remove(at: index)
                 inputMessage = "Can't reach the Mac. Your line is still here to send."
@@ -59,7 +68,7 @@ import Observation
             else { typedLines[index].outcome = .rejected(result.error?.message ?? "Jarvis could not accept your line.") }
         case .failure:
             for index in typedLines.indices where typedLines[index].outcome == .unanswered {
-                typedLines[index].outcome = .outcomeUnknown
+                typedLines[index].outcome = .deliveryUncertain
             }
         default: break
         }
