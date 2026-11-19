@@ -66,7 +66,8 @@ async def test_queued_terminal_news_checks_focus_at_consumption_and_preserves_us
 
 @pytest.mark.parametrize("silence", [False, True])
 @pytest.mark.parametrize("delivery", ["unseen", "partial", "complete"])
-async def test_text_only_announcement_disconnect_preserves_only_untold_news(silence: bool, delivery: str) -> None:
+@pytest.mark.parametrize("availability", ["disconnect", "background"])
+async def test_text_only_announcement_unavailable_preserves_only_untold_news(silence: bool, delivery: str, availability: str) -> None:
     clock, output, phone, metrics = FakeClock(), RecordingOutput(), RecordingOutput(), RecordingMetrics()
     local, remote = RecordingPlayer(), RecordingPlayer()
     arrival, started, first, partial, last, end = (asyncio.Event() for _ in range(6))
@@ -95,7 +96,11 @@ async def test_text_only_announcement_disconnect_preserves_only_untold_news(sile
         if delivery == "complete":
             last.set()
             await until(lambda: "First part. Second part." in phone.replies)
-        hub.clients.disconnect("phone")
+        if availability == "disconnect":
+            hub.clients.disconnect("phone")
+        else:
+            from dataclasses import replace
+            hub.attach_client(replace(client, can_show_text=False))
         first.set()
         last.set()
         await until(lambda: "First part. Second part." in output.replies)

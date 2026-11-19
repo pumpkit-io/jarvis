@@ -33,7 +33,7 @@ from jarvis_hub.agents.backend import (
     TurnEnd,
 )
 from jarvis_hub.authorizations import Authorization, Authorizations
-from jarvis_hub.approvals import HUB_ACTIONS, Approval, Approvals, approval_event
+from jarvis_hub.approvals import EXPIRES_AFTER, HUB_ACTIONS, Approval, Approvals, approval_event
 from jarvis_hub.clients import Client, Clients, TERMINAL
 from jarvis_hub.config import DEFAULT_TALKER_RESTART_AT
 from jarvis_hub.limits import SavedLimit, UsageLimit, reset_sentence, update_sentence
@@ -125,7 +125,8 @@ class Speech(Protocol):
     """Says the Talker's replies aloud as they stream (`jarvis_hub.voice.speech.Speech`)."""
 
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
-              destination: Player | None = None, allowed: Callable[[], bool] | None = None) -> Callable[[], bool] | None: ...
+              destination: Player | None = None, allowed: Callable[[], bool] | None = None,
+              can_start: Callable[[], bool] | None = None) -> Callable[[], bool] | None: ...
 
     def say(self, name: ClipName, lang: Lang, *, in_reply: bool = False) -> None: ...
 
@@ -164,7 +165,8 @@ class Floor(Protocol):
 
 class _Silent:
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
-              destination: Player | None = None, allowed: Callable[[], bool] | None = None) -> None:
+              destination: Player | None = None, allowed: Callable[[], bool] | None = None,
+              can_start: Callable[[], bool] | None = None) -> None:
         pass
 
     def say(self, name: ClipName, lang: Lang, *, in_reply: bool = False) -> None:
@@ -467,6 +469,13 @@ class Hub:
         else:
             self._displays = _ClientOutput(output, self.clients)
             self._output = EventOutput(None, self._displays)
+        self._client_snapshots: dict[tuple[str, str | None], dict[str, Any]] = {
+            ("task_snapshot", None): {"tasks": []}, ("pending_approval", None): {"approvals": []},
+        }
+        self._publishing_snapshots = False
+        self._snapshot_wall_offset = wall() - clock.now()
+        self._snapshot_expiry_at: float | None = None
+        self._snapshot_expiry: asyncio.Task[None] | None = None
         self._admission_lock = asyncio.Lock()
         self._client_players: dict[str, Player] = {}
         self._metrics = metrics
@@ -598,10 +607,58 @@ class Hub:
             },
         }
 
+    def publish_client_snapshots(self, client_id: str | None = None) -> None:
+        """Append current safe display records; a replay refresh is unconditional for its destination."""
+        if self._output.log is None or self._publishing_snapshots:
+            return
+        self._publishing_snapshots = True
+        try:
+            approvals = [approval for approval in self._approvals.pending() if approval.question is not None]
+            questions = {approval.task_id: approval.question for approval in approvals}
+            tasks = {"tasks": [{"id": task.id, "title": task.request, "state": task.state,
+                                "last_report": task.last_report, "approval_question": questions.get(task.id)}
+                               for task in self._tasks.open_tasks() if task.state in ("queued", "working", "needs_user")]}
+            pending = {"approvals": [{"id": approval.id, "task_id": approval.task_id, "question": approval.question,
+                                      "expires_at": datetime.fromtimestamp(
+                                          self._snapshot_wall_offset + approval.created + EXPIRES_AFTER, timezone.utc
+                                      ).isoformat().replace("+00:00", "Z")} for approval in approvals]}
+            health = self.health()
+            terminal = self.clients.get(TERMINAL)
+            for client in self.clients.all():
+                if client.id == TERMINAL or (client_id is not None and client.id != client_id):
+                    continue
+                payload = {"ready": health["ready"], "usage_limit": health["usage_limit"],
+                           "quiet": self._quiet_mode, "focus_client_id": self.clients.focus,
+                           "mac_voice_on": terminal is not None and terminal.can_speak, "silence": client.silence}
+                self._publish_snapshot("status", payload, client.id, force=client_id is not None)
+            self._publish_snapshot("task_snapshot", tasks, None, force=client_id is not None)
+            self._publish_snapshot("pending_approval", pending, None, force=client_id is not None)
+            expires = min((approval.created + EXPIRES_AFTER for approval in approvals), default=None)
+            if expires != self._snapshot_expiry_at:
+                self._snapshot_expiry_at = expires
+                if self._snapshot_expiry is not None:
+                    self._snapshot_expiry.cancel()
+                self._snapshot_expiry = (asyncio.create_task(self._expire_snapshot(expires))
+                                         if expires is not None and not self._closing else None)
+        finally:
+            self._publishing_snapshots = False
+
+    async def _expire_snapshot(self, expires: float) -> None:
+        await self._clock.sleep(max(0, expires - self._clock.now()))
+        self._snapshot_expiry = None
+        self.publish_client_snapshots()
+
+    def _publish_snapshot(self, kind: str, payload: dict[str, Any], client_id: str | None, *, force: bool) -> None:
+        key = kind, client_id
+        if force or self._client_snapshots.get(key) != payload:
+            self._output.snapshot(kind, payload, client_id=client_id)
+            self._client_snapshots[key] = payload
+
     async def start(self) -> None:
         """Open the Talker and warm it in the background (ADR 0006); a line typed meanwhile waits for it.
         What the last launch left pending is restored first, and the Orchestrator hears of it in the background."""
         recovering = self._restore()
+        self.publish_client_snapshots()
         self._loops = [asyncio.create_task(self._talk()), asyncio.create_task(self._orchestrate())]
         if recovering is not None:
             self._loops.append(asyncio.create_task(recovering))
@@ -653,11 +710,13 @@ class Hub:
     def _focus_available(self) -> bool:
         client = self.clients.get(self.clients.focus)
         return bool(client is not None and client.connected
-                    and (client.can_show_text or self._client_can_speak(client.id)))
+                    and (client.can_show_text if client.id != TERMINAL else
+                         client.can_show_text or self._client_can_speak(client.id)))
 
     def _clients_changed(self) -> None:
         if self._floor is not None and (activity := getattr(self._floor, "remote_activity", None)) is not None:
             activity(self.clients.remote_activity)
+        self.publish_client_snapshots()
         # Adapters may attach before start restores the saved news.
         if not self._loops:
             return
@@ -744,6 +803,10 @@ class Hub:
     async def close(self) -> None:
         """Stops everything; Tasks, their waits and the Subagents it interrupts are saved for the next launch."""
         self._closing = True
+        self.publish_client_snapshots()
+        if self._snapshot_expiry is not None:
+            self._snapshot_expiry.cancel()
+            await asyncio.gather(self._snapshot_expiry, return_exceptions=True)
         await self._scopes.close()
         await self._waits.close()
         await self._subagents.close()
@@ -1028,6 +1091,7 @@ class Hub:
         """Saves the Hub's records as they change; a closing Hub saves once, at the end of close()."""
         if self._persist_suspended:
             return
+        self.publish_client_snapshots()
         self._authorizations.settle(lambda task_id: (task := self._tasks.get(task_id)) is not None and task.open)
         if not self._closing:
             self._save()
@@ -1543,7 +1607,9 @@ class Hub:
                      destination=player,
                      allowed=lambda: self._client_can_speak(destination_id)
                      and self._client_players.get(destination_id) is player
-                     and (kind != "event" or self.clients.focus == destination_id))
+                     and (kind != "event" or self.clients.focus == destination_id),
+                     can_start=lambda: destination_id == TERMINAL or bool(
+                         (client := self.clients.get(destination_id)) is not None and client.can_show_text))
         if delivery is not None:
             delivery.receipt = receipt
         self._replying = show
@@ -1607,6 +1673,10 @@ class Hub:
             self._model_available = True
             if self._on_model_ready is not None:
                 self._on_model_ready()
+        if (show and end.outcome == "completed"
+                and turn not in (self._interrupted_turn, self._silenced_turn)):
+            self._approvals.record_question(shown)
+        self.publish_client_snapshots()
         if show and (shown.strip() or end.outcome != "failed"):
             self._exchanges.append((message, shown))
         if delivery is not None and end.outcome == "completed":
@@ -1700,6 +1770,7 @@ class Hub:
         # Taken after the last await before the turn, so a cancel lands either before it or on the running turn.
         if not item.restart and not tasks[0].take_message():
             return
+        self.publish_client_snapshots()
         session = self._orchestrator
         self._turn_count += 1
         turn = self._turn_count

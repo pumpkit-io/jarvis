@@ -7,6 +7,7 @@ import aiohttp
 from jarvis_hub.door import Door
 from jarvis_hub.event_log import EventLog, EventOutput
 from jarvis_hub.pairing import PairingStore
+from tests.protocol_exchanges import SNAPSHOTS, receive_conversation as receive
 from tests.fakes import FakeBackend, FakeClock, RecordingMetrics, RecordingOutput, Text, make_hub, until
 
 
@@ -24,27 +25,27 @@ async def test_typed_exchange_is_durable_once_and_shared(tmp_path: Path) -> None
             async with aiohttp.ClientSession() as session:
                 url = f"http://127.0.0.1:{door.port}/v1/events?after=0"
                 async with session.ws_connect(url, headers={"Authorization": f"Bearer {first.token}"}, protocols=["jarvis.v1"]) as one, session.ws_connect(url, headers={"Authorization": f"Bearer {second.token}"}, protocols=["jarvis.v1"]) as two:
-                    assert (await one.receive_json())["type"] == "replay_complete"
-                    assert (await two.receive_json())["type"] == "replay_complete"
+                    assert (await receive(one))["type"] == "replay_complete"
+                    assert (await receive(two))["type"] == "replay_complete"
                     command = {"version": 1, "id": "say-1", "type": "say_text", "payload": {"text": "Hello"}}
                     await one.send_json(command)
                     events: list[dict[str, Any]] = []
                     result = None
                     while result is None or not any(e["type"] == "reply_end" for e in events):
-                        frame = await asyncio.wait_for(one.receive_json(), 2)
+                        frame = await receive(one)
                         if frame["type"] == "command_result":
                             result = frame
                         else:
                             events.append(frame)
                     assert result is not None and result["ok"]
                     assert [e["type"] for e in events] == ["heard", "reply_delta", "reply_end"]
-                    assert [await asyncio.wait_for(two.receive_json(), 2) for _ in events] == events
+                    assert [await receive(two) for _ in events] == events
                     assert events[0]["payload"] == {"request_id": result["result"]["request_id"], "text": "Hello", "spoken": False}
                     assert events[-1]["payload"] == {"reply_id": events[1]["payload"]["reply_id"], "request_id": result["result"]["request_id"], "text": "Here, sir.", "reason": "complete"}
                     assert all(e["client_id"] == first.client.id for e in events)
                     await one.send_json(command)
-                    assert await asyncio.wait_for(one.receive_json(), 2) == result
-                    assert len(log.after(0)) == 3
+                    assert await receive(one) == result
+                    assert len([e for e in log.after(0) if e.type not in SNAPSHOTS]) == 3
                     assert ("heard", "Hello") in screen.log
         finally:
             await door.close()
@@ -58,7 +59,7 @@ async def test_shared_swift_fixture_matches_actual_loopback_exchanges(tmp_path: 
 
 
 async def test_history_filters_destination_status_and_preserves_pruned_high_water(tmp_path: Path) -> None:
-    from tests.protocol_exchanges import connect, receive
+    from tests.protocol_exchanges import connect, receive_conversation as receive
 
     path = tmp_path / "events.db"
     with PairingStore(tmp_path / "pairing.db") as pairing:
@@ -78,15 +79,16 @@ async def test_history_filters_destination_status_and_preserves_pruned_high_wate
                                                          "oldest_seq": None, "history_pruned": True}
                         log.append("status", {"silence": True}, client_id=other.client.id)
                         visible = log.append("notice", {"text": "visible"}, client_id=None)
-                        assert (await receive(socket))["seq"] == visible.seq == 3
+                        assert (await receive(socket))["seq"] == visible.seq
                     async with session.get(f"http://127.0.0.1:{door.port}/v1/history?limit=1", headers={"Authorization": f"Bearer {phone.token}"}) as response:
                         page = await response.json()
-                    assert [e["seq"] for e in page["events"]] == [3]
-                    assert page["has_more"] is False
+                    assert [e["seq"] for e in page["events"]] == [visible.seq]
+                    assert page["has_more"] is True
+                    mark = log.high_water
                     async with connect(session, door, phone.token) as socket:
-                        assert (await receive(socket))["seq"] == 3
-                        assert (await receive(socket))["through_seq"] == 3
-                    for query, status in (("after=4", 409), ("after=-1", 400), ("after=9223372036854775808", 400), ("after=true", 400)):
+                        assert (await receive(socket))["seq"] == visible.seq
+                        assert (await receive(socket))["through_seq"] == mark
+                    for query, status in ((f"after={log.high_water + 1}", 409), ("after=-1", 400), ("after=9223372036854775808", 400), ("after=true", 400)):
                         async with session.get(f"http://127.0.0.1:{door.port}/v1/events?{query}", headers={"Authorization": f"Bearer {phone.token}", "Sec-WebSocket-Protocol": "jarvis.v1"}) as response:
                             assert response.status == status
                     for endpoint in ("events", "history"):
@@ -124,13 +126,13 @@ async def test_terminal_disconnection_and_failure_cannot_suppress_durable_remote
             await hub.admit_line(Line("Second", 1000, client_id="reference"))
             await until(lambda: len(remote.replies) == 2)
             assert remote.replies == ["Visible.", "Still visible."]
-            assert [e.type for e in log.after(0)] == ["heard", "reply_delta", "reply_end"] * 2
+            assert [e.type for e in log.after(0) if e.type not in SNAPSHOTS] == ["heard", "reply_delta", "reply_end"] * 2
         finally:
             await hub.close()
 
 
 async def test_command_validation_is_bounded_strict_and_durably_idempotent(tmp_path: Path) -> None:
-    from tests.protocol_exchanges import command, connect, receive
+    from tests.protocol_exchanges import command, connect, receive_conversation as receive
 
     with PairingStore(tmp_path / "pairing.db") as pairing, EventLog(tmp_path / "events.db") as log:
         phone = pairing.exchange(pairing.create_code("https://mac.example.ts.net"), "Phone", "iphone")
@@ -153,18 +155,18 @@ async def test_command_validation_is_bounded_strict_and_durably_idempotent(tmp_p
                             '{"version":1,"id":"surrogate","type":"say_text","payload":{"text":"\\ud800"}}', "[]"):
                     await socket.send_str(raw)
                     assert (await receive(socket))["error"]["code"] == "invalid_payload"
-                await socket.send_json(command("ack-future", "acknowledge", seq=1))
+                await socket.send_json(command("ack-future", "acknowledge", seq=log.high_water + 1))
                 assert (await receive(socket))["error"]["code"] == "invalid_payload"
                 await socket.send_json(command("unknown", "never_a_tool", text="do not echo"))
                 assert (await receive(socket))["error"]["code"] == "unknown_command"
-                assert log.after(0) == []
+                assert [e for e in log.after(0) if e.type not in SNAPSHOTS] == []
         finally:
             await door.close()
             await hub.close()
 
 
 async def test_worker_appends_during_replay_have_no_live_handover_gap(tmp_path: Path) -> None:
-    from tests.protocol_exchanges import connect, receive
+    from tests.protocol_exchanges import connect, receive_conversation as receive
 
     with PairingStore(tmp_path / "pairing.db") as pairing, EventLog(tmp_path / "events.db") as log:
         phone = pairing.exchange(pairing.create_code("https://mac.example.ts.net"), "Phone", "iphone")
@@ -194,15 +196,16 @@ async def test_worker_appends_during_replay_have_no_live_handover_gap(tmp_path: 
                         else:
                             events.append(frame)
                     await appending
-                    assert [e["seq"] for e in events] == list(range(1, 1241))
-                    assert [e["payload"] for e in events] == [e.payload for e in log.after(0)]
+                    assert len(events) == 1240
+                    assert [e["seq"] for e in events] == sorted({e["seq"] for e in events})
+                    assert [e["payload"] for e in events] == [e.payload for e in log.after(0) if e.type == "notice"]
         finally:
             await door.close()
             await hub.close()
 
 
 async def test_a_slow_replay_cannot_block_another_client_or_durability(tmp_path: Path) -> None:
-    from tests.protocol_exchanges import connect, receive
+    from tests.protocol_exchanges import connect, receive_conversation as receive
 
     with PairingStore(tmp_path / "pairing.db") as pairing, EventLog(tmp_path / "events.db") as log:
         slow = pairing.exchange(pairing.create_code("https://mac.example.ts.net"), "Slow", "reference")
@@ -215,11 +218,11 @@ async def test_a_slow_replay_cannot_block_another_client_or_durability(tmp_path:
         try:
             async with aiohttp.ClientSession() as session:
                 async with connect(session, door, slow.token), connect(session, door, healthy.token, after=64) as healthy_socket:
-                    assert (await receive(healthy_socket))["through_seq"] == 64
-                    log.append("notice", {"text": "Other Client remains live"}, client_id=None)
+                    assert (await receive(healthy_socket))["through_seq"] >= 64
+                    committed = log.append("notice", {"text": "Other Client remains live"}, client_id=None)
                     final = await receive(healthy_socket)
-                    assert final["seq"] == 65 and final["payload"]["text"] == "Other Client remains live"
-                    assert log.high_water == 65
+                    assert final["seq"] == committed.seq and final["payload"]["text"] == "Other Client remains live"
+                    assert log.high_water == committed.seq
         finally:
             await door.close()
             await hub.close()
@@ -267,7 +270,7 @@ async def test_terminal_eof_refuses_new_remote_turns_and_begun_replies_always_fi
 
 
 async def test_live_only_sequence_gaps_are_not_reported_as_pruned_history(tmp_path: Path) -> None:
-    from tests.protocol_exchanges import connect, receive
+    from tests.protocol_exchanges import connect, receive_conversation as receive
 
     with PairingStore(tmp_path / "pairing.db") as pairing:
         phone = pairing.exchange(pairing.create_code("https://mac.example.ts.net"), "Phone", "iphone")
@@ -283,8 +286,8 @@ async def test_live_only_sequence_gaps_are_not_reported_as_pruned_history(tmp_pa
                 async with aiohttp.ClientSession() as session, connect(session, door, phone.token) as socket:
                     assert await receive(socket) == {"version": 1, "type": "replay_complete", "through_seq": 1, "oldest_seq": None}
                     live = log.append("future_live_event", {"ephemeral": "also not retained"}, client_id=phone.client.id, replayable=False)
-                    assert (await receive(socket))["seq"] == live.seq == 2
-                    assert log.after(0) == []
+                    assert (await receive(socket))["seq"] == live.seq
+                    assert [e for e in log.after(0) if e.type not in SNAPSHOTS] == []
             finally:
                 await door.close()
                 await hub.close()
@@ -294,7 +297,7 @@ async def test_typed_wire_identity_does_not_claim_the_mac_spoken_floor(tmp_path:
     from jarvis_hub.voice.voice_mode import VoiceMode
     from jarvis_hub.voice.state import Timing
     from tests.fakes import FakeTts, RecordingPlayer, ScriptedAudio
-    from tests.protocol_exchanges import command, connect, receive
+    from tests.protocol_exchanges import command, connect, receive_conversation as receive
 
     with PairingStore(tmp_path / "pairing.db") as pairing, EventLog(tmp_path / "events.db") as log:
         phone = pairing.exchange(pairing.create_code("https://mac.example.ts.net"), "Phone", "iphone")
@@ -349,7 +352,7 @@ async def test_worker_notices_remain_ordered_while_display_clients_attach(tmp_pa
 
         try:
             await asyncio.gather(attach(), *(worker(i) for i in range(4)))
-            ordered = [event.payload["text"] for event in log.after(0)]
+            ordered = [event.payload["text"] for event in log.after(0) if event.type == "notice"]
             assert terminal.notices == ordered and len(ordered) == 80
             assert screens[0].notices == ordered
             for screen in screens:
@@ -359,7 +362,7 @@ async def test_worker_notices_remain_ordered_while_display_clients_attach(tmp_pa
 
 
 async def test_malformed_wire_commands_keep_a_safe_correlated_result_envelope(tmp_path: Path) -> None:
-    from tests.protocol_exchanges import connect, receive
+    from tests.protocol_exchanges import connect, receive_conversation as receive
 
     with PairingStore(tmp_path / "pairing.db") as pairing, EventLog(tmp_path / "events.db") as log:
         phone = pairing.exchange(pairing.create_code("https://mac.example.ts.net"), "Phone", "iphone")
@@ -387,7 +390,7 @@ async def test_malformed_wire_commands_keep_a_safe_correlated_result_envelope(tm
                     assert response["error"]["code"] == code
                     assert response.get("id") == expected_id
                     assert "private-marker" not in str(response)
-                assert log.after(0) == []
+                assert [e for e in log.after(0) if e.type not in SNAPSHOTS] == []
         finally:
             await door.close()
             await hub.close()

@@ -132,7 +132,7 @@ class EventLog:
             return "new" if inserted.rowcount else row[1], json.loads(row[2]) if row[2] is not None else None
 
     def complete(self, client_id: str, command_id: str, result: dict[str, Any]) -> None:
-        safe_fields = {"request_id", "talk_id", "speech_id", "reply_id", "seq", "focus_client_id", "silence", "cancelled", "stopped"}
+        safe_fields = {"request_id", "talk_id", "speech_id", "reply_id", "seq", "focus_client_id", "silence", "cancelled", "stopped", "can_show_text"}
         if "result" in result and set(result["result"]) - safe_fields:
             raise ValueError("Lifetime command results may contain only identifiers and status")
         with self._lock, self._db:
@@ -171,6 +171,10 @@ class EventOutput:
     def _append(self, kind: str, payload: dict[str, Any], client_id: str | None) -> None:
         if self.log is not None:
             self.log.append(kind, payload, client_id=client_id)
+
+    def snapshot(self, kind: str, payload: dict[str, Any], *, client_id: str | None = None) -> None:
+        with self._lock:
+            self._append(kind, payload, client_id)
 
     def heard(self, text: str, *, typed: bool = True, request_id: str | None = None, client_id: str = "terminal", display: bool = True) -> None:
         with self._lock:

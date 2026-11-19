@@ -795,3 +795,17 @@ async def test_canceling_a_playback_wait_during_loading_keeps_speech_available()
     finally:
         tts.hold.set()
         await speech.close()
+
+
+async def test_denied_start_preserves_another_queued_reply_and_player(speech: Speech, player: RecordingPlayer) -> None:
+    unavailable = RecordingPlayer()
+    skipped = speech.begin("en", turn=1, heard_at=None, destination=unavailable, can_start=lambda: False)
+    speech.feed("The deployment failed. Check the logs.")
+    speech.end()
+    queued = speech.begin("en", turn=2, heard_at=None)
+    speech.feed("A complete queued reply.")
+    speech.end()
+    await speech.idle()
+    assert unavailable.texts == [] and unavailable.events == []
+    assert player.texts == ["A complete queued reply."]
+    assert not skipped() and queued()
