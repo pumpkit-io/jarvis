@@ -9,6 +9,9 @@ import Observation
     public private(set) var error: PairingError?
     public private(set) var client: HubClient?
     public private(set) var conversation = ConversationProjection()
+    private var tasksNeedRefresh = true
+    public var updatingTasks: Bool { tasksNeedRefresh && (connection == .connecting || connection.canSend) }
+    public var openTasks: [OpenTask] { OpenTask.current(in: conversation.events, now: historyNow()) }
     public private(set) var loadingHistory = false
     public private(set) var hasOlderHistory = true
     public private(set) var historyMessage: String?
@@ -120,6 +123,7 @@ import Observation
         switch update {
         case .event(let event):
             conversation.ingest(event); talk.receive(event)
+            if event.kind == .taskSnapshot { tasksNeedRefresh = false }
             switch event.kind {
             case .speechBegin:
                 if voiceOn, let id = event.string("speech_id"), let reply = event.string("reply_id"), foreground {
@@ -342,6 +346,7 @@ import Observation
         } catch { historyClearFailed = true }
         voiceOn = true; explicitSilence = nil; voicePending = false; voiceMessage = nil; voicePersistenceFailed = false; voiceRevision = 0
         do { try store.clear(); error = historyClearFailed ? .storage : nil } catch { self.error = .storage }
+        tasksNeedRefresh = true
         conversation = ConversationProjection(); historyBefore = nil; hasOlderHistory = true; loadingHistory = false; historyMessage = nil; typedLines = []; draft = ""; inputMessage = nil
         playback.reset(); replayCommands = [:]; replayMessages = [:]
         await old?.stop()
@@ -409,6 +414,7 @@ import Observation
                 if case .state(let state) = update {
                     if state == .unpaired { await self.unpair(); return }
                     self.connection = state
+                    if !state.canSend { self.tasksNeedRefresh = true }
                     await self.talk.setReady(state.canSend)
                 } else {
                     if case .result(let result) = update { await self.talk.receive(result) }
