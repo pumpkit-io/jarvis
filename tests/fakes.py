@@ -21,7 +21,7 @@ from jarvis_hub.agents.backend import (
     TurnEnd,
     Usage,
 )
-from jarvis_hub.hub import WARM_UP, Hub, Line
+from jarvis_hub.hub import WARM_UP, Hub, Line, Output
 from jarvis_hub.limits import UsageLimit
 from jarvis_hub.voice.language import Lang
 from jarvis_hub.subagents import Refusal, Subagent, SubagentSetup
@@ -485,7 +485,7 @@ def subagent_spec(subagent: Subagent) -> SessionSpec:
 
 def make_hub(
     backend: FakeBackend,
-    output: RecordingOutput,
+    output: Output,
     metrics: Any,
     workspace: FakeWorkspace | None = None,
     log_dir: Path | None = None,
