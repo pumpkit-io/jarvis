@@ -58,18 +58,22 @@ class TranscriptionService:
     def _run(self) -> None:
         while (job := self._jobs.get()) is not None:
             result, audio, after = job
-            with self._lock:
-                if self._closed:
-                    result.cancel()
-                    continue
-                if not result.set_running_or_notify_cancel():
-                    continue
             try:
-                text = self._transcribe(audio, after)
-            except BaseException as error:
-                result.set_exception(error)
-            else:
-                result.set_result(text)
+                with self._lock:
+                    if self._closed:
+                        result.cancel()
+                        continue
+                    if not result.set_running_or_notify_cancel():
+                        continue
+                try:
+                    text = self._transcribe(audio, after)
+                except BaseException as error:
+                    result.set_exception(error.with_traceback(None))
+                else:
+                    result.set_result(text)
+            finally:
+                # The idle worker must not retain the last recording or its job.
+                del job, audio, result
 
     def _transcribe(self, audio: Samples, after: float) -> str:
         if self._model is None:

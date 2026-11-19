@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -14,6 +15,7 @@ from aiohttp import WSMsgType, web
 from jarvis_hub.clients import Client, Clients
 from jarvis_hub.event_log import Event, EventLog
 from jarvis_hub.protocol import failure, json_object, sequence, wire_event
+from jarvis_hub.uploads import MAX_AUDIO_BYTES, BufferTranscriber, Talk, TalkError, UploadedTalks, rejected
 
 from jarvis_hub.config import ConfigError
 from jarvis_hub.pairing import PairedClient, PairingError, PairingStore
@@ -24,6 +26,12 @@ if TYPE_CHECKING:
 
 class Conversation(Protocol):
     clients: Clients
+
+    async def begin_remote_talk(self, client_id: str) -> str: ...
+
+    def cancel_remote_talk(self, client_id: str, request_id: str) -> None: ...
+
+    def set_client_talking(self, client_id: str, talking: bool) -> None: ...
 
     def attach_client(self, client: Client) -> None: ...
 
@@ -48,6 +56,7 @@ class Door:
         health: Callable[[], dict[str, Any]], pairing: PairingStore | None = None, authenticate: Callable[[str], bool] = lambda token: False,
         hub: Conversation | None = None, log: EventLog | None = None, revocation_interval: float = 0.25,
         on_replay: Callable[[str], None] | None = None, now: Callable[[], float] = time.perf_counter,
+        transcription: BufferTranscriber | None = None, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._enabled = enabled
         self._host = host
@@ -66,6 +75,8 @@ class Door:
         self._watcher: asyncio.Task[None] | None = None
         self._retiring: set[asyncio.Task[None]] = set()
         self._closing = False
+        self._talks = UploadedTalks(hub, log, transcription, now, sleep,
+            lambda client_id: not self._closing and pairing is not None and bool(pairing.active_ids({client_id}))) if hub is not None and log is not None else None
 
     @property
     def port(self) -> int | None:
@@ -80,6 +91,7 @@ class Door:
             raise ConfigError("Remote door refused: bind address must be loopback 127.0.0.1")
         app = web.Application(client_max_size=65536)
         app.router.add_post("/v1/pair", self._pair)
+        app.router.add_post("/v1/utterances/{talk_id}", self._utterance)
         app.router.add_get("/v1/health", self._get_health)
         app.router.add_get("/v1/events", self._events)
         app.router.add_get("/v1/history", self._history)
@@ -96,6 +108,8 @@ class Door:
 
     async def close(self) -> None:
         self._closing = True
+        if self._talks is not None:
+            await self._talks.close()
         if self._watcher is not None:
             self._watcher.cancel()
             await asyncio.gather(self._watcher, return_exceptions=True)
@@ -195,6 +209,8 @@ class Door:
             connection.subscription = None
         if self._connections.get(connection.client.id) is connection:
             del self._connections[connection.client.id]
+            if self._talks is not None:
+                self._talks.disconnect(connection.client.id)
             if self._hub is not None:
                 self._hub.clients.disconnect(connection.client.id)
         writer = connection.writer
@@ -230,6 +246,89 @@ class Door:
                             await connection.socket.send_json(frame)
         except (OSError, ConnectionError, TimeoutError, RuntimeError):
             self._retire_soon(connection, 1013)
+
+    @staticmethod
+    def _upload_response(command_id: str, result: dict[str, Any]) -> web.Response:
+        code = result.get("error", {}).get("code")
+        status = {"unauthorized": 401, "invalid_payload": 400, "unsupported_audio": 415,
+                  "audio_too_large": 413, "upload_rate_limited": 429, "empty_transcript": 422,
+                  "transcription_failed": 503}.get(code, 409 if code else 200)
+        headers = {"Cache-Control": "no-store"}
+        retry = result.get("error", {}).get("retry_after_seconds")
+        if retry is not None:
+            headers["Retry-After"] = str(retry)
+        envelope: dict[str, Any] = {"version": 1, "type": "command_result"}
+        if Door._valid_id(command_id):
+            envelope["id"] = command_id
+        envelope.update(result)
+        return web.json_response(envelope, status=status, headers=headers)
+
+    async def _utterance(self, request: web.Request) -> web.Response:
+        command_id = request.headers.get("Idempotency-Key", "")
+        client = await self._identity(request)
+        if client is None:
+            return self._upload_response(command_id, rejected("unauthorized", "Device token required"))
+        talk_id = request.match_info["talk_id"]
+        if not self._valid_id(command_id) or not self._valid_id(talk_id):
+            return self._upload_response(command_id, rejected("invalid_payload", "Talk and command identifiers are required"))
+        if (request.content_type != "application/octet-stream"
+                or request.headers.get("X-Jarvis-Audio-Format") != "pcm_s16le_16000_mono"):
+            return self._upload_response(command_id, rejected("unsupported_audio", "Use PCM16 little-endian, 16000 Hz mono"))
+        body = bytearray()
+        try:
+            if request.content_length is not None and request.content_length > MAX_AUDIO_BYTES:
+                return self._upload_response(command_id, rejected("audio_too_large", "A Talk is limited to 300 seconds"))
+            if self._talks is not None:
+                self._talks.receiving(client.id, talk_id)
+            async with asyncio.timeout(30):
+                async for chunk in request.content.iter_chunked(65536):
+                    if len(body) + len(chunk) > MAX_AUDIO_BYTES:
+                        return self._upload_response(command_id, rejected("audio_too_large", "A Talk is limited to 300 seconds"))
+                    body.extend(chunk)
+            if not body or len(body) % 2:
+                return self._upload_response(command_id, rejected("invalid_payload", "PCM must have an even, nonzero byte length"))
+            if self._log is None or self._talks is None or self._closing:
+                return self._upload_response(command_id, rejected("transcription_failed", "Conversation is unavailable"))
+            chunk = b""
+            payload = {"talk_id": talk_id, "format": "pcm_s16le_16000_mono", "sha256": hashlib.sha256(body).hexdigest()}
+            status, result = self._log.reserve(client.id, command_id, "upload", payload)
+            key = client.id, command_id
+            if status != "new" or result is not None:
+                body.clear()
+            if status == "conflict":
+                result = rejected("id_conflict", "Command id was already used with different content")
+            elif result is None:
+                task = self._operations.get(key)
+                if task is None and status == "new":
+                    try:
+                        talk = self._talks.claim(client.id, talk_id)
+                    except TalkError as error:
+                        result = rejected(error.code, str(error), error.retry_after)
+                        self._log.complete(client.id, command_id, result)
+                    else:
+                        task = asyncio.create_task(self._upload(talk, command_id, body))
+                        talk.operation = task
+                        self._operations[key] = task
+                        task.add_done_callback(lambda done: self._operations.pop(key, None))
+                        body = bytearray()
+                if result is None:
+                    if task is None:
+                        result = rejected("outcome_unknown", "Previous operation outcome is unknown; reconcile with history")
+                        self._log.complete(client.id, command_id, result)
+                    else:
+                        result = await asyncio.shield(task)
+            assert result is not None
+            return self._upload_response(command_id, result)
+        except (OSError, ConnectionError, TimeoutError):
+            return self._upload_response(command_id, rejected("invalid_payload", "Incomplete upload; retry the same body and id"))
+        finally:
+            body.clear()
+
+    async def _upload(self, talk: Talk, command_id: str, body: bytearray) -> dict[str, Any]:
+        assert self._talks is not None and self._log is not None
+        result = await self._talks.upload(talk, body)
+        self._log.complete(talk.client_id, command_id, result)
+        return result
 
     async def _history(self, request: web.Request) -> web.Response:
         client = await self._identity(request)
@@ -290,6 +389,8 @@ class Door:
         try:
             await socket.prepare(request)
             previous = self._connections.get(client.id)
+            if previous is not None and self._talks is not None:
+                self._talks.disconnect(client.id)
             self._connections[client.id] = connection
             existing = self._hub.clients.get(client.id)
             self._hub.attach_client(Client(client.id, "iphone" if client.kind == "iphone" else "reference", connected=True, can_show_text=False,
@@ -364,7 +465,13 @@ class Door:
 
     @staticmethod
     def _valid_id(value: Any) -> bool:
-        return isinstance(value, str) and 0 < len(value.encode("utf-8")) <= 256 and all(ord(c) >= 32 for c in value)
+        if not isinstance(value, str):
+            return False
+        try:
+            encoded = value.encode("utf-8")
+        except UnicodeError:
+            return False
+        return 0 < len(encoded) <= 256 and all(ord(c) >= 32 for c in value)
 
     async def _execute(self, connection: _Connection, command_id: str, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
         from jarvis_hub.hub import Line
@@ -382,6 +489,13 @@ class Door:
                     Line(text, self._now(), client_id=connection.client.id),
                     allowed=lambda: self._active(connection))
                 result = {"ok": True, "result": {"request_id": request_id}}
+            elif kind in ("talk_begin", "talk_cancel"):
+                talk_id = payload.get("talk_id")
+                if set(payload) != {"talk_id"} or not self._valid_id(talk_id) or self._talks is None:
+                    raise ValueError("A Talk identifier is required")
+                assert isinstance(talk_id, str)
+                result = (await self._talks.begin(connection.client.id, talk_id) if kind == "talk_begin"
+                          else self._talks.cancel(connection.client.id, talk_id))
             elif kind == "set_presence":
                 visible = payload.get("can_show_text")
                 if type(visible) is not bool or set(payload) != {"can_show_text"}:
@@ -398,6 +512,8 @@ class Door:
                 result = {"ok": True, "result": {"seq": self._pairing.acknowledge(connection.client.id, seq)}}
             else:
                 result = {"ok": False, "error": failure("unknown_command", "Unknown command")["error"]}
+        except TalkError as error:
+            result = rejected(error.code, str(error), error.retry_after)
         except ValueError:
             result = {"ok": False, "error": failure("invalid_payload", "Command payload is invalid or Hub is stopping")["error"]}
         except (Exception, asyncio.CancelledError):
