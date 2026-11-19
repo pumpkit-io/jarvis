@@ -644,12 +644,20 @@ class Hub:
             self._client_players[client.id] = player
         self._clients_changed()
 
+    def set_client_talking(self, client_id: str, talking: bool) -> None:
+        self.clients.set_talking(client_id, talking)
+
+    def set_client_playing(self, client_id: str, playing: bool) -> None:
+        self.clients.set_playing(client_id, playing)
+
     def _focus_available(self) -> bool:
         client = self.clients.get(self.clients.focus)
         return bool(client is not None and client.connected
                     and (client.can_show_text or self._client_can_speak(client.id)))
 
     def _clients_changed(self) -> None:
+        if self._floor is not None and (activity := getattr(self._floor, "remote_activity", None)) is not None:
+            activity(self.clients.remote_activity)
         # Adapters may attach before start restores the saved news.
         if not self._loops:
             return

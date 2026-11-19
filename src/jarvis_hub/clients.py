@@ -14,6 +14,8 @@ class Client:
     can_show_text: bool = True
     can_speak: bool = False
     silence: bool = False
+    talking: bool = False
+    playing: bool = False
 
 
 class Clients:
@@ -38,7 +40,7 @@ class Clients:
 
     def disconnect(self, client_id: str) -> None:
         client = self._clients[client_id]
-        self._clients[client_id] = replace(client, connected=False)
+        self._clients[client_id] = replace(client, connected=False, talking=False, playing=False)
         self._on_change()
 
     def take_focus(self, client_id: str) -> None:
@@ -53,3 +55,16 @@ class Clients:
         if not client_id:
             raise ValueError("Focus needs a Client id")
         self._focus = client_id
+
+    @property
+    def remote_activity(self) -> bool:
+        return any(client.id != TERMINAL and client.connected and (client.talking or client.playing)
+                   for client in self._clients.values())
+
+    def set_talking(self, client_id: str, talking: bool) -> None:
+        self._clients[client_id] = replace(self._clients[client_id], talking=talking)
+        self._on_change()
+
+    def set_playing(self, client_id: str, playing: bool) -> None:
+        self._clients[client_id] = replace(self._clients[client_id], playing=playing)
+        self._on_change()

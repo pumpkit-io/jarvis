@@ -39,3 +39,51 @@ TOKENS = [
 )
 def test_words_after_the_wake_word_hit(after: float, text: str) -> None:
     assert words_after(TOKENS, after) == text
+
+
+@pytest.mark.parametrize('detector_kind', ['wake', 'vad'])
+def test_streaming_detector_adapters_reset_the_underlying_context(
+    monkeypatch: pytest.MonkeyPatch, detector_kind: str,
+) -> None:
+    import sys
+    from types import ModuleType
+    import numpy as np
+    from jarvis_hub.voice.engines import OpenWakeWord, SileroVad, WAKE_MODEL
+
+    class StreamingModel:
+        def __init__(self, **kwargs: object) -> None:
+            self.previous = 0
+
+        def reset(self) -> None:
+            self.previous = 0
+
+        def reset_states(self) -> None:
+            self.reset()
+
+        def predict(self, chunk: np.ndarray, frame_size: int | None = None) -> object:
+            current = int(chunk[0])
+            score = float(self.previous == 2000 and current == 1000)
+            self.previous = current
+            return {WAKE_MODEL: score} if frame_size is None else score
+
+    package, utils, model, vad = (ModuleType(name) for name in
+                                 ('openwakeword', 'openwakeword.utils', 'openwakeword.model', 'openwakeword.vad'))
+    monkeypatch.setattr(package, 'utils', utils, raising=False)
+    def download_models(models: list[str]) -> None:
+        pass
+
+    monkeypatch.setattr(utils, 'download_models', download_models, raising=False)
+    monkeypatch.setattr(model, 'Model', StreamingModel, raising=False)
+    monkeypatch.setattr(vad, 'VAD', StreamingModel, raising=False)
+    for module in (package, utils, model, vad):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+    detector = OpenWakeWord() if detector_kind == 'wake' else SileroVad()
+    score = detector.score if isinstance(detector, OpenWakeWord) else detector.probability
+    prefix, suffix = np.full(detector.chunk, 2000, np.int16), np.full(detector.chunk, 1000, np.int16)
+    assert score(prefix) == 0
+    assert score(suffix) == 1
+    score(prefix)
+    detector.reset()
+    assert score(suffix) == 0
+    assert score(prefix) == 0
+    assert score(suffix) == 1

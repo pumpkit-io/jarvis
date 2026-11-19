@@ -73,6 +73,12 @@ class RelationAssessment(Protocol):
 
 
 @dataclass(frozen=True)
+class _MicrophoneEvent:
+    event: InputEvent
+    generation: int
+
+
+@dataclass(frozen=True)
 class _Fragment:
     heard: Heard
     phase: str
@@ -211,6 +217,8 @@ class VoiceMode:
         self._reply_started: tuple[tuple[str, int], float] | None = None
         self._reply_finished: tuple[tuple[str, int], float] | None = None
         self._closed = False
+        self._remote_active = False
+        self._microphone_generation = 0
         self._capture_setting: tuple[bool, int] | None = None
         self._origins: dict[int | None, tuple[str, bool | None]] = {}
         self._waiting: deque[_Fragment] = deque()
@@ -228,7 +236,7 @@ class VoiceMode:
         self._idle = asyncio.Event()
         self._idle.set()
         self._woke: Callable[[], None] = lambda: None
-        self._events: asyncio.Queue[Event | _Related] = asyncio.Queue()
+        self._events: asyncio.Queue[Event | _Related | _MicrophoneEvent] = asyncio.Queue()
         self._lines: asyncio.Queue[Line] = asyncio.Queue()
         self._speech = Speech(
             tts, player, clock, metrics=metrics, notice=notice, on_reply_audio=self._reply_audio, on_chime=self._chime_started, on_ready=self._ready
@@ -344,11 +352,15 @@ class VoiceMode:
 
     async def _listen(self) -> None:
         async for event in self._audio.events():
-            self._events.put_nowait(event)
+            self._events.put_nowait(_MicrophoneEvent(event, self._microphone_generation))
 
     async def _drive(self, interrupt: Callable[[], Awaitable[Any]]) -> None:
         while True:
             event = await self._next_event()
+            if isinstance(event, _MicrophoneEvent):
+                if self._remote_active or event.generation != self._microphone_generation:
+                    continue
+                event = event.event
             if isinstance(event, _Related):
                 if event.fragments is self._inflight and self.owns(event.owner.token) and event.epoch == self._epoch:
                     self._applying_fragments = event.fragments
@@ -454,8 +466,21 @@ class VoiceMode:
             self._transition(before, "idle", EndConversation(self._clock.now()))
         self._idle.set()
 
+    def remote_activity(self, active: bool) -> None:
+        if active == self._remote_active:
+            return
+        self._remote_active = active
+        self._microphone_generation += 1
+        if (suppress := getattr(self._audio, "suppress", None)) is not None:
+            suppress(active)
+        self._voice = Voice()
+        self._retire()
+        self._barge_in_from = None
+        self._audio.barge_in(None)
+        self._idle.set()
+
     def _sync_capture(self) -> None:
-        setting = (not self._closed and (self._voice.state in CAPTURING or self._voice.state == "thinking"), self._epoch)
+        setting = (not self._closed and not self._remote_active and (self._voice.state in CAPTURING or self._voice.state == "thinking"), self._epoch)
         if setting != self._capture_setting:
             self._capture_setting = setting
             self._audio.capture(setting[0], owner=setting[1])
@@ -592,7 +617,7 @@ class VoiceMode:
             self._woke()
         return actions
 
-    async def _next_event(self) -> Event | _Related:
+    async def _next_event(self) -> Event | _Related | _MicrophoneEvent:
         """The next event, or a Tick once the machine's deadline has come."""
         deadline = self._voice.deadline
         if deadline is None:

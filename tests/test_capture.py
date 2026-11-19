@@ -1187,3 +1187,197 @@ async def test_moving_to_another_microphone_closes_and_reopens_the_source() -> N
         assert source.opened
     finally:
         capture.close()
+
+
+async def test_remote_suppression_drops_inflight_wake_and_queued_audio_then_accepts_fresh_wake() -> None:
+    from jarvis_hub.voice.state import InputEvent, WakeWord
+
+    class HeldWake(MarkerWake):
+        def __init__(self) -> None:
+            self.entered, self.release = threading.Event(), threading.Event()
+
+        def score(self, chunk: np.ndarray) -> float:
+            self.entered.set()
+            self.release.wait(timeout=5)
+            return super().score(chunk)
+
+    wake, source = HeldWake(), Source()
+    events: list[InputEvent] = []
+    rows: list[dict[str, Any]] = []
+    capture = Capture(lambda: engines(CountingEcho(), wake), Listening(), rows.append, lambda text: None,
+                      source=source, backlog_s=10)
+    capture.start()
+
+    async def collect() -> None:
+        async for event in capture.events():
+            events.append(event)
+
+    collecting = asyncio.create_task(collect())
+    try:
+        await until(capture.ready.is_set)
+        source.frames(8, value=2000)
+        assert await asyncio.to_thread(wake.entered.wait, 2)
+        capture.suppress(True)
+        source.frames(120, value=1000, start=.08)
+        capture.suppress(False)
+        wake.release.set()
+        await until(lambda: any(row.get('kind') == 'capture' for row in rows))
+        assert events == []
+        source.frames(8, value=2000, start=10)
+        await until(lambda: any(isinstance(event, WakeWord) for event in events))
+        assert len([event for event in events if isinstance(event, WakeWord)]) == 1
+    finally:
+        wake.release.set()
+        capture.close()
+        collecting.cancel()
+        await asyncio.gather(collecting, return_exceptions=True)
+
+
+@pytest.mark.parametrize('activity', ['talking', 'playing'])
+@pytest.mark.parametrize('mac_woke', [False, True])
+@pytest.mark.parametrize('one_breath', [False, True])
+async def test_phone_activity_retires_mac_inflight_transcription_at_the_hub(
+    activity: str, mac_woke: bool, one_breath: bool,
+) -> None:
+    from jarvis_hub.clients import Client
+    from jarvis_hub.voice.state import Timing
+    from jarvis_hub.voice.voice_mode import VoiceMode, merge
+    from tests.fakes import (FakeBackend, FakeClock, FakeTts, RecordingMetrics, RecordingOutput,
+                             RecordingPlayer, Text, Typist, make_hub)
+
+    clock, source, stt = FakeClock(), Source(), GatedEndpointStt()
+    backend = FakeBackend(clock, [[Text('Fresh Mac request.')]])
+    metrics, output, player = RecordingMetrics(), RecordingOutput(), RecordingPlayer()
+    capture = Capture(
+        lambda: Engines(CountingEcho(), MarkerWake(), LoudVad(), ScriptedTurn(), stt, Everyone()),
+        Listening(), metrics.record, output.notice, source=source, backlog_s=10, clock=clock.now,
+    )
+    voice = VoiceMode(audio=capture, tts=FakeTts(), player=player, clock=clock,
+                      timing=Timing(6.0, 4.0, 6.0, .5), metrics=metrics, notice=output.notice)
+    hub = make_hub(backend, output, metrics, speech=voice.speech, speak_typed=False,
+                   on_end_conversation=voice.end_conversation, floor=voice)
+    typist = Typist(clock)
+    await hub.start()
+    hub.attach_client(Client('phone', 'reference', connected=True))
+    capture.start()
+    voice.start()
+    running = asyncio.create_task(hub.run(merge(typist.lines(), voice.lines(hub.interrupt, hub.woke))))
+
+    def user_messages() -> list[str]:
+        return [message for session in backend.all_sessions('talker') for message in session.received
+                if message.startswith('<user')]
+
+    report = hub.set_client_talking if activity == 'talking' else hub.set_client_playing
+    try:
+        await until(capture.ready.is_set)
+        await until(lambda: player.voices == ['ready'])
+        if mac_woke:
+            source.frames(8, value=2000, start=clock.now())
+            await until(lambda: player.voices == ['ready', 'chime'])
+        source.frames(80, value=1000, start=clock.now() + .08)
+        source.frames(80, start=clock.now() + .88)
+        assert await asyncio.to_thread(stt.entered.wait, 2)
+        report('phone', True)
+        source.frames(8, value=2000, start=clock.now() + 2)
+        source.frames(100, value=1500, start=clock.now() + 2.08)
+        source.frames(80, start=clock.now() + 3.08)
+        stt.release.set()
+        await until(lambda: bool(stt.heard))
+        assert user_messages() == []
+        assert player.voices.count('chime') == int(mac_woke)
+        report('phone', False)
+        clock.advance(10)
+        chimes_before_resume = player.voices.count('chime')
+        source.frames(8, value=2000, start=clock.now())
+        if not one_breath:
+            await until(lambda: player.voices.count('chime') == chimes_before_resume + 1)
+        source.frames(80, value=1500, start=clock.now() + .08)
+        await until(lambda: player.voices.count('chime') == chimes_before_resume + 1)
+        source.frames(80, start=clock.now() + .88)
+        await until(lambda: bool(user_messages()))
+        assert user_messages() == ['<user lang="en">the tests</user>']
+        assert len(stt.heard) == 2
+    finally:
+        stt.release.set()
+        typist.end()
+        await asyncio.wait([running], timeout=1)
+        await hub.close()
+        await voice.close()
+        capture.close()
+
+
+@pytest.mark.parametrize('detector_kind', ['wake', 'vad'])
+async def test_remote_resume_forgets_streaming_detector_context_on_its_worker(detector_kind: str) -> None:
+    from jarvis_hub.voice.state import InputEvent, SpeechStarted, WakeWord
+
+    class StreamingDetector:
+        chunk = 1280
+
+        def __init__(self) -> None:
+            self.previous = 0
+            self.calls = 0
+            self.entered, self.release = threading.Event(), threading.Event()
+            self.inference_threads: list[int] = []
+            self.reset_threads: list[int] = []
+
+        def reset(self) -> None:
+            self.previous = 0
+            self.reset_threads.append(threading.get_ident())
+
+        def score(self, chunk: np.ndarray) -> float:
+            self.inference_threads.append(threading.get_ident())
+            current = int(chunk[0])
+            if not self.calls:
+                self.entered.set()
+                assert self.release.wait(timeout=3)
+            score = float(self.previous == 2000 and current == 1000)
+            self.previous = current
+            self.calls += 1
+            return score
+
+        def probability(self, chunk: np.ndarray) -> float:
+            return self.score(chunk)
+
+    class NoWake(MarkerWake):
+        def score(self, chunk: np.ndarray) -> float:
+            return 0.0
+
+    detector, source = StreamingDetector(), Source()
+    events: list[InputEvent] = []
+    capture = Capture(
+        lambda: Engines(CountingEcho(), detector if detector_kind == 'wake' else NoWake(),
+                        detector if detector_kind == 'vad' else LoudVad(), ScriptedTurn(), ScriptedStt(), Everyone()),
+        Listening(), lambda row: None, lambda text: None, source=source,
+    )
+    capture.start()
+
+    async def collect() -> None:
+        async for event in capture.events():
+            events.append(event)
+
+    collecting = asyncio.create_task(collect())
+    event_type = WakeWord if detector_kind == 'wake' else SpeechStarted
+    try:
+        await until(capture.ready.is_set)
+        source.frames(8, value=2000)
+        assert await asyncio.to_thread(detector.entered.wait, 2)
+        capture.suppress(True)
+        source.frames(800, value=500, start=1)
+        capture.suppress(False)
+        capture.capture(detector_kind == 'vad', owner=2)
+        assert detector.reset_threads == []
+        detector.release.set()
+        source.frames(8, value=1000, start=20)
+        await until(lambda: detector.calls == 2)
+        source.frames(8, value=2000, start=24)
+        source.frames(8, value=1000, start=24.08)
+        await until(lambda: any(isinstance(event, event_type) and event.at >= 24 for event in events))
+        assert len([event for event in events if isinstance(event, event_type)]) == 1
+        assert detector.reset_threads
+        assert set(detector.reset_threads) == set(detector.inference_threads)
+        assert threading.get_ident() not in detector.reset_threads
+    finally:
+        detector.release.set()
+        capture.close()
+        collecting.cancel()
+        await asyncio.gather(collecting, return_exceptions=True)
