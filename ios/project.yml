@@ -15,6 +15,7 @@ targets:
   Jarvis:
     type: application
     platform: iOS
+    deploymentTarget: "17.0"
     sources:
       - JarvisApp
     dependencies:
