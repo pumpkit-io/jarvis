@@ -159,8 +159,8 @@ class Speech:
         self._tts = tts
         self._player = player
         self._players: list[Player] = [player]
-        self._retired_players: list[Player] = []
-        self._last_player = player
+        self._last_player: Player | None = player
+        self._last_played = ""
         self._clock = clock
         self._metrics = metrics
         self._notice = notice
@@ -198,7 +198,6 @@ class Speech:
             return
         generation = None
         if reply is None:
-            self._retired_players = [retired for retired in self._retired_players if retired is not self._player]
             generation = self._local_cue_generation
         self._enqueue(_Cached(name, lang, reply, generation))
 
@@ -211,7 +210,6 @@ class Speech:
         player = destination if destination is not None else self._player
         if not any(p is player for p in self._players):
             self._players.append(player)
-        self._retired_players = [retired for retired in self._retired_players if retired is not player]
         self._last_player = player
         self._reply = _Reply(turn, lang, self._clock.now(), heard_at, owner=owner, player=player, reply_id=reply_id, allowed=allowed, can_start=can_start)
         self._prune_replies()
@@ -233,7 +231,6 @@ class Speech:
         self._replays[destination] = reply
         if not any(p is destination for p in self._players):
             self._players.append(destination)
-        self._retired_players = [p for p in self._retired_players if p is not destination]
         self._replies[reply.turn] = reply
         self._say(reply.splitter.feed(text) + reply.splitter.end_block(), reply)
         reply.closed = True
@@ -304,16 +301,20 @@ class Speech:
                 reply.stopped = True
         if self._reply is not None and self._reply.stopped:
             self._reply = None
-        if not any(retired is player for retired in self._retired_players):
-            self._retired_players.append(player)
-            try:
-                player.stop()
-            except Exception as e:
-                self._notice(f"Could not stop speech: {type(e).__name__}: {e}")
+        if self._last_player is player:
+            self._last_played = player.played()
+            self._last_player = None
+        self._players = [p for p in self._players if p is not player or p is self._player]
+        if isinstance(player, RemotePlayer):
+            self._replays.pop(player, None)
+        try:
+            player.stop()
+        except Exception as e:
+            self._notice(f"Could not stop speech: {type(e).__name__}: {e}")
         self._prune_replies()
 
     def played(self) -> str:
-        return self._last_player.played()
+        return self._last_player.played() if self._last_player is not None else self._last_played
 
     async def idle(self, *, stall_timeout: float | None = STALLED, local_only: bool = False,
                    destination: Player | None = None) -> None:
@@ -330,8 +331,7 @@ class Speech:
                 await self._queue_changed.wait()
         def pending() -> float:
             return sum(p.pending() for p in self._players
-                       if (not local_only or p is self._player) and (destination is None or p is destination)
-                       and not any(retired is p for retired in self._retired_players))
+                       if (not local_only or p is self._player) and (destination is None or p is destination))
 
         left, since = pending(), self._clock.now()
         while left > 0:
@@ -340,6 +340,7 @@ class Speech:
                 left, since = now_left, self._clock.now()
             elif stall_timeout is not None and self._clock.now() - since >= stall_timeout:
                 return
+        self._prune_replies()
 
     async def close(self) -> None:
         if self._worker is not None:
@@ -416,6 +417,7 @@ class Speech:
                     item.reply.generation_done = True
                     self._prune_replies()
                 self._completed(item)
+                del item
 
     def _reply_played(self, reply: _Reply) -> bool:
         if not reply.played and reply.closed and not reply.stopped and not reply.failed and reply.chunks > 0:
@@ -431,6 +433,9 @@ class Speech:
                 reply.audio_s > 0 and (reply.player or self._player).pending() > reply.trailing_audio_s + 1e-9
             ))
         }
+
+        self._replays = {player: reply for player, reply in self._replays.items()
+                         if reply.turn in self._replies}
 
     @staticmethod
     def _reply_allowed(reply: _Reply) -> bool:
@@ -470,9 +475,7 @@ class Speech:
     def _play(self, clip: Clip, reply: _Reply | None, *, sentence: bool) -> float:
         """Plays `clip` after what is queued; returns when it starts."""
         player = reply.player if reply is not None and reply.player is not None else self._player
-        if any(retired is player for retired in self._retired_players) or (
-            reply is not None and not self._reply_allowed(reply)
-        ):
+        if reply is not None and not self._reply_allowed(reply):
             return self._clock.now()
         self._prune_replies()
         for queued in self._replies.values():

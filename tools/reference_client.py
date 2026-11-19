@@ -115,7 +115,6 @@ class ReferenceClient:
         self.streams: dict[str, tuple[str, int]] = {}
         self.clip_header: Json | None = None
         self.clips: list[tuple[str, str, float, Path]] = []
-        self.ended_streams: set[str] = set()
         self.audio_done_replies: set[str] = set()
         self.audio_stop_reasons: dict[str, str] = {}
         self.unavailable_audio_replies: set[str] = set()
@@ -230,6 +229,23 @@ class ReferenceClient:
             self.failure = error
             self.changed.set()
 
+    def audio_requested(self, reply: Json) -> bool:
+        return not self.silence and bool(reply['payload']['text']) and reply['payload']['reason'] == 'complete'
+
+    async def wait_audio(self, reply: Json, *, requested: bool) -> None:
+        if requested:
+            reply_id = reply['payload']['reply_id']
+            await self.wait(lambda: reply_id in self.audio_done_replies or reply_id in self.unavailable_audio_replies)
+
+    def audio_outcome(self, reply: Json, *, requested: bool, first_clip: bool, failure: str | None = None) -> tuple[str, str | None]:
+        if not requested:
+            return 'not_requested', None
+        reply_id = reply['payload']['reply_id']
+        reason = failure or self.audio_stop_reasons.get(reply_id)
+        if reason is None and reply_id in self.audio_done_replies:
+            return 'complete', None
+        return ('partial' if first_clip else 'unavailable'), reason or 'disconnected'
+
     def apply(self, frame: Json) -> None:
         kind, payload = frame['type'], frame.get('payload', {})
         seq = frame.get('seq')
@@ -242,7 +258,6 @@ class ReferenceClient:
         if kind == 'status':
             self.silence = payload.get('silence', False)
         if kind in ('speech_end', 'speech_stop'):
-            self.ended_streams.add(payload['speech_id'])
             self.audio_done_replies.add(payload['reply_id'])
             if kind == 'speech_stop':
                 self.audio_stop_reasons[payload['reply_id']] = payload['reason']
@@ -431,25 +446,20 @@ async def run(args: argparse.Namespace, deadline: asyncio.Timeout) -> None:
         elif args.action == 'talk':
             result, timing = await client.upload(args.wav)
             reply = await client.reply(result['request_id'])
-            reply_id = reply['payload']['reply_id']
-            audio_status, audio_reason = 'not_requested', None
-            if not client.silence and reply['payload']['text'] and reply['payload']['reason'] == 'complete':
+            audio_failure = None
+            audio_requested = client.audio_requested(reply)
+            if audio_requested:
                 # Once text succeeds, the remaining deadline bounds audio without losing the result.
                 expires = deadline.when()
                 deadline.reschedule(None)
                 try:
                     async with asyncio.timeout_at(expires):
-                        await client.wait(lambda: reply_id in client.audio_done_replies
-                                          or reply_id in client.unavailable_audio_replies)
-                    audio_status = 'complete' if reply_id in client.audio_done_replies else 'unavailable'
-                    audio_reason = None if audio_status == 'complete' else 'disconnected'
-                    if reply_id in client.audio_stop_reasons:
-                        audio_status, audio_reason = 'unavailable', client.audio_stop_reasons[reply_id]
+                        await client.wait_audio(reply, requested=audio_requested)
                 except TimeoutError:
-                    audio_status, audio_reason = 'unavailable', 'deadline'
+                    audio_failure = 'deadline'
             report = timing.report(client)
-            if audio_status == 'unavailable' and report['first_matching_clip_received'] is not None:
-                audio_status = 'partial'
+            audio_status, audio_reason = client.audio_outcome(reply, requested=audio_requested,
+                first_clip=report['first_matching_clip_received'] is not None, failure=audio_failure)
             emit({**report, 'audio_status': audio_status, 'audio_reason': audio_reason})
         elif args.action == 'listen':
             await client.wait(lambda: False)

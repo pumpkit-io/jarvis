@@ -401,7 +401,7 @@ async def test_executable_talk_recovers_text_without_waiting_for_lost_live_audio
             await speech.close()
 
 
-@pytest.mark.parametrize('synthesis', ['late', 'failed'])
+@pytest.mark.parametrize('synthesis', ['late', 'failed', 'silenced'])
 async def test_executable_talk_keeps_text_success_when_audio_is_late_or_missing(tmp_path: Path, synthesis: str) -> None:
     import wave
 
@@ -436,6 +436,8 @@ async def test_executable_talk_keeps_text_success_when_audio_is_late_or_missing(
             await until(lambda: any(event.type == 'reply_end' for event in log.after(0)), timeout=2)
             await asyncio.sleep(0.15)
             assert not pending.done()
+            if synthesis == 'silenced':
+                hub.clients.set_silence(phone.client.id, True)
             tts.hold.set()
             code, stdout, stderr = await pending
             assert code == 0, stderr

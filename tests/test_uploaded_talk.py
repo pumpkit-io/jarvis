@@ -315,13 +315,14 @@ async def test_older_client_asr_cannot_interrupt_newer_admitted_request(tmp_path
 
 
 async def test_two_clients_same_talk_counter_have_distinct_scopes_and_approval_targets(tmp_path: Path) -> None:
-    import json
     from tests.fakes import Gate, Tool
     finish = asyncio.Event()
     state = tmp_path / 'state.json'
     async with rig(tmp_path, state_path=state, talker=[
         [Tool('delegate', {'request': 'First Task'}), Text('First.')],
         [Tool('delegate', {'request': 'Second Task'}), Text('Second.')],
+        [Tool('present_approval', {'approval_id': 'A1'}), Text('May I post Pumpkit post 812 on X now?')],
+        [Tool('delegate', {'request': 'Third independent Task'}), Text('Third.')],
     ], orchestrator=[
         [Gate(finish), Tool('report', {'task_id': 'T1', 'spoken': 'May I publish?', 'needs_user': True,
             'approval': {'action': 'subagent_action', 'grants': ['x_post'], 'post': '812', 'post_action': 'post_now'}})],
@@ -337,13 +338,29 @@ async def test_two_clients_same_talk_counter_have_distinct_scopes_and_approval_t
                     receipts.append((await response.json())['result']['request_id'])
                 await until(lambda: len([e for e in log.after(0) if e.type == 'reply_end']) == len(receipts))
             assert receipts[0] != receipts[1]
+            await second.send_json(command('foreground', 'set_presence', can_show_text=True))
+            assert (await result(second, 'foreground'))['ok']
             finish.set()
             await until(lambda: any(e.type == 'task_snapshot' and any(t['state'] == 'needs_user' for t in e.payload['tasks']) for e in log.after(0)))
-            saved = json.loads(state.read_text())
-            scopes = {scope['id']: scope for scope in saved['spoken_scopes']}
-            assert scopes[receipts[0]]['task_ids'] == ['T1']
-            assert scopes[receipts[1]]['task_ids'] == ['T2']
-            assert saved['approvals'][0]['task_id'] == 'T1'
+            heard = [e for e in log.after(0) if e.type == 'heard']
+            assert [(e.client_id, e.payload['request_id']) for e in heard] == [
+                (phone.client.id, receipts[0]), (other.client.id, receipts[1])]
+            tasks = [e.payload['tasks'] for e in log.after(0) if e.type == 'task_snapshot'][-1]
+            assert [(t['id'], t['title']) for t in tasks] == [('T1', 'First Task'), ('T2', 'Second Task')]
+            await until(lambda: any(e.type == 'pending_approval' and e.payload['approvals'] for e in log.after(0)))
+            approvals = [e.payload['approvals'] for e in log.after(0) if e.type == 'pending_approval'][-1]
+            assert approvals[0]['task_id'] == 'T1' and '812' in approvals[0]['question']
+            resolve = next(t.handler for t in _backend.session('talker').spec.tools if t.name == 'resolve_scope')
+            assert 'not pending' in str(await resolve({'scope_id': receipts[0], 'revision': 1, 'attempt': 0,
+                'disposition': 'revise_tasks', 'task_ids': ['T2']}))
+            await second.send_json(command('third', 'say_text', text='Please inspect the docs separately'))
+            assert (await result(second, 'third'))['ok']
+            await until(lambda: any(e.type == 'task_snapshot' and any(t['id'] == 'T3' for t in e.payload['tasks']) for e in log.after(0)))
+            _hub.publish_client_snapshots(other.client.id)
+            approvals = [e.payload['approvals'] for e in log.after(0) if e.type == 'pending_approval'][-1]
+            assert [(a['id'], a['task_id'], a['question']) for a in approvals] == [
+                ('A1', 'T1', 'May I post Pumpkit post 812 on X now?')]
+
 
 
 @pytest.mark.parametrize("ending", ["disconnect", "eof"])
@@ -724,7 +741,6 @@ async def test_retired_mac_line_cannot_invalidate_a_phone_talk(tmp_path: Path) -
 
 
 async def test_five_minute_talk_retains_full_long_scope_and_approval_after_hub_restart(tmp_path: Path) -> None:
-    import json
     from tests.fakes import Tool
 
     transcript = 'Please inspect the build and preserve every condition. ' * 120 + 'Including this final condition.'
@@ -746,15 +762,20 @@ async def test_five_minute_talk_retains_full_long_scope_and_approval_after_hub_r
         await until(lambda: any(e.type == 'pending_approval' and e.payload['approvals'] for e in log.after(0)))
         assert [e.payload['text'] for e in log.after(0) if e.type == 'heard'] == [transcript]
         assert backend.session('talker').received[1] == f'<user lang="en">{transcript}</user>'
-        saved = json.loads(path.read_text())
-        [scope] = saved['spoken_scopes']
-        assert scope['id'] == request_id and scope['segments'] == [transcript]
-        assert scope['revision'] == 0 and scope['task_ids'] == ['T1'] and not scope['pending']
-        assert saved['tasks'][0]['words'] == [transcript]
-        assert saved['approvals'][0]['task_id'] == 'T1' and saved['approvals'][0]['task_revision'] == 0
+        tasks = [e.payload['tasks'] for e in log.after(0) if e.type == 'task_snapshot'][-1]
+        assert tasks[0]['id'] == 'T1' and tasks[0]['title'] == 'Inspect long request'
+        approval = [e.payload['approvals'] for e in log.after(0) if e.type == 'pending_approval'][-1][0]
+        assert approval['task_id'] == 'T1' and approval['question'] == 'Shall I publish the prepared post?'
+        resolve = next(t.handler for t in backend.session('talker').spec.tools if t.name == 'resolve_scope')
+        assert 'not pending' in str(await resolve({'scope_id': request_id, 'revision': 1, 'attempt': 0,
+            'disposition': 'revise_tasks', 'task_ids': ['T1']}))
 
     with PairingStore(tmp_path / 'pairing.db') as pairing, EventLog(tmp_path / 'events.db', wall=lambda: 1000) as log:
-        backend = FakeBackend(FakeClock(), [[Tool('approve', {'approval_id': 'A1'}), Text('Please confirm the action first.')]])
+        backend = FakeBackend(FakeClock(), [
+            [Tool('approve', {'approval_id': 'A1'}), Text('Please confirm the action first.')],
+            [Tool('present_approval', {'approval_id': 'A1'}), Text('Shall I publish post 812 now?')],
+            [Tool('approve', {'approval_id': 'A1'}), Text('Approved.')],
+        ])
         hub = make_hub(backend, EventOutput(log, RecordingOutput()), RecordingMetrics(), state_path=path)
         door = Door(enabled=True, port=0, health=hub.health, pairing=pairing, hub=hub, log=log)
         await hub.start()
@@ -773,12 +794,125 @@ async def test_five_minute_talk_retains_full_long_scope_and_approval_after_hub_r
                 await socket.send_json(command('status', 'say_text', text='What is the status of that request?'))
                 assert (await result(socket, 'status'))['ok']
                 await until(lambda: bool(backend.session('talker').tool_results))
-                restored = json.loads(path.read_text())
-                [scope] = restored['spoken_scopes']
-                assert scope['segments'] == [transcript] and scope['revision'] == 0
-                assert restored['tasks'][0]['words'] == [transcript]
-                assert restored['approvals'][0]['state'] == 'pending'
+                hub.publish_client_snapshots(phone.client.id)
+                pending = [e.payload['approvals'] for e in log.after(0) if e.type == 'pending_approval'][-1]
+                assert pending[0]['id'] == 'A1' and pending[0]['task_id'] == 'T1'
+                assert backend.all_sessions('subagent') == []
                 assert str(backend.session('talker').tool_results[0].result).startswith('Not approved:')
+                await until(lambda: any(e.type == 'reply_end' and e.payload['text'] == 'Please confirm the action first.' for e in log.after(0)))
+                await socket.send_json(command('present', 'say_text', text='Remind me what needs approval'))
+                assert (await result(socket, 'present'))['ok']
+                await until(lambda: any(e.type == 'reply_end' and e.payload['text'] == 'Shall I publish post 812 now?' for e in log.after(0)))
+                await socket.send_json(command('yes', 'say_text', text='Yes, post 812 now'))
+                assert (await result(socket, 'yes'))['ok']
+                await until(lambda: len(backend.session('talker').tool_results) == 3)
+                assert str(backend.session('talker').tool_results[-1].result).startswith("Approved A1 with the User's words")
+
         finally:
             await door.close()
             await hub.close()
+
+
+async def test_interactive_terminal_echoes_remote_typing_once_and_preserves_local_echo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+    import threading
+    from dataclasses import replace
+    import jarvis_hub.main as entry
+    from tests.fakes import FakeTts
+    from tests.test_text_mode import settings
+
+    released = threading.Event()
+    stdout, stderr = io.StringIO(), io.StringIO()
+    class TTY(io.StringIO):
+        sent = False
+        def isatty(self) -> bool:
+            return True
+        def __next__(self) -> str:
+            assert released.wait(5)
+            if self.sent:
+                raise StopIteration
+            self.sent = True
+            stdout.write('Local typed line\n')
+            return 'Local typed line\n'
+    doors: list[Door] = []
+    class CaptureDoor(Door):
+        def __init__(self, **options: Any) -> None:
+            super().__init__(**options)
+            doors.append(self)
+    monkeypatch.setattr(entry, 'Door', CaptureDoor)
+    monkeypatch.setattr(entry, 'KokoroSynthesizer', FakeTts)
+    config = replace(settings(tmp_path), remote=True, remote_port=0)
+    with PairingStore(config.runtime_dir / 'events.sqlite3') as pairing:
+        phone = pairing.exchange(pairing.create_code('https://mac.example.ts.net'), 'Phone', 'iphone')
+    backend = FakeBackend(FakeClock(), [[Text('Remote reply.')], [Text('Local reply.')]])
+    running = asyncio.create_task(entry.text_mode(settings=config, environ={}, backend=backend, clock=backend.clock,
+        stdin=TTY(), stdout=stdout, stderr=stderr))
+    try:
+        await until(lambda: bool(doors and doors[0].port) and stdout.getvalue().endswith('› '))
+        async with aiohttp.ClientSession() as session, connect(session, doors[0], phone.token) as socket:
+            await socket.send_json(command('remote', 'say_text', text='Remote typed line'))
+            receipt = await result(socket, 'remote')
+            assert receipt['ok']
+            await until(lambda: 'Remote reply.' in stdout.getvalue())
+            assert stdout.getvalue().count('Remote typed line') == 1
+    finally:
+        released.set()
+        await running
+    assert stdout.getvalue().count('Local typed line') == 1
+    assert 'Local reply.' in stdout.getvalue()
+    assert '[hub] Model ready.' in stderr.getvalue()
+    with EventLog(config.runtime_dir / 'events.sqlite3') as log:
+        heard = [e for e in log.after(0) if e.type == 'heard']
+        assert [e.payload['text'] for e in heard] == ['Remote typed line', 'Local typed line']
+        assert [e.client_id for e in heard] == [phone.client.id, 'terminal']
+        assert all(not e.payload['spoken'] for e in heard)
+        assert heard[0].payload['request_id'] == receipt['result']['request_id']
+
+
+@pytest.mark.parametrize('user_asks', [False, True], ids=['delegated-only-refused', 'user-tail-authority'])
+async def test_long_uploaded_user_words_authorize_max_effort_before_and_after_restart(tmp_path: Path, user_asks: bool) -> None:
+    import json
+    from tests.fakes import Tool
+    from tests.test_subagents import spawn
+
+    transcript = 'Please inspect the build and retain every condition. ' * 125
+    assert len(transcript) > 6000
+    transcript += 'Use max effort.' if user_asks else 'Include the final condition.'
+    delegated = 'Inspect build' if user_asks else 'Inspect build with max effort'
+    path = tmp_path / 'state.json'
+    attempt = spawn(brief='Inspect build', model='opus', effort='max', writes=False, task_id='T1')
+    async with rig(tmp_path, Transcriber(transcript), state_path=path, max_effort='max',
+        talker=[[Tool('delegate', {'request': delegated}), Text('Working.')]],
+        orchestrator=[[Tool('schedule_check', {'after_seconds': 600, 'note': 'Recheck build', 'max_repeats': 1}), attempt,
+            Tool('report', {'task_id': 'T1', 'spoken': 'Waiting for the User.', 'needs_user': True})]],
+    ) as (session, socket, door, _hub, log, backend, _asr, phone, _clock, _pairing):
+        await socket.send_json(command('begin', 'talk_begin', talk_id='long-authority'))
+        assert (await result(socket, 'begin'))['ok']
+        async with session.post(f'http://127.0.0.1:{door.port}/v1/utterances/long-authority', headers=headers(phone.token), data=PCM) as response:
+            assert response.status == 200
+        await until(lambda: bool(backend.all_sessions('orchestrator')) and any(r.name == 'spawn_subagent' for r in backend.session('orchestrator').tool_results))
+        first = next(r.result or '' for r in backend.session('orchestrator').tool_results if r.name == 'spawn_subagent')
+        if user_asks:
+            assert json.loads(first)['subagent_id'] == 'S1'
+            await until(lambda: bool(backend.all_sessions('subagent')))
+        else:
+            assert 'only when the User asks' in first
+            assert backend.all_sessions('subagent') == []
+        await until(lambda: len(backend.session('orchestrator').tool_results) >= 3)
+        assert [e.payload['text'] for e in log.after(0) if e.type == 'heard'] == [transcript]
+        assert backend.session('talker').received[1] == f'<user lang="en">{transcript}</user>'
+
+    backend = FakeBackend(FakeClock(), orchestrator=[[attempt]])
+    hub = make_hub(backend, RecordingOutput(), RecordingMetrics(), state_path=path, max_effort='max')
+    await hub.start()
+    try:
+        await until(lambda: bool(backend.all_sessions('orchestrator')) and bool(backend.session('orchestrator').tool_results))
+        restored = backend.session('orchestrator').tool_results[0].result or ''
+        if user_asks:
+            assert 'subagent_id' in json.loads(restored)
+            await until(lambda: bool(backend.all_sessions('subagent')))
+        else:
+            assert 'only when the User asks' in restored
+            assert backend.all_sessions('subagent') == []
+    finally:
+        await hub.close()

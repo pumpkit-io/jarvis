@@ -61,7 +61,7 @@ class Clock(Protocol):
 
 
 class Output(Protocol):
-    def heard(self, text: str, *, typed: bool = True) -> None:
+    def heard(self, text: str, *, typed: bool = True, client_id: str = "terminal") -> None:
         """The admitted User line, before display delivery."""
         ...
 
@@ -101,8 +101,8 @@ class _ClientOutput:
                 # A failed display must not suppress committed output on another Client.
                 continue
 
-    def heard(self, text: str, *, typed: bool = True) -> None:
-        self._deliver("heard", text, typed=typed)
+    def heard(self, text: str, *, typed: bool = True, client_id: str = "terminal") -> None:
+        self._deliver("heard", text, typed=typed, client_id=client_id)
 
     def reply(self, text: str) -> None:
         self._deliver("reply", text)
@@ -1462,7 +1462,7 @@ class Hub:
                 if item.lang:
                     self._lang = item.lang
                 if item.heard:
-                    self._displays.heard(item.heard, typed=item.typed)
+                    self._displays.heard(item.heard, typed=item.typed, client_id=item.client_id)
                 if item.kind == "event" and self._limit.blocks("talker"):
                     parked = self._park(item)
                     continue

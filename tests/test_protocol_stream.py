@@ -104,7 +104,7 @@ async def test_terminal_disconnection_and_failure_cannot_suppress_durable_remote
     from jarvis_hub.hub import Line
 
     class BrokenScreen(RecordingOutput):
-        def heard(self, text: str, *, typed: bool = True) -> None:
+        def heard(self, text: str, *, typed: bool = True, client_id: str = "terminal") -> None:
             raise OSError("screen failed")
 
         def reply(self, text: str) -> None:

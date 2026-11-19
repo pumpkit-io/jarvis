@@ -16,12 +16,7 @@ public struct VoiceSettingStore: Sendable {
     }
 
     public func save(_ silence: Bool, for credentials: PairingCredentials) throws {
-        let file = file(credentials)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try JSONEncoder().encode(silence).write(to: file, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
-        var values = URLResourceValues(); values.isExcludedFromBackup = true
-        var location = file; try location.setResourceValues(values)
+        try write(silence, to: file(credentials))
     }
 
     public func clear(_ credentials: PairingCredentials) throws {
@@ -38,9 +33,12 @@ public struct VoiceSettingStore: Sendable {
     }
 
     public func saveGesture(_ gesture: TalkGesture, for credentials: PairingCredentials) throws {
-        let file = file(credentials).deletingPathExtension().appendingPathExtension("gesture.json")
+        try write(gesture, to: file(credentials).deletingPathExtension().appendingPathExtension("gesture.json"))
+    }
+
+    private func write<Value: Encodable>(_ value: Value, to file: URL) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try JSONEncoder().encode(gesture).write(to: file, options: .atomic)
+        try JSONEncoder().encode(value).write(to: file, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         var values = URLResourceValues(); values.isExcludedFromBackup = true
         var location = file; try location.setResourceValues(values)

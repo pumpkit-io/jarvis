@@ -6,7 +6,6 @@ options:
 settings:
   base:
     SWIFT_VERSION: 6.0
-    TARGETED_DEVICE_FAMILY: 1
     CODE_SIGN_STYLE: Automatic
 targets:
   JarvisAudioSpike:
@@ -15,6 +14,7 @@ targets:
     sources: [Sources]
     settings:
       base:
+        TARGETED_DEVICE_FAMILY: 1
         PRODUCT_BUNDLE_IDENTIFIER: io.pumpkit.jarvis.audio-spike
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: Jarvis Audio Spike

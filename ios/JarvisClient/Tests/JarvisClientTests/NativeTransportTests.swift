@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import Testing
 @testable import JarvisClient
 
@@ -9,19 +10,94 @@ func largeRecordedExchange() throws -> [String: Any] {
     return try #require(exchanges["large_event_replay"] as? [String: Any])
 }
 
+private final class RecordedEventWebSocket: @unchecked Sendable {
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "jarvis.tests.recorded-websocket")
+    private let lock = NSLock()
+    private var connections: [NWConnection] = []
+
+    init(message: Data) throws {
+        let webSocket = NWProtocolWebSocket.Options()
+        webSocket.setClientRequestHandler(queue) { protocols, _ in
+            NWProtocolWebSocket.Response(status: protocols.contains("jarvis.v1") ? .accept : .reject,
+                                         subprotocol: "jarvis.v1")
+        }
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        parameters.defaultProtocolStack.applicationProtocols.insert(webSocket, at: 0)
+        listener = try NWListener(using: parameters)
+        listener.newConnectionHandler = { [weak self] connection in
+            guard let self else { connection.cancel(); return }
+            self.lock.withLock { self.connections.append(connection) }
+            connection.stateUpdateHandler = { state in
+                guard case .ready = state else { return }
+                connection.stateUpdateHandler = nil
+                let context = NWConnection.ContentContext(identifier: "recorded-event",
+                    metadata: [NWProtocolWebSocket.Metadata(opcode: .text)])
+                connection.send(content: message, contentContext: context, isComplete: true,
+                                completion: .contentProcessed { _ in })
+            }
+            connection.start(queue: self.queue)
+        }
+    }
+
+    func start() async throws -> URL {
+        let deadline = Task { [listener] in
+            try? await Task.sleep(for: .seconds(5))
+            if !Task.isCancelled { listener.cancel() }
+        }
+        defer { deadline.cancel() }
+        try await withCheckedThrowingContinuation { (ready: CheckedContinuation<Void, any Error>) in
+            listener.stateUpdateHandler = { [listener] state in
+                switch state {
+                case .ready: listener.stateUpdateHandler = nil; ready.resume()
+                case .failed(let error): listener.stateUpdateHandler = nil; ready.resume(throwing: error)
+                case .cancelled: listener.stateUpdateHandler = nil; ready.resume(throwing: URLError(.timedOut))
+                default: break
+                }
+            }
+            listener.start(queue: queue)
+        }
+        let port = try #require(listener.port)
+        return try #require(URL(string: "ws://127.0.0.1:\(port.rawValue)/v1/events"))
+    }
+
+    func stop() {
+        listener.cancel()
+        let current = lock.withLock { let current = connections; connections.removeAll(); return current }
+        for connection in current { connection.stateUpdateHandler = nil; connection.cancel() }
+    }
+}
+
 @Test func nativeReceiveBoundaryPreservesLargeRecordedHubText() async throws {
     let recorded = try largeRecordedExchange()
     let frames = try #require(recorded["replay"] as? [[String: Any]])
     let large = try #require(frames.first(where: { $0["type"] as? String == "show" }))
-    let data = try JSONSerialization.data(withJSONObject: large)
-    #expect(data.count > 65_536)
-    let text = try #require(String(data: data, encoding: .utf8))
-    let socket = URLSessionHubSocket(request: URLRequest(url: URL(string: "wss://example.invalid/v1/events")!),
-                                     receiveMessage: { .string(text) })
-    #expect(socket.task.maximumMessageSize == Int.max)
+    let event = try JSONSerialization.data(withJSONObject: large)
+    // Legal JSON whitespace exceeds the native receive ceiling without copying or changing the shared fixture.
+    let data = event + Data(repeating: 0x20, count: 8 * 1_024 * 1_024)
+    let server = try RecordedEventWebSocket(message: data)
+    defer { server.stop() }
+    var request = URLRequest(url: try await server.start())
+    request.setValue("jarvis.v1", forHTTPHeaderField: "Sec-WebSocket-Protocol")
+    let socket = URLSessionHubSocket(request: request)
     do {
-        guard case .text(let actual) = try await socket.receive() else { Issue.record("Expected text"); await socket.close(); return }
+        let actual = try await withThrowingTaskGroup(of: Data.self) { group in
+            group.addTask {
+                try await socket.open()
+                guard case .text(let received) = try await socket.receive() else { throw HubProtocolError.invalidFrame }
+                return received
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(10))
+                await socket.close()
+                throw URLError(.timedOut)
+            }
+            defer { group.cancelAll() }
+            return try #require(await group.next())
+        }
         #expect(actual == data)
+        #expect(try HubFrame.decode(actual) == HubFrame.decode(event))
     } catch {
         await socket.close()
         throw error

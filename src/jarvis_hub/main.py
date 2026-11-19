@@ -168,13 +168,15 @@ class TerminalOutput:
         self._mid_reply = False
         self.on_notice: Callable[[str], None] = self.notice
 
-    def heard(self, text: str, *, typed: bool = True) -> None:
-        # A terminal already shows what was typed; piped input is echoed so the transcript reads in order.
+    def heard(self, text: str, *, typed: bool = True, client_id: str = "terminal") -> None:
+        # Only local interactive typing was already echoed by this terminal.
         if not typed:
             self._stdout.write(f"\r{SAID}{text}\n")
             self._stdout.flush()
-        elif not self._prompt:
-            self._stdout.write(f"{PROMPT}{text}\n")
+        elif not self._prompt or client_id != "terminal":
+            prefix = "\r" if self._prompt else ""
+            self._stdout.write(f"{prefix}{PROMPT}{text}\n")
+            self._stdout.flush()
 
     def reply(self, text: str) -> None:
         self._stdout.write(text)

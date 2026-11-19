@@ -500,3 +500,56 @@ async def test_talk_begin_before_first_audio_permanently_suppresses_queued_old_r
         warm.set()
         await hub.close()
         await speech.close()
+
+
+async def test_replaced_remote_players_release_transport_owners_after_live_and_replay_work_drains() -> None:
+    import asyncio
+    import gc
+    import weakref
+    from jarvis_hub.voice.player import Clip, RemotePlayer
+    from tests.fakes import until
+
+    class Owner:
+        pass
+    class Transport:
+        def __init__(self, owner: Owner) -> None:
+            self.owner = owner
+            self.clips: list[tuple[str, int, Clip]] = []
+        def send_clip(self, speech_id: str, index: int, clip: Clip) -> None:
+            self.clips.append((speech_id, index, clip))
+        def stop(self, speech_id: str) -> None:
+            pass
+    clock, metrics, output = FakeClock(), RecordingMetrics(), RecordingOutput()
+    speech = Speech(FakeTts(), RecordingPlayer(), clock, metrics=metrics, notice=output.notice)
+    hub = make_hub(FakeBackend(clock, [[Text('Live reply.')]] * 4), output, metrics, speech=speech)
+    references: list[tuple[weakref.ReferenceType[RemotePlayer], weakref.ReferenceType[Owner]]] = []
+    await hub.start()
+    try:
+        for index in range(4):
+            owner = Owner()
+            transport = Transport(owner)
+            remote = RemotePlayer(transport)
+            references.append((weakref.ref(remote), weakref.ref(owner)))
+            hub.attach_client(Client('phone', 'iphone', connected=True, can_speak=True), player=remote)
+            await hub.admit_line(Line(str(index), clock.now(), typed=False, client_id='phone'))
+            await until(lambda: len(transport.clips) == 1)
+            stream, clip_index, _ = transport.clips[-1]
+            assert remote.pending() > 0
+            assert remote.report(stream, clip_index, 'finished')
+            await speech.idle(destination=remote)
+            assert speech.played() == 'Live reply.'
+            hub.replay_speech('phone', f'reply-{index}', 'Retained reply.', 'en')
+            await until(lambda: len(transport.clips) == 2)
+            stream, clip_index, _ = transport.clips[-1]
+            assert remote.pending() > 0
+            assert remote.report(stream, clip_index, 'finished')
+            await speech.idle(destination=remote)
+            del remote, transport, owner
+        hub.attach_client(Client('phone', 'iphone', connected=True, can_speak=True), player=RecordingPlayer())
+        await speech.idle()
+        await asyncio.sleep(0)
+        gc.collect()
+        assert all(player() is None and owner() is None for player, owner in references)
+    finally:
+        await hub.close()
+        await speech.close()
