@@ -2384,6 +2384,154 @@
           }
         }
       ]
+    },
+    "uploaded_talk": {
+      "begin": {
+        "version": 1,
+        "id": "talk-begin",
+        "type": "talk_begin",
+        "payload": {
+          "talk_id": "talk-1"
+        }
+      },
+      "upload_result": {
+        "version": 1,
+        "type": "command_result",
+        "id": "upload-1",
+        "ok": true,
+        "result": {
+          "talk_id": "talk-1",
+          "request_id": "request-8"
+        }
+      },
+      "live": [
+        {
+          "version": 1,
+          "type": "replay_complete",
+          "through_seq": 0,
+          "oldest_seq": null
+        },
+        {
+          "version": 1,
+          "seq": 1,
+          "time": "1970-01-01T00:16:40Z",
+          "type": "status",
+          "client_id": "client-6",
+          "payload": {
+            "ready": true,
+            "usage_limit": {
+              "limited": false,
+              "resets_at": null
+            },
+            "quiet": false,
+            "focus_client_id": "terminal",
+            "mac_voice_on": false,
+            "silence": false
+          }
+        },
+        {
+          "version": 1,
+          "seq": 2,
+          "time": "1970-01-01T00:16:40Z",
+          "type": "status",
+          "client_id": "client-6",
+          "payload": {
+            "ready": true,
+            "usage_limit": {
+              "limited": false,
+              "resets_at": null
+            },
+            "quiet": false,
+            "focus_client_id": "terminal",
+            "mac_voice_on": false,
+            "silence": false
+          }
+        },
+        {
+          "version": 1,
+          "seq": 3,
+          "time": "1970-01-01T00:16:40Z",
+          "type": "task_snapshot",
+          "client_id": null,
+          "payload": {
+            "tasks": []
+          }
+        },
+        {
+          "version": 1,
+          "seq": 4,
+          "time": "1970-01-01T00:16:40Z",
+          "type": "pending_approval",
+          "client_id": null,
+          "payload": {
+            "approvals": []
+          }
+        },
+        {
+          "version": 1,
+          "seq": 5,
+          "time": "1970-01-01T00:16:40Z",
+          "type": "status",
+          "client_id": "client-6",
+          "payload": {
+            "ready": true,
+            "usage_limit": {
+              "limited": false,
+              "resets_at": null
+            },
+            "quiet": false,
+            "focus_client_id": "client-6",
+            "mac_voice_on": false,
+            "silence": false
+          }
+        },
+        {
+          "version": 1,
+          "type": "command_result",
+          "id": "talk-begin",
+          "ok": true,
+          "result": {
+            "talk_id": "talk-1"
+          }
+        },
+        {
+          "version": 1,
+          "seq": 6,
+          "time": "1970-01-01T00:16:40Z",
+          "type": "heard",
+          "client_id": "client-6",
+          "payload": {
+            "request_id": "request-8",
+            "text": "Good evening from the phone",
+            "spoken": true
+          }
+        },
+        {
+          "version": 1,
+          "seq": 7,
+          "time": "1970-01-01T00:16:40Z",
+          "type": "reply_delta",
+          "client_id": "client-6",
+          "payload": {
+            "reply_id": "reply-9",
+            "request_id": "request-8",
+            "text": "Good evening, sir."
+          }
+        },
+        {
+          "version": 1,
+          "seq": 8,
+          "time": "1970-01-01T00:16:40Z",
+          "type": "reply_end",
+          "client_id": "client-6",
+          "payload": {
+            "reply_id": "reply-9",
+            "request_id": "request-8",
+            "text": "Good evening, sir.",
+            "reason": "complete"
+          }
+        }
+      ]
     }
   }
 }
