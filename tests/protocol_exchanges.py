@@ -17,6 +17,7 @@ from jarvis_hub.event_log import EventLog, EventOutput
 from jarvis_hub.hub import Hub, Line
 from jarvis_hub.pairing import PairingStore
 from jarvis_hub.protocol import wire_event
+from jarvis_hub.voice.player import Player
 from tests.fakes import FakeBackend, FakeClock, RecordingMetrics, RecordingOutput, Text, Gate, Limited, Tool, make_hub, until
 
 FIXTURE = Path(__file__).resolve().parents[1] / "ios/JarvisClient/Tests/JarvisClientTests/Fixtures/client-v1.json"
@@ -82,7 +83,7 @@ def normalize(value: Any) -> Any:
             return {k: visit(v, k) for k, v in cast(dict[str, Any], item).items()}
         if isinstance(item, list):
             return [visit(v) for v in cast(list[Any], item)]
-        if isinstance(item, str) and key in {"client_id", "focus_client_id", "request_id", "reply_id"} and item != TERMINAL:
+        if isinstance(item, str) and key in {"client_id", "focus_client_id", "request_id", "reply_id", "speech_id"} and item != TERMINAL:
             if item not in identities:
                 prefix = "client" if key == "focus_client_id" else key.removesuffix("_id")
                 counters[prefix] = counters.get(prefix, 0) + 1
@@ -107,7 +108,7 @@ async def exchanges(root: Path) -> dict[str, Any]:
         door = Door(enabled=True, port=0, health=hub.health, pairing=pairing, hub=hub, log=log, now=clock.now)
         await hub.start()
         await door.start()
-        artifact: dict[str, Any] = {"version": 1, "normalization": "Only generated client/request/reply IDs, including Focus references, are replaced by first-seen ordinal IDs. Fake wall time starts at 1000 seconds.", "exchanges": {}}
+        artifact: dict[str, Any] = {"version": 1, "normalization": "Only generated client/request/reply IDs, including Focus references and speech IDs, are replaced by first-seen ordinal IDs. Fake wall time starts at 1000 seconds.", "exchanges": {}}
         cases = artifact["exchanges"]
         try:
             async with aiohttp.ClientSession() as session:
@@ -202,6 +203,7 @@ async def exchanges(root: Path) -> dict[str, Any]:
         cases.update(await snapshot_exchanges(root / "snapshots"))
         cases.update(await large_event_exchanges(root / "large-events"))
         cases.update(await uploaded_exchange(root / "upload"))
+        cases.update(await speech_exchange(root / "speech"))
         return normalize(artifact)
 
 
@@ -215,17 +217,24 @@ class DelayedAdmission:
     def __init__(self, hub: Hub) -> None:
         self.hub = hub
         self.clients = hub.clients
-        self.begin_remote_talk = hub.begin_remote_talk
+        self.speech_available = hub.speech_available
+        self.begin_entered = asyncio.Event()
         self.cancel_remote_talk = hub.cancel_remote_talk
         self.set_client_talking = hub.set_client_talking
+        self.set_client_playing = hub.set_client_playing
+        self.interrupt_client = hub.interrupt_client
         self.admitted = asyncio.Event()
         self.release = asyncio.Event()
+
+    async def begin_remote_talk(self, client_id: str, *, allowed: Callable[[], bool] = lambda: True) -> str:
+        self.begin_entered.set()
+        return await self.hub.begin_remote_talk(client_id, allowed=allowed)
 
     def publish_client_snapshots(self, client_id: str) -> None:
         self.hub.publish_client_snapshots(client_id)
 
-    def attach_client(self, client: Client) -> None:
-        self.hub.attach_client(client)
+    def attach_client(self, client: Client, *, player: Player | None = None) -> None:
+        self.hub.attach_client(client, player=player)
 
     async def admit_line(self, line: Line, *, allowed: Callable[[], bool] = lambda: True) -> str | None:
         result = await self.hub.admit_line(line, allowed=allowed)
@@ -452,3 +461,80 @@ async def uploaded_exchange(root: Path) -> dict[str, Any]:
         finally:
             await door.close()
             await hub.close()
+
+
+async def speech_exchange(root: Path) -> dict[str, Any]:
+    import base64
+    import numpy as np
+    from jarvis_hub.voice.speech import Speech
+    from jarvis_hub.voice.player import Samples
+    from tests.fakes import FakeTts, RecordingPlayer
+
+    class PcmTts(FakeTts):
+        def synthesize(self, text: str, voice: str) -> Samples:
+            self.hold.wait(5)
+            return np.array([-1, -.5, 0, .5, 1, 2], dtype=np.float32)
+
+    root.mkdir(parents=True, exist_ok=True)
+    with PairingStore(root / 'pairing.db') as pairing, EventLog(root / 'events.db', wall=lambda: 1000) as log:
+        phone = pairing.exchange(pairing.create_code('https://mac.example.ts.net'), 'Phone', 'iphone')
+        clock, metrics, tts = FakeClock(), RecordingMetrics(), PcmTts()
+        output = EventOutput(log, RecordingOutput())
+        speech = Speech(tts, RecordingPlayer(), clock, metrics=metrics, notice=output.notice)
+        hub = make_hub(FakeBackend(clock, [[Text('First sentence. Second sentence.')]]), output, metrics, speech=speech)
+        door = Door(enabled=True, port=0, health=hub.health, pairing=pairing, hub=hub, log=log)
+        speech.start()
+        await speech.idle()
+        await hub.start()
+        await door.start()
+        frames: list[dict[str, Any]] = []
+        replay: list[dict[str, Any]] = []
+        reports: list[dict[str, Any]] = []
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with connect(session, door, phone.token) as socket:
+                    while (await receive(socket))['type'] != 'replay_complete':
+                        pass
+                    await socket.send_json(command('presence', 'set_presence', can_show_text=True))
+                    while (await receive(socket)).get('id') != 'presence':
+                        pass
+                    tts.hold.clear()
+                    await hub.admit_line(Line('Hello', clock.now(), typed=False, client_id=phone.client.id))
+                    while True:
+                        frame = await receive(socket)
+                        if frame['type'] not in SNAPSHOTS:
+                            frames.append(frame)
+                        if frame['type'] == 'reply_end':
+                            break
+                    tts.hold.set()
+                    while True:
+                        frame = await receive(socket)
+                        if frame['type'] not in SNAPSHOTS:
+                            frames.append(frame)
+                        if frame['type'] == 'speech_clip':
+                            binary = await socket.receive()
+                            assert binary.type == aiohttp.WSMsgType.BINARY
+                            frames.append({'binary_base64': base64.b64encode(binary.data).decode('ascii')})
+                        if frame['type'] == 'speech_end':
+                            speech_id = frame['payload']['speech_id']
+                            break
+                    assert hub.clients.remote_activity
+                    for index, state in [(0, 'started'), (0, 'finished'), (1, 'finished')]:
+                        report = command(f'report-{index}-{state}', 'playback_report', speech_id=speech_id, clip_index=index, state=state)
+                        await socket.send_json(report)
+                        while (response := await receive(socket)).get('id') != report['id']:
+                            pass
+                        reports.append({'command': report, 'result': response})
+                    assert not hub.clients.remote_activity
+                async with connect(session, door, phone.token) as socket:
+                    while True:
+                        frame = await receive(socket)
+                        replay.append(frame)
+                        if frame['type'] == 'replay_complete':
+                            break
+            return {'speech_live': frames, 'speech_reports': reports, 'speech_replay': replay}
+        finally:
+            tts.hold.set()
+            await door.close()
+            await hub.close()
+            await speech.close()

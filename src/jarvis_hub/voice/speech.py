@@ -16,7 +16,7 @@ from typing import Any, Literal, ParamSpec, Protocol, TypeVar
 import numpy as np
 
 from jarvis_hub.voice.language import Lang, voice_for
-from jarvis_hub.voice.player import Clip, PlaybackReceipt, Player, Samples
+from jarvis_hub.voice.player import Clip, PlaybackReceipt, Player, RemotePlayer, Samples
 from jarvis_hub.voice.splitter import SentenceSplitter
 from jarvis_hub.voice.tts import Synthesizer
 
@@ -70,6 +70,7 @@ class _DaemonThread(Executor):
     def _run(self) -> None:
         while (job := self._jobs.get()) is not None:
             job()
+            job = None
 
 
 def _notes(sample_rate: int, notes: tuple[float, ...], seconds: float, gain: float) -> Samples:
@@ -97,6 +98,7 @@ class _Reply:
     heard_at: float | None
     owner: tuple[str, int] | None = None
     player: Player | None = None
+    reply_id: str | None = None
     allowed: Callable[[], bool] | None = None
     can_start: Callable[[], bool] | None = None
     splitter: SentenceSplitter = field(default_factory=SentenceSplitter)
@@ -175,8 +177,10 @@ class Speech:
         self._worker: asyncio.Task[None] | None = None
         self._loading: asyncio.Future[None] | None = None
 
-    def start(self) -> None:
-        """Load the voice in the background; speech and nonverbal cues wait until it is ready."""
+    def start(self, *, lazy: bool = False) -> None:
+        """Load the voice in the background, or defer loading until a reply begins with `lazy`."""
+        if lazy or self._worker is not None:
+            return
         self._loading = asyncio.get_running_loop().run_in_executor(self._thread, self._load)
         self._worker = asyncio.create_task(self._work(self._loading))
 
@@ -193,15 +197,16 @@ class Speech:
 
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
               destination: Player | None = None, allowed: Callable[[], bool] | None = None,
-              can_start: Callable[[], bool] | None = None) -> Callable[[], bool]:
+              can_start: Callable[[], bool] | None = None, reply_id: str | None = None) -> Callable[[], bool]:
         """Bind a reply's destination and return a completion check unaffected by later replies.
         `can_start` gates only the first audio; `allowed` continues to guard an active reply."""
+        self.start()
         player = destination if destination is not None else self._player
         if not any(p is player for p in self._players):
             self._players.append(player)
         self._retired_players = [retired for retired in self._retired_players if retired is not player]
         self._last_player = player
-        self._reply = _Reply(turn, lang, self._clock.now(), heard_at, owner=owner, player=player, allowed=allowed, can_start=can_start)
+        self._reply = _Reply(turn, lang, self._clock.now(), heard_at, owner=owner, player=player, reply_id=reply_id, allowed=allowed, can_start=can_start)
         self._prune_replies()
         self._replies[turn] = self._reply
         reply = self._reply
@@ -275,14 +280,16 @@ class Speech:
     def played(self) -> str:
         return self._last_player.played()
 
-    async def idle(self, *, stall_timeout: float | None = STALLED) -> None:
+    async def idle(self, *, stall_timeout: float | None = STALLED, local_only: bool = False) -> None:
         """Wait for voice loading and playback; None disables the stalled-player timeout."""
         if self._loading is not None:
             with contextlib.suppress(Exception):
                 await asyncio.shield(self._loading)
         await self._queue.join()
         def pending() -> float:
-            return sum(p.pending() for p in self._players if not any(retired is p for retired in self._retired_players))
+            return sum(p.pending() for p in self._players
+                       if (not local_only or p is self._player)
+                       and not any(retired is p for retired in self._retired_players))
 
         left, since = pending(), self._clock.now()
         while left > 0:
@@ -393,6 +400,8 @@ class Speech:
                 if name == "chime" and self._on_chime is not None:
                     self._on_chime(starts)
             case _End(reply):
+                if not reply.stopped and reply.first_audio is not None and isinstance(reply.player, RemotePlayer):
+                    reply.player.end_reply()
                 self._record_reply(reply)
 
     def _play(self, clip: Clip, reply: _Reply | None, *, sentence: bool) -> float:
@@ -418,6 +427,9 @@ class Speech:
             elif sentence and player.pending() == 0:
                 reply.gaps += 1
             reply.audio_s += clip.seconds
+        if starts_reply and isinstance(player, RemotePlayer) and reply is not None and reply.reply_id is not None:
+            player.begin_reply(reply.reply_id)
+            starts_reply = False
         receipt = player.play(clip, starts_reply=starts_reply)
         if reply is not None and sentence and clip.seconds > 0:
             reply.receipts.append(receipt)

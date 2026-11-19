@@ -269,6 +269,31 @@ class SoundPlayer:
         return np.minimum(self._gain + step * np.arange(frames), 1.0)
 
 
+class NoLocalPlayer:
+    """Remote-only speech has no local audio device."""
+
+    def play(self, clip: Clip, *, starts_reply: bool = False) -> PlaybackReceipt:
+        raise RuntimeError("Local audio is unavailable")
+
+    def pause(self) -> None:
+        pass
+
+    def resume(self, rewind_ms: int = REWIND_MS) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    def played(self) -> str:
+        return ""
+
+    def pending(self) -> float:
+        return 0.0
+
+    def close(self) -> None:
+        pass
+
+
 class ClipTransport(Protocol):
     def send_clip(self, speech_id: str, index: int, clip: Clip) -> None: ...
 
@@ -284,6 +309,34 @@ class RemotePlayer:
         self._clips: list[tuple[str, float, PlaybackReceipt]] = []
         self._finished = -1
         self._stopped = True
+        self._ended = False
+
+    def begin_reply(self, reply_id: str) -> None:
+        self.stop()
+        self._speech_id = uuid4().hex
+        self._clips.clear()
+        self._finished = -1
+        self._stopped = False
+        self._ended = False
+        if begin := getattr(self._transport, "begin", None):
+            begin(self._speech_id, reply_id)
+
+    def end_reply(self) -> None:
+        self._ended = True
+        if self._speech_id is not None and not self._stopped:
+            if end := getattr(self._transport, "end", None):
+                end(self._speech_id, len(self._clips) - 1)
+
+    def accepts(self, speech_id: str, index: int) -> bool:
+        return (speech_id == self._speech_id and not self._stopped and -1 <= index < len(self._clips)
+                and not (self._ended and self._finished == len(self._clips) - 1))
+
+    def heard_through(self, speech_id: str, index: int) -> bool:
+        if not self.accepts(speech_id, index) or index < self._finished:
+            return False
+        for completed in range(self._finished + 1, index + 1):
+            self.report(speech_id, completed, "finished")
+        return True
 
     def play(self, clip: Clip, *, starts_reply: bool = False) -> PlaybackReceipt:
         if starts_reply or self._speech_id is None or self._stopped:
@@ -291,6 +344,7 @@ class RemotePlayer:
             self._clips.clear()
             self._finished = -1
             self._stopped = False
+            self._ended = False
         index = len(self._clips)
         receipt = PlaybackReceipt()
         self._clips.append((clip.text, clip.seconds, receipt))
@@ -303,7 +357,7 @@ class RemotePlayer:
 
     def report(self, speech_id: str, index: int, state: Literal["started", "finished", "stopped"]) -> bool:
         """Reject unknown streams/clips and out-of-order completions; stopped streams stay frozen."""
-        if speech_id != self._speech_id or self._stopped:
+        if not self.accepts(speech_id, index):
             return False
         if state == "stopped" and index == -1:
             self._stopped = True

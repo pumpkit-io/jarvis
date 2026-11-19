@@ -450,3 +450,53 @@ async def test_reported_phone_playback_cannot_be_interrupted_by_mac_echo() -> No
         running.cancel()
         await hub.close()
         await voice.close()
+
+
+async def test_two_clients_admitted_before_audio_cannot_play_stale_first_reply() -> None:
+    clock, tts, metrics = FakeClock(), FakeTts(), RecordingMetrics()
+    output, local = RecordingOutput(), RecordingPlayer()
+    first, second = RecordingPlayer(hold=True), RecordingPlayer(hold=True)
+    speech = Speech(tts, local, clock, metrics=metrics, notice=output.notice)
+    hub = make_hub(FakeBackend(clock, [[Text('Old reply.')], [Text('Current reply.')]]), output, metrics, speech=speech)
+    hub.attach_client(Client('one', 'iphone', connected=True, can_speak=True), player=first)
+    hub.attach_client(Client('two', 'iphone', connected=True, can_speak=True), player=second)
+    await hub.start()
+    speech.start()
+    try:
+        await hub.admit_line(Line('First', clock.now(), typed=False, client_id='one'))
+        await hub.admit_line(Line('Second', clock.now(), typed=False, client_id='two'))
+        from tests.fakes import until
+        await until(lambda: second.texts == ['Current reply.'])
+        assert first.texts == []
+        assert output.replies == ['Old reply.', 'Current reply.']
+    finally:
+        await hub.close()
+        await speech.close()
+
+
+async def test_talk_begin_before_first_audio_permanently_suppresses_queued_old_reply() -> None:
+    import asyncio
+    from tests.fakes import Gate, until
+
+    warm = asyncio.Event()
+    clock, metrics, output = FakeClock(), RecordingMetrics(), RecordingOutput()
+    local, first, second = RecordingPlayer(), RecordingPlayer(hold=True), RecordingPlayer(hold=True)
+    speech = Speech(FakeTts(), local, clock, metrics=metrics, notice=output.notice)
+    backend = FakeBackend(clock, [[Text('Old reply.')]], warm_up=[Gate(warm)])
+    hub = make_hub(backend, output, metrics, speech=speech)
+    hub.attach_client(Client('one', 'iphone', connected=True, can_speak=True), player=first)
+    hub.attach_client(Client('two', 'iphone', connected=True, can_speak=True), player=second)
+    speech.start()
+    await hub.start()
+    try:
+        await hub.admit_line(Line('First', clock.now(), typed=False, client_id='one'))
+        request_id = await hub.begin_remote_talk('two')
+        warm.set()
+        await until(lambda: any(row['kind'] == 'speech' for row in metrics.records))
+        assert first.texts == second.texts == []
+        assert output.replies == ['Old reply.']
+        hub.cancel_remote_talk('two', request_id)
+    finally:
+        warm.set()
+        await hub.close()
+        await speech.close()
