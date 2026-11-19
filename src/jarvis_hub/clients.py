@@ -29,6 +29,9 @@ class Clients:
     def focus(self) -> str:
         return self._focus
 
+    def all(self) -> tuple[Client, ...]:
+        return tuple(self._clients.values())
+
     def get(self, client_id: str) -> Client | None:
         return self._clients.get(client_id)
 

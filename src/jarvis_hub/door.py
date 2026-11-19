@@ -6,7 +6,7 @@ import asyncio
 import sqlite3
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from aiohttp import WSMsgType, web
@@ -27,6 +27,8 @@ class Conversation(Protocol):
 
     def attach_client(self, client: Client) -> None: ...
 
+    def publish_client_snapshots(self, client_id: str) -> None: ...
+
     async def admit_line(self, line: Line, *, allowed: Callable[[], bool] = lambda: True) -> str | None: ...
 
 
@@ -45,7 +47,7 @@ class Door:
         self, *, enabled: bool = False, port: int = 8765, host: str = "127.0.0.1",
         health: Callable[[], dict[str, Any]], pairing: PairingStore | None = None, authenticate: Callable[[str], bool] = lambda token: False,
         hub: Conversation | None = None, log: EventLog | None = None, revocation_interval: float = 0.25,
-        on_replay: Callable[[str], None] = lambda client_id: None, now: Callable[[], float] = time.perf_counter,
+        on_replay: Callable[[str], None] | None = None, now: Callable[[], float] = time.perf_counter,
     ) -> None:
         self._enabled = enabled
         self._host = host
@@ -56,7 +58,7 @@ class Door:
         self._runner: web.AppRunner | None = None
         self._hub = hub
         self._log = log
-        self._on_replay = on_replay
+        self._on_replay: Callable[[str], None] = on_replay or (hub.publish_client_snapshots if hub is not None else lambda client_id: None)
         self._now = now
         self._connections: dict[str, _Connection] = {}
         self._operations: dict[tuple[str, str], asyncio.Task[dict[str, Any]]] = {}
@@ -290,7 +292,7 @@ class Door:
             previous = self._connections.get(client.id)
             self._connections[client.id] = connection
             existing = self._hub.clients.get(client.id)
-            self._hub.attach_client(Client(client.id, "iphone" if client.kind == "iphone" else "reference", connected=True,
+            self._hub.attach_client(Client(client.id, "iphone" if client.kind == "iphone" else "reference", connected=True, can_show_text=False,
                                            silence=existing.silence if existing is not None else False))
             # Replay is queued before scheduled append notifications can run on this loop.
             complete: dict[str, Any] = {"version": 1, "type": "replay_complete", "through_seq": mark, "oldest_seq": oldest}
@@ -380,6 +382,15 @@ class Door:
                     Line(text, self._now(), client_id=connection.client.id),
                     allowed=lambda: self._active(connection))
                 result = {"ok": True, "result": {"request_id": request_id}}
+            elif kind == "set_presence":
+                visible = payload.get("can_show_text")
+                if type(visible) is not bool or set(payload) != {"can_show_text"}:
+                    raise ValueError("can_show_text must be a boolean")
+                client = self._hub.clients.get(connection.client.id)
+                if client is None:
+                    raise ValueError("Client is disconnected")
+                self._hub.attach_client(replace(client, can_show_text=visible))
+                result = {"ok": True, "result": {"can_show_text": visible}}
             elif kind == "acknowledge":
                 seq = sequence(payload.get("seq"))
                 if seq > self._log.high_water:
