@@ -200,6 +200,7 @@ async def exchanges(root: Path) -> dict[str, Any]:
         cases["typed_wire_streams"] = capture.frames()
         cases.update(await concurrent_restart(root / "restart"))
         cases.update(await snapshot_exchanges(root / "snapshots"))
+        cases.update(await large_event_exchanges(root / "large-events"))
         return normalize(artifact)
 
 
@@ -371,6 +372,40 @@ async def snapshot_exchanges(root: Path) -> dict[str, Any]:
                         frames += await capture.until(resumed, "status")
                     assert frames[-1]["payload"]["ready"]
             return {"snapshots_and_presence": {"commands": commands, "streams": capture.frames()}}
+        finally:
+            await door.close()
+            await hub.close()
+
+
+async def large_event_exchanges(root: Path) -> dict[str, Any]:
+    root.mkdir(parents=True, exist_ok=True)
+    capture = WireCapture()
+    clock = FakeClock()
+    text = "L" * 70_000
+    backend = FakeBackend(clock, [[Tool("show", {"markdown": text}), Text(text)]])
+    with PairingStore(root / "pairing.db") as pairing, EventLog(root / "events.db", wall=clock.now) as log:
+        phone = pairing.exchange(pairing.create_code("https://mac.example.ts.net"), "Large reply phone", "iphone")
+        hub = make_hub(backend, EventOutput(log, RecordingOutput()), RecordingMetrics())
+        door = Door(enabled=True, port=0, health=hub.health, pairing=pairing, hub=hub, log=log)
+        await hub.start()
+        await until(lambda: hub.health()["ready"])
+        await door.start()
+        say = command("large-events", "say_text", text="Show the complete result")
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with connect(session, door, phone.token) as socket:
+                    await capture.until(socket, "pending_approval")
+                    await socket.send_json(say)
+                    await capture.until(socket, "reply_end")
+                    if not any(frame["type"] == "command_result" for frame in capture.frames()[0]):
+                        await capture.until(socket, "command_result")
+                live = capture.frames()[0]
+                first_large = next(frame for frame in live if frame["type"] == "show")
+                after = first_large["seq"] - 1
+                async with connect(session, door, phone.token, after=after) as resumed:
+                    await capture.until(resumed, "replay_complete")
+                    await capture.until(resumed, "pending_approval")
+            return {"large_event_replay": {"command": say, "after": after, "live": live, "replay": capture.frames()[1]}}
         finally:
             await door.close()
             await hub.close()

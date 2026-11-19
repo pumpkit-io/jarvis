@@ -394,3 +394,14 @@ async def test_malformed_wire_commands_keep_a_safe_correlated_result_envelope(tm
         finally:
             await door.close()
             await hub.close()
+
+
+async def test_large_retained_events_keep_full_text_on_replay(tmp_path: Path) -> None:
+    from tests.protocol_exchanges import large_event_exchanges
+
+    recorded = (await large_event_exchanges(tmp_path))["large_event_replay"]
+    live = [frame for frame in recorded["live"] if frame["type"] in {"show", "reply_delta", "reply_end"}]
+    replay = [frame for frame in recorded["replay"] if frame["type"] in {"show", "reply_delta", "reply_end"}]
+    assert [frame["type"] for frame in live] == ["show", "reply_delta", "reply_end"]
+    assert replay == live
+    assert all(len(frame["payload"]["text"].encode("utf-8")) == 70_000 for frame in live)

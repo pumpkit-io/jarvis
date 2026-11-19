@@ -1,4 +1,6 @@
 public enum HubConnectionState: Equatable, Sendable {
+    case suspended
+    case incompatibleProtocol
     case unpaired
     case connecting
     case ready
@@ -12,6 +14,10 @@ public enum HubConnectionState: Equatable, Sendable {
 
     public var message: String {
         switch self {
+        case .suspended:
+            "Connection paused"
+        case .incompatibleProtocol:
+            "This Client needs a compatible Hub."
         case .unpaired:
             "Not paired yet"
         case .connecting:

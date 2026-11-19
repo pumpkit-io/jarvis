@@ -7,6 +7,6 @@ let package = Package(
     products: [.library(name: "JarvisClient", targets: ["JarvisClient"])],
     targets: [
         .target(name: "JarvisClient"),
-        .testTarget(name: "JarvisClientTests", dependencies: ["JarvisClient"])
+        .testTarget(name: "JarvisClientTests", dependencies: ["JarvisClient"], resources: [.copy("Fixtures")])
     ]
 )
