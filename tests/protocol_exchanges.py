@@ -223,9 +223,14 @@ class DelayedAdmission:
         self.set_client_talking = hub.set_client_talking
         self.set_client_playing = hub.set_client_playing
         self.replay_speech = hub.replay_speech
+        self.focus_entered = asyncio.Event()
         self.interrupt_client = hub.interrupt_client
         self.admitted = asyncio.Event()
         self.release = asyncio.Event()
+
+    async def take_focus(self, client_id: str, *, allowed: Callable[[], bool] = lambda: True) -> None:
+        self.focus_entered.set()
+        await self.hub.take_focus(client_id, allowed=allowed)
 
     async def begin_remote_talk(self, client_id: str, *, allowed: Callable[[], bool] = lambda: True) -> str:
         self.begin_entered.set()

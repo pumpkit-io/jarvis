@@ -31,6 +31,8 @@ class Conversation(Protocol):
     clients: Clients
     speech_available: bool
 
+    async def take_focus(self, client_id: str, *, allowed: Callable[[], bool] = lambda: True) -> None: ...
+
     async def begin_remote_talk(self, client_id: str, *, allowed: Callable[[], bool] = lambda: True) -> str: ...
 
     def cancel_remote_talk(self, client_id: str, request_id: str) -> None: ...
@@ -587,6 +589,11 @@ class Door:
                 assert isinstance(talk_id, str)
                 result = (await self._talks.begin(connection.client.id, talk_id, allowed=lambda: self._active(connection)) if kind == "talk_begin"
                           else self._talks.cancel(connection.client.id, talk_id))
+            elif kind == "take_focus":
+                if payload:
+                    raise ValueError("take_focus requires an empty payload")
+                await self._hub.take_focus(connection.client.id, allowed=lambda: self._active(connection))
+                result = {"ok": True, "result": {"focus_client_id": connection.client.id}}
             elif kind == "set_presence":
                 visible = payload.get("can_show_text")
                 if type(visible) is not bool or set(payload) != {"can_show_text"}:
