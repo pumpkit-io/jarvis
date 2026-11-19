@@ -57,11 +57,15 @@ class EchoCanceller(Protocol):
 class WakeDetector(Protocol):
     chunk: int
 
+    def reset(self) -> None: ...
+
     def score(self, chunk: Pcm) -> float: ...
 
 
 class VoiceActivity(Protocol):
     chunk: int
+
+    def reset(self) -> None: ...
 
     def probability(self, chunk: Pcm) -> float: ...
 
@@ -594,6 +598,7 @@ class _Capture:
 @dataclass(frozen=True)
 class _Suppression:
     generation: int
+    active: bool
 
 
 @dataclass(frozen=True)
@@ -707,7 +712,7 @@ class Capture:
             self._suppressed = active
             self._suppression_generation += 1
             self._capture_epoch += 1
-            self._frames.put(_Suppression(self._suppression_generation))
+            self._frames.put(_Suppression(self._suppression_generation, active))
 
     def barge_in(self, since: float | None) -> None:
         self._frames.put(_BargeIn(since))
@@ -850,6 +855,9 @@ class Capture:
                 pipeline.discard_endpoint("shutdown")
                 break
             if isinstance(item, _Suppression):
+                if not item.active:
+                    engines.wake.reset()
+                    engines.vad.reset()
                 pipeline.discard_endpoint("remote_activity")
                 pipeline = fresh_pipeline()
                 generation = item.generation

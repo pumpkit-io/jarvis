@@ -1304,3 +1304,80 @@ async def test_phone_activity_retires_mac_inflight_transcription_at_the_hub(
         await hub.close()
         await voice.close()
         capture.close()
+
+
+@pytest.mark.parametrize('detector_kind', ['wake', 'vad'])
+async def test_remote_resume_forgets_streaming_detector_context_on_its_worker(detector_kind: str) -> None:
+    from jarvis_hub.voice.state import InputEvent, SpeechStarted, WakeWord
+
+    class StreamingDetector:
+        chunk = 1280
+
+        def __init__(self) -> None:
+            self.previous = 0
+            self.calls = 0
+            self.entered, self.release = threading.Event(), threading.Event()
+            self.inference_threads: list[int] = []
+            self.reset_threads: list[int] = []
+
+        def reset(self) -> None:
+            self.previous = 0
+            self.reset_threads.append(threading.get_ident())
+
+        def score(self, chunk: np.ndarray) -> float:
+            self.inference_threads.append(threading.get_ident())
+            current = int(chunk[0])
+            if not self.calls:
+                self.entered.set()
+                assert self.release.wait(timeout=3)
+            score = float(self.previous == 2000 and current == 1000)
+            self.previous = current
+            self.calls += 1
+            return score
+
+        def probability(self, chunk: np.ndarray) -> float:
+            return self.score(chunk)
+
+    class NoWake(MarkerWake):
+        def score(self, chunk: np.ndarray) -> float:
+            return 0.0
+
+    detector, source = StreamingDetector(), Source()
+    events: list[InputEvent] = []
+    capture = Capture(
+        lambda: Engines(CountingEcho(), detector if detector_kind == 'wake' else NoWake(),
+                        detector if detector_kind == 'vad' else LoudVad(), ScriptedTurn(), ScriptedStt(), Everyone()),
+        Listening(), lambda row: None, lambda text: None, source=source,
+    )
+    capture.start()
+
+    async def collect() -> None:
+        async for event in capture.events():
+            events.append(event)
+
+    collecting = asyncio.create_task(collect())
+    event_type = WakeWord if detector_kind == 'wake' else SpeechStarted
+    try:
+        await until(capture.ready.is_set)
+        source.frames(8, value=2000)
+        assert await asyncio.to_thread(detector.entered.wait, 2)
+        capture.suppress(True)
+        source.frames(800, value=500, start=1)
+        capture.suppress(False)
+        capture.capture(detector_kind == 'vad', owner=2)
+        assert detector.reset_threads == []
+        detector.release.set()
+        source.frames(8, value=1000, start=20)
+        await until(lambda: detector.calls == 2)
+        source.frames(8, value=2000, start=24)
+        source.frames(8, value=1000, start=24.08)
+        await until(lambda: any(isinstance(event, event_type) and event.at >= 24 for event in events))
+        assert len([event for event in events if isinstance(event, event_type)]) == 1
+        assert detector.reset_threads
+        assert set(detector.reset_threads) == set(detector.inference_threads)
+        assert threading.get_ident() not in detector.reset_threads
+    finally:
+        detector.release.set()
+        capture.close()
+        collecting.cancel()
+        await asyncio.gather(collecting, return_exceptions=True)

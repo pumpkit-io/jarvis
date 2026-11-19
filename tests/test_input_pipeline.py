@@ -56,12 +56,18 @@ class PassThrough:
 class MarkerWake:
     chunk = 1280
 
+    def reset(self) -> None:
+        pass
+
     def score(self, chunk: np.ndarray) -> float:
         return 1.0 if (chunk == WAKE).any() else 0.0
 
 
 class LoudVad:
     chunk = 512
+
+    def reset(self) -> None:
+        pass
 
     def probability(self, chunk: np.ndarray) -> float:
         return 1.0 if np.abs(chunk.astype(np.float32)).mean() > 500 else 0.0
@@ -902,12 +908,18 @@ class AnyVad:
 
     chunk = 512
 
+    def reset(self) -> None:
+        pass
+
     def probability(self, chunk: np.ndarray) -> float:
         return 1.0 if chunk.any() else 0.0
 
 
 class AlwaysWake:
     chunk = 1280
+
+    def reset(self) -> None:
+        pass
 
     def score(self, chunk: np.ndarray) -> float:
         return 1.0 if chunk.any() else 0.0
