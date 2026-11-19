@@ -4,6 +4,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from jarvis_hub.door import Door
 from jarvis_hub.event_log import EventLog, EventOutput
 from jarvis_hub.pairing import PairingStore
@@ -236,31 +238,41 @@ async def test_refused_token_is_erased_without_disclosing_it(tmp_path: Path) -> 
             await hub.close()
 
 
-def test_upload_wav_rejects_wrong_format_empty_oversize_and_truncated(tmp_path: Path) -> None:
+async def test_executable_talk_rejects_wrong_format_empty_oversize_and_truncated(tmp_path: Path) -> None:
     import wave
 
-    import pytest
-    from tools.reference_client import read_wav
+    from tools.reference_client import save_credentials
 
-    path = tmp_path / 'input.wav'
-    for rate, channels, width in ((24000, 1, 2), (16000, 2, 2), (16000, 1, 1)):
-        with wave.open(str(path), 'wb') as wav:
-            wav.setparams((channels, width, rate, 0, 'NONE', 'not compressed'))
-            wav.writeframes(b'\0' * 4)
-        with pytest.raises(ValueError, match='ffmpeg'):
-            read_wav(path)
-    for data in (b'', b'\0' * 9_600_002):
-        with wave.open(str(path), 'wb') as wav:
-            wav.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
-            wav.writeframes(data)
-        with pytest.raises(ValueError, match='300 seconds'):
-            read_wav(path)
-    with wave.open(str(path), 'wb') as wav:
-        wav.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
-        wav.writeframes(b'\0' * 4)
-    path.write_bytes(path.read_bytes()[:-2])
-    with pytest.raises(ValueError, match='truncated'):
-        read_wav(path)
+    with PairingStore(tmp_path / 'pairing.db') as pairing, EventLog(tmp_path / 'events.db') as log:
+        hub = make_hub(FakeBackend(FakeClock()), EventOutput(log, RecordingOutput()), RecordingMetrics())
+        door = Door(enabled=True, port=0, health=hub.health, pairing=pairing, hub=hub, log=log)
+        await door.start()
+        phone = pairing.exchange(pairing.create_code('https://mac.example.ts.net'), 'Reference', 'reference')
+        credentials = tmp_path / 'client/credentials.json'
+        save_credentials(credentials, {'origin': f'http://127.0.0.1:{door.port}', 'client_id': phone.client.id, 'device_token': phone.token})
+        path = tmp_path / 'input.wav'
+        cases = [(24000, 1, 2, b'\0' * 4, 'ffmpeg'), (16000, 2, 2, b'\0' * 4, 'ffmpeg'),
+                 (16000, 1, 1, b'\0' * 4, 'ffmpeg'), (16000, 1, 2, b'', '300 seconds'),
+                 (16000, 1, 2, b'\0' * 9_600_002, '300 seconds'), (16000, 1, 2, b'\0' * 4, 'truncated')]
+        try:
+            for rate, channels, width, data, error in cases:
+                with wave.open(str(path), 'wb') as wav:
+                    wav.setparams((channels, width, rate, 0, 'NONE', 'not compressed'))
+                    wav.writeframes(data)
+                if error == 'truncated':
+                    path.write_bytes(path.read_bytes()[:-2])
+                code, stdout, stderr = await invoke('--credentials', str(credentials), '--output', str(tmp_path / 'clips'),
+                                                    'talk', str(path))
+                assert code == 1 and error in stderr
+                assert phone.token not in stdout + stderr
+                assert not any(event.type == 'heard' for event in log.after(0))
+            path.write_bytes(b'not a WAV')
+            code, stdout, stderr = await invoke('--credentials', str(credentials), 'talk', str(path))
+            assert code == 1 and 'ffmpeg' in stderr
+            assert phone.token not in stdout + stderr
+        finally:
+            await door.close()
+            await hub.close()
 
 
 async def test_incomplete_clip_reconnects_before_header_and_malformed_binary_closes_1002(tmp_path: Path) -> None:
@@ -318,3 +330,135 @@ async def test_incomplete_clip_reconnects_before_header_and_malformed_binary_clo
             assert list((root / 'clips').glob('*.wav')) == []
         finally:
             await runner.cleanup()
+
+
+@pytest.mark.parametrize('early_audio', [False, True])
+async def test_executable_talk_recovers_text_without_waiting_for_lost_live_audio(tmp_path: Path, early_audio: bool) -> None:
+    import wave
+
+    import aiohttp
+    from jarvis_hub.voice.speech import Speech
+    from tests.fakes import FakeTts, Gate, RecordingPlayer, until
+    from tests.protocol_exchanges import connect, receive
+    from tests.test_uploaded_talk import Transcriber
+    from tools.reference_client import save_credentials
+
+    release = asyncio.Event()
+    wav_path = tmp_path / 'talk.wav'
+    with wave.open(str(wav_path), 'wb') as wav:
+        wav.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
+        wav.writeframes(b'\x00\x80\xff\x7f')
+    clock, metrics = FakeClock(), RecordingMetrics()
+    with PairingStore(tmp_path / 'pairing.db') as pairing, EventLog(tmp_path / 'events.db') as log:
+        speech = Speech(FakeTts(), RecordingPlayer(), clock, metrics=metrics, notice=lambda _: None)
+        opening = 'One sentence. ' if early_audio else 'One '
+        backend = FakeBackend(clock, [[Text(opening), Gate(release), Text('two.')]])
+        hub = make_hub(backend, EventOutput(log, RecordingOutput()), metrics, speech=speech)
+        transcriber = Transcriber()
+        door = Door(enabled=True, port=0, health=hub.health, pairing=pairing, hub=hub, log=log, transcription=transcriber)
+        speech.start()
+        await hub.start()
+        await door.start()
+        phone = pairing.exchange(pairing.create_code('https://mac.example.ts.net'), 'Reference', 'reference')
+        credentials = tmp_path / 'client/credentials.json'
+        save_credentials(credentials, {'origin': f'http://127.0.0.1:{door.port}', 'client_id': phone.client.id, 'device_token': phone.token})
+        pending = asyncio.create_task(invoke('--credentials', str(credentials), '--output', str(tmp_path / 'clips'),
+                                             '--timeout', '4', 'talk', str(wav_path)))
+        try:
+            await until(lambda: any(event.type == 'reply_delta' for event in log.after(0)), timeout=3)
+            if early_audio:
+                await until(lambda: len(list((tmp_path / 'clips').glob('*.wav'))) == 1)
+            async with aiohttp.ClientSession() as session, connect(session, door, phone.token) as replacement:
+                while (await receive(replacement))['type'] != 'replay_complete':
+                    pass
+            release.set()
+            await until(lambda: any(event.type == 'reply_end' for event in log.after(0)))
+            code, stdout, stderr = await pending
+            assert code == 0, stderr
+            frames = [json.loads(line) for line in stdout.splitlines()]
+            endings = [frame for frame in frames if frame['type'] == 'reply_end']
+            assert len(endings) == 1 and endings[0]['payload']['text'] == opening + 'two.'
+            report = next(frame for frame in frames if frame['type'] == 'upload_metrics')
+            assert report['reply_id'] == endings[0]['payload']['reply_id']
+            assert report['audio_status'] == ('partial' if early_audio else 'unavailable')
+            assert report['audio_reason'] == 'disconnected'
+            if early_audio:
+                assert report['first_matching_clip_received'] is not None
+                assert report['release_to_first_clip_seconds'] >= 0
+            else:
+                assert report['first_matching_clip_received'] is None
+                assert report['release_to_first_clip_seconds'] is None
+                assert report['handoff_to_first_clip_seconds'] is None
+            assert transcriber.calls == 1
+            assert len([event for event in log.after(0) if event.type == 'heard']) == 1
+            assert phone.token not in stdout + stderr
+        finally:
+            release.set()
+            if not pending.done():
+                await pending
+            await door.close()
+            await hub.close()
+            await speech.close()
+
+
+@pytest.mark.parametrize('synthesis', ['late', 'failed'])
+async def test_executable_talk_keeps_text_success_when_audio_is_late_or_missing(tmp_path: Path, synthesis: str) -> None:
+    import wave
+
+    from jarvis_hub.voice.speech import Speech
+    from tests.fakes import FakeTts, RecordingPlayer, until
+    from tests.test_uploaded_talk import Transcriber
+    from tools.reference_client import save_credentials
+
+    wav_path = tmp_path / 'talk.wav'
+    with wave.open(str(wav_path), 'wb') as wav:
+        wav.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
+        wav.writeframes(b'\x00\x80\xff\x7f')
+    clock, metrics = FakeClock(), RecordingMetrics()
+    tts = FakeTts(fail_on='First sentence.' if synthesis == 'failed' else None)
+    tts.hold.clear()
+    with PairingStore(tmp_path / 'pairing.db') as pairing, EventLog(tmp_path / 'events.db') as log:
+        speech = Speech(tts, RecordingPlayer(), clock, metrics=metrics, notice=lambda _: None)
+        text = 'First sentence.' if synthesis == 'failed' else 'First sentence. Second sentence.'
+        backend = FakeBackend(clock, [[Text(text)]])
+        hub = make_hub(backend, EventOutput(log, RecordingOutput()), metrics, speech=speech)
+        transcriber = Transcriber()
+        door = Door(enabled=True, port=0, health=hub.health, pairing=pairing, hub=hub, log=log, transcription=transcriber)
+        speech.start()
+        await hub.start()
+        await door.start()
+        phone = pairing.exchange(pairing.create_code('https://mac.example.ts.net'), 'Reference', 'reference')
+        credentials = tmp_path / 'client/credentials.json'
+        save_credentials(credentials, {'origin': f'http://127.0.0.1:{door.port}', 'client_id': phone.client.id, 'device_token': phone.token})
+        pending = asyncio.create_task(invoke('--credentials', str(credentials), '--output', str(tmp_path / 'clips'),
+                                             '--timeout', '2.5', 'talk', str(wav_path)))
+        try:
+            await until(lambda: any(event.type == 'reply_end' for event in log.after(0)), timeout=2)
+            await asyncio.sleep(0.15)
+            assert not pending.done()
+            tts.hold.set()
+            code, stdout, stderr = await pending
+            assert code == 0, stderr
+            frames = [json.loads(line) for line in stdout.splitlines()]
+            ending = next(frame for frame in frames if frame['type'] == 'reply_end')
+            report = next(frame for frame in frames if frame['type'] == 'upload_metrics')
+            assert report['reply_id'] == ending['payload']['reply_id']
+            assert ending['payload']['text'] == text
+            if synthesis == 'late':
+                assert report['audio_status'] == 'complete' and report['audio_reason'] is None
+                assert report['first_matching_clip_received'] is not None
+                assert len([frame for frame in frames if frame['type'] == 'saved_clip']) == 2
+            else:
+                assert report['audio_status'] == 'unavailable' and report['audio_reason'] == 'deadline'
+                assert report['first_matching_clip_received'] is None
+                assert report['release_to_first_clip_seconds'] is None
+                assert report['handoff_to_first_clip_seconds'] is None
+            assert transcriber.calls == 1
+            assert phone.token not in stdout + stderr
+        finally:
+            tts.hold.set()
+            if not pending.done():
+                await pending
+            await door.close()
+            await hub.close()
+            await speech.close()

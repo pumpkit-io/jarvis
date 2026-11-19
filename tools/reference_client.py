@@ -117,6 +117,9 @@ class ReferenceClient:
         self.clips: list[tuple[str, str, float, Path]] = []
         self.ended_streams: set[str] = set()
         self.audio_done_replies: set[str] = set()
+        self.audio_stop_reasons: dict[str, str] = {}
+        self.unavailable_audio_replies: set[str] = set()
+        self.replaying = True
         self.silence = False
         self.reply_requests: dict[str, str | None] = {}
         self.session: aiohttp.ClientSession
@@ -158,6 +161,7 @@ class ReferenceClient:
         try:
             while True:
                 try:
+                    self.replaying = True
                     self.streams.clear()
                     self.clip_header = None
                     async with self.session.ws_connect(self.origin + f'/v1/events?after={self.cache.cursor}',
@@ -175,6 +179,7 @@ class ReferenceClient:
                                     raise ValueError('Unsupported event version.')
                                 kind = frame['type']
                                 if kind == 'replay_complete':
+                                    self.replaying = False
                                     self.cache.advance(frame['through_seq'])
                                     await socket.send_json({'version': 1, 'id': presence, 'type': 'set_presence',
                                                             'payload': {'can_show_text': True}})
@@ -212,6 +217,8 @@ class ReferenceClient:
                 except (aiohttp.ClientError, ConnectionError):
                     pass
                 finally:
+                    self.unavailable_audio_replies.update(self.reply_requests)
+                    self.unavailable_audio_replies.update(reply for reply, _index in self.streams.values())
                     self.ready = False
                     self.socket = None
                     self.clip_header = None
@@ -237,7 +244,11 @@ class ReferenceClient:
         if kind in ('speech_end', 'speech_stop'):
             self.ended_streams.add(payload['speech_id'])
             self.audio_done_replies.add(payload['reply_id'])
+            if kind == 'speech_stop':
+                self.audio_stop_reasons[payload['reply_id']] = payload['reason']
         if kind in ('reply_delta', 'reply_end'):
+            if self.replaying:
+                self.unavailable_audio_replies.add(payload['reply_id'])
             self.reply_requests[payload['reply_id']] = payload.get('request_id')
         if self.cache.advance(seq, None if kind.startswith('speech_') else frame):
             self.display(frame)
@@ -389,7 +400,8 @@ class UploadTiming:
                        if attempt['body_handoff_end'] is not None), None)
         receipt = first[2] if first is not None else None
         return {'type': 'upload_metrics', 'talk_id': self.talk_id, 'command_id': self.command_id,
-                'request_id': self.request_id, 'reply_id': first[0] if first else None,
+                'request_id': self.request_id,
+                'reply_id': next((reply for reply, request in client.reply_requests.items() if request == self.request_id), None),
                 'speech_id': first[1] if first else None, 'release_upload_start': self.release,
                 'body_handoff_end': handed, 'first_matching_clip_received': receipt,
                 'http_response_end': self.response_end, 'attempts': self.attempts,
@@ -400,7 +412,7 @@ class UploadTiming:
                 'playback_boundary': 'clip_received_not_physical_playback'}
 
 
-async def run(args: argparse.Namespace) -> None:
+async def run(args: argparse.Namespace, deadline: asyncio.Timeout) -> None:
     if args.action == 'pair':
         await pair(args.credentials, args.origin, args.code or getpass.getpass('Pairing code: '), args.name)
         return
@@ -419,9 +431,26 @@ async def run(args: argparse.Namespace) -> None:
         elif args.action == 'talk':
             result, timing = await client.upload(args.wav)
             reply = await client.reply(result['request_id'])
+            reply_id = reply['payload']['reply_id']
+            audio_status, audio_reason = 'not_requested', None
             if not client.silence and reply['payload']['text'] and reply['payload']['reason'] == 'complete':
-                await client.wait(lambda: reply['payload']['reply_id'] in client.audio_done_replies)
-            emit(timing.report(client))
+                # Once text succeeds, the remaining deadline bounds audio without losing the result.
+                expires = deadline.when()
+                deadline.reschedule(None)
+                try:
+                    async with asyncio.timeout_at(expires):
+                        await client.wait(lambda: reply_id in client.audio_done_replies
+                                          or reply_id in client.unavailable_audio_replies)
+                    audio_status = 'complete' if reply_id in client.audio_done_replies else 'unavailable'
+                    audio_reason = None if audio_status == 'complete' else 'disconnected'
+                    if reply_id in client.audio_stop_reasons:
+                        audio_status, audio_reason = 'unavailable', client.audio_stop_reasons[reply_id]
+                except TimeoutError:
+                    audio_status, audio_reason = 'unavailable', 'deadline'
+            report = timing.report(client)
+            if audio_status == 'unavailable' and report['first_matching_clip_received'] is not None:
+                audio_status = 'partial'
+            emit({**report, 'audio_status': audio_status, 'audio_reason': audio_reason})
         elif args.action == 'listen':
             await client.wait(lambda: False)
 
@@ -449,8 +478,8 @@ def main() -> None:
     args = parser().parse_args()
     try:
         async def bounded() -> None:
-            async with asyncio.timeout(args.timeout):
-                await run(args)
+            async with asyncio.timeout(args.timeout) as deadline:
+                await run(args, deadline)
         asyncio.run(bounded())
     except KeyboardInterrupt:
         pass
