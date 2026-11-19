@@ -1,0 +1,374 @@
+{
+  "version": 1,
+  "normalization": "Only generated client/request/reply IDs are replaced by first-seen ordinal IDs. Fixed fake wall time is 1000 seconds.",
+  "exchanges": {
+    "rejected_envelopes": [
+      {
+        "command": {
+          "version": 1,
+          "id": "malformed-command",
+          "type": "say_text",
+          "payload": []
+        },
+        "result": {
+          "version": 1,
+          "error": {
+            "code": "invalid_payload",
+            "message": "Expected a valid command envelope",
+            "retry_after_seconds": null
+          },
+          "type": "command_result",
+          "ok": false,
+          "id": "malformed-command"
+        }
+      },
+      {
+        "command": {
+          "version": 2,
+          "id": "unsupported-command",
+          "type": "say_text",
+          "payload": {
+            "text": "Hello"
+          }
+        },
+        "result": {
+          "version": 1,
+          "error": {
+            "code": "unsupported_version",
+            "message": "Use protocol version 1",
+            "retry_after_seconds": null
+          },
+          "type": "command_result",
+          "ok": false,
+          "id": "unsupported-command",
+          "supported_versions": [
+            1
+          ]
+        }
+      },
+      {
+        "command": {
+          "version": 1,
+          "type": "say_text",
+          "payload": []
+        },
+        "result": {
+          "version": 1,
+          "error": {
+            "code": "invalid_payload",
+            "message": "Expected a valid command envelope",
+            "retry_after_seconds": null
+          },
+          "type": "command_result",
+          "ok": false
+        }
+      }
+    ],
+    "typed_partial": {
+      "initial": [
+        {
+          "version": 1,
+          "type": "replay_complete",
+          "through_seq": 0,
+          "oldest_seq": null
+        },
+        {
+          "version": 1,
+          "type": "replay_complete",
+          "through_seq": 0,
+          "oldest_seq": null
+        }
+      ],
+      "command": {
+        "version": 1,
+        "id": "say-1",
+        "type": "say_text",
+        "payload": {
+          "text": "Hello"
+        }
+      },
+      "events": [
+        {
+          "version": 1,
+          "seq": 1,
+          "time": "1970-01-01T00:16:40Z",
+          "type": "heard",
+          "client_id": "client-1",
+          "payload": {
+            "request_id": "request-1",
+            "text": "Hello",
+            "spoken": false
+          }
+        },
+        {
+          "version": 1,
+          "seq": 2,
+          "time": "1970-01-01T00:16:40Z",
+          "type": "reply_delta",
+          "client_id": "client-1",
+          "payload": {
+            "reply_id": "reply-1",
+            "request_id": "request-1",
+            "text": "One"
+          }
+        }
+      ],
+      "result": {
+        "version": 1,
+        "type": "command_result",
+        "id": "say-1",
+        "ok": true,
+        "result": {
+          "request_id": "request-1"
+        }
+      },
+      "retry_result": {
+        "version": 1,
+        "type": "command_result",
+        "id": "say-1",
+        "ok": true,
+        "result": {
+          "request_id": "request-1"
+        }
+      },
+      "conflict_result": {
+        "version": 1,
+        "type": "command_result",
+        "id": "say-1",
+        "ok": false,
+        "error": {
+          "code": "id_conflict",
+          "message": "Command id was already used with different content",
+          "retry_after_seconds": null
+        }
+      }
+    },
+    "reconnect_during_reply": {
+      "after": 2,
+      "frames": [
+        {
+          "version": 1,
+          "seq": 3,
+          "time": "1970-01-01T00:16:40Z",
+          "type": "reply_delta",
+          "client_id": "client-1",
+          "payload": {
+            "reply_id": "reply-1",
+            "request_id": "request-1",
+            "text": " two."
+          }
+        },
+        {
+          "version": 1,
+          "seq": 4,
+          "time": "1970-01-01T00:16:40Z",
+          "type": "reply_end",
+          "client_id": "client-1",
+          "payload": {
+            "reply_id": "reply-1",
+            "request_id": "request-1",
+            "text": "One two.",
+            "reason": "complete"
+          }
+        },
+        {
+          "version": 1,
+          "type": "replay_complete",
+          "through_seq": 4,
+          "oldest_seq": 1
+        }
+      ]
+    },
+    "history_acknowledge": {
+      "newest": {
+        "version": 1,
+        "events": [
+          {
+            "version": 1,
+            "seq": 3,
+            "time": "1970-01-01T00:16:40Z",
+            "type": "reply_delta",
+            "client_id": "client-1",
+            "payload": {
+              "reply_id": "reply-1",
+              "request_id": "request-1",
+              "text": " two."
+            }
+          },
+          {
+            "version": 1,
+            "seq": 4,
+            "time": "1970-01-01T00:16:40Z",
+            "type": "reply_end",
+            "client_id": "client-1",
+            "payload": {
+              "reply_id": "reply-1",
+              "request_id": "request-1",
+              "text": "One two.",
+              "reason": "complete"
+            }
+          }
+        ],
+        "next_before": 3,
+        "has_more": true
+      },
+      "older": {
+        "version": 1,
+        "events": [
+          {
+            "version": 1,
+            "seq": 1,
+            "time": "1970-01-01T00:16:40Z",
+            "type": "heard",
+            "client_id": "client-1",
+            "payload": {
+              "request_id": "request-1",
+              "text": "Hello",
+              "spoken": false
+            }
+          },
+          {
+            "version": 1,
+            "seq": 2,
+            "time": "1970-01-01T00:16:40Z",
+            "type": "reply_delta",
+            "client_id": "client-1",
+            "payload": {
+              "reply_id": "reply-1",
+              "request_id": "request-1",
+              "text": "One"
+            }
+          }
+        ],
+        "next_before": 1,
+        "has_more": false
+      },
+      "ack": {
+        "version": 1,
+        "type": "command_result",
+        "id": "ack-1",
+        "ok": true,
+        "result": {
+          "seq": 4
+        }
+      },
+      "lower_ack": {
+        "version": 1,
+        "type": "command_result",
+        "id": "ack-2",
+        "ok": true,
+        "result": {
+          "seq": 4
+        }
+      }
+    },
+    "replacement_revocation": {
+      "replay": {
+        "version": 1,
+        "type": "replay_complete",
+        "through_seq": 4,
+        "oldest_seq": 1
+      },
+      "close_code": 1008
+    },
+    "concurrent_retry": {
+      "command": {
+        "version": 1,
+        "id": "concurrent",
+        "type": "say_text",
+        "payload": {
+          "text": "Accept once"
+        }
+      },
+      "conflict": {
+        "version": 1,
+        "type": "command_result",
+        "id": "concurrent",
+        "ok": false,
+        "error": {
+          "code": "id_conflict",
+          "message": "Command id was already used with different content",
+          "retry_after_seconds": null
+        }
+      },
+      "result": {
+        "version": 1,
+        "type": "command_result",
+        "id": "concurrent",
+        "ok": true,
+        "result": {
+          "request_id": "request-2"
+        }
+      },
+      "repeated": {
+        "version": 1,
+        "type": "command_result",
+        "id": "concurrent",
+        "ok": true,
+        "result": {
+          "request_id": "request-2"
+        }
+      },
+      "events": [
+        {
+          "version": 1,
+          "seq": 1,
+          "time": "1970-01-01T00:16:40Z",
+          "type": "heard",
+          "client_id": "client-2",
+          "payload": {
+            "request_id": "request-2",
+            "text": "Accept once",
+            "spoken": false
+          }
+        },
+        {
+          "version": 1,
+          "seq": 2,
+          "time": "1970-01-01T00:16:40Z",
+          "type": "reply_delta",
+          "client_id": "client-2",
+          "payload": {
+            "reply_id": "reply-2",
+            "request_id": "request-2",
+            "text": "Accepted."
+          }
+        },
+        {
+          "version": 1,
+          "seq": 3,
+          "time": "1970-01-01T00:16:40Z",
+          "type": "reply_end",
+          "client_id": "client-2",
+          "payload": {
+            "reply_id": "reply-2",
+            "request_id": "request-2",
+            "text": "Accepted.",
+            "reason": "complete"
+          }
+        }
+      ]
+    },
+    "restart_outcome_unknown": {
+      "command": {
+        "version": 1,
+        "id": "interrupted-admission",
+        "type": "say_text",
+        "payload": {
+          "text": "Do not duplicate after restart"
+        }
+      },
+      "result": {
+        "version": 1,
+        "type": "command_result",
+        "id": "interrupted-admission",
+        "ok": false,
+        "error": {
+          "code": "outcome_unknown",
+          "message": "Operation outcome is unknown; reconcile with history",
+          "retry_after_seconds": null
+        }
+      }
+    }
+  }
+}

@@ -44,6 +44,7 @@ from jarvis_hub.spoken import SpokenScopes
 from jarvis_hub.subagent_rules import connector_check
 from jarvis_hub.subagents import Subagent, SubagentSetup, Subagents, ended_event, kept_line, over_time_event
 from jarvis_hub.talker import talker_tools
+from jarvis_hub.event_log import EventOutput
 from jarvis_hub.tasks import Task, Tasks, no_task
 from jarvis_hub.voice.language import Lang, detect_language
 from jarvis_hub.voice.speech import ClipName
@@ -61,7 +62,7 @@ class Clock(Protocol):
 
 class Output(Protocol):
     def heard(self, text: str, *, typed: bool = True) -> None:
-        """The User's line, as the Talker starts on it."""
+        """The admitted User line, before display delivery."""
         ...
 
     def reply(self, text: str) -> None:
@@ -92,25 +93,28 @@ class _ClientOutput:
                 if (client := self._clients.get(client_id)) is not None
                 and client.connected and client.can_show_text]
 
-    def heard(self, text: str, *, typed: bool = True) -> None:
+    def _deliver(self, method: str, *args: Any, **kwargs: Any) -> None:
         for output in self._targets():
-            output.heard(text, typed=typed)
+            try:
+                getattr(output, method)(*args, **kwargs)
+            except Exception:
+                # A failed display must not suppress committed output on another Client.
+                continue
+
+    def heard(self, text: str, *, typed: bool = True) -> None:
+        self._deliver("heard", text, typed=typed)
 
     def reply(self, text: str) -> None:
-        for output in self._targets():
-            output.reply(text)
+        self._deliver("reply", text)
 
     def reply_end(self) -> None:
-        for output in self._targets():
-            output.reply_end()
+        self._deliver("reply_end")
 
     def notice(self, text: str) -> None:
-        for output in self._targets():
-            output.notice(text)
+        self._deliver("notice", text)
 
     def show(self, markdown: str) -> None:
-        for output in self._targets():
-            output.show(markdown)
+        self._deliver("show", markdown)
 
 
 class Metrics(Protocol):
@@ -305,6 +309,7 @@ class _TalkerInput:
     replayed: bool = False
     request_id: str | None = None
     revision: int = 0
+    spoken_owner: tuple[str, int] | None = None
     client_id: str = TERMINAL
     # The news this turn tells: all of a news turn, or the away opener a User's spoken turn opens with.
     news: News | None = None
@@ -455,7 +460,14 @@ class Hub:
         self._backend = backend
         self._clock = clock
         self.clients = Clients(terminal_speech=speech is not None, on_focus=self._persist, on_change=self._clients_changed)
-        self._output = _ClientOutput(output, self.clients)
+        if isinstance(output, EventOutput):
+            self._displays = _ClientOutput(output.destination, self.clients)
+            output.destination = self._displays
+            self._output = output
+        else:
+            self._displays = _ClientOutput(output, self.clients)
+            self._output = EventOutput(None, self._displays)
+        self._admission_lock = asyncio.Lock()
         self._client_players: dict[str, Player] = {}
         self._metrics = metrics
         self._orchestrator_timeout = orchestrator_timeout
@@ -543,7 +555,7 @@ class Hub:
         self._replying = False
         self._authorizations = Authorizations()
         self._user_source = ""
-        self._user_client_id = TERMINAL
+        self._user_client_id: str = TERMINAL
         # The User's own text in the Talker turn under way, for the Tasks it delegates.
         self._user_text: str | None = None
         self._scopes = SpokenScopes(clock, change=self._persist, notice=output.notice)
@@ -624,7 +636,7 @@ class Hub:
         """Attach screen and audio adapters without moving Focus; omitted adapters keep their existing bindings."""
         self.clients.register(client)
         if output is not None:
-            self._output.attach(client.id, output)
+            self._displays.attach(client.id, output)
         if player is not None:
             previous = self._client_players.get(client.id)
             if previous is not player and (previous is not None or client.id == TERMINAL):
@@ -770,51 +782,72 @@ class Hub:
         self._persist()
 
     async def _read(self, inputs: AsyncIterator[Line]) -> None:
-        async for line in inputs:
-            if text := line.text.strip():
-                if self.clients.get(line.client_id) is None:
-                    raise ValueError(f"Unknown Client {line.client_id}")
-                if line.client_id != TERMINAL:
-                    if self._floor is not None:
-                        self._floor.typed_input()
-                    await self.interrupt()
-                elif self._floor is not None and line.typed:
+        try:
+            async for line in inputs:
+                await self.admit_line(line)
+        finally:
+            self._input_ended.set()
+
+    async def admit_line(self, line: Line, *, allowed: Callable[[], bool] = lambda: True) -> str | None:
+        """Serialize terminal and remote admission without extending the terminal-owned lifetime."""
+        async with self._admission_lock:
+            if self._closing or self._input_ended.is_set() or not allowed():
+                raise ValueError("Hub is stopping")
+            return await self._admit_line(line, allowed=allowed)
+
+    async def _admit_line(self, line: Line, *, allowed: Callable[[], bool]) -> str | None:
+        request_id = line.request_id or uuid.uuid4().hex
+        if text := line.text.strip():
+            if self.clients.get(line.client_id) is None:
+                raise ValueError(f"Unknown Client {line.client_id}")
+            if line.client_id != TERMINAL:
+                if self._floor is not None:
                     self._floor.typed_input()
-                    await self.interrupt()
-                elif any(
-                    (client := self.clients.get(client_id)) is not None and client.connected
-                    for client_id in self._client_players if client_id != TERMINAL
+                await self.interrupt()
+            elif self._floor is not None and line.typed:
+                self._floor.typed_input()
+                await self.interrupt()
+            elif any(
+                (client := self.clients.get(client_id)) is not None and client.connected
+                for client_id in self._client_players if client_id != TERMINAL
+            ):
+                if not line.typed and line.request_id is not None and self._floor is not None and not self._floor.owns(
+                    (line.request_id, line.revision)
                 ):
-                    if line.request_id is not None and self._floor is not None and not self._floor.owns(
-                        (line.request_id, line.revision)
-                    ):
-                        continue
-                    await self.interrupt()
-                elif self._floor is None and self._news_delivery is not None and (
-                    self._news_delivery.follows_focus and self._news_delivery.speaks
-                    and not self._news_delivery_told(self._news_delivery)
-                ):
-                    await self.interrupt()
-                if line.typed:
-                    self._scopes.typed(text)
-                if line.request_id is not None:
-                    owner = (line.request_id, line.revision)
-                    if self._floor is not None and not self._floor.owns(owner):
-                        continue
-                    self.admit_spoken_revision(line)
-                    if self._floor is not None and not self._floor.owns(owner):
-                        continue
-                if not line.typed:
-                    self._release_held(arrived=line.arrived)
-                self.clients.take_focus(line.client_id)
-                self._read_lang = lang = line.lang or detect_language(text, self._read_lang)
-                message = user_message(text, lang, typed=line.typed)
-                if line.interrupted is not None:
-                    message = f"{interrupted_message(line.interrupted)}\n{message}"
-                spoken = not line.typed or (self._speak_typed and line.client_id == TERMINAL)
-                item = _TalkerInput("user", line.arrived, message, heard=text, lang=lang, typed=line.typed, spoken=spoken,
-                                    request_id=line.request_id, revision=line.revision, client_id=line.client_id)
-                self._post(self._talker_inbox, item)
+                    return None
+                await self.interrupt()
+            elif self._floor is None and self._news_delivery is not None and (
+                self._news_delivery.follows_focus and self._news_delivery.speaks
+                and not self._news_delivery_told(self._news_delivery)
+            ):
+                await self.interrupt()
+            if not allowed():
+                raise ValueError("Client is disconnected")
+            if line.typed:
+                self._scopes.typed(text)
+            if not line.typed and line.request_id is not None:
+                owner = (line.request_id, line.revision)
+                if self._floor is not None and not self._floor.owns(owner):
+                    return None
+                self.admit_spoken_revision(line)
+                if self._floor is not None and not self._floor.owns(owner):
+                    return None
+            if not line.typed:
+                self._release_held(arrived=line.arrived)
+            self.clients.take_focus(line.client_id)
+            self._read_lang = lang = line.lang or detect_language(text, self._read_lang)
+            message = user_message(text, lang, typed=line.typed)
+            if line.interrupted is not None:
+                message = f"{interrupted_message(line.interrupted)}\n{message}"
+            spoken = not line.typed or (self._speak_typed and line.client_id == TERMINAL)
+            item = _TalkerInput("user", line.arrived, message, heard=text, lang=lang, typed=line.typed, spoken=spoken,
+                                request_id=request_id, revision=line.revision, client_id=line.client_id,
+                                spoken_owner=(line.request_id, line.revision)
+                                if not line.typed and line.client_id == TERMINAL and line.request_id is not None else None)
+            self._output.heard(text, typed=line.typed, request_id=request_id, client_id=line.client_id, display=False)
+            self._post(self._talker_inbox, item)
+            return request_id
+        return None
 
     def _post(self, inbox: "asyncio.Queue[Any]", item: _TalkerInput | _OrchestratorInput) -> None:
         """Queue an item; the Hub counts as settled again once every posted item is handled."""
@@ -1253,12 +1286,17 @@ class Hub:
                 if item.lang:
                     self._lang = item.lang
                 if item.heard:
-                    self._output.heard(item.heard, typed=item.typed)
+                    self._displays.heard(item.heard, typed=item.typed)
                 if item.kind == "event" and self._limit.blocks("talker"):
                     parked = self._park(item)
                     continue
-                if item.details:
-                    self._output.show(item.details)
+                owner = item.spoken_owner
+                current = owner is None or self._floor is None or self._floor.owns(owner)
+                if current:
+                    self._output.begin_reply(item.client_id if item.kind == "user" else None,
+                                             item.request_id if item.kind == "user" else None)
+                    if item.details:
+                        self._output.show(item.details)
                 self._user_text = item.heard if item.kind == "user" and not item.replayed else None
                 self._user_source = uuid.uuid4().hex if self._user_text else ""
                 self._user_client_id = item.client_id
@@ -1273,18 +1311,16 @@ class Hub:
                                              follows_focus=item.kind == "event")
                     self._news_delivery = delivery
                 self._approvals.turn_began(self._user_text)
-                if item.kind == "user" and self._limit.blocks("talker"):
+                if not current:
+                    end = TurnEnd("interrupted")
+                elif item.kind == "user" and self._limit.blocks("talker"):
                     end = self._limited_reply(item)
                 else:
-                    owner = (item.request_id, item.revision) if item.request_id is not None else None
-                    if owner is not None and self._floor is not None and not self._floor.owns(owner):
-                        end = TurnEnd("interrupted")
-                    else:
-                        authority = self._scopes.activate() if item.kind == "user" else {}
-                        scope_context = self._scopes.context() if authority else ""
-                        message = "\n".join(part for part in (item.message, scope_context) if part)
-                        end = await self._turn(message, kind=item.kind, arrived=item.arrived, spoken=item.spoken,
-                                               owner=owner, scope_authority=authority, news_delivery=delivery)
+                    authority = self._scopes.activate() if item.kind == "user" else {}
+                    scope_context = self._scopes.context() if authority else ""
+                    message = "\n".join(part for part in (item.message, scope_context) if part)
+                    end = await self._turn(message, kind=item.kind, arrived=item.arrived, spoken=item.spoken,
+                                           owner=owner, scope_authority=authority, news_delivery=delivery)
                 self._approvals.turn_ended(completed=end.outcome == "completed")
                 if delivery is not None and self._news_delivery is delivery:
                     if end.outcome == "completed" and delivery.speaks:
@@ -1553,10 +1589,13 @@ class Hub:
             self._turn_spoken = self._turn_answers_user = self._replying = False
             if self._interrupted_turn != turn:
                 speech.end()
+            if show:
+                reason = ("stand_by" if self._silenced_turn == turn else
+                          "interrupted" if self._interrupted_turn == turn else
+                          "complete" if end.outcome == "completed" else "error")
+                self._output.reply_end(text=shown, reason=reason)
         if end.outcome == "interrupted" and self._interrupted_turn != turn:
             end = TurnEnd("failed", end.usage, "the turn stopped without the Hub interrupting it")
-        if show:
-            self._output.reply_end()
         # A failed restart has its own notice.
         if end.outcome == "failed" and kind != "restart":
             self._model_available = False
@@ -1812,7 +1851,7 @@ class Hub:
         self._limit_notice(self._limit.tell())
         self._persist()
         speech.end()
-        self._output.reply_end()
+        self._output.reply_end(text="", reason="error")
         return TurnEnd("limited")
 
     def _limit_notice(self, resets_at: float | None, *, update: bool = False) -> None:

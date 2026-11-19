@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import sqlite3
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,8 +21,13 @@ class Event:
     seq: int
     time: float
     type: str
-    client_id: str
+    client_id: str | None
     payload: dict[str, Any]
+    replayable: bool = True
+
+
+def _event(row: tuple[Any, ...]) -> Event:
+    return Event(row[0], row[1], row[2], row[3] or None, json.loads(row[4]))
 
 
 class EventLog:
@@ -27,36 +35,113 @@ class EventLog:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._wall = wall
         self._lock = threading.Lock()
+        self._subscriptions: dict[object, tuple[asyncio.AbstractEventLoop, Callable[[Event], None]]] = {}
         self._db = sqlite3.connect(path, check_same_thread=False)
-        self._db.execute(
-            "CREATE TABLE IF NOT EXISTS events ("
-            "seq INTEGER PRIMARY KEY AUTOINCREMENT, time REAL NOT NULL, "
-            "type TEXT NOT NULL, client_id TEXT NOT NULL, payload TEXT NOT NULL)"
-        )
-        self._db.execute("DELETE FROM events WHERE time < ?", (wall() - 30 * 86400,))
+        self._db.executescript("""
+            CREATE TABLE IF NOT EXISTS events (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT, time REAL NOT NULL,
+                type TEXT NOT NULL, client_id TEXT, payload TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS commands (
+                client_id TEXT NOT NULL, id TEXT NOT NULL, type TEXT NOT NULL,
+                digest TEXT NOT NULL, status TEXT NOT NULL, result TEXT,
+                PRIMARY KEY(client_id, id));
+            CREATE TABLE IF NOT EXISTS retention (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1), pruned_through INTEGER NOT NULL);
+            INSERT OR IGNORE INTO retention VALUES (1, 0);
+        """)
+        cutoff = wall() - 30 * 86400
+        self._db.execute("UPDATE retention SET pruned_through = MAX(pruned_through, "
+                         "COALESCE((SELECT MAX(seq) FROM events WHERE time < ?), 0)) WHERE singleton = 1", (cutoff,))
+        self._db.execute("DELETE FROM events WHERE time < ?", (cutoff,))
+        unknown = json.dumps({"ok": False, "error": {"code": "outcome_unknown",
+            "message": "Previous operation outcome is unknown; reconcile with history", "retry_after_seconds": None}})
+        self._db.execute("UPDATE commands SET status = 'complete', result = ? WHERE status != 'complete'", (unknown,))
         self._db.commit()
 
-    def append(self, type: str, payload: dict[str, Any], *, client_id: str = "terminal") -> Event:
+    def append(self, type: str, payload: dict[str, Any], *, client_id: str | None = "terminal", replayable: bool = True) -> Event:
         with self._lock:
             stamp = self._wall()
             encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False)
             with self._db:
                 cursor = self._db.execute(
                     "INSERT INTO events(time, type, client_id, payload) VALUES (?, ?, ?, ?)",
-                    (stamp, type, client_id, encoded),
+                    (stamp, type, client_id if client_id is not None else "", encoded if replayable else "{}"),
                 )
+                if not replayable:
+                    self._db.execute("DELETE FROM events WHERE seq = ?", (cursor.lastrowid,))
             assert cursor.lastrowid is not None
-            return Event(cursor.lastrowid, stamp, type, client_id, json.loads(encoded))
+            event = Event(cursor.lastrowid, stamp, type, client_id, json.loads(encoded), replayable)
+            # Schedule under the allocation lock so worker threads cannot reverse delivery order.
+            for loop, callback in self._subscriptions.values():
+                loop.call_soon_threadsafe(callback, event)
+            return event
+
+    def _high_water(self) -> int:
+        row = self._db.execute("SELECT seq FROM sqlite_sequence WHERE name = 'events'").fetchone()
+        return row[0] if row else 0
+
+    @property
+    def high_water(self) -> int:
+        with self._lock:
+            return self._high_water()
 
     def after(self, seq: int) -> list[Event]:
         with self._lock:
+            return [_event(row) for row in self._db.execute(
+                "SELECT seq, time, type, client_id, payload FROM events WHERE seq > ? ORDER BY seq", (seq,))]
+
+    def subscribe(self, after: int, loop: asyncio.AbstractEventLoop, callback: Callable[[Event], None],
+                  client_id: str) -> tuple[object, list[Event], int, int | None, bool]:
+        with self._lock:
+            mark = self._high_water()
+            if after > mark:
+                raise ValueError("Cursor exceeds the latest sequence")
+            oldest = self._db.execute("SELECT MIN(seq) FROM events").fetchone()[0]
+            replay = [_event(row) for row in self._db.execute(
+                "SELECT seq, time, type, client_id, payload FROM events WHERE seq > ? AND seq <= ? "
+                "AND (type != 'status' OR client_id = ?) ORDER BY seq", (after, mark, client_id))]
+            token = object()
+            self._subscriptions[token] = (loop, callback)
+            pruned_through = self._db.execute("SELECT pruned_through FROM retention WHERE singleton = 1").fetchone()[0]
+            pruned = after < pruned_through
+            return token, replay, mark, oldest, pruned
+
+    def unsubscribe(self, token: object) -> None:
+        with self._lock:
+            self._subscriptions.pop(token, None)
+
+    def history(self, client_id: str, before: int | None, limit: int) -> tuple[list[Event], bool]:
+        with self._lock:
             rows = self._db.execute(
-                "SELECT seq, time, type, client_id, payload FROM events WHERE seq > ? ORDER BY seq", (seq,)
-            )
-            return [Event(row[0], row[1], row[2], row[3], json.loads(row[4])) for row in rows]
+                "SELECT seq, time, type, client_id, payload FROM events "
+                "WHERE (? IS NULL OR seq < ?) AND (type != 'status' OR client_id = ?) "
+                "ORDER BY seq DESC LIMIT ?", (before, before, client_id, limit + 1)).fetchall()
+            return [_event(row) for row in reversed(rows[:limit])], len(rows) > limit
+
+    def reserve(self, client_id: str, command_id: str, kind: str,
+                payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+        encoded = json.dumps([kind, payload], ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        with self._lock, self._db:
+            inserted = self._db.execute("INSERT OR IGNORE INTO commands VALUES (?, ?, ?, ?, 'reserved', NULL)",
+                             (client_id, command_id, kind if kind in {"say_text", "acknowledge"} else "unknown", digest))
+            row = self._db.execute("SELECT digest, status, result FROM commands WHERE client_id = ? AND id = ?",
+                                   (client_id, command_id)).fetchone()
+            if row[0] != digest:
+                return "conflict", None
+            return "new" if inserted.rowcount else row[1], json.loads(row[2]) if row[2] is not None else None
+
+    def complete(self, client_id: str, command_id: str, result: dict[str, Any]) -> None:
+        safe_fields = {"request_id", "talk_id", "speech_id", "reply_id", "seq", "focus_client_id", "silence", "cancelled", "stopped"}
+        if "result" in result and set(result["result"]) - safe_fields:
+            raise ValueError("Lifetime command results may contain only identifiers and status")
+        with self._lock, self._db:
+            self._db.execute("UPDATE commands SET status = 'complete', result = ? WHERE client_id = ? AND id = ?",
+                             (json.dumps(result, allow_nan=False), client_id, command_id))
 
     def close(self) -> None:
         with self._lock:
+            self._subscriptions.clear()
             self._db.close()
 
     def __enter__(self) -> EventLog:
@@ -67,33 +152,57 @@ class EventLog:
 
 
 class EventOutput:
-    def __init__(self, log: EventLog, destination: Output) -> None:
-        self._log = log
-        self._destination = destination
-        # Screen diagnostics can re-enter this output while showing details.
+    def __init__(self, log: EventLog | None, destination: Output) -> None:
+        self.log = log
+        self.destination = destination
         self._lock = threading.RLock()
+        self._reply_id: str | None = None
+        self._request_id: str | None = None
+        self._client_id: str | None = None
+        self._text = ""
 
-    def heard(self, text: str, *, typed: bool = True) -> None:
+    def begin_reply(self, client_id: str | None, request_id: str | None) -> None:
         with self._lock:
-            self._log.append("heard", {"text": text, "typed": typed})
-            self._destination.heard(text, typed=typed)
+            self._reply_id = uuid.uuid4().hex
+            self._request_id = request_id
+            self._client_id = client_id
+            self._text = ""
+
+    def _append(self, kind: str, payload: dict[str, Any], client_id: str | None) -> None:
+        if self.log is not None:
+            self.log.append(kind, payload, client_id=client_id)
+
+    def heard(self, text: str, *, typed: bool = True, request_id: str | None = None, client_id: str = "terminal", display: bool = True) -> None:
+        with self._lock:
+            self._append("heard", {"request_id": request_id or uuid.uuid4().hex, "text": text, "spoken": not typed}, client_id)
+            if display:
+                self.destination.heard(text, typed=typed)
 
     def reply(self, text: str) -> None:
         with self._lock:
-            self._log.append("reply_delta", {"text": text})
-            self._destination.reply(text)
+            if self._reply_id is None:
+                self.begin_reply("terminal", None)
+            self._text += text
+            self._append("reply_delta", {"reply_id": self._reply_id, "request_id": self._request_id, "text": text}, self._client_id)
+            self.destination.reply(text)
 
-    def reply_end(self) -> None:
+    def reply_end(self, *, text: str | None = None, reason: str = "complete") -> None:
         with self._lock:
-            self._log.append("reply_end", {})
-            self._destination.reply_end()
+            if self._reply_id is None:
+                self.begin_reply("terminal", None)
+            self._append("reply_end", {"reply_id": self._reply_id, "request_id": self._request_id,
+                                      "text": self._text if text is None else text, "reason": reason}, self._client_id)
+            self._reply_id = None
+            self._request_id = self._client_id = None
+            self._text = ""
+            self.destination.reply_end()
 
     def notice(self, text: str) -> None:
         with self._lock:
-            self._log.append("notice", {"text": text})
-            self._destination.notice(text)
+            self._append("notice", {"text": text}, None)
+            self.destination.notice(text)
 
     def show(self, markdown: str) -> None:
         with self._lock:
-            self._log.append("show", {"markdown": markdown})
-            self._destination.show(markdown)
+            self._append("show", {"reply_id": self._reply_id, "title": "Details", "text": markdown}, self._client_id)
+            self.destination.show(markdown)

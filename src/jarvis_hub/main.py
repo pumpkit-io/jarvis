@@ -312,7 +312,7 @@ async def text_mode(
             settings, backend=backend, clock=clock, output=output, metrics=metrics, speech=speech,
             on_model_ready=lambda: output.notice("Model ready."),
         )
-        door = Door(enabled=settings.remote, port=settings.remote_port, health=hub.health, pairing=pairing)
+        door = Door(enabled=settings.remote, port=settings.remote_port, health=hub.health, pairing=pairing, hub=hub, log=log, now=clock.now)
         try:
             output.notice("Model loading.")
             await hub.start()
@@ -403,7 +403,7 @@ async def voice_mode(
             preconnect_orchestrator=True,
             on_model_ready=lambda: (output.notice("Model ready."), model_ready.set()),
         )
-        door = Door(enabled=settings.remote, port=settings.remote_port, health=hub.health, pairing=pairing)
+        door = Door(enabled=settings.remote, port=settings.remote_port, health=hub.health, pairing=pairing, hub=hub, log=log, now=clock.now)
         try:
             output.notice("Model loading.")
             await hub.start()

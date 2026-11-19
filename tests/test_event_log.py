@@ -50,13 +50,16 @@ async def test_terminal_conversation_logs_output_and_does_not_rehydrate_the_talk
     stdout, stderr = await converse(backend, io.StringIO("Show me\n"), config=config)
 
     with EventLog(config.runtime_dir / "events.sqlite3") as log:
-        assert [(event.type, event.payload) for event in log.after(0)] == [
+        events = log.after(0)
+        request_id = events[2].payload["request_id"]
+        reply_id = events[3].payload["reply_id"]
+        assert [(event.type, event.payload) for event in events] == [
             ("notice", {"text": "Model loading."}),
             ("notice", {"text": "Model ready."}),
-            ("heard", {"text": "Show me", "typed": True}),
-            ("reply_delta", {"text": "Here, sir."}),
-            ("show", {"markdown": "# Plan"}),
-            ("reply_end", {}),
+            ("heard", {"request_id": request_id, "text": "Show me", "spoken": False}),
+            ("reply_delta", {"reply_id": reply_id, "request_id": request_id, "text": "Here, sir."}),
+            ("show", {"reply_id": reply_id, "title": "Details", "text": "# Plan"}),
+            ("reply_end", {"reply_id": reply_id, "request_id": request_id, "text": "Here, sir.", "reason": "complete"}),
         ]
     assert stdout.startswith("› Show me\nHere, sir.\n")
     assert "Plan" in stdout and "# Plan" not in stdout

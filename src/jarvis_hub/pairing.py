@@ -162,6 +162,15 @@ class PairingStore:
             rows = self._db.execute("SELECT id FROM clients WHERE revoked_at IS NULL").fetchall()
         return {row[0] for row in rows} & client_ids
 
+    def acknowledge(self, client_id: str, seq: int) -> int:
+        with self._lock:
+            self._db.execute("UPDATE clients SET last_ack_seq = MAX(last_ack_seq, ?) WHERE id = ? AND revoked_at IS NULL",
+                             (seq, client_id))
+            row = self._db.execute("SELECT last_ack_seq FROM clients WHERE id = ? AND revoked_at IS NULL", (client_id,)).fetchone()
+            if row is None:
+                raise ValueError("Client is revoked")
+            return row[0]
+
     def clients(self) -> list[PairedClient]:
         with self._lock:
             rows = self._db.execute("SELECT id, kind, name, created_at FROM clients WHERE revoked_at IS NULL ORDER BY created_at, id").fetchall()
