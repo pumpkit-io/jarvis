@@ -93,9 +93,12 @@ public enum TalkState: Equatable, Sendable {
         else { await press() }
     }
 
-    public func releaseInteraction(_ id: UUID) async {
-        guard interaction == id else { return }
-        await release()
+    @discardableResult public func releaseInteraction(_ id: UUID, pendingPress: Task<Void, Never>? = nil) -> Task<Void, Never> {
+        if interaction != id || state != .recording { pendingPress?.cancel() }
+        return Task {
+            guard interaction == id else { return }
+            await release()
+        }
     }
 
     public func cancelInteraction(_ id: UUID) async {

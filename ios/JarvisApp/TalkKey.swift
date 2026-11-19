@@ -79,9 +79,9 @@ struct TalkKey: View {
     }
 
     private func send() {
-        pressTask?.cancel(); pressTask = nil
         guard let id = interaction else { return }
-        Task { await talk.releaseInteraction(id) }
+        talk.releaseInteraction(id, pendingPress: pressTask)
+        pressTask = nil; interaction = nil
     }
 
     private func cancel() {

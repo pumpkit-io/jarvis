@@ -735,7 +735,7 @@ func delayedLifecycleCancellationCannotRetireNewPairing(overlappingUnpair: Bool)
     #expect(!recorder.active && wire.uploads.isEmpty)
     await talk.press(interaction: current)
     await talk.cancelInteraction(old)
-    await talk.releaseInteraction(old)
+    await talk.releaseInteraction(old).value
     #expect(recorder.active)
     await talk.release()
     await talk.cancelInteraction(current)
@@ -796,9 +796,65 @@ func delayedLifecycleCancellationCannotRetireNewPairing(overlappingUnpair: Bool)
                    upload: { try await wire.upload($0, $1, $2) })
     let intent = UUID()
     let deferred = Task { await talk.press(interaction: intent) }
-    deferred.cancel()
-    await talk.releaseInteraction(intent)
+    await talk.releaseInteraction(intent, pendingPress: deferred).value
     await deferred.value
     #expect(recorder.starts == 0 && !recorder.active)
     #expect(wire.commands.isEmpty && wire.uploads.isEmpty)
+}
+
+@MainActor final class CancellableBeginWire {
+    var commands: [HubCommand] = []
+    var deliveredBegin: String?
+    var admissionIDs: [String] = []
+    var waitingForWrite = false
+    private let writes: AsyncStream<Void>
+    private let writeInput: AsyncStream<Void>.Continuation
+    private var acknowledged: Bool?
+    private var admissionWaiter: CheckedContinuation<Bool, Never>?
+
+    init() { (writes, writeInput) = AsyncStream.makeStream() }
+
+    func send(_ command: HubCommand) async throws {
+        commands.append(command)
+        guard command.type == "talk_begin" else { return }
+        waitingForWrite = true
+        for await _ in writes { break }
+        try Task.checkCancellation()
+        deliveredBegin = command.id
+    }
+
+    func finishWrite() { writeInput.yield(()); writeInput.finish() }
+
+    func acknowledge() {
+        let accepted = deliveredBegin != nil
+        acknowledged = accepted
+        admissionWaiter?.resume(returning: accepted); admissionWaiter = nil
+    }
+
+    func admit(_ id: String) async -> Bool {
+        admissionIDs.append(id)
+        if let acknowledged { return acknowledged }
+        return await withCheckedContinuation { admissionWaiter = $0 }
+    }
+}
+
+@MainActor @Test func releasePreservesCancellableBeginWriteUntilItsAcknowledgementAndUploadsOnce() async throws {
+    let recorder = FakeTalkRecorder(), wire = CancellableBeginWire(), uploads = TalkWire()
+    let talk = TalkController(recorder: recorder, permission: { true })
+    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { uploads.retired.append($0) },
+                   upload: { try await uploads.upload($0, $1, $2) }, admission: { await wire.admit($0) })
+    let intent = UUID()
+    let press = Task { await talk.press(interaction: intent) }
+    try await eventuallySession { wire.waitingForWrite && recorder.active }
+    let begin = try #require(wire.commands.first)
+    let release = talk.releaseInteraction(intent, pendingPress: press)
+    try await eventuallySession { !recorder.active }
+    #expect(uploads.uploads.isEmpty)
+    wire.finishWrite(); await press.value
+    wire.acknowledge(); await release.value
+    #expect(wire.deliveredBegin == begin.id)
+    #expect(wire.admissionIDs == [begin.id])
+    #expect(wire.commands.map(\.type) == ["talk_begin"])
+    #expect(uploads.uploads.count == 1)
+    #expect(begin.payload["talk_id"] == uploads.uploads.first.map { .string($0.0) })
 }
