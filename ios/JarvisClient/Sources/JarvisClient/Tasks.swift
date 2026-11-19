@@ -10,14 +10,18 @@ public struct OpenTask: Identifiable, Equatable, Sendable {
     static func current(in events: [HubEvent], now: Date) -> [OpenTask] {
         guard let snapshot = events.last(where: { $0.kind == .taskSnapshot }),
               let payload = try? snapshot.decodePayload(TaskSnapshot.self) else { return [] }
-        let pending = events.last(where: { $0.kind == .pendingApproval && $0.seq > snapshot.seq })
-            .flatMap { try? $0.decodePayload(PendingApprovals.self) }
+        let pendingEvent = events.last(where: { $0.kind == .pendingApproval })
+        let pending = pendingEvent.flatMap { try? $0.decodePayload(PendingApprovals.self) }
         return payload.tasks.filter { ["queued", "working", "needs_user"].contains($0.state) }.map { task in
             let question: String?
-            if let pending {
-                question = pending.approvals.first {
-                    $0.task_id == task.id && (utcDate($0.expires_at).map { $0 > now } ?? false)
-                }?.question
+            let approval = pending?.approvals.first { $0.task_id == task.id }
+            let unexpiredQuestion = approval.flatMap { approval in
+                utcDate(approval.expires_at).map { $0 > now } == true ? approval.question : nil
+            }
+            if let pendingEvent, pendingEvent.seq > snapshot.seq {
+                question = unexpiredQuestion
+            } else if let approval, approval.question == task.approval_question {
+                question = unexpiredQuestion
             } else { question = task.approval_question }
             return OpenTask(id: task.id, title: task.title, lastReport: task.last_report,
                             waitingForUser: task.state == "needs_user", approvalQuestion: question)
