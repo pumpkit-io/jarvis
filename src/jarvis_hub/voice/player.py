@@ -3,7 +3,7 @@
 import threading
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 from uuid import uuid4
 
@@ -31,9 +31,16 @@ class Clip:
 REWIND_MS = 300
 
 
+@dataclass
+class PlaybackReceipt:
+    """One clip's completed playback, independent of later reply history."""
+
+    completed: bool = False
+
+
 class Player(Protocol):
-    def play(self, clip: Clip, *, starts_reply: bool = False) -> None:
-        """Queue a clip to start the moment the one before it ends; `starts_reply` starts a new `played` record."""
+    def play(self, clip: Clip, *, starts_reply: bool = False) -> PlaybackReceipt:
+        """Queue a clip and return its completion receipt; `starts_reply` starts a new `played` record."""
         ...
 
     def pause(self) -> None:
@@ -94,6 +101,7 @@ _HISTORY_SECONDS = 2
 class _Queued:
     clip: Clip
     starts_reply: bool
+    receipt: PlaybackReceipt = field(default_factory=PlaybackReceipt)
 
 
 class SoundPlayer:
@@ -125,11 +133,13 @@ class SoundPlayer:
         self._open_stream = open_stream
         self._stream: Stream | None = open_stream(sample_rate, self._fill)
 
-    def play(self, clip: Clip, *, starts_reply: bool = False) -> None:
+    def play(self, clip: Clip, *, starts_reply: bool = False) -> PlaybackReceipt:
+        queued = _Queued(clip, starts_reply)
         with self._lock:
-            self._clips.append(_Queued(clip, starts_reply))
+            self._clips.append(queued)
             if len(self._clips) == 1 and self._pos == 0:
                 self._start_current()
+        return queued.receipt
 
     def pause(self) -> None:
         with self._lock:
@@ -239,6 +249,7 @@ class SoundPlayer:
                 n += take
                 if self._pos == len(clip.samples):
                     self._heard.append(clip.text)
+                    self._clips[0].receipt.completed = True
                     self._remember(self._clips.popleft())
                     self._to_flush = max(0, self._to_flush - 1)
                     self._pos = 0
@@ -270,23 +281,25 @@ class RemotePlayer:
     def __init__(self, transport: ClipTransport) -> None:
         self._transport = transport
         self._speech_id: str | None = None
-        self._clips: list[tuple[str, float]] = []
+        self._clips: list[tuple[str, float, PlaybackReceipt]] = []
         self._finished = -1
         self._stopped = True
 
-    def play(self, clip: Clip, *, starts_reply: bool = False) -> None:
+    def play(self, clip: Clip, *, starts_reply: bool = False) -> PlaybackReceipt:
         if starts_reply or self._speech_id is None or self._stopped:
             self._speech_id = uuid4().hex
             self._clips.clear()
             self._finished = -1
             self._stopped = False
         index = len(self._clips)
-        self._clips.append((clip.text, clip.seconds))
+        receipt = PlaybackReceipt()
+        self._clips.append((clip.text, clip.seconds, receipt))
         try:
             self._transport.send_clip(self._speech_id, index, clip)
         except Exception:
             self._stopped = True
             raise
+        return receipt
 
     def report(self, speech_id: str, index: int, state: Literal["started", "finished", "stopped"]) -> bool:
         """Reject unknown streams/clips and out-of-order completions; stopped streams stay frozen."""
@@ -301,6 +314,7 @@ class RemotePlayer:
             if index > self._finished + 1:
                 return False
             self._finished = max(self._finished, index)
+            self._clips[index][2].completed = True
         elif state == "stopped":
             self._stopped = True
         elif state != "started":
@@ -320,10 +334,10 @@ class RemotePlayer:
             self._transport.stop(self._speech_id)
 
     def played(self) -> str:
-        return " ".join(text for text, _ in self._clips[:self._finished + 1] if text)
+        return " ".join(text for text, _, _ in self._clips[:self._finished + 1] if text)
 
     def pending(self) -> float:
-        return 0.0 if self._stopped else sum(seconds for _, seconds in self._clips[self._finished + 1:])
+        return 0.0 if self._stopped else sum(seconds for _, seconds, _ in self._clips[self._finished + 1:])
 
     def close(self) -> None:
         self.stop()

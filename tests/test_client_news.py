@@ -245,7 +245,7 @@ async def test_phone_conversation_tools_leave_mac_listening_callbacks_untouched(
         await speech.close()
 
 
-async def test_reconnected_focus_waits_for_playback_before_batched_announcement() -> None:
+async def test_live_focus_waits_for_playback_before_batched_announcement() -> None:
     from tests.fakes import Set
 
     clock, output, metrics = FakeClock(), RecordingOutput(), RecordingMetrics()
@@ -269,10 +269,11 @@ async def test_reconnected_focus_waits_for_playback_before_batched_announcement(
     running = asyncio.create_task(hub.run(inputs()))
     try:
         await until(lambda: remote.texts == ["Working, sir."])
-        hub.clients.disconnect("phone")
+        hub.clients.take_focus("terminal")
+        hub.clients.disconnect("terminal")
         arrival.set()
         await reported.wait()
-        hub.attach_client(client)
+        hub.clients.take_focus("phone")
         await asyncio.sleep(0.01)
         clock.advance(3)
         await asyncio.sleep(0.01)
@@ -527,7 +528,9 @@ async def test_focus_move_after_announcement_was_heard_does_not_repeat_it() -> N
         arrival.set()
         await until(lambda: remote.texts == ["The fix is ready."] and "The fix is ready." in output.replies)
         remote.finish()
+        events = list(remote.events)
         hub.clients.take_focus("terminal")
+        assert remote.events == events
         end.set()
         await running
         assert local.texts == []
@@ -575,8 +578,16 @@ async def test_focus_move_during_mac_announcement_leaves_mac_available_for_next_
         await until(lambda: remote.texts == ["One update, sir: ready."])
         assert local.voices.count("closing") == closing
         local.hold = False
+        chimes = local.voices.count("chime")
         audio.wake()
         await until(lambda: audio.capturing[-1:] == [True])
+        await until(lambda: local.voices.count("chime") == chimes + 1)
+        clock.advance(6.1)
+        await until(lambda: local.voices.count("closing") == closing + 1)
+        await until(lambda: audio.capturing[-1:] == [False])
+        audio.wake()
+        await until(lambda: audio.capturing[-1:] == [True])
+        await until(lambda: local.voices.count("chime") == chimes + 2)
         audio.say("At the desk again")
         await until(lambda: "Back at the desk." in local.texts)
         assert remote.texts == ["One update, sir: ready."]

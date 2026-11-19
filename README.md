@@ -58,6 +58,10 @@ Say “Hey Jarvis” and your request, in one breath if you wish. “Hi Jarvis�
 
 Replies start with generated content about the request; slow generation stays silent without a holding sentence. Background work is acknowledged before it starts.
 
+With `--text --speak`, spoken news waits for current speech to finish and batches waiting updates into one Announcement. This keeps unheard updates together when Focus moves to another Client. News still speaks after terminal input ends. User input interrupts an Announcement and preserves its unheard news.
+
+A phone with unfinished playback does not keep the terminal session open. Undelivered remote news stays saved for the next launch.
+
 The [voice trace](docs/notes/voice-tracing.md) correlates captured requests, endpointing, transcription, Hub turns and estimated meaningful playback. It distinguishes missing measurements from zero delay.
 
 Type into the same terminal during voice mode for a text-only reply. Details appear on screen and in `.jarvis/show.log`. Ctrl-D or Ctrl-C stops the Hub. Each launch starts a fresh conversation; saved Tasks and waits survive restart, and interrupted Subagents keep their branches.

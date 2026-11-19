@@ -16,7 +16,7 @@ from typing import Any, Literal, ParamSpec, Protocol, TypeVar
 import numpy as np
 
 from jarvis_hub.voice.language import Lang, voice_for
-from jarvis_hub.voice.player import Clip, Player, Samples
+from jarvis_hub.voice.player import Clip, PlaybackReceipt, Player, Samples
 from jarvis_hub.voice.splitter import SentenceSplitter
 from jarvis_hub.voice.tts import Synthesizer
 
@@ -106,6 +106,11 @@ class _Reply:
     gaps: int = 0
     audio_s: float = 0.0
     generation_done: bool = False
+    stopped: bool = False
+    closed: bool = False
+    failed: bool = False
+    played: bool = False
+    receipts: list[PlaybackReceipt] = field(default_factory=list[PlaybackReceipt])
     # Later clips remain in pending() after this reply has drained.
     trailing_audio_s: float = 0.0
 
@@ -121,6 +126,7 @@ class _Cached:
     name: ClipName
     lang: Lang
     reply: _Reply | None = None
+    cue_generation: int | None = None
 
 
 @dataclass(frozen=True)
@@ -147,6 +153,7 @@ class Speech:
         self._tts = tts
         self._player = player
         self._players: list[Player] = [player]
+        self._retired_players: list[Player] = []
         self._last_player = player
         self._clock = clock
         self._metrics = metrics
@@ -163,6 +170,7 @@ class Speech:
         self._reply: _Reply | None = None
         self._replies: dict[int, _Reply] = {}
         self._generation = 0
+        self._local_cue_generation = 0
         self._worker: asyncio.Task[None] | None = None
         self._loading: asyncio.Future[None] | None = None
 
@@ -173,19 +181,29 @@ class Speech:
 
     def say(self, name: ClipName, lang: Lang, *, in_reply: bool = False) -> None:
         """Queue a nonverbal cue; `in_reply` associates its playback with the reply `begin` opened."""
-        self._queue.put_nowait(_Cached(name, lang, self._reply if in_reply else None))
+        reply = self._reply if in_reply else None
+        if in_reply and reply is None:
+            return
+        generation = None
+        if reply is None:
+            self._retired_players = [retired for retired in self._retired_players if retired is not self._player]
+            generation = self._local_cue_generation
+        self._queue.put_nowait(_Cached(name, lang, reply, generation))
 
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
-              destination: Player | None = None, allowed: Callable[[], bool] | None = None) -> None:
-        """Bind the destination for this reply; recheck availability before synthesis and delivery.
-        `heard_at` retains the User's speech-end timestamp for latency and reply ownership."""
+              destination: Player | None = None, allowed: Callable[[], bool] | None = None) -> Callable[[], bool]:
+        """Bind a reply's destination and return a completion check unaffected by later replies.
+        `heard_at` keeps the User's speech-end timestamp; availability is rechecked before synthesis and delivery."""
         player = destination if destination is not None else self._player
         if not any(p is player for p in self._players):
             self._players.append(player)
+        self._retired_players = [retired for retired in self._retired_players if retired is not player]
         self._last_player = player
         self._reply = _Reply(turn, lang, self._clock.now(), heard_at, owner=owner, player=player, allowed=allowed)
         self._prune_replies()
         self._replies[turn] = self._reply
+        reply = self._reply
+        return lambda: self._reply_played(reply)
 
     def feed(self, text: str) -> None:
         reply = self._reply
@@ -202,6 +220,7 @@ class Speech:
         if reply is None:
             return
         self._say(reply.splitter.end_block())
+        reply.closed = True
         self._queue.put_nowait(_End(reply))
         self._reply = None
 
@@ -209,6 +228,7 @@ class Speech:
         """Drop the reply and everything queued or playing."""
         self._prune_replies()
         for reply in self._replies.values():
+            reply.stopped = True
             self._record({
                 "kind": "speech_stop", "turn": reply.turn, "request_at": reply.heard_at,
                 "request_id": reply.owner[0] if reply.owner is not None else None,
@@ -231,6 +251,25 @@ class Speech:
             except Exception as e:
                 self._notice(f"Could not stop speech: {type(e).__name__}: {e}")
 
+    def retire(self, destination: Player | None) -> None:
+        """Stop this output and its playback waits until a new reply or local cue reactivates it."""
+        player = destination if destination is not None else self._player
+        if player is self._player:
+            self._local_cue_generation += 1
+        self._prune_replies()
+        for reply in self._replies.values():
+            if reply.player is player:
+                reply.stopped = True
+        if self._reply is not None and self._reply.stopped:
+            self._reply = None
+        if not any(retired is player for retired in self._retired_players):
+            self._retired_players.append(player)
+            try:
+                player.stop()
+            except Exception as e:
+                self._notice(f"Could not stop speech: {type(e).__name__}: {e}")
+        self._prune_replies()
+
     def played(self) -> str:
         return self._last_player.played()
 
@@ -240,10 +279,13 @@ class Speech:
             with contextlib.suppress(Exception):
                 await self._loading
         await self._queue.join()
-        left, since = sum(p.pending() for p in self._players), self._clock.now()
+        def pending() -> float:
+            return sum(p.pending() for p in self._players if not any(retired is p for retired in self._retired_players))
+
+        left, since = pending(), self._clock.now()
         while left > 0:
             await self._clock.sleep(0.05)
-            if (now_left := sum(p.pending() for p in self._players)) < left:
+            if (now_left := pending()) < left:
                 left, since = now_left, self._clock.now()
             elif stall_timeout is not None and self._clock.now() - since >= stall_timeout:
                 return
@@ -294,6 +336,8 @@ class Speech:
                 if ready:
                     await self._handle(item)
             except Exception as e:
+                if isinstance(item, _Say):
+                    item.reply.failed = True
                 self._notice(f"Could not speak a sentence: {type(e).__name__}: {e}")
             finally:
                 if isinstance(item, _End):
@@ -301,27 +345,38 @@ class Speech:
                     self._prune_replies()
                 self._queue.task_done()
 
+    def _reply_played(self, reply: _Reply) -> bool:
+        if not reply.played and reply.closed and not reply.stopped and not reply.failed and reply.chunks > 0:
+            reply.played = len(reply.receipts) == reply.chunks and all(receipt.completed for receipt in reply.receipts)
+        return reply.played
+
     def _prune_replies(self) -> None:
+        for reply in self._replies.values():
+            self._reply_played(reply)
         self._replies = {
             turn: reply for turn, reply in self._replies.items()
-            if not reply.generation_done or (
+            if not reply.stopped and (not reply.generation_done or (
                 reply.audio_s > 0 and (reply.player or self._player).pending() > reply.trailing_audio_s + 1e-9
-            )
+            ))
         }
 
     async def _handle(self, item: _Say | _Cached | _End) -> None:
         match item:
             case _Say(reply, text):
-                if reply.allowed is not None and not reply.allowed():
+                if reply.stopped or (reply.allowed is not None and not reply.allowed()):
                     return
                 generation = self._generation
                 voice = voice_for(reply.lang)
                 samples = await asyncio.get_running_loop().run_in_executor(
                     self._thread, self._tts.synthesize, text, voice
                 )
-                if generation == self._generation and (reply.allowed is None or reply.allowed()):
+                if generation == self._generation and not reply.stopped and (reply.allowed is None or reply.allowed()):
                     self._play(Clip(text, voice, samples, self._tts.sample_rate), reply, sentence=True)
-            case _Cached(name, lang, reply):
+            case _Cached(name, lang, reply, cue_generation):
+                if cue_generation is not None and cue_generation != self._local_cue_generation:
+                    return
+                if reply is not None and reply.stopped:
+                    return
                 starts = self._play(self._cache[name, lang], reply, sentence=False)
                 if name == "chime" and self._on_chime is not None:
                     self._on_chime(starts)
@@ -331,7 +386,9 @@ class Speech:
     def _play(self, clip: Clip, reply: _Reply | None, *, sentence: bool) -> float:
         """Plays `clip` after what is queued; returns when it starts."""
         player = reply.player if reply is not None and reply.player is not None else self._player
-        if reply is not None and reply.allowed is not None and not reply.allowed():
+        if any(retired is player for retired in self._retired_players) or (
+            reply is not None and (reply.stopped or (reply.allowed is not None and not reply.allowed()))
+        ):
             return self._clock.now()
         self._prune_replies()
         for queued in self._replies.values():
@@ -349,7 +406,9 @@ class Speech:
             elif sentence and player.pending() == 0:
                 reply.gaps += 1
             reply.audio_s += clip.seconds
-        player.play(clip, starts_reply=starts_reply)
+        receipt = player.play(clip, starts_reply=starts_reply)
+        if reply is not None and sentence and clip.seconds > 0:
+            reply.receipts.append(receipt)
         if starts_reply and reply is not None and player is self._player and self._on_reply_audio is not None:
             self._on_reply_audio(reply.heard_at, reply.owner)
         return starts

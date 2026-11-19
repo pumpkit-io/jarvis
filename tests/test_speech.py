@@ -721,3 +721,57 @@ async def test_backend_failure_emits_operational_status_without_a_spoken_fallbac
     assert player.texts == []
     assert any("Model unavailable" in n and "transport disconnected" in n and "Try a new request" in n for n in output.notices)
     assert len(backend.session("talker").received) == 2
+
+
+async def test_fresh_local_cue_after_retirement_does_not_revive_queued_cues_or_reply_audio() -> None:
+    from jarvis_hub.clients import Client
+    from jarvis_hub.hub import Line
+    from jarvis_hub.voice.player import Samples
+
+    entered = threading.Event()
+
+    class GatedTts(FakeTts):
+        def synthesize(self, text: str, voice: str) -> Samples:
+            if text == "Old sentence.":
+                entered.set()
+            return super().synthesize(text, voice)
+
+    clock, output, metrics = FakeClock(), RecordingOutput(), RecordingMetrics()
+    tts, player = GatedTts(), RecordingPlayer()
+    starts: list[float] = []
+    speech = Speech(tts, player, clock, metrics=metrics, notice=output.notice, on_chime=starts.append)
+    finish, end = asyncio.Event(), asyncio.Event()
+    backend = FakeBackend(clock, [[Text("Old sentence. "), Gate(finish), Text("Stale ending.")]])
+    hub = speaking_hub(backend, output, metrics, speech)
+
+    async def inputs() -> AsyncIterator[Line]:
+        yield Line("An old request", clock.now())
+        await end.wait()
+
+    speech.start()
+    await speech.idle()
+    tts.hold.clear()
+    await hub.start()
+    running = asyncio.create_task(hub.run(inputs()))
+    try:
+        await until(entered.is_set)
+        speech.say("chime", "en")
+        speech.say("ready", "en", in_reply=True)
+        hub.clients.disconnect("terminal")
+        hub.attach_client(Client("terminal", "terminal", connected=True, can_speak=True))
+        speech.say("closing", "en")
+        tts.hold.set()
+        await speech.idle()
+        assert player.voices == ["closing"]
+        assert starts == []
+        finish.set()
+        await until(lambda: output.replies == ["Old sentence. Stale ending."])
+        await speech.idle()
+        assert player.voices == ["closing"]
+        end.set()
+        await running
+    finally:
+        tts.hold.set()
+        running.cancel()
+        await hub.close()
+        await speech.close()

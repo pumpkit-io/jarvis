@@ -35,7 +35,7 @@ import soxr
 
 from jarvis_hub.voice.engines import EngineChoice, load_engines
 from jarvis_hub.voice.input import FRAME, SAMPLE_RATE, Capture, Listening, Push
-from jarvis_hub.voice.player import Clip
+from jarvis_hub.voice.player import Clip, PlaybackReceipt
 from jarvis_hub.voice.state import InputEvent, Timing, WakeWord
 from jarvis_hub.voice.tts import KokoroSynthesizer
 from jarvis_hub.voice.transcription import TranscriptionService
@@ -60,8 +60,8 @@ class Clock:
 class SilentPlayer:
     """Plays at once and keeps nothing; the run is about input, and nothing reaches a speaker to echo."""
 
-    def play(self, clip: Clip, *, starts_reply: bool = False) -> None:
-        pass
+    def play(self, clip: Clip, *, starts_reply: bool = False) -> PlaybackReceipt:
+        return PlaybackReceipt(completed=True)
 
     def pause(self) -> None:
         pass
