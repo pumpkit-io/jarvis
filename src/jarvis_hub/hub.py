@@ -328,6 +328,7 @@ def _told(news: News) -> _TalkerInput:
 class _Announcement:
     news: News
     client_id: str
+    speaks: bool
     held: bool = False
     reply: str | None = None
 
@@ -622,22 +623,30 @@ class Hub:
         if not self._loops:
             return
         announcement = self._announcement
-        if announcement is not None and (
-            announcement.client_id != self.clients.focus or not self._client_can_speak(announcement.client_id)
-        ):
-            self._announcement = None
-            heard = announcement.reply is not None and (
-                " ".join(announcement.reply.split()) == " ".join(self._speech.played().split())
+        if announcement is not None:
+            client = self.clients.get(announcement.client_id)
+            visible = bool(client is not None and client.connected and client.can_show_text)
+            can_speak = self._client_can_speak(announcement.client_id)
+            same_focus = announcement.client_id == self.clients.focus
+            told = announcement.reply is not None and (
+                not announcement.speaks or " ".join(announcement.reply.split()) == " ".join(self._speech.played().split())
             )
-            self._speech.stop()
-            if announcement.client_id == TERMINAL and self._floor is not None:
-                self._floor.typed_input()
-            if not heard:
-                announcement.held = True
-                self._held.extend(announcement.news.leaves())
-                self._telling = ()
-                self._pending += announcement.news.count
-                self._settled.clear()
+            if announcement.speaks and (not same_focus or not can_speak):
+                self._speech.stop()
+                if announcement.client_id == TERMINAL and self._floor is not None:
+                    self._floor.typed_input()
+            if same_focus and visible and not can_speak:
+                announcement.speaks = False
+                if announcement.reply is not None:
+                    self._announcement = None
+            elif not same_focus or not (can_speak if announcement.speaks else visible):
+                self._announcement = None
+                if not told:
+                    announcement.held = True
+                    self._held.extend(announcement.news.leaves())
+                    self._telling = ()
+                    self._pending += announcement.news.count
+                    self._settled.clear()
         if not self._focus_available():
             for news in self._news:
                 self._held.extend(news.leaves())
@@ -1168,6 +1177,12 @@ class Hub:
                 item = replace(item, news=rest)
                 if item.kind == "event" and rest is None:
                     continue
+            if item.kind == "event" and item.news is not None and not self._focus_available():
+                self._held.extend(item.news.leaves())
+                if self._input_ended.is_set() and self._pending == len(self._held):
+                    self._settled.set()
+                self._persist()
+                continue
             # How many of the item's posted items wait for the usage limit to reset: they stay pending.
             parked = 0
             announcement: _Announcement | None = None
@@ -1187,8 +1202,9 @@ class Hub:
                 self._user_source = uuid.uuid4().hex if self._user_text else ""
                 self._user_client_id = item.client_id
                 self._telling = item.news.away_leaves() if item.news else ()
-                if item.kind == "event" and item.spoken and item.news and self._client_can_speak(self.clients.focus):
-                    announcement = _Announcement(item.news, self.clients.focus)
+                if item.kind == "event" and item.news:
+                    announcement = _Announcement(item.news, self.clients.focus,
+                                                 speaks=item.spoken and self._client_can_speak(self.clients.focus))
                     self._announcement = announcement
                 self._approvals.turn_began(self._user_text)
                 if item.kind == "user" and self._limit.blocks("talker"):
@@ -1205,7 +1221,7 @@ class Hub:
                                                owner=owner, scope_authority=authority)
                 self._approvals.turn_ended(completed=end.outcome == "completed")
                 if announcement is not None and self._announcement is announcement:
-                    if end.outcome == "completed":
+                    if end.outcome == "completed" and announcement.speaks:
                         finishing = asyncio.create_task(self._announcement_finished(announcement))
                         self._announcing.add(finishing)
                         finishing.add_done_callback(self._announcing.discard)
