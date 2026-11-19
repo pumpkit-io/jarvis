@@ -110,6 +110,11 @@ async def test_silence_stops_only_destination_while_model_text_continues(tmp_pat
     voice = VoiceMode(audio=ScriptedAudio(clock), tts=tts, player=local, clock=clock,
                       metrics=RecordingMetrics(), notice=lambda _: None, timing=Timing(6, 4, 6, .5)) if voice_mode else None
     async with remote_rig(tmp_path, backend, voice=voice, tts=tts, local=local) as (session, door, hub, _log, _backend, phones, _pairing):
+        if voice_mode:
+            await until(lambda: local.voices == ['ready'])
+        else:
+            assert local.texts == []
+        startup_local = list(local.texts)
         async with connect(session, door, phones[0].token) as socket:
             await foreground(socket)
             await hub.admit_line(Line('Phone', 0, typed=False, client_id=phones[0].client.id))
@@ -125,10 +130,10 @@ async def test_silence_stops_only_destination_while_model_text_continues(tmp_pat
             assert frames[-1]['payload']['reason'] == 'complete'
             assert not any(frame['type'] == 'speech_clip' for frame in frames)
             assert 'Ending.' not in [text for text, _ in tts.calls]
-            previous_local = list(local.texts)
+            assert local.texts == startup_local
             await hub.admit_line(Line('Mac', 0, typed=False))
             await through(socket, 'reply_end')
-            await until(lambda: local.texts == [*previous_local, 'Mac reply.'])
+            await until(lambda: local.texts == [*startup_local, 'Mac reply.'])
 
 
 @pytest.mark.parametrize("in_process", [False, True])
