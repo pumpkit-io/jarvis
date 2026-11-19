@@ -16,7 +16,7 @@ from typing import Any, Literal, ParamSpec, Protocol, TypeVar
 import numpy as np
 
 from jarvis_hub.voice.language import Lang, voice_for
-from jarvis_hub.voice.player import Clip, Player, Samples
+from jarvis_hub.voice.player import Clip, PlaybackReceipt, Player, Samples
 from jarvis_hub.voice.splitter import SentenceSplitter
 from jarvis_hub.voice.tts import Synthesizer
 
@@ -107,6 +107,10 @@ class _Reply:
     audio_s: float = 0.0
     generation_done: bool = False
     stopped: bool = False
+    closed: bool = False
+    failed: bool = False
+    played: bool = False
+    receipts: list[PlaybackReceipt] = field(default_factory=list[PlaybackReceipt])
     # Later clips remain in pending() after this reply has drained.
     trailing_audio_s: float = 0.0
 
@@ -178,9 +182,9 @@ class Speech:
         self._queue.put_nowait(_Cached(name, lang, self._reply if in_reply else None))
 
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
-              destination: Player | None = None, allowed: Callable[[], bool] | None = None) -> None:
-        """Bind the destination for this reply; recheck availability before synthesis and delivery.
-        `heard_at` retains the User's speech-end timestamp for latency and reply ownership."""
+              destination: Player | None = None, allowed: Callable[[], bool] | None = None) -> Callable[[], bool]:
+        """Bind a reply's destination and return a completion check unaffected by later replies.
+        `heard_at` keeps the User's speech-end timestamp; availability is rechecked before synthesis and delivery."""
         player = destination if destination is not None else self._player
         if not any(p is player for p in self._players):
             self._players.append(player)
@@ -189,6 +193,8 @@ class Speech:
         self._reply = _Reply(turn, lang, self._clock.now(), heard_at, owner=owner, player=player, allowed=allowed)
         self._prune_replies()
         self._replies[turn] = self._reply
+        reply = self._reply
+        return lambda: self._reply_played(reply)
 
     def feed(self, text: str) -> None:
         reply = self._reply
@@ -205,6 +211,7 @@ class Speech:
         if reply is None:
             return
         self._say(reply.splitter.end_block())
+        reply.closed = True
         self._queue.put_nowait(_End(reply))
         self._reply = None
 
@@ -212,6 +219,7 @@ class Speech:
         """Drop the reply and everything queued or playing."""
         self._prune_replies()
         for reply in self._replies.values():
+            reply.stopped = True
             self._record({
                 "kind": "speech_stop", "turn": reply.turn, "request_at": reply.heard_at,
                 "request_id": reply.owner[0] if reply.owner is not None else None,
@@ -237,6 +245,7 @@ class Speech:
     def retire(self, destination: Player | None) -> None:
         """Stop this destination and exclude it from playback waits until a new reply binds it."""
         player = destination if destination is not None else self._player
+        self._prune_replies()
         for reply in self._replies.values():
             if reply.player is player:
                 reply.stopped = True
@@ -316,6 +325,8 @@ class Speech:
                 if ready:
                     await self._handle(item)
             except Exception as e:
+                if isinstance(item, _Say):
+                    item.reply.failed = True
                 self._notice(f"Could not speak a sentence: {type(e).__name__}: {e}")
             finally:
                 if isinstance(item, _End):
@@ -323,7 +334,14 @@ class Speech:
                     self._prune_replies()
                 self._queue.task_done()
 
+    def _reply_played(self, reply: _Reply) -> bool:
+        if not reply.played and reply.closed and not reply.stopped and not reply.failed and reply.chunks > 0:
+            reply.played = len(reply.receipts) == reply.chunks and all(receipt.completed for receipt in reply.receipts)
+        return reply.played
+
     def _prune_replies(self) -> None:
+        for reply in self._replies.values():
+            self._reply_played(reply)
         self._replies = {
             turn: reply for turn, reply in self._replies.items()
             if not reply.stopped and (not reply.generation_done or (
@@ -373,7 +391,9 @@ class Speech:
             elif sentence and player.pending() == 0:
                 reply.gaps += 1
             reply.audio_s += clip.seconds
-        player.play(clip, starts_reply=starts_reply)
+        receipt = player.play(clip, starts_reply=starts_reply)
+        if reply is not None and sentence and clip.seconds > 0:
+            reply.receipts.append(receipt)
         if starts_reply and reply is not None and player is self._player and self._on_reply_audio is not None:
             self._on_reply_audio(reply.heard_at, reply.owner)
         return starts

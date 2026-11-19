@@ -58,7 +58,7 @@ Say “Hey Jarvis” and your request, in one breath if you wish. “Hi Jarvis�
 
 Replies start with generated content about the request; slow generation stays silent without a holding sentence. Background work is acknowledged before it starts.
 
-With `--text --speak`, spoken news waits for current speech to finish and batches waiting updates into one Announcement. This keeps unheard updates together when Focus moves to another Client. News still speaks after terminal input ends.
+With `--text --speak`, spoken news waits for current speech to finish and batches waiting updates into one Announcement. This keeps unheard updates together when Focus moves to another Client. News still speaks after terminal input ends. User input interrupts an Announcement and preserves its unheard news.
 
 A phone with unfinished playback does not keep the terminal session open. Undelivered remote news stays saved for the next launch.
 

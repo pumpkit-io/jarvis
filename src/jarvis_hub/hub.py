@@ -121,7 +121,7 @@ class Speech(Protocol):
     """Says the Talker's replies aloud as they stream (`jarvis_hub.voice.speech.Speech`)."""
 
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
-              destination: Player | None = None, allowed: Callable[[], bool] | None = None) -> None: ...
+              destination: Player | None = None, allowed: Callable[[], bool] | None = None) -> Callable[[], bool] | None: ...
 
     def say(self, name: ClipName, lang: Lang, *, in_reply: bool = False) -> None: ...
 
@@ -337,7 +337,7 @@ class _NewsDelivery:
     speaks: bool
     player: Player | None
     follows_focus: bool
-    turn: int | None = None
+    receipt: Callable[[], bool] | None = None
     held: bool = False
     reply: str | None = None
 
@@ -460,7 +460,6 @@ class Hub:
         self._metrics = metrics
         self._orchestrator_timeout = orchestrator_timeout
         self._speech: Speech = speech if speech is not None else _Silent()
-        self._speech_turn: int | None = None
         # In voice mode a typed line gets a text-only reply; with `--text --speak` it is spoken.
         self._speak_typed = speak_typed
         self._on_end_conversation = on_end_conversation
@@ -643,7 +642,9 @@ class Hub:
         if not self._loops:
             return
         delivery = self._news_delivery
-        if delivery is not None:
+        if delivery is not None and self._news_delivery_told(delivery):
+            self._news_delivery = None
+        elif delivery is not None:
             client = self.clients.get(delivery.client_id)
             visible = bool(client is not None and client.connected and client.can_show_text)
             can_speak = self._client_can_speak(delivery.client_id)
@@ -691,15 +692,12 @@ class Hub:
 
     def _news_delivery_told(self, delivery: _NewsDelivery) -> bool:
         return delivery.reply is not None and (
-            not delivery.speaks or (
-                delivery.turn == self._speech_turn
-                and " ".join(delivery.reply.split()) == " ".join(self._speech.played().split())
-            )
+            not delivery.speaks or (delivery.receipt is not None and delivery.receipt())
         )
 
     def _hold_news_delivery(self, delivery: _NewsDelivery) -> None:
         self._news_delivery = None
-        if delivery.held:
+        if delivery.held or self._news_delivery_told(delivery):
             return
         delivery.held = True
         self._held.extend(delivery.news.leaves())
@@ -783,6 +781,11 @@ class Hub:
                         (line.request_id, line.revision)
                     ):
                         continue
+                    await self.interrupt()
+                elif self._floor is None and self._news_delivery is not None and (
+                    self._news_delivery.follows_focus and self._news_delivery.speaks
+                    and not self._news_delivery_told(self._news_delivery)
+                ):
                     await self.interrupt()
                 if line.typed:
                     self._scopes.typed(text)
@@ -1491,16 +1494,14 @@ class Hub:
             self._news_delivery = None
         audible = self._turn_spoken and self._client_can_speak(destination_id)
         speech = self._speech if audible else _Silent()
-        if delivery is not None:
-            delivery.turn = turn
-        if audible:
-            self._speech_turn = turn
         player = self._client_players.get(destination_id)
-        speech.begin(self._lang, turn=turn, heard_at=arrived if kind == "user" else None, owner=owner,
+        receipt = speech.begin(self._lang, turn=turn, heard_at=arrived if kind == "user" else None, owner=owner,
                      destination=player,
                      allowed=lambda: self._client_can_speak(destination_id)
                      and self._client_players.get(destination_id) is player
                      and (kind != "event" or self.clients.focus == destination_id))
+        if delivery is not None:
+            delivery.receipt = receipt
         self._replying = show
         try:
             async for event in self._guarded(session.send(message)):
@@ -1799,8 +1800,6 @@ class Hub:
         """A held Talker needs no model call to show its availability."""
         speech = self._speech if item.spoken else _Silent()
         self._turn_count += 1
-        if item.spoken:
-            self._speech_turn = self._turn_count
         speech.begin(self._lang, turn=self._turn_count, heard_at=item.arrived)
         self._limit_notice(self._limit.tell())
         self._persist()

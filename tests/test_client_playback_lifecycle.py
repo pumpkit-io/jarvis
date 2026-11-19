@@ -124,3 +124,51 @@ async def test_replaced_player_retires_old_audio_without_redirecting_the_reply()
         running.cancel()
         await hub.close()
         await speech.close()
+
+
+async def test_typed_user_reply_survives_focus_move_after_interrupting_announcement_on_same_player() -> None:
+    clock, output, metrics = FakeClock(), RecordingOutput(), RecordingMetrics()
+    local, remote = RecordingPlayer(hold=True), RecordingPlayer()
+    arrival, ask, end = (asyncio.Event() for _ in range(3))
+    backend = FakeBackend(clock, [[Tool("delegate", {"request": "Fix typo", "context": ""})],
+                                  [Text("Task ready.")], [Text("Ordinary answer.")], [Text("One retained news report.")]],
+                          orchestrator=[[Gate(arrival), Tool("report", {"task_id": "T1", "spoken": "Ready"})]])
+    speech = Speech(FakeTts(), local, clock, metrics=metrics, notice=output.notice)
+    hub = make_hub(backend, output, metrics, speech=speech)
+    client = Client("phone", "iphone", connected=False, can_speak=True)
+    hub.attach_client(client, player=remote)
+
+    async def inputs() -> AsyncIterator[Line]:
+        yield Line("Fix typo", clock.now())
+        await ask.wait()
+        yield Line("An ordinary typed question", clock.now())
+        await end.wait()
+
+    speech.start()
+    await hub.start()
+    running = asyncio.create_task(hub.run(inputs()))
+    try:
+        await until(lambda: len(backend.all_sessions("orchestrator")) == 1)
+        arrival.set()
+        await until(lambda: local.texts == ["Task ready."])
+        ask.set()
+        await until(lambda: local.texts == ["Task ready.", "Ordinary answer."])
+        events = list(local.events)
+        hub.attach_client(Client("phone", "iphone", connected=True, can_speak=True))
+        hub.clients.take_focus("phone")
+        assert local.pending() > 0
+        assert "stop" not in local.events[len(events):]
+        assert remote.texts == []
+        local.finish()
+        clock.advance(0.1)
+        await until(lambda: remote.texts == ["One retained news report."])
+        message = backend.all_sessions("talker")[0].received[-1]
+        assert message.startswith('<event source="hub" away="1">')
+        assert message.count('task="T1"') == 1
+        assert len(backend.all_sessions("talker")[0].received) == 5
+        end.set()
+        await running
+    finally:
+        running.cancel()
+        await hub.close()
+        await speech.close()

@@ -118,7 +118,7 @@ class _ObservedSpeech:
         self._waits: set[asyncio.Task[None]] = set()
 
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
-              destination: Player | None = None, allowed: Callable[[], bool] | None = None) -> None:
+              destination: Player | None = None, allowed: Callable[[], bool] | None = None) -> Callable[[], bool] | None:
         self._remote = destination is not None
         self._destination = destination
         self._dropping = not self._remote and self._moved_on(heard_at, owner)
@@ -127,7 +127,7 @@ class _ObservedSpeech:
         self._replies += 1
         self._heard_at = heard_at
         self._owner = owner
-        self._speech.begin(lang, turn=turn, heard_at=heard_at, owner=owner, destination=destination, allowed=allowed)
+        return self._speech.begin(lang, turn=turn, heard_at=heard_at, owner=owner, destination=destination, allowed=allowed)
 
     def feed(self, text: str) -> None:
         if not self._dropping:

@@ -528,7 +528,9 @@ async def test_focus_move_after_announcement_was_heard_does_not_repeat_it() -> N
         arrival.set()
         await until(lambda: remote.texts == ["The fix is ready."] and "The fix is ready." in output.replies)
         remote.finish()
+        events = list(remote.events)
         hub.clients.take_focus("terminal")
+        assert remote.events == events
         end.set()
         await running
         assert local.texts == []
