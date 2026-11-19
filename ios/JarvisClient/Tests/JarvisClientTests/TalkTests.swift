@@ -563,3 +563,47 @@ actor HeldUploadResponse {
     #expect(recorder.starts == 2)
     #expect(talk.state == .recording)
 }
+
+@MainActor @Test func unpairCancelsAcknowledgedUploadingTalkOnDepartingClientAndIgnoresLateResults() async throws {
+    let first = FakeSocket(), next = FakeSocket(), recorder = FakeTalkRecorder(), store = MemoryPairingStore()
+    store.record = try testPairingCredentials()
+    let response = HeldUploadResponse()
+    let controller = TalkController(recorder: recorder, permission: { true })
+    var connections = 0
+    let service = PairingService { _ in
+        (Data(#"{"version":1,"client_id":"iphone-2","device_token":"new-secret","mac_name":"Mac","origin":"https://mac.example"}"#.utf8), 201)
+    }
+    let session = AppSession(store: store, service: service, makeClient: { _ in
+        connections += 1
+        let socket = connections == 1 ? first : next
+        return HubClient(transport: HubTransport(connect: { _ in socket }))
+    }, makePaths: { nil }, talk: controller, uploadTalk: TalkUpload { try await response.post($0) })
+    await session.launch(); await first.ready()
+    try await eventuallySession { session.talk.canPress }
+    await session.talk.press()
+    let oldID = try #require(session.talk.talkID)
+    let begin = try #require(await first.sent.first(where: { $0.type == "talk_begin" }))
+    await first.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(begin.id)\",\"ok\":true,\"result\":{}}")
+    let released = Task { await session.talk.release() }
+    try await eventuallySession { await response.waiting }
+    await session.unpair()
+    let cancel = try #require(await first.sent.first(where: { $0.type == "talk_cancel" }))
+    #expect(cancel.payload == ["talk_id": .string(oldID)])
+    #expect(await first.closed)
+    #expect(store.record == nil)
+    await session.pair(try PairingInput(origin: "https://mac.example", code: "001234"))
+    await next.ready()
+    try await eventuallySession { session.talk.canPress }
+    await session.talk.press()
+    let freshID = try #require(session.talk.talkID)
+    await response.finish(); await released.value
+    await first.text(event(3, "heard", #"{"request_id":"new-request","text":"old transcript","spoken":true}"#))
+    await first.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(cancel.id)\",\"ok\":true,\"result\":{}}")
+    #expect(session.credentials?.deviceToken == "new-secret")
+    #expect(session.talk.talkID == freshID)
+    #expect(session.talk.state == .recording)
+    #expect(session.talk.requestID == nil)
+    #expect(session.conversation.rows.isEmpty)
+    #expect(await next.sent.contains(where: { $0.payload["talk_id"] == .string(oldID) }) == false)
+    await session.unpair()
+}

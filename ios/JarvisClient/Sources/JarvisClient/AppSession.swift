@@ -196,7 +196,8 @@ import Observation
         let client = try makeClient(credentials)
         self.credentials = credentials; self.client = client; connection = .connecting
         talk.configure(ready: false, send: { [weak self] command in
-            guard let self, self.generation == owner, self.client === client else { throw HubProtocolError.notConnected }
+            guard let self, self.client === client,
+                  self.generation == owner || command.type == "talk_cancel" else { throw HubProtocolError.notConnected }
             try await self.sendCommand(client, command)
         }, retire: { await client.retireTalkBegin(id: $0) }, upload: { [weak self] id, commandID, pcm in
             guard let self, self.generation == owner else { throw CancellationError() }

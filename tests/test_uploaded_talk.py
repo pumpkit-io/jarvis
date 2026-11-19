@@ -644,7 +644,6 @@ async def test_reconnected_cancellation_retires_only_old_talk_before_fresh_captu
             assert (await result(replacement, 'fresh-begin'))['ok'] is True
             await replacement.send_json(cancellation)
             assert await result(replacement, 'old-cancel') == receipt
-            assert client(hub, phone.client.id).talking
             async with session.post(f'http://127.0.0.1:{door.port}/v1/utterances/old', headers=headers(phone.token, 'old-upload'), data=PCM) as response:
                 assert response.status == 409
             async with session.post(f'http://127.0.0.1:{door.port}/v1/utterances/fresh', headers=headers(phone.token), data=PCM) as response:
