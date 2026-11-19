@@ -586,3 +586,85 @@ actor HeldReplayError {
     #expect(!audio.active && !player.missedReplies.contains("r"))
     await session.unpair()
 }
+
+@MainActor @Test(arguments: [false, true]) func oldWatchdogDrainCannotCloseRenewedPlaybackWindow(endedBeforeFlush: Bool) async throws {
+    let output = FakeSpeechOutput(), audio = SpeechSession(), socket = FakeSocket(), clock = SpeechWait()
+    let store = MemoryPairingStore(); store.record = try testPairingCredentials()
+    let player = SpeechPlayer(session: audio, output: output, wait: { await clock.sleep() })
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
+                             makePaths: { nil }, playback: player)
+    await session.launch(); await socket.ready()
+    try await eventuallySession { session.connection.canSend }
+    await socket.text(event(2, "speech_begin", #"{"speech_id":"s","reply_id":"r","sample_rate":24000,"channels":1,"sample_width":2}"#))
+    await socket.text(event(3, "speech_clip", #"{"speech_id":"s","reply_id":"r","index":0,"text":"One.","byte_length":2}"#))
+    socket.input.yield(.binary(Data([1, 0])))
+    try await eventuallySession { await socket.sent.contains { $0.payload["state"] == .string("started") } }
+    await socket.blockSend("playback_report")
+    output.callbacks[0]()
+    try await eventuallySession { await socket.sendWaiter != nil }
+    try await eventuallySession { await clock.calls == 1 }
+    await clock.advance()
+    try await eventuallySession { !audio.active }
+    await socket.text(event(4, "speech_clip", #"{"speech_id":"s","reply_id":"r","index":1,"text":"Two.","byte_length":2}"#))
+    socket.input.yield(.binary(Data([2, 0])))
+    await socket.text(event(5, "speech_end", #"{"speech_id":"s","reply_id":"r","last_clip_index":1}"#))
+    try await eventuallySession { output.bytes.count == 2 }
+    let departure = Task { await session.setForeground(false) }
+    try await eventuallySession { await socket.sent.contains { $0.payload["can_show_text"] == .bool(false) } }
+    let presence = try #require(await socket.sent.last { $0.type == "set_presence" })
+    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(presence.id)\",\"ok\":true,\"result\":{\"can_show_text\":false}}")
+    await departure.value
+    if endedBeforeFlush { output.callbacks[1](); #expect(!audio.active) }
+    await socket.releaseSend(keepingBlocked: true)
+    try await eventuallySession {
+        let waiting = await socket.sendWaiter != nil
+        return await socket.closed || waiting
+    }
+    #expect(await socket.closed == false)
+    #expect(await socket.sent.last { $0.type == "playback_report" }?.payload["state"] == .string("started"))
+    if !endedBeforeFlush { #expect(audio.active && player.sentence == "Two."); output.callbacks[1]() }
+    await socket.releaseSend(keepingBlocked: true)
+    try await eventuallySession {
+        let waiting = await socket.sendWaiter != nil
+        return await socket.closed || waiting
+    }
+    #expect(await socket.closed == false)
+    #expect(await socket.sent.last { $0.type == "playback_report" }?.payload["state"] == .string("finished"))
+    await socket.releaseSend()
+    try await eventuallySession { await socket.closed }
+    #expect(await socket.sent.filter { $0.type == "playback_report" }.map { $0.payload["clip_index"] } == [.integer(0), .integer(0), .integer(1), .integer(1)])
+    await session.unpair()
+}
+
+@MainActor @Test func firstDepartureWaitsForReceiptFromForegroundCompletion() async throws {
+    let output = FakeSpeechOutput(), audio = SpeechSession(), socket = FakeSocket()
+    let store = MemoryPairingStore(); store.record = try testPairingCredentials()
+    let player = SpeechPlayer(session: audio, output: output)
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
+                             makePaths: { nil }, playback: player)
+    await session.launch(); await socket.ready()
+    try await eventuallySession { session.connection.canSend }
+    await socket.text(event(2, "speech_begin", #"{"speech_id":"s","reply_id":"r","sample_rate":24000,"channels":1,"sample_width":2}"#))
+    await socket.text(event(3, "speech_clip", #"{"speech_id":"s","reply_id":"r","index":0,"text":"One.","byte_length":2}"#))
+    socket.input.yield(.binary(Data([1, 0])))
+    await socket.text(event(4, "speech_end", #"{"speech_id":"s","reply_id":"r","last_clip_index":0}"#))
+    try await eventuallySession { await socket.sent.contains { $0.payload["state"] == .string("started") } }
+    await socket.blockSend("playback_report")
+    output.callbacks[0]()
+    try await eventuallySession { await socket.sendWaiter != nil }
+    let departure = Task { await session.setForeground(false) }
+    try await eventuallySession {
+        let sent = await socket.sent.contains { $0.payload["can_show_text"] == .bool(false) }
+        return await socket.closed || sent
+    }
+    #expect(await socket.closed == false)
+    if let presence = await socket.sent.last(where: { $0.payload["can_show_text"] == .bool(false) }) {
+        await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(presence.id)\",\"ok\":true,\"result\":{\"can_show_text\":false}}")
+    }
+    await departure.value
+    #expect(!audio.active)
+    await socket.releaseSend()
+    try await eventuallySession { await socket.closed }
+    #expect(await socket.sent.filter { $0.type == "playback_report" }.map { $0.payload["state"] } == [.string("started"), .string("finished")])
+    await session.unpair()
+}

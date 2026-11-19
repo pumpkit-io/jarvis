@@ -14,6 +14,8 @@ import Observation
     public private(set) var inputMessage: String?
     public let playback: SpeechPlayer
     private var playbackDelivery: Task<Void, Never>?
+    private var playbackRevision: UInt64 = 0
+    private var pendingPlaybackDrain: (speechID: String, revision: UInt64)?
     private var backgroundSpeechID: String?
     public private(set) var replayMessages: [String: String] = [:]
     private var replayCommands: [String: HubCommand] = [:]
@@ -175,6 +177,7 @@ import Observation
         self.uploadTalk = uploadTalk; self.stopPlayback = stopPlayback
         self.playback.configure(report: { [weak self] command in
             guard let self, let client = self.client else { return }
+            self.playbackRevision &+= 1
             let previous = self.playbackDelivery
             self.playbackDelivery = Task {
                 await previous?.value
@@ -186,12 +189,16 @@ import Observation
             self.talk.speaking = false
             if self.speechID == id { self.speechID = nil }
             guard let client = self.client else { return }
-            let previous = self.playbackDelivery, owner = self.generation
+            let previous = self.playbackDelivery, owner = self.generation, revision = self.playbackRevision
+            self.pendingPlaybackDrain = (id, revision)
             self.playbackDelivery = Task {
                 await previous?.value
-                guard !Task.isCancelled else { return }
+                // A newer clip can resume and finish while an older receipt is still being written.
+                guard !Task.isCancelled, self.generation == owner, self.client === client,
+                      self.playbackRevision == revision else { return }
                 await client.playbackDrained(speechID: id)
-                guard self.generation == owner, self.client === client else { return }
+                guard self.generation == owner, self.client === client, self.playbackRevision == revision else { return }
+                if self.pendingPlaybackDrain?.revision == revision { self.pendingPlaybackDrain = nil }
                 if self.backgroundSpeechID == id { self.backgroundSpeechID = nil }
             }
         })
@@ -248,7 +255,7 @@ import Observation
         let owner = generation, old = client
         updates?.cancel(); updates = nil; paths?.cancel(); paths = nil
         connection = .unpaired; speechID = nil; playback.stop(reportStopped: false); stopPlayback()
-        playbackDelivery?.cancel(); playbackDelivery = nil
+        playbackDelivery?.cancel(); playbackDelivery = nil; pendingPlaybackDrain = nil
         await talk.setReady(false)
         guard generation == owner, client === old else { await old?.stop(); return }
         await talk.cancel()
@@ -266,7 +273,7 @@ import Observation
         let transition = foregroundGeneration, owner = generation, client = client
         if !value { await talk.cancel() }
         guard foregroundGeneration == transition, generation == owner, self.client === client else { return }
-        let playing = playback.activeSpeechID ?? backgroundSpeechID
+        let playing = playback.activeSpeechID ?? pendingPlaybackDrain?.speechID ?? backgroundSpeechID
         backgroundSpeechID = value ? nil : playing
         if !value && playing == nil { playback.stop(reportStopped: false) }
         await client?.setForeground(value, playingSpeechID: value ? nil : playing)

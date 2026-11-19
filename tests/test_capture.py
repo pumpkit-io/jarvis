@@ -637,6 +637,7 @@ async def test_queued_endpoint_delivers_one_complete_hub_request_and_task_and_pr
         typed_message = '<user lang="en" typed="true">Show the status</user>'
         spoken_message = '<user lang="en">Check the tests</user>'
         assert users == ([typed_message, spoken_message] if typed_during_stt else [spoken_message])
+        await until(lambda: bool(backend.all_sessions('orchestrator')))
         assert len(backend.all_sessions('orchestrator')) == 1
         assert len([result for session in backend.all_sessions('talker') for result in session.tool_results
                     if result.name == 'delegate']) == 1
