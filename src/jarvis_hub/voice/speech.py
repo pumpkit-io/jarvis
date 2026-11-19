@@ -172,6 +172,8 @@ class Speech:
         # One thread: MLX ties its streams to the thread that loaded the model.
         self._thread = _DaemonThread("tts")
         self._queue: asyncio.Queue[_Say | _Cached | _End] = asyncio.Queue()
+        self._queued_by_player: dict[Player, int] = {}
+        self._queue_changed = asyncio.Event()
         self._cache: dict[tuple[ClipName, Lang], Clip] = {}
         self._reply: _Reply | None = None
         self._replies: dict[int, _Reply] = {}
@@ -198,7 +200,7 @@ class Speech:
         if reply is None:
             self._retired_players = [retired for retired in self._retired_players if retired is not self._player]
             generation = self._local_cue_generation
-        self._queue.put_nowait(_Cached(name, lang, reply, generation))
+        self._enqueue(_Cached(name, lang, reply, generation))
 
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
               destination: Player | None = None, allowed: Callable[[], bool] | None = None,
@@ -235,7 +237,7 @@ class Speech:
         self._replies[reply.turn] = reply
         self._say(reply.splitter.feed(text) + reply.splitter.end_block(), reply)
         reply.closed = True
-        self._queue.put_nowait(_End(reply))
+        self._enqueue(_End(reply))
         return reply.speech_id
 
     def stop_replay(self, destination: Player) -> bool:
@@ -262,7 +264,7 @@ class Speech:
             return
         self._say(reply.splitter.end_block())
         reply.closed = True
-        self._queue.put_nowait(_End(reply))
+        self._enqueue(_End(reply))
         self._reply = None
 
     def stop(self) -> None:
@@ -284,8 +286,7 @@ class Speech:
         self._generation += 1
         self._reply = None
         while not self._queue.empty():
-            self._queue.get_nowait()
-            self._queue.task_done()
+            self._completed(self._queue.get_nowait())
         for player in self._players:
             try:
                 player.stop()
@@ -316,11 +317,17 @@ class Speech:
 
     async def idle(self, *, stall_timeout: float | None = STALLED, local_only: bool = False,
                    destination: Player | None = None) -> None:
-        """Wait for voice loading and playback; None disables the stalled-player timeout."""
-        if self._loading is not None:
-            with contextlib.suppress(Exception):
-                await asyncio.shield(self._loading)
-        await self._queue.join()
+        """Wait for queued synthesis and playback, optionally for one destination.
+        None disables the stalled-player timeout."""
+        if destination is None:
+            if self._loading is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(self._loading)
+            await self._queue.join()
+        else:
+            while self._queued_by_player.get(destination, 0):
+                self._queue_changed.clear()
+                await self._queue_changed.wait()
         def pending() -> float:
             return sum(p.pending() for p in self._players
                        if (not local_only or p is self._player) and (destination is None or p is destination)
@@ -339,9 +346,30 @@ class Speech:
             self._worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._worker
+        while not self._queue.empty():
+            self._completed(self._queue.get_nowait())
         self._thread.shutdown(wait=False)
         for player in self._players:
             player.close()
+
+    def _destination(self, item: _Say | _Cached | _End) -> Player:
+        reply = item.reply
+        return reply.player if reply is not None and reply.player is not None else self._player
+
+    def _enqueue(self, item: _Say | _Cached | _End) -> None:
+        player = self._destination(item)
+        self._queued_by_player[player] = self._queued_by_player.get(player, 0) + 1
+        self._queue.put_nowait(item)
+
+    def _completed(self, item: _Say | _Cached | _End) -> None:
+        player = self._destination(item)
+        remaining = self._queued_by_player[player] - 1
+        if remaining:
+            self._queued_by_player[player] = remaining
+        else:
+            del self._queued_by_player[player]
+        self._queue_changed.set()
+        self._queue.task_done()
 
     def _say(self, chunks: list[str], reply: _Reply | None = None) -> None:
         reply = reply or self._reply
@@ -350,7 +378,7 @@ class Speech:
             if reply.first_chunk is None:
                 reply.first_chunk = self._clock.now()
             reply.chunks += 1
-            self._queue.put_nowait(_Say(reply, chunk))
+            self._enqueue(_Say(reply, chunk))
 
     def _load(self) -> None:
         self._tts.load()
@@ -387,7 +415,7 @@ class Speech:
                 if isinstance(item, _End):
                     item.reply.generation_done = True
                     self._prune_replies()
-                self._queue.task_done()
+                self._completed(item)
 
     def _reply_played(self, reply: _Reply) -> bool:
         if not reply.played and reply.closed and not reply.stopped and not reply.failed and reply.chunks > 0:

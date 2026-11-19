@@ -1,11 +1,13 @@
 import asyncio
+import threading
 from pathlib import Path
 from typing import Literal
 
 import pytest
 
+from jarvis_hub.voice.player import Samples
 from jarvis_hub.hub import Line
-from tests.fakes import AwaitInterrupt, FakeBackend, FakeClock, Gate, RecordingPlayer, Set, Text, Tool, until
+from tests.fakes import AwaitInterrupt, FakeBackend, FakeClock, FakeTts, Gate, RecordingPlayer, Set, Text, Tool, until
 from tests.protocol_exchanges import command, connect, receive
 from tests.test_remote_speech import control, foreground, remote_rig, through
 
@@ -63,6 +65,50 @@ async def test_unheard_replay_on_other_client_does_not_hold_focused_idle_news(tm
             shared = await through(one, 'reply_end')
             assert shared[-1]['payload']['text'] == 'The fix is ready.'
             assert not any(f['type'].startswith('speech_') for f in shared)
+
+
+async def test_news_text_starts_while_another_clients_replay_is_still_synthesizing(tmp_path: Path) -> None:
+    entered = threading.Event()
+
+    class GatedTts(FakeTts):
+        def synthesize(self, text: str, voice: str) -> Samples:
+            if text == 'Working, sir.':
+                entered.set()
+            return super().synthesize(text, voice)
+
+    arrival, reported = asyncio.Event(), asyncio.Event()
+    tts = GatedTts()
+    backend = FakeBackend(FakeClock(), [[Tool('delegate', {'request': 'Fix typo', 'context': ''}), Text('Working, sir.')],
+                                       [Text('The fix is ready.')]],
+                          orchestrator=[[Gate(arrival), Tool('report', {'task_id': 'T1', 'spoken': 'Ready'}), Set(reported)]])
+    async with remote_rig(tmp_path, backend, tts=tts) as (session, door, hub, _log, backend, phones, _pairing):
+        try:
+            async with connect(session, door, phones[0].token) as one, connect(session, door, phones[1].token) as two:
+                await foreground(one)
+                await foreground(two)
+                await hub.admit_line(Line('Fix typo', 0, client_id=phones[0].client.id))
+                reply = (await through(one, 'reply_end'))[-1]['payload']['reply_id']
+                await through(two, 'reply_end')
+                await until(lambda: len(tts.calls) == 2)
+                tts.hold.clear()
+                assert (await control(one, 'replay-held', 'replay_speech', reply_id=reply))['ok']
+                await until(entered.is_set)
+                assert (await control(two, 'focus-held', 'take_focus'))['ok']
+                arrival.set()
+                await reported.wait()
+                async with asyncio.timeout(1):
+                    frames = await through(two, 'reply_end')
+                    shared = await through(one, 'reply_end')
+                assert frames[-1]['payload']['text'] == shared[-1]['payload']['text'] == 'The fix is ready.'
+                assert len(backend.session('talker').received) == 3
+                assert not tts.hold.is_set()
+                assert not any(f['type'].startswith('speech_') for f in frames + shared)
+                tts.hold.set()
+                audio = await through(two, 'speech_end')
+                assert [f['payload']['text'] for f in audio if f['type'] == 'speech_clip'] == ['The fix is ready.']
+                assert hub.clients.remote_activity
+        finally:
+            tts.hold.set()
 
 
 async def test_focused_pending_clip_defers_news_until_finished_not_speech_end(tmp_path: Path) -> None:
