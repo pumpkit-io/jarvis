@@ -17,10 +17,11 @@ class Client:
 
 
 class Clients:
-    def __init__(self, *, terminal_speech: bool, on_focus: Callable[[], None]) -> None:
+    def __init__(self, *, terminal_speech: bool, on_focus: Callable[[], None], on_change: Callable[[], None] = lambda: None) -> None:
         self._clients = {TERMINAL: Client(TERMINAL, "terminal", connected=True, can_speak=terminal_speech)}
         self._focus = TERMINAL
         self._on_focus = on_focus
+        self._on_change = on_change
 
     @property
     def focus(self) -> str:
@@ -33,10 +34,12 @@ class Clients:
         if not client.id:
             raise ValueError("A Client needs an id")
         self._clients[client.id] = client
+        self._on_change()
 
     def disconnect(self, client_id: str) -> None:
         client = self._clients[client_id]
         self._clients[client_id] = replace(client, connected=False)
+        self._on_change()
 
     def take_focus(self, client_id: str) -> None:
         if client_id not in self._clients:
@@ -44,6 +47,7 @@ class Clients:
         if self._focus != client_id:
             self._focus = client_id
             self._on_focus()
+            self._on_change()
 
     def restore_focus(self, client_id: str) -> None:
         if not client_id:

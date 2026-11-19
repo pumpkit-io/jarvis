@@ -26,7 +26,7 @@ from jarvis_hub.limits import UsageLimit
 from jarvis_hub.voice.language import Lang
 from jarvis_hub.subagents import Refusal, Subagent, SubagentSetup
 from jarvis_hub.waits import WaitSetup
-from jarvis_hub.voice.player import REWIND_MS, Clip, Samples
+from jarvis_hub.voice.player import REWIND_MS, Clip, PlaybackReceipt, Samples
 from jarvis_hub.voice.bargein import Partial
 from jarvis_hub.voice.state import BargeIn, Heard, InputEvent, Overheard, SpeechStarted, WakeWord
 
@@ -690,24 +690,29 @@ class RecordingPlayer:
         self.hold = hold
         self.clips: list[Clip] = []
         self.events: list[str] = []
-        self._queued: list[Clip] = []
+        self._queued: list[tuple[Clip, PlaybackReceipt]] = []
         self._heard: list[str] = []
         self.closed = False
 
-    def play(self, clip: Clip, *, starts_reply: bool = False) -> None:
+    def play(self, clip: Clip, *, starts_reply: bool = False) -> PlaybackReceipt:
+        receipt = PlaybackReceipt()
         self.clips.append(clip)
         self.events.append(f"play {clip.text}")
         if starts_reply:
             self._heard = []
         if self.hold:
-            self._queued.append(clip)
+            self._queued.append((clip, receipt))
         else:
             self._heard.append(clip.text)
+            receipt.completed = True
+        return receipt
 
     def finish(self, clips: int | None = None) -> None:
         """Plays out the queue, or only its first `clips`."""
         done = self._queued[:clips]
-        self._heard += [c.text for c in done]
+        self._heard += [clip.text for clip, _ in done]
+        for _, receipt in done:
+            receipt.completed = True
         del self._queued[: len(done)]
 
     def pause(self) -> None:
@@ -724,7 +729,7 @@ class RecordingPlayer:
         return " ".join(self._heard)
 
     def pending(self) -> float:
-        return sum(c.seconds for c in self._queued)
+        return sum(clip.seconds for clip, _ in self._queued)
 
     def close(self) -> None:
         self.closed = True
