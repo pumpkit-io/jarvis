@@ -12,6 +12,7 @@ struct ConversationView: View {
     @FocusState private var typing: Bool
     @State private var followsLatest = true
     @State private var readingAnchor: String?
+    @State private var scrollPhase: ScrollPhase = .idle
     @State private var recoveryCandidate: String?
     @State var expandedDetails: Set<String> = []
     private var theme: JarvisTheme { JarvisTheme(scheme: scheme) }
@@ -35,73 +36,68 @@ struct ConversationView: View {
             .font(.system(size: controlSize))
             .foregroundStyle(theme.secondary)
             .padding(20)
-            GeometryReader { viewport in
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 32) {
-                        if session.hasOlderHistory {
-                            VStack(alignment: .leading) {
-                                if session.loadingHistory { ProgressView("Loading older history…") }
-                                else if session.connection.canSend {
-                                    Button { Task { await session.loadOlderHistory() } } label: {
-                                        Text("Older history").underline()
-                                            .frame(minWidth: 44, minHeight: 44, alignment: .leading)
-                                            .contentShape(Rectangle())
-                                    }
-                                    .buttonStyle(.plain)
-                                } else { Text("Older history") }
-                            }
-                            .font(.system(size: controlSize))
-                            .foregroundStyle(theme.secondary).frame(minHeight: 44)
-                            .task(id: session.connection.canSend) { await session.loadOlderHistory() }
-                        }
-                        if let message = session.historyMessage {
-                            Text(message).font(.system(size: controlSize)).foregroundStyle(theme.secondary)
-                        }
-                        if session.conversation.rows.isEmpty {
-                            Text("Nothing said yet. Hold the key and ask Jarvis something.")
-                                .font(.system(size: scriptSize, design: .serif))
-                                .lineSpacing(5)
-                                .padding(.top, 24)
-                        }
-                        ForEach(Array(session.conversation.rows.enumerated()), id: \.element.id) { index, row in
-                            VStack(alignment: .leading, spacing: 12) {
-                                if let date = gapDate(index) {
-                                    Text(date, format: .dateTime.month(.abbreviated).day().hour().minute())
-                                        .font(.system(size: controlSize))
-                                        .foregroundStyle(theme.secondary)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 32) {
+                    if session.hasOlderHistory {
+                        VStack(alignment: .leading) {
+                            if session.loadingHistory { ProgressView("Loading older history…") }
+                            else if session.connection.canSend {
+                                Button { Task { await session.loadOlderHistory() } } label: {
+                                    Text("Older history").underline()
+                                        .frame(minWidth: 44, minHeight: 44, alignment: .leading)
+                                        .contentShape(Rectangle())
                                 }
-                                scriptRow(row)
-                            }.id(row.id)
+                                .buttonStyle(.plain)
+                            } else { Text("Older history") }
                         }
-                        ForEach(session.typedLines.filter { !$0.message.isEmpty }) { line in
-                            typedLineStatus(line)
-                        }
-                        Color.clear.frame(height: 1).id("latest")
-                            .background(GeometryReader { marker in
-                                Color.clear.preference(key: ConversationBottom.self,
-                                    value: marker.frame(in: .named("script")).maxY)
-                            })
+                        .font(.system(size: controlSize))
+                        .foregroundStyle(theme.secondary).frame(minHeight: 44)
+                        .task(id: session.connection.canSend) { await session.loadOlderHistory() }
                     }
-                    .scrollTargetLayout()
-                    .foregroundStyle(theme.text)
-                    .frame(maxWidth: 640, alignment: .leading)
-                    .frame(maxWidth: .infinity)
-                    .padding(20)
+                    if let message = session.historyMessage {
+                        Text(message).font(.system(size: controlSize)).foregroundStyle(theme.secondary)
+                    }
+                    if session.conversation.rows.isEmpty {
+                        Text("Nothing said yet. Hold the key and ask Jarvis something.")
+                            .font(.system(size: scriptSize, design: .serif))
+                            .lineSpacing(5)
+                            .padding(.top, 24)
+                    }
+                    ForEach(Array(session.conversation.rows.enumerated()), id: \.element.id) { index, row in
+                        VStack(alignment: .leading, spacing: 12) {
+                            if let date = gapDate(index) {
+                                Text(date, format: .dateTime.month(.abbreviated).day().hour().minute())
+                                    .font(.system(size: controlSize))
+                                    .foregroundStyle(theme.secondary)
+                            }
+                            scriptRow(row)
+                        }.id(row.id)
+                    }
+                    ForEach(session.typedLines.filter { !$0.message.isEmpty }) { line in
+                        typedLineStatus(line)
+                    }
                 }
-                .scrollPosition(id: $readingAnchor)
-                .coordinateSpace(name: "script")
-                .onPreferenceChange(ConversationBottom.self) { bottom in
-                    followsLatest = bottom <= viewport.size.height + 60
-                }
-                .onChange(of: session.conversation.rows) { previous, current in
-                    let prepended = previous.first.map { old in current.first.map { $0.sequence < old.sequence } ?? false } ?? false
-                    if followsLatest && !prepended { proxy.scrollTo("latest", anchor: .bottom) }
-                }
-                .onChange(of: session.typedLines) {
-                    if followsLatest { proxy.scrollTo("latest", anchor: .bottom) }
-                }
+                .scrollTargetLayout()
+                .foregroundStyle(theme.text)
+                .frame(maxWidth: 640, alignment: .leading)
+                .frame(maxWidth: .infinity)
+                .padding(20)
             }
+            .scrollPosition(id: $readingAnchor, anchor: .top)
+            .defaultScrollAnchor(.bottom, for: .initialOffset)
+            .defaultScrollAnchor(followsLatest ? .bottom : nil, for: .sizeChanges)
+            .defaultScrollAnchor(.top, for: .alignment)
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                geometry.contentSize.height - geometry.visibleRect.maxY <= 60
+            } action: { _, atBottom in
+                // Only the reader can change following; streamed layout changes cannot reclaim it.
+                if scrollPhase != .idle && scrollPhase != .animating { followsLatest = atBottom }
+            }
+            .onScrollPhaseChange { _, phase, context in
+                scrollPhase = phase
+                if phase == .idle {
+                    followsLatest = context.geometry.contentSize.height - context.geometry.visibleRect.maxY <= 60
+                }
             }
         }
         .background(theme.background)
@@ -181,6 +177,7 @@ struct ConversationView: View {
             }
             if !row.details.isEmpty {
                 DisclosureGroup(isExpanded: Binding(get: { expandedDetails.contains(row.id) }, set: {
+                    followsLatest = false
                     if $0 { expandedDetails.insert(row.id) } else { expandedDetails.remove(row.id) }
                 })) {
                     ForEach(row.details) { detail in
@@ -246,11 +243,6 @@ struct ConversationView: View {
     }
 
     private func submit() { Task { await session.sendTypedLine() } }
-}
-
-private struct ConversationBottom: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
 struct VoiceControl: View {
