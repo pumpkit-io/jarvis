@@ -72,6 +72,31 @@ xcodebuild -project ios/Jarvis.xcodeproj -scheme Jarvis \
 
 `project.yml` is the checked-in project definition. The generated Xcode project, plist and build output are ignored. Open `ios/Jarvis.xcodeproj` after generating it to inspect the app in Xcode. Swift checks run locally; there is no Swift CI.
 
+### Native audio callback regression
+
+The microphone tap factory is nonisolated. It installs with the input node's hardware format (`nil`) and creates its converter from the first received buffer. `NativeTalkCaptureTests.swift` feeds real PCM to that handler from a background queue, checks the converted bytes, and verifies the byte-limit callback reaches the main actor without opening a microphone.
+
+To reproduce the actor violation if the factory loses `nonisolated`, run the tests with actor runtime checks. The native build system ensures this compiler flag is applied on the current Swift toolchain:
+
+```sh
+swift test --package-path ios/JarvisClient --build-system native \
+  --scratch-path /tmp/jarvis-tap-actor-checks \
+  -Xswiftc -enable-actor-data-race-checks --filter nativeTap
+```
+
+With an actor-isolated factory, the background test terminated with signal 5; with the nonisolated factory, both tests passed. A default package test run on Swift 6.4 omitted the callback's runtime check and passed even before the fix.
+
+For a callback audit, emit checked iOS simulator SIL:
+
+```sh
+swiftc -swift-version 6 -enable-actor-data-race-checks -parse-as-library \
+  -emit-sil -module-name JarvisClient -target arm64-apple-ios17.0-simulator \
+  -sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" \
+  ios/JarvisClient/Sources/JarvisClient/*.swift > /tmp/jarvis-callbacks.sil 2>&1
+```
+
+The audit found no `swift_task_isCurrentExecutor` in the tap returned by `NativeTalkCaptureSource.makeTapHandler`, the `NativePCMConverter` input block, `NativeSpeechOutput`'s scheduled-buffer completion, or `HubNetworkPaths`' path-update handler. All are nonisolated. Their explicit `Task { @MainActor in ... }` hops retain main-actor delivery. The URLSession delegate methods on `RefuseRedirects`, `URLSessionHubSocket`, `TalkRedirectRefusal` and `PairingRedirectGuard` also have no executor check; the other URLSession operations use async APIs rather than completion closures. Physical microphone capture still needs the iPhone check below.
+
 ## Speech playback
 
 `AppSession` routes live speech from its sole update consumer to `SpeechPlayer`. The default recorder and player share one `NativeTalkAudioSession`: recording uses `playAndRecord`, playback uses `playback` with `spokenAudio`, and an owner check prevents an old playback release from deactivating recording. Neither thinking nor a speech header activates the session.
