@@ -115,16 +115,50 @@ private extension OutboxDelivery {
     #expect(outbox.items.count == 2)
 }
 
-@MainActor @Test func repeatedRefusalsEndInAVisibleFailure() async throws {
+@MainActor @Test func temporaryRefusalsKeepRetryingUnderNewIdsUntilTheHubTakesIt() async throws {
     let transport = FakeOutboxTransport()
     let outbox = makeOutbox(scratch(), transport)
     outbox.enqueueLine("Hello", recordedAt: Date())
-    for attempt in 0..<Outbox.maxAttempts {
+    for attempt in 0..<10 {
         try await outboxSettles { transport.started.count == attempt + 1 }
-        transport.answer(attempt, status: 503, ok: false, code: "transcription_failed", retryAfter: 0)
+        transport.answer(attempt, status: 503, ok: false, code: attempt.isMultiple(of: 2) ? "temporarily_unavailable" : "upload_rate_limited", retryAfter: 0)
     }
-    #expect(outbox.items[0].status == .failed("Jarvis couldn't take this message. Try again."))
-    #expect(Set(transport.started.compactMap(\.commandID)).count == Outbox.maxAttempts)
+    try await outboxSettles { transport.started.count == 11 }
+    #expect(Set(transport.started.compactMap(\.commandID)).count == 11)
+    transport.answer(10, request: "r")
+    #expect(outbox.items.map(\.status) == [.sent(requestID: "r")])
+}
+
+@MainActor @Test func anUnsavedMessageFailsVisiblyWithoutBlockingTheOnesAfterIt() async throws {
+    let directory = scratch()
+    let transport = FakeOutboxTransport()
+    let outbox = makeOutbox(directory, transport)
+    outbox.enqueueLine("One", recordedAt: Date())
+    let blocked = OutboxStore(directory: directory, credentials: credentials).body(outbox.items[0].id)
+    transport.answer(0, request: "r1")
+    outbox.enqueueLine("Two", recordedAt: Date())
+    try FileManager.default.removeItem(at: transport.started[1].body)
+    transport.fail(1)
+    outbox.enqueueLine("Three", recordedAt: Date())
+    outbox.nudge()
+    #expect(outbox.items[1].status == .failed("This message is no longer saved on the iPhone."))
+    #expect(transport.started.last?.path == "/v1/lines" && transport.started.count == 3)
+    #expect(!FileManager.default.fileExists(atPath: blocked.path))
+}
+
+@MainActor @Test func tryingAgainSendsTheMessageAsTheNewest() async throws {
+    let transport = FakeOutboxTransport()
+    let outbox = makeOutbox(scratch(), transport)
+    outbox.enqueueLine("First", recordedAt: Date())
+    outbox.enqueueLine("Second", recordedAt: Date())
+    #expect(outbox.hasPending)
+    transport.answer(0, status: 409, ok: false, code: "outcome_unknown")
+    transport.answer(1, request: "r2")
+    #expect(!outbox.hasPending)
+    let first = outbox.items[0].id
+    outbox.retry(first)
+    #expect(outbox.items.map(\.id).last == first && outbox.items.last?.status == .sending)
+    #expect(transport.started[2].commandID != transport.started[0].commandID)
 }
 
 @MainActor @Test func queueSurvivesRestartAndOnlyInterruptedUploadsGoBackInLine() async throws {

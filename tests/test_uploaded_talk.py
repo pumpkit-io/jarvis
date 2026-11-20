@@ -1012,6 +1012,20 @@ async def test_queued_upload_does_not_end_the_live_talk(tmp_path: Path) -> None:
         assert asr.calls == 2
 
 
+async def test_queued_upload_from_a_device_revoked_during_asr_admits_nothing(tmp_path: Path) -> None:
+    asr = Transcriber()
+    asr.release.clear()
+    async with rig(tmp_path, asr) as (session, _socket, door, _hub, log, _backend, asr, phone, _clock, pairing):
+        pending = asyncio.create_task(session.post(f'http://127.0.0.1:{door.port}/v1/utterances/queued',
+                                                   headers=headers(phone.token), data=PCM))
+        await asr.entered.wait()
+        pairing.revoke('Phone')
+        asr.release.set()
+        async with await pending as response:
+            assert response.status == 409
+        assert not [e for e in log.after(0) if e.type == 'heard']
+
+
 @pytest.mark.parametrize(('recorded_at', 'marker'), [
     ('1970-01-01T00:06:40Z', ' delayed="10 minutes"'),
     ('1970-01-01T00:16:00Z', ''),

@@ -212,6 +212,50 @@ import Testing
     #expect(session.outbox == nil && transport.cancelled)
 }
 
+@MainActor @Test func aLiveTalkBehindOlderMessagesReleasesTheFloorAndGoesAsQueued() async throws {
+    let socket = FakeSocket(), recorder = FakeTalkRecorder(), store = MemoryPairingStore(), transport = FakeOutboxTransport()
+    store.record = try testPairingCredentials()
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
+                             makePaths: { nil }, talk: TalkController(recorder: recorder, permission: { true }),
+                             makeOutboxTransport: { transport })
+    await session.launch(); await socket.ready()
+    try await eventuallySession { session.connection.canSend }
+    session.draft = "Earlier"; await session.sendTypedLine()
+    await session.talk.press()
+    try await eventuallySession { await socket.sent.contains { $0.type == "talk_begin" } }
+    let begun = try #require(await socket.sent.first { $0.type == "talk_begin" }?.payload["talk_id"])
+    await session.talk.release()
+    try await eventuallySession { await socket.sent.contains { $0.type == "talk_cancel" } }
+    #expect(await socket.sent.first { $0.type == "talk_cancel" }?.payload["talk_id"] == begun)
+    guard case .talk(let queued, _) = session.outbox?.items.last?.content else { Issue.record("No queued Talk"); return }
+    #expect(.string(queued) != begun)
+    await session.unpair()
+}
+
+@MainActor @Test func theHeaderSaysReadyThroughABriefDropAndOneOutageShowsAfterThreeSeconds() async throws {
+    let transport = FakeTransport(), store = MemoryPairingStore(), notice = FakeSleeper()
+    store.record = try testPairingCredentials()
+    let session = AppSession(store: store, makeClient: { _ in
+        HubClient(transport: HubTransport(connect: { await transport.connect($0) }), sleep: { _ in })
+    }, makePaths: { nil }, noticeSleep: { try await notice.sleep($0) })
+    await session.launch()
+    try await eventuallySession { await transport.socket(0) != nil }
+    let first = try #require(await transport.socket(0)); await first.ready()
+    try await eventuallySession { session.shownConnection == .ready }
+    first.input.finish(throwing: URLError(.networkConnectionLost))
+    try await eventuallySession { await transport.socket(1) != nil }
+    let second = try #require(await transport.socket(1))
+    second.input.finish(throwing: URLError(.networkConnectionLost))
+    try await eventuallySession { await transport.socket(2) != nil }
+    #expect(session.shownConnection == .ready)
+    #expect(await notice.pending == 1)
+    await notice.advance()
+    try await eventuallySession { session.shownConnection != .ready }
+    let third = try #require(await transport.socket(2)); await third.ready(through: 1)
+    try await eventuallySession { session.shownConnection == .ready }
+    await session.unpair()
+}
+
 @MainActor @Test func tapStartsAndSendsThroughTheSameRecorderAndLabels() async throws {
     let recorder = FakeTalkRecorder()
     let (talk, wire) = wired(recorder)

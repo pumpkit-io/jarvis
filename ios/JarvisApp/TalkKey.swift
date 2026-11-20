@@ -26,7 +26,6 @@ struct TalkKey: View {
         .foregroundStyle(recording ? Color.white : theme.keyText)
         .background(recording ? theme.signal : theme.brass, in: RoundedRectangle(cornerRadius: 10))
         .scaleEffect(pressed && !talk.holdCancelled ? 0.98 : 1)
-        .opacity(talk.canPress || recording || talk.state == .authorizing ? 1 : 0.55)
         .contentShape(Rectangle())
         .gesture(DragGesture(minimumDistance: 0)
             .updating($pressed) { _, pressed, _ in pressed = true }

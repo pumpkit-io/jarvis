@@ -118,13 +118,13 @@ struct ConversationView: View {
             case .line(let text): Text(verbatim: text).multilineTextAlignment(.trailing).textSelection(.enabled)
             case .talk(_, let seconds): Text("Voice message, \(Int(seconds.rounded())) s")
             }
-            Text(item.message).font(.system(size: controlSize * 0.9))
+            Text(item.message)
             HStack(spacing: 16) {
-                if case .failed = item.status {
-                    Button("Try again") { session.outbox?.retry(item.id) }
+                if item.isSettled {
+                    Button(item.status == .uncertain ? "Send again" : "Try again") { session.outbox?.retry(item.id) }
                         .buttonStyle(.plain).underline().frame(minHeight: 44)
                 }
-                if item.status != .sending, !isSent(item) {
+                if item.status != .sending, !item.isSent {
                     Button("Delete") { session.outbox?.delete(item.id) }
                         .buttonStyle(.plain).underline().frame(minHeight: 44)
                 }
@@ -135,8 +135,6 @@ struct ConversationView: View {
         .frame(maxWidth: .infinity, alignment: .trailing)
         .accessibilityElement(children: .contain)
     }
-
-    private func isSent(_ item: OutboxItem) -> Bool { if case .sent = item.status { true } else { false } }
 
     private func gapDate(_ index: Int) -> Date? {
         let rows = session.conversation.rows

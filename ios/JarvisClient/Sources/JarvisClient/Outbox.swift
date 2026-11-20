@@ -15,7 +15,6 @@ public struct OutboxItem: Codable, Identifiable, Equatable, Sendable {
     public var commandID: String
     public let recordedAt: Date
     public var status: Status
-    public var attempts = 0
 
     public var message: String {
         switch status {
@@ -23,9 +22,30 @@ public struct OutboxItem: Codable, Identifiable, Equatable, Sendable {
         case .sending: "Sending…"
         case .sent: "Sent"
         case .failed(let message): message
-        case .uncertain: "This may have reached Jarvis. Check the conversation before sending it again."
+        case .uncertain: "This may have reached Jarvis. Check the conversation, then send it again or delete it."
         }
     }
+
+    public var isSent: Bool { if case .sent = status { true } else { false } }
+    /// The User decides what happens next: try again or delete.
+    public var isSettled: Bool {
+        switch status {
+        case .failed, .uncertain: true
+        default: false
+        }
+    }
+}
+
+/// Talk audio is 16 kHz mono PCM16.
+enum TalkAudio {
+    static let bytesPerSecond = 32_000
+    static let maxBytes = 9_600_000
+}
+
+private struct LineBody: Encodable {
+    let version = 1
+    let text: String
+    let recorded_at: String
 }
 
 /// What came back for one delivery: an HTTP answer, or nothing at all.
@@ -100,7 +120,6 @@ public struct OutboxStore: Sendable {
 /// Every Talk and typed line waits here until the Hub has answered it, sent one at a time in the order they were said.
 @MainActor @Observable public final class Outbox {
     public private(set) var items: [OutboxItem] = []
-    public private(set) var saveFailed = false
     private let store: OutboxStore
     private let transport: any OutboxTransport
     private let credentials: PairingCredentials
@@ -111,9 +130,6 @@ public struct OutboxStore: Sendable {
     private var retry: Task<Void, Never>?
     private var heardRequests: [String] = []
     private var retired = false
-
-    /// A message rejected for a reason other than its content is sent again under new ids, but not forever.
-    static let maxAttempts = 6
 
     public init(store: OutboxStore, transport: any OutboxTransport, credentials: PairingCredentials,
                 now: @escaping () -> Date = { Date() },
@@ -135,7 +151,7 @@ public struct OutboxStore: Sendable {
     }
 
     public func enqueueTalk(talkID: String, pcm: Data, recordedAt: Date) {
-        let item = OutboxItem(id: UUID().uuidString, content: .talk(talkID: talkID, seconds: Double(pcm.count) / 32_000),
+        let item = OutboxItem(id: UUID().uuidString, content: .talk(talkID: talkID, seconds: Double(pcm.count) / Double(TalkAudio.bytesPerSecond)),
                               commandID: UUID().uuidString, recordedAt: recordedAt, status: .waiting)
         enqueue(item, body: pcm)
     }
@@ -143,10 +159,12 @@ public struct OutboxStore: Sendable {
     public func enqueueLine(_ text: String, recordedAt: Date) {
         let item = OutboxItem(id: UUID().uuidString, content: .line(text: text), commandID: UUID().uuidString,
                               recordedAt: recordedAt, status: .waiting)
-        let body = try? JSONSerialization.data(withJSONObject: ["version": 1, "text": text, "recorded_at": stamp(recordedAt)],
-                                               options: [.sortedKeys])
-        enqueue(item, body: body ?? Data())
+        let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
+        enqueue(item, body: try? encoder.encode(LineBody(text: text, recorded_at: stamp(recordedAt))))
     }
+
+    /// Whether anything said earlier still waits to reach the Hub.
+    public var hasPending: Bool { items.contains { $0.status == .waiting || $0.status == .sending } }
 
     /// Removes a message that has not gone out, or whose outcome the User has settled.
     public func delete(_ id: String) {
@@ -156,10 +174,14 @@ public struct OutboxStore: Sendable {
         persist()
     }
 
+    /// Sends a settled message again as the newest one, under new ids so the Hub cannot mistake it for the old attempt.
     public func retry(_ id: String) {
-        guard let index = items.firstIndex(where: { $0.id == id }), case .failed = items[index].status else { return }
-        renew(index)
-        items[index].attempts = 0; items[index].status = .waiting
+        guard let index = items.firstIndex(where: { $0.id == id }), items[index].isSettled,
+              FileManager.default.fileExists(atPath: store.body(id).path) else { return }
+        var item = items.remove(at: index)
+        item.status = .waiting
+        items.append(item)
+        renew(items.count - 1)
         persist()
         deliverNext()
     }
@@ -191,10 +213,12 @@ public struct OutboxStore: Sendable {
         try? store.clear()
     }
 
-    private func enqueue(_ item: OutboxItem, body: Data) {
+    private func enqueue(_ item: OutboxItem, body: Data?) {
         guard !retired else { return }
-        do { try store.writeBody(body, for: item.id); saveFailed = false }
-        catch { saveFailed = true }
+        var item = item
+        if body.flatMap({ try? store.writeBody($0, for: item.id) }) == nil {
+            item.status = .failed("This message couldn't be saved on the iPhone.")
+        }
         items.append(item)
         persist()
         deliverNext()
@@ -215,6 +239,11 @@ public struct OutboxStore: Sendable {
             return
         }
         let item = items[index]
+        guard FileManager.default.fileExists(atPath: store.body(item.id).path) else {
+            items[index].status = .failed("This message is no longer saved on the iPhone.")
+            persist()
+            return deliverNext(notBefore: notBefore)
+        }
         items[index].status = .sending
         persist()
         transport.start(OutboxDelivery(itemID: item.id, request: request(item), body: store.body(item.id), notBefore: notBefore))
@@ -273,17 +302,12 @@ public struct OutboxStore: Sendable {
             items[index].status = .uncertain
         case "empty_transcript":
             items[index].status = .failed("Jarvis heard no words in this recording.")
-        case "audio_too_large", "unsupported_audio", "id_conflict", "unauthorized":
+        case "audio_too_large", "unsupported_audio", "id_conflict", "unauthorized", "unsupported_version":
             items[index].status = .failed(error?.message ?? "Jarvis couldn't take this message.")
         case "invalid_payload" where !isTalk:
             items[index].status = .failed(error?.message ?? "Jarvis couldn't take this message.")
         default:
-            // The Hub answered without admitting it, so the same words can go again under new ids.
-            items[index].attempts += 1
-            guard items[index].attempts < Self.maxAttempts else {
-                items[index].status = .failed("Jarvis couldn't take this message. Try again.")
-                return
-            }
+            // The Hub answered without admitting it, so the same words can go again under new ids until it takes them.
             renew(index)
             items[index].status = .waiting
             backOff(at: retryAfter)
@@ -302,8 +326,8 @@ public struct OutboxStore: Sendable {
     }
 
     private func persist() {
-        do { try store.save(items.filter { if case .sent = $0.status { false } else { true } }); saveFailed = false }
-        catch { saveFailed = true }
+        // The bodies are what matter; a lost index costs only the order after a relaunch.
+        try? store.save(items.filter { !$0.isSent })
     }
 
     private func stamp(_ date: Date) -> String { ISO8601DateFormatter().string(from: date) }

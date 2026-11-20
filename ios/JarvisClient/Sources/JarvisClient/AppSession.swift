@@ -384,13 +384,19 @@ import Observation
 
     private func setConnection(_ state: HubConnectionState) {
         connection = state
-        connectionNotice?.cancel(); connectionNotice = nil
         let blip: [HubConnectionState] = [.connecting, .unreachable, .hubStopped, .suspended]
-        guard shownConnection == .ready, blip.contains(state) else { shownConnection = state; return }
+        guard shownConnection == .ready, blip.contains(state) else {
+            connectionNotice?.cancel(); connectionNotice = nil
+            shownConnection = state
+            return
+        }
+        // One timer for the whole outage: retries switching between connecting and unreachable must not restart it.
+        guard connectionNotice == nil else { return }
         connectionNotice = Task { [weak self, noticeSleep] in
             do { try await noticeSleep(3) } catch { return }
-            guard let self, !Task.isCancelled, self.connection == state else { return }
-            self.shownConnection = state
+            guard let self, !Task.isCancelled else { return }
+            self.connectionNotice = nil
+            if self.connection != .ready { self.shownConnection = self.connection }
         }
     }
 
@@ -454,7 +460,10 @@ import Observation
             _ = await client.sendLive(HubCommand(type: "talk_cancel", payload: ["talk_id": .string(id)]))
         }, deliver: { [weak self] id, pcm, recordedAt in
             guard let self, self.generation == owner else { return }
-            outbox.enqueueTalk(talkID: id, pcm: pcm, recordedAt: recordedAt)
+            guard outbox.hasPending else { return outbox.enqueueTalk(talkID: id, pcm: pcm, recordedAt: recordedAt) }
+            // Waiting behind older messages, this Talk would hold the Hub's floor and the Mac's microphone; it goes as a queued Talk.
+            Task { _ = await client.sendLive(HubCommand(type: "talk_cancel", payload: ["talk_id": .string(id)])) }
+            outbox.enqueueTalk(talkID: UUID().uuidString, pcm: pcm, recordedAt: recordedAt)
         }, stopSpeech: { [weak self] in await self?.interruptSpeech() })
         await outbox.resume()
         guard generation == owner else { await client.stop(); return }

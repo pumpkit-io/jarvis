@@ -49,8 +49,8 @@ public enum TalkState: Equatable, Sendable {
         }
     }
     public var canPress: Bool { state != .authorizing && state != .recording }
-    /// A press shorter than this is a slip of the finger, not something said.
-    static let shortest = 9_600
+    /// Audio shorter than 0.3 seconds is a slip of the finger, not something said.
+    static let shortestBytes = TalkAudio.bytesPerSecond * 3 / 10
     private let recorder: any TalkRecorder
     private let permission: @MainActor () async -> Bool
     private let now: @MainActor () -> Double
@@ -227,7 +227,7 @@ public enum TalkState: Equatable, Sendable {
         let pcm = recorder.stop()
         timer?.cancel(); timer = nil
         talkID = nil
-        guard pcm.count >= Self.shortest, pcm.count <= 9_600_000, pcm.count.isMultiple(of: 2) else {
+        guard pcm.count >= Self.shortestBytes, pcm.count <= TalkAudio.maxBytes, pcm.count.isMultiple(of: 2) else {
             state = .cancelled; holdCancelled = true
             await endBegun(id)
             return

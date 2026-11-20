@@ -110,7 +110,7 @@ class UploadedTalks:
 
     def _valid(self, talk: Talk) -> bool:
         return (not self._closing and talk.state in ('recording', 'transcribing')
-                and self._now() < talk.deadline and (talk.queued or self._active(talk.client_id)))
+                and self._now() < talk.deadline and self._active(talk.client_id))
 
     def receiving(self, client_id: str, talk_id: str) -> None:
         talk = self._talks.get((client_id, talk_id))

@@ -310,7 +310,7 @@ class Door:
         code = result.get("error", {}).get("code")
         status = {"unauthorized": 401, "invalid_payload": 400, "unsupported_audio": 415,
                   "audio_too_large": 413, "upload_rate_limited": 429, "empty_transcript": 422,
-                  "transcription_failed": 503, "unsupported_version": 426}.get(code, 409 if code else 200)
+                  "transcription_failed": 503, "temporarily_unavailable": 503, "unsupported_version": 426}.get(code, 409 if code else 200)
         headers = {"Cache-Control": "no-store"}
         retry = result.get("error", {}).get("retry_after_seconds")
         if retry is not None:
@@ -407,7 +407,7 @@ class Door:
                 or not (recorded_at is None or isinstance(recorded_at, str))):
             return self._upload_response(command_id, rejected("invalid_payload", "text must be nonempty and at most 16384 UTF-8 bytes"))
         if self._log is None or self._hub is None or self._closing:
-            return self._upload_response(command_id, rejected("transcription_failed", "Conversation is unavailable"))
+            return self._upload_response(command_id, rejected("temporarily_unavailable", "Conversation is unavailable"))
         status, result = self._log.reserve(client.id, command_id, "say_text", {"text": text, "recorded_at": recorded_at})
         key = client.id, command_id
         if status == "conflict":
@@ -435,7 +435,7 @@ class Door:
                 allowed=lambda: not self._closing and self._pairing is not None and bool(self._pairing.active_ids({client_id})))
             result: dict[str, Any] = {"ok": True, "result": {"request_id": request_id}}
         except ValueError:
-            result = rejected("transcription_failed", "Conversation is unavailable")
+            result = rejected("temporarily_unavailable", "Conversation is unavailable")
         self._log.complete(client_id, command_id, result)
         return result
 
