@@ -6,8 +6,7 @@ struct ConversationView: View {
     var showsTalkControls = true
     var openTasks: (() -> Void)? = nil
     var typingChanged: (Bool) -> Void = { _ in }
-    @Environment(\.colorScheme) private var scheme
-    @ScaledMetric(relativeTo: .body) var scriptSize = 19
+    @ScaledMetric(relativeTo: .body) var scriptSize = 18
     @ScaledMetric(relativeTo: .subheadline) var controlSize = 15
     @FocusState private var typing: Bool
     @State private var followsLatest = true
@@ -17,7 +16,7 @@ struct ConversationView: View {
     @State private var readingAnchor: String?
     @State private var scrollPhase: ScrollPhase = .idle
     @State var expandedDetails: Set<String> = []
-    private var theme: JarvisTheme { JarvisTheme(scheme: scheme) }
+    private var theme: JarvisTheme { JarvisTheme() }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -36,7 +35,7 @@ struct ConversationView: View {
                 }
             }
             .font(.system(size: controlSize))
-            .foregroundStyle(theme.secondary)
+            .foregroundStyle(theme.haze)
             .padding(20)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 32) {
@@ -53,11 +52,11 @@ struct ConversationView: View {
                             } else { Text("Older history") }
                         }
                         .font(.system(size: controlSize))
-                        .foregroundStyle(theme.secondary).frame(minHeight: 44)
+                        .foregroundStyle(theme.haze).frame(minHeight: 44)
                         .task(id: session.connection.canSend) { await session.loadOlderHistory() }
                     }
                     if let message = session.historyMessage {
-                        Text(message).font(.system(size: controlSize)).foregroundStyle(theme.secondary)
+                        Text(message).font(.system(size: controlSize)).foregroundStyle(theme.haze)
                     }
                     if session.conversation.rows.isEmpty {
                         Text("Nothing said yet. Hold the key and ask Jarvis something.")
@@ -71,7 +70,7 @@ struct ConversationView: View {
                             if let date = gapDate(index) {
                                 Text(date, format: .dateTime.month(.abbreviated).day().hour().minute())
                                     .font(.system(size: controlSize))
-                                    .foregroundStyle(theme.secondary)
+                                    .foregroundStyle(theme.haze)
                             }
                             scriptRow(row)
                         }
@@ -83,7 +82,7 @@ struct ConversationView: View {
                     }
                 }
                 .scrollTargetLayout()
-                .foregroundStyle(theme.text)
+                .foregroundStyle(theme.frost)
                 .frame(minWidth: 0, maxWidth: 640, alignment: .leading)
                 .frame(minWidth: 0, maxWidth: .infinity, alignment: .center)
                 .padding(20)
@@ -105,7 +104,7 @@ struct ConversationView: View {
                 if phase == .idle && !detailsChanging { followsLatest = isAtBottom }
             }
         }
-        .background(theme.background)
+        .background(theme.void)
         .onChange(of: typing) { typingChanged(typing) }
         .onDisappear { typingChanged(false) }
         .safeAreaInset(edge: .bottom, spacing: 0) { composer }
@@ -131,7 +130,7 @@ struct ConversationView: View {
             }
         }
         .font(.system(size: controlSize))
-        .foregroundStyle(theme.secondary)
+        .foregroundStyle(theme.haze)
         .frame(maxWidth: .infinity, alignment: .trailing)
         .accessibilityElement(children: .contain)
     }
@@ -150,7 +149,7 @@ struct ConversationView: View {
                     .font(.system(size: row.speaker == .user ? controlSize : scriptSize,
                                   design: row.speaker == .user ? .default : .serif))
                     .lineSpacing(row.speaker == .user ? 2 : 5)
-                    .foregroundStyle(row.speaker == .user ? theme.secondary : theme.text)
+                    .foregroundStyle(row.speaker == .user ? theme.haze : theme.frost)
                     .multilineTextAlignment(row.speaker == .user ? .trailing : .leading)
                     .frame(maxWidth: .infinity, alignment: row.speaker == .user ? .trailing : .leading)
                     .textSelection(.enabled)
@@ -160,14 +159,14 @@ struct ConversationView: View {
                 Button("Play") { Task { await session.replay(replyID: String(row.id.dropFirst(6))) } }
                     .buttonStyle(.plain)
                     .font(.system(size: controlSize))
-                    .foregroundStyle(theme.secondary)
+                    .foregroundStyle(theme.haze)
                     .underline()
                     .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
                     .disabled(!session.voiceOn || !session.connection.canSend)
                     .accessibilityLabel("Play reply")
                 if let message = session.replayMessages[String(row.id.dropFirst(6))] ?? session.playback.messages[String(row.id.dropFirst(6))] {
-                    Text(message).font(.system(size: controlSize)).foregroundStyle(theme.secondary)
+                    Text(message).font(.system(size: controlSize)).foregroundStyle(theme.haze)
                 }
             }
             if !row.details.isEmpty {
@@ -195,8 +194,8 @@ struct ConversationView: View {
                     }
                 } label: { Text("Details").frame(minHeight: 44) }
                 .font(.system(size: controlSize))
-                .foregroundStyle(theme.secondary)
-                .tint(theme.secondary)
+                .foregroundStyle(theme.haze)
+                .tint(theme.haze)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
@@ -219,7 +218,7 @@ struct ConversationView: View {
     private var composer: some View {
         VStack(spacing: 12) {
             if let message = session.draftValidationMessage ?? session.inputMessage {
-                Text(message).foregroundStyle(theme.secondary)
+                Text(message).foregroundStyle(theme.haze)
             }
             HStack(alignment: .bottom, spacing: 8) {
                 TextField("Type instead", text: $session.draft, axis: .vertical)
@@ -237,14 +236,15 @@ struct ConversationView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 4)
-            .foregroundStyle(theme.secondary)
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.secondary, lineWidth: 1))
+            .foregroundStyle(theme.frost)
+            .background(theme.deep, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.haze, lineWidth: 1))
 
             if showsTalkControls { TalkControls(session: session, controlSize: controlSize, showsKeys: !typing) }
         }
         .font(.system(size: controlSize))
         .padding(20)
-        .background(theme.background)
+        .background(theme.void)
     }
 
     private func submit() { Task { await session.sendTypedLine() } }
@@ -253,8 +253,7 @@ struct ConversationView: View {
 struct VoiceControl: View {
     @Bindable var session: AppSession
     var controlSize: CGFloat
-    @Environment(\.colorScheme) private var scheme
-    private var theme: JarvisTheme { JarvisTheme(scheme: scheme) }
+    private var theme: JarvisTheme { JarvisTheme() }
 
     var body: some View {
         Button { Task { await session.setVoiceOn(!session.voiceOn) } } label: {
@@ -265,10 +264,10 @@ struct VoiceControl: View {
                 .frame(minWidth: 72, minHeight: controlSize > 20 ? 44 : 88)
                 .frame(maxWidth: controlSize > 20 ? .infinity : nil)
                 .contentShape(Rectangle())
-                .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.secondary, lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.haze, lineWidth: 1))
         }
         .buttonStyle(.plain)
-        .foregroundStyle(theme.secondary)
+        .foregroundStyle(theme.haze)
         .accessibilityHint(session.voiceOn ? "Turn off speech on this phone" : "Turn on speech on this phone")
         .accessibilityValue(session.voicePending ? "Waiting for the Mac" : session.voiceOn ? "On" : "Off")
     }

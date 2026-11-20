@@ -5,8 +5,7 @@ struct TalkControls: View {
     @Bindable var session: AppSession
     var controlSize: CGFloat
     var showsKeys = true
-    @Environment(\.colorScheme) private var scheme
-    private var theme: JarvisTheme { JarvisTheme(scheme: scheme) }
+    private var theme: JarvisTheme { JarvisTheme() }
 
     var body: some View {
         VStack(spacing: 12) {
@@ -32,7 +31,7 @@ struct TalkControls: View {
             }
         }
         .font(.system(size: controlSize))
-        .foregroundStyle(theme.secondary)
+        .foregroundStyle(theme.haze)
     }
 
     private var microphoneSettingsURL: URL {

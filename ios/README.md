@@ -153,29 +153,30 @@ Open Jarvis on the phone. If iOS asks, trust the developer profile in Settings. 
 
 ## Palette verification
 
-Ratios were computed with the `ui-design` skill's `scripts/contrast-check.py`. Text needs 4.5:1; control edges need 3:1.
+The app forces dark appearance and uses one palette, independent of the system setting. Ratios were computed with the `ui-design` skill's `scripts/contrast-check.py`. Text needs 4.5:1; control edges and indicators need 3:1.
 
-| Use | Foreground | Background | Ratio |
-|---|---|---|---|
-| Dark script | Linen `#E9EEEA` | Baize `#16302B` | 11.99:1 |
-| Dark status and outlines | Slate `#8FA39C` | Baize | 5.29:1 |
-| Dark Talk key edge | Brass `#C39A4A` | Baize | 5.39:1 |
-| Dark Talk label | Baize | Brass | 5.39:1 |
-| Light script | Baize | Linen | 11.99:1 |
-| Original light status | Slate `#8FA39C` | Linen | 2.27:1, fails |
-| Original light key edge | Brass `#C39A4A` | Linen | 2.22:1, fails |
-| Adjusted light status and outlines | `#536D64` | Linen | 4.78:1 |
-| Adjusted light Talk key | `#806020` | Linen | 4.95:1 |
-| Light Talk label | Linen | `#806020` | 4.95:1 |
+| Foreground | Background | Ratio |
+|---|---|---|
+| Frost `#E6EEF5` | Void `#05070C` | 17.19:1 |
+| Frost `#E6EEF5` | Deep `#0E1420` | 15.72:1 |
+| Haze `#7F8EA3` | Void `#05070C` | 6.05:1 |
+| Haze `#7F8EA3` | Deep `#0E1420` | 5.53:1 |
+| Void `#05070C` | Cyan `#33E6FF` | 13.34:1 |
+| Signal edge `#D6402E` | Deep `#0E1420` | 4.06:1 |
+| Cyan edge `#33E6FF` | Void `#05070C` | 13.34:1 |
+| Green indicator `#3DDC84` | Void `#05070C` | 11.29:1 |
+| Amber indicator `#F5B544` | Void `#05070C` | 11.11:1 |
 
-Only the light-theme Slate and Brass are darkened. The Talk key stays the only large coloured element. The red Signal marks active recording. Dynamic Type scales both type sizes, the script scrolls, and the bottom controls are kept above the safe area. The screen contains no invented conversation, Tasks or readiness claim.
+Recording uses Frost text on Deep with a Signal edge: Frost on a solid Signal fill would fail the normal-text threshold. Jarvis's replies retain the system serif at 18 points relative to body; other screen copy uses system sans relative to subheadline. Dynamic Type scales both sizes and labels wrap.
+
+Native macOS-hosted renders of Pairing, Settings, Tasks and Conversation were inspected at 320 and 393 points. The package build and tests and the generated app's unsigned iPhone and iPhone Simulator SDK builds passed. These renders verify the actual SwiftUI screen code but do not establish iPhone safe-area, keyboard or physical accessibility results.
 
 ## Verification still needing the device
 
 Use the [real-device checklist](../docs/notes/iphone-real-device-verification.md) for setup, cellular/AirPods, two-Client room, security, lifecycle and accessibility checks. Every physical result remains Waiting on User.
 
 - Install and launch under the actual Personal Team, then trust the profile if prompted.
-- Check the empty script in light and dark themes, portrait and landscape, and with larger text.
+- Check the empty script in dark appearance, portrait and landscape, and with larger text.
 - Confirm the weekly rebuild installs over the existing app.
 
 An initial project build with the implementation Mac's Xcode 27.1 failed before compilation: `IDESimulatorFoundation` could not load a required symbol from the installed `DVTDownloads` system framework, and Xcode reported incomplete first-launch setup. A later check at commit `77e6836` built both Jarvis and the audio spike from the same archived commit using a process-local override for matching Xcode-bundled private frameworks. With a generic iOS destination, signing disabled and an iOS 17 deployment floor, both generated projects produced unsigned arm64 `.app` bundles. Both bundles declare iPhone only (`UIDeviceFamily: [1]`) and audio background mode; the main app retains its camera and microphone descriptions, and the spike retains its microphone description. The override did not repair global host configuration or complete Xcode setup.

@@ -4,16 +4,15 @@ import SwiftUI
 struct SettingsView: View {
     @Bindable var session: AppSession
     @State private var confirmingUnpair = false
-    @Environment(\.colorScheme) private var scheme
     @ScaledMetric(relativeTo: .subheadline) var controlSize = 15
-    private var theme: JarvisTheme { JarvisTheme(scheme: scheme) }
+    private var theme: JarvisTheme { JarvisTheme() }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 32) {
                 Text("Settings").accessibilityAddTraits(.isHeader)
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Talk gesture").foregroundStyle(theme.secondary)
+                    Text("Talk gesture").foregroundStyle(theme.haze)
                     ForEach(TalkGesture.allCases, id: \.self) { gesture in
                         Button { Task { await session.setTalkGesture(gesture) } } label: {
                             HStack(alignment: .firstTextBaseline) {
@@ -25,7 +24,7 @@ struct SettingsView: View {
                         .buttonStyle(.plain)
                         .accessibilityValue(session.talk.gesture == gesture ? "Selected" : "")
                     }
-                    if let message = session.gestureMessage { Text(message).foregroundStyle(theme.secondary) }
+                    if let message = session.gestureMessage { Text(message).foregroundStyle(theme.haze) }
                 }
                 VStack(alignment: .leading, spacing: 12) {
                     Button { Task { await session.takeFocus() } } label: {
@@ -33,10 +32,10 @@ struct SettingsView: View {
                             .contentShape(Rectangle())
                     }.buttonStyle(.plain).disabled(session.focusPending)
                     if session.focusHere { Text("Updates come to this iPhone") }
-                    if let message = session.focusMessage { Text(message).foregroundStyle(theme.secondary) }
+                    if let message = session.focusMessage { Text(message).foregroundStyle(theme.haze) }
                 }
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Paired Mac").foregroundStyle(theme.secondary)
+                    Text("Paired Mac").foregroundStyle(theme.haze)
                     Text(session.credentials?.macName ?? "Unpaired")
                 }
                 Button { confirmingUnpair = true } label: {
@@ -45,11 +44,11 @@ struct SettingsView: View {
                 }.buttonStyle(.plain)
             }
             .font(.system(size: controlSize))
-            .foregroundStyle(theme.text)
+            .foregroundStyle(theme.frost)
             .frame(maxWidth: 520, alignment: .leading).padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(theme.background).tint(theme.text)
+        .background(theme.void).tint(theme.frost)
         .confirmationDialog("Unpair this iPhone?", isPresented: $confirmingUnpair, titleVisibility: .visible) {
             Button("Unpair this iPhone") { Task { await session.unpair() } }
             Button("Cancel", role: .cancel) {}

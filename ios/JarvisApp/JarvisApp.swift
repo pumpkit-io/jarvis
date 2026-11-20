@@ -8,6 +8,7 @@ struct JarvisApp: App {
     var body: some Scene {
         WindowGroup {
             JarvisRootView(session: AppSession(store: KeychainPairingStore()))
+                .preferredColorScheme(.dark)
         }
     }
 }
