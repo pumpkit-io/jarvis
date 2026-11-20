@@ -11,12 +11,13 @@ struct TalkKey: View {
     private var recording: Bool { talk.state == .recording }
 
     var body: some View {
-        VStack(spacing: 8) {
-            if recording {
-                Text(String(format: "%d:%02d", talk.elapsed / 60, talk.elapsed % 60))
-                    .monospacedDigit().fontWeight(.semibold)
+        ZStack {
+            ForEach(Array([TalkState.idle, .authorizing, .recording, .thinking].enumerated()), id: \.offset) { _, state in
+                label(talk.label(for: state), recording: state == .recording)
+                    .hidden()
+                    .accessibilityHidden(true)
             }
-            Text(talk.label).fontWeight(.semibold).multilineTextAlignment(.center)
+            label(talk.label, recording: recording)
         }
         .font(.system(size: controlSize))
         .frame(maxWidth: .infinity, minHeight: 88)
@@ -45,5 +46,17 @@ struct TalkKey: View {
         .accessibilityHint(talk.gesture == .hold ? "Hold while speaking. Release to send. Slide up to cancel." : "Tap to start. Tap again to send. Slide up to cancel.")
         .accessibilityValue(recording ? "Recording, \(talk.elapsed) seconds" : talk.ready ? talk.label : "Unavailable")
         .onDisappear { Task { await talk.controlDisappeared(interaction: interaction) } }
+    }
+
+    private func label(_ text: String, recording: Bool) -> some View {
+        VStack(spacing: 8) {
+            if recording {
+                Text(String(format: "%d:%02d", talk.elapsed / 60, talk.elapsed % 60))
+                    .monospacedDigit().fontWeight(.semibold)
+            }
+            Text(text).fontWeight(.semibold).multilineTextAlignment(.center)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity)
     }
 }
