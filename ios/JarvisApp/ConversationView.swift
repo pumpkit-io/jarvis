@@ -11,6 +11,9 @@ struct ConversationView: View {
     @ScaledMetric(relativeTo: .subheadline) var controlSize = 15
     @FocusState private var typing: Bool
     @State private var followsLatest = true
+    @State private var isAtBottom = true
+    @State private var detailsChanging = false
+    @State private var detailsRevision = 0
     @State private var readingAnchor: String?
     @State private var scrollPhase: ScrollPhase = .idle
     @State private var recoveryCandidate: String?
@@ -90,14 +93,14 @@ struct ConversationView: View {
             .onScrollGeometryChange(for: Bool.self) { geometry in
                 geometry.contentSize.height - geometry.visibleRect.maxY <= 60
             } action: { _, atBottom in
-                // Only the reader can change following; streamed layout changes cannot reclaim it.
-                if scrollPhase != .idle && scrollPhase != .animating { followsLatest = atBottom }
+                isAtBottom = atBottom
+                // Streamed layout changes cannot reclaim a reader who has scrolled up.
+                if !detailsChanging && scrollPhase != .idle && scrollPhase != .animating { followsLatest = atBottom }
             }
             .onScrollPhaseChange { _, phase, context in
                 scrollPhase = phase
-                if phase == .idle {
-                    followsLatest = context.geometry.contentSize.height - context.geometry.visibleRect.maxY <= 60
-                }
+                isAtBottom = context.geometry.contentSize.height - context.geometry.visibleRect.maxY <= 60
+                if phase == .idle && !detailsChanging { followsLatest = isAtBottom }
             }
         }
         .background(theme.background)
@@ -176,9 +179,19 @@ struct ConversationView: View {
                 }
             }
             if !row.details.isEmpty {
-                DisclosureGroup(isExpanded: Binding(get: { expandedDetails.contains(row.id) }, set: {
+                DisclosureGroup(isExpanded: Binding(get: { expandedDetails.contains(row.id) }, set: { expanded in
+                    guard expanded != expandedDetails.contains(row.id) else { return }
+                    detailsRevision += 1
+                    let revision = detailsRevision
+                    detailsChanging = true
                     followsLatest = false
-                    if $0 { expandedDetails.insert(row.id) } else { expandedDetails.remove(row.id) }
+                    withAnimation(.default, completionCriteria: .removed) {
+                        if expanded { expandedDetails.insert(row.id) } else { expandedDetails.remove(row.id) }
+                    } completion: {
+                        guard revision == detailsRevision else { return }
+                        detailsChanging = false
+                        if scrollPhase == .idle { followsLatest = isAtBottom }
+                    }
                 })) {
                     ForEach(row.details) { detail in
                         VStack(alignment: .leading, spacing: 8) {
