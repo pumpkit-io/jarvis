@@ -96,6 +96,10 @@ _Avoid_: treating a local floor decision as a Task selection
 One push-to-talk capture on the iPhone Client, from press to release. The iPhone Client listens at no other time, and each Talk is a new Spoken request.
 _Avoid_: recording, voice message, push
 
+**Outbox**:
+The iPhone Client's saved queue of Talks and typed lines the Hub has not yet accepted. Every one goes through it, sent oldest first whenever the Mac is reachable, so a Talk never waits on the connection.
+_Avoid_: offline mode, pending messages
+
 **Follow-up window**:
 The ten seconds after Jarvis finishes speaking when the User can go on without the Wake word. When it passes in silence, Jarvis plays a short falling closing sound and goes idle.
 _Avoid_: grace period, listening timeout

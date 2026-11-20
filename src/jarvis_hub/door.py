@@ -8,6 +8,7 @@ import sqlite3
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from aiohttp import WSMsgType, web
@@ -100,6 +101,7 @@ class Door:
         hub: Conversation | None = None, log: EventLog | None = None, revocation_interval: float = 0.25,
         on_replay: Callable[[str], None] | None = None, now: Callable[[], float] = time.perf_counter,
         transcription: BufferTranscriber | None = None, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        wall: Callable[[], float] = time.time,
     ) -> None:
         self._enabled = enabled
         self._host = host
@@ -112,6 +114,7 @@ class Door:
         self._log = log
         self._on_replay: Callable[[str], None] = on_replay or (hub.publish_client_snapshots if hub is not None else lambda client_id: None)
         self._now = now
+        self._wall = wall
         self._connections: dict[str, _Connection] = {}
         self._operations: dict[tuple[str, str], asyncio.Task[dict[str, Any]]] = {}
         self._revocation_interval = revocation_interval
@@ -360,7 +363,8 @@ class Door:
                         result = rejected(error.code, str(error), error.retry_after)
                         self._log.complete(client.id, command_id, result)
                     else:
-                        task = asyncio.create_task(self._upload(talk, command_id, body))
+                        delayed = self._delay(request.headers.get("X-Jarvis-Recorded-At"))
+                        task = asyncio.create_task(self._upload(talk, command_id, body, delayed))
                         talk.operation = task
                         self._operations[key] = task
                         task.add_done_callback(lambda done: self._operations.pop(key, None))
@@ -378,9 +382,9 @@ class Door:
         finally:
             body.clear()
 
-    async def _upload(self, talk: Talk, command_id: str, body: bytearray) -> dict[str, Any]:
+    async def _upload(self, talk: Talk, command_id: str, body: bytearray, delayed: float | None) -> dict[str, Any]:
         assert self._talks is not None and self._log is not None
-        result = await self._talks.upload(talk, body)
+        result = await self._talks.upload(talk, body, delayed)
         self._log.complete(talk.client_id, command_id, result)
         return result
 
@@ -401,6 +405,18 @@ class Door:
         return web.json_response({"version": 1, "events": [wire_event(e) for e in events],
                                   "next_before": events[0].seq if events else None, "has_more": more},
                                  headers={"Cache-Control": "no-store"})
+
+    def _delay(self, recorded_at: str | None) -> float | None:
+        # The phone's clock is trusted only to say how long ago; a bad stamp means the line is current.
+        if recorded_at is None:
+            return None
+        try:
+            stamp = datetime.fromisoformat(recorded_at)
+        except ValueError:
+            return None
+        if stamp.tzinfo is None:
+            return None
+        return max(0.0, self._wall() - stamp.timestamp())
 
     @staticmethod
     def _cursor(value: str) -> int:
@@ -578,8 +594,10 @@ class Door:
                 text = payload.get("text")
                 if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > 16384:
                     raise ValueError("text must be nonempty and at most 16384 UTF-8 bytes")
+                recorded_at = payload.get("recorded_at")
                 request_id = await self._hub.admit_line(
-                    Line(text, self._now(), client_id=connection.client.id),
+                    Line(text, self._now(), client_id=connection.client.id,
+                         delayed=self._delay(recorded_at if isinstance(recorded_at, str) else None)),
                     allowed=lambda: self._active(connection))
                 result = {"ok": True, "result": {"request_id": request_id}}
             elif kind in ("talk_begin", "talk_cancel"):

@@ -54,7 +54,7 @@ async def rig(root: Path, transcriber: Transcriber | None = None, **options: Any
         hub = make_hub(backend, EventOutput(log, RecordingOutput()), RecordingMetrics(), **options)
         asr = transcriber or Transcriber()
         door = Door(enabled=True, port=0, health=hub.health, pairing=pairing, hub=hub, log=log,
-                    now=clock.now, transcription=asr, sleep=clock.sleep)
+                    now=clock.now, transcription=asr, sleep=clock.sleep, wall=lambda: 1000)
         await hub.start()
         await door.start()
         try:
@@ -612,12 +612,11 @@ async def test_disconnected_upload_can_finish_inside_original_retry_allowance(tm
         assert not client(hub, phone.client.id).talking
 
 
-async def test_upload_requires_authentication_talk_and_supported_format(tmp_path: Path) -> None:
+async def test_upload_requires_authentication_and_supported_format(tmp_path: Path) -> None:
     async with rig(tmp_path) as (session, _socket, door, _hub, _log, _backend, asr, phone, _clock, _pairing):
         url = f'http://127.0.0.1:{door.port}/v1/utterances/talk'
         for request_headers, status, code in [
             (headers('wrong'), 401, 'unauthorized'),
-            (headers(phone.token), 409, 'talk_not_active'),
             ({**headers(phone.token), 'X-Jarvis-Audio-Format': 'wav'}, 415, 'unsupported_audio'),
             ({**headers(phone.token), 'Idempotency-Key': ''}, 400, 'invalid_payload'),
         ]:
@@ -977,3 +976,57 @@ async def test_long_uploaded_user_words_authorize_max_effort_before_and_after_re
             assert backend.all_sessions('subagent') == []
     finally:
         await hub.close()
+
+
+async def test_queued_upload_needs_no_talk_begin_or_socket_and_retries_exactly(tmp_path: Path) -> None:
+    async with rig(tmp_path) as (session, socket, door, hub, log, backend, asr, phone, _clock, _pairing):
+        await socket.close()
+        await until(lambda: not client(hub, phone.client.id).connected)
+        url = f'http://127.0.0.1:{door.port}/v1/utterances/queued'
+        async with session.post(url, headers=headers(phone.token), data=PCM) as response:
+            assert response.status == 200
+            receipt = await response.json()
+        async with session.post(url, headers=headers(phone.token), data=PCM) as response:
+            assert await response.json() == receipt
+        await until(lambda: len(backend.session('talker').received) == 2)
+        heard = [event for event in log.after(0) if event.type == 'heard']
+        assert len(heard) == asr.calls == 1
+        assert heard[0].payload['request_id'] == receipt['result']['request_id']
+        assert '<user lang="en">' in backend.session('talker').received[-1]
+        assert not client(hub, phone.client.id).talking
+        async with session.post(url, headers=headers(phone.token, 'another-id'), data=PCM) as response:
+            assert response.status == 409
+            assert (await response.json())['error']['code'] == 'talk_not_active'
+        assert asr.calls == 1
+
+
+async def test_queued_upload_does_not_end_the_live_talk(tmp_path: Path) -> None:
+    async with rig(tmp_path) as (session, socket, door, hub, _log, _backend, asr, phone, _clock, _pairing):
+        await socket.send_json(command('begin', 'talk_begin', talk_id='live'))
+        await result(socket, 'begin')
+        async with session.post(f'http://127.0.0.1:{door.port}/v1/utterances/queued', headers=headers(phone.token, 'old'), data=PCM) as response:
+            assert response.status == 200
+        assert client(hub, phone.client.id).talking
+        async with session.post(f'http://127.0.0.1:{door.port}/v1/utterances/live', headers=headers(phone.token), data=PCM) as response:
+            assert response.status == 200
+        assert asr.calls == 2
+
+
+@pytest.mark.parametrize(('recorded_at', 'marker'), [
+    ('1970-01-01T00:06:40Z', ' delayed="10 minutes"'),
+    ('1970-01-01T00:16:00Z', ''),
+    ('not a time', ''),
+])
+async def test_late_voice_and_typed_lines_tell_the_talker_how_late(tmp_path: Path, recorded_at: str, marker: str) -> None:
+    async with rig(tmp_path) as (session, socket, door, _hub, _log, backend, _asr, phone, _clock, _pairing):
+        async with session.post(f'http://127.0.0.1:{door.port}/v1/utterances/queued',
+                                headers={**headers(phone.token), 'X-Jarvis-Recorded-At': recorded_at}, data=PCM) as response:
+            assert response.status == 200
+        await until(lambda: len(backend.session('talker').received) == 2)
+        assert f'<user lang="en"{marker}>' in backend.session('talker').received[-1]
+        await socket.send_json(command('foreground', 'set_presence', can_show_text=True))
+        await result(socket, 'foreground')
+        await socket.send_json(command('typed', 'say_text', text='Ciao', recorded_at=recorded_at))
+        assert (await result(socket, 'typed'))['ok'] is True
+        await until(lambda: len(backend.session('talker').received) == 3)
+        assert f'typed="true"{marker}>' in backend.session('talker').received[-1]

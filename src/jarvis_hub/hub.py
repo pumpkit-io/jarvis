@@ -222,6 +222,8 @@ class Line:
     segments: tuple[str, ...] = ()
     relation_hint: str | None = None
     client_id: str = TERMINAL
+    # Seconds between the User saying this and the Hub receiving it, for lines a phone queued while offline.
+    delayed: float | None = None
 
 
 # Sent once at launch, in the background, so the first real turn finds the prompt cached (ADR 0006); never shown.
@@ -245,10 +247,20 @@ ORCHESTRATOR_TIMEOUT = 600.0
 INTERRUPT_GRACE = 10.0
 
 
-def user_message(text: str, lang: Lang, *, typed: bool = True) -> str:
+def user_message(text: str, lang: Lang, *, typed: bool = True, delayed: float | None = None) -> str:
     # Escaped so the User's text can never close the tag or forge another one.
     marker = ' typed="true"' if typed else ""
+    if (late := delay_phrase(delayed)) is not None:
+        marker += f' delayed="{late}"'
     return f'<user lang="{lang}"{marker}>{escape(text, quote=False)}</user>'
+
+
+def delay_phrase(seconds: float | None) -> str | None:
+    # Under two minutes a queued line still reads as the current exchange.
+    if seconds is None or seconds < 120:
+        return None
+    minutes = round(seconds / 60)
+    return f"{minutes} minutes" if minutes < 120 else f"{round(minutes / 60)} hours"
 
 
 def interrupted_message(spoken: str) -> str:
@@ -1004,7 +1016,7 @@ class Hub:
                 self._release_held(arrived=line.arrived)
             self.clients.take_focus(line.client_id)
             self._read_lang = lang = line.lang or detect_language(text, self._read_lang)
-            message = user_message(text, lang, typed=line.typed)
+            message = user_message(text, lang, typed=line.typed, delayed=line.delayed)
             interrupted = line.interrupted if line.interrupted is not None else self._remote_interrupted
             self._remote_interrupted = None
             if interrupted is not None:
