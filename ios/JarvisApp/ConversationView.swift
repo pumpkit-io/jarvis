@@ -65,6 +65,7 @@ struct ConversationView: View {
                             .font(.system(size: scriptSize, design: .serif))
                             .lineSpacing(5)
                             .padding(.top, 24)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     ForEach(Array(session.conversation.rows.enumerated()), id: \.element.id) { index, row in
                         VStack(alignment: .leading, spacing: 12) {
@@ -74,7 +75,9 @@ struct ConversationView: View {
                                     .foregroundStyle(theme.secondary)
                             }
                             scriptRow(row)
-                        }.id(row.id)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .id(row.id)
                     }
                     ForEach(session.typedLines.filter { !$0.message.isEmpty }) { line in
                         typedLineStatus(line)
@@ -82,8 +85,8 @@ struct ConversationView: View {
                 }
                 .scrollTargetLayout()
                 .foregroundStyle(theme.text)
-                .frame(maxWidth: 640, alignment: .leading)
-                .frame(maxWidth: .infinity)
+                .frame(minWidth: 0, maxWidth: 640, alignment: .leading)
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .center)
                 .padding(20)
             }
             .scrollPosition(id: $readingAnchor, anchor: .top)
@@ -142,6 +145,7 @@ struct ConversationView: View {
         }
         .font(.system(size: controlSize))
         .foregroundStyle(theme.secondary)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func gapDate(_ index: Int) -> Date? {
@@ -205,8 +209,10 @@ struct ConversationView: View {
                 .font(.system(size: controlSize))
                 .foregroundStyle(theme.secondary)
                 .tint(theme.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func spokenText(_ row: ConversationRow) -> AttributedString {
@@ -219,7 +225,6 @@ struct ConversationView: View {
         guard let range = row.text.range(of: sentence, range: cursor..<row.text.endIndex) else { return AttributedString(row.text) }
         var marked = AttributedString(row.text[range])
         marked.underlineStyle = .single
-        marked.font = .system(size: scriptSize, design: .serif).bold()
         return AttributedString(row.text[..<range.lowerBound]) + marked + AttributedString(row.text[range.upperBound...])
     }
 
