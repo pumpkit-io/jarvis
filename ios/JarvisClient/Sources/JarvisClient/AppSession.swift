@@ -41,6 +41,11 @@ import Observation
     private let makeOutboxTransport: @MainActor () -> any OutboxTransport
     private let outboxDirectory: URL
     private let noticeSleep: @Sendable (Double) async throws -> Void
+    public let orb = OrbModel()
+    private let orbNow: @MainActor () -> Double
+    private let orbSleep: @Sendable (Double) async throws -> Void
+    private var orbFrames: Task<Void, Never>?
+    private var streamingReply: (id: String, started: Double)?
     public let playback: SpeechPlayer
     private var playbackDelivery: Task<Void, Never>?
     private var playbackRevision: UInt64 = 0
@@ -118,7 +123,12 @@ import Observation
                 }
             case .speechStop:
                 if let id = event.string("speech_id") { playback.stop(speechID: id, reportStopped: false) }
+            case .replyDelta:
+                if foreground, !tasksReplaying, let id = event.string("reply_id"), streamingReply?.id != id {
+                    streamingReply = (id, orbNow())
+                }
             case .replyEnd:
+                if streamingReply?.id == event.string("reply_id") { streamingReply = nil }
                 if let reply = event.string("reply_id"), playback.replyID != reply { playback.markMissed(replyID: reply) }
             default: break
             }
@@ -190,6 +200,8 @@ import Observation
                 makeOutboxTransport: (@MainActor () -> any OutboxTransport)? = nil,
                 outboxDirectory: URL? = nil,
                 noticeSleep: @escaping @Sendable (Double) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
+                orbNow: @escaping @MainActor () -> Double = { ProcessInfo.processInfo.systemUptime },
+                orbSleep: @escaping @Sendable (Double) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
                 stopPlayback: @escaping @MainActor () -> Void = {},
                 sendCommand: @escaping @Sendable (HubClient, HubCommand) async throws -> Void = { try await $0.send($1) }) {
         self.voiceStore = voiceStore
@@ -209,6 +221,7 @@ import Observation
             ?? (makeClient == nil ? OutboxStore.applicationDirectory
                 : FileManager.default.temporaryDirectory.appendingPathComponent("JarvisOutbox-\(UUID().uuidString)"))
         self.noticeSleep = noticeSleep
+        self.orbNow = orbNow; self.orbSleep = orbSleep
         self.stopPlayback = stopPlayback
         self.playback.configure(report: { [weak self] command in
             guard let self, let client = self.client else { return }
@@ -237,6 +250,30 @@ import Observation
                 if self.backgroundSpeechID == id { self.backgroundSpeechID = nil }
             }
         })
+    }
+
+    private func startOrbFrames() {
+        guard orbFrames == nil, foreground, credentials != nil else { return }
+        orbFrames = Task { [weak self, orbSleep] in
+            while !Task.isCancelled {
+                do { try await orbSleep(1.0 / 60) } catch { return }
+                guard !Task.isCancelled else { return }
+                guard let self else { return }
+                self.sampleOrb()
+            }
+        }
+    }
+
+    private func sampleOrb() {
+        if playback.playingSpeechID != nil {
+            orb.update(speaker: .jarvis, target: playback.level)
+        } else if !voiceOn, let reply = streamingReply {
+            let time = max(0, orbNow() - reply.started)
+            let target = abs(sin(7 * time) * sin(2.3 * time)) * (0.6 + 0.4 * abs(sin(0.9 * time)))
+            orb.update(speaker: .jarvis, target: target)
+        } else {
+            orb.update(speaker: .idle, target: 0)
+        }
     }
 
     public func launch() async {
@@ -360,6 +397,7 @@ import Observation
         let oldCredentials = credentials
         history = nil
         updates?.cancel(); updates = nil; paths?.cancel(); paths = nil
+        orbFrames?.cancel(); orbFrames = nil; orb.reset(); streamingReply = nil
         setConnection(.unpaired); speechID = nil; playback.stop(reportStopped: false); stopPlayback()
         playbackDelivery?.cancel(); playbackDelivery = nil; pendingPlaybackDrain = nil
         outbox?.retire(); outbox = nil
@@ -384,6 +422,7 @@ import Observation
 
     private func setConnection(_ state: HubConnectionState) {
         connection = state
+        if !state.canSend { streamingReply = nil }
         let blip: [HubConnectionState] = [.connecting, .unreachable, .hubStopped, .suspended]
         guard shownConnection == .ready, blip.contains(state) else {
             connectionNotice?.cancel(); connectionNotice = nil
@@ -402,6 +441,8 @@ import Observation
 
     public func setForeground(_ value: Bool) async {
         foreground = value
+        if value { startOrbFrames() }
+        else { orbFrames?.cancel(); orbFrames = nil; orb.reset(); streamingReply = nil }
         foregroundGeneration &+= 1
         let transition = foregroundGeneration, owner = generation, client = client
         if !value { await talk.cancel(); outbox?.prepareForBackground() } else { outbox?.nudge() }
@@ -450,6 +491,7 @@ import Observation
             playback.markMissed(replyID: String(row.id.dropFirst(6)))
         }
         self.credentials = credentials; self.client = client; setConnection(.connecting)
+        startOrbFrames()
         let outbox = Outbox(store: OutboxStore(directory: outboxDirectory, credentials: credentials),
                             transport: makeOutboxTransport(), credentials: credentials, now: historyNow)
         self.outbox = outbox

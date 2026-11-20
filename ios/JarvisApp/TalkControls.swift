@@ -3,6 +3,7 @@ import SwiftUI
 
 struct MessageInputBar: View {
     @Bindable var session: AppSession
+    var showsVoiceControl = true
     var typingChanged: (Bool) -> Void = { _ in }
     @ScaledMetric(relativeTo: .subheadline) var controlSize = 15
     @FocusState private var typing: Bool
@@ -23,9 +24,11 @@ struct MessageInputBar: View {
                         .underline().frame(minHeight: 44)
                 }
             }
-            HStack {
-                Spacer()
-                VoiceControl(session: session, controlSize: controlSize)
+            if showsVoiceControl {
+                HStack {
+                    Spacer()
+                    VoiceControl(session: session, controlSize: controlSize)
+                }
             }
             HStack(alignment: .bottom, spacing: 12) {
                 field
@@ -102,6 +105,7 @@ struct VoiceControl: View {
                 .font(.system(size: controlSize))
                 .frame(width: 44, height: 44)
                 .contentShape(Circle())
+                .background(theme.deep, in: Circle())
         }
         .buttonStyle(.plain)
         .foregroundStyle(theme.haze)

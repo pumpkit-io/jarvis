@@ -3,6 +3,7 @@ import Foundation
 import Observation
 
 @MainActor public protocol SpeechOutput: AnyObject {
+    var level: Double { get }
     func play(_ pcm: Data, finished: @escaping @MainActor @Sendable () -> Void) throws
     func stop()
 }
@@ -15,6 +16,7 @@ import Observation
     public private(set) var lastFinishedIndex: Int64 = -1
     public private(set) var messages: [String: String] = [:]
     public private(set) var missedReplies: Set<String> = []
+    public var level: Double { sentence == nil ? 0 : output.level }
     public var playingSpeechID: String? { sentence == nil ? nil : speechID }
     public private(set) var activeSpeechID: String?
     private struct Clip { let index: Int64; let text: String; let pcm: Data }
@@ -122,6 +124,25 @@ import Observation
 @MainActor public final class NativeSpeechOutput: SpeechOutput {
     private var engine: AVAudioEngine?
     private var node: AVAudioPlayerNode?
+    private struct MeterClip {
+        let start: Int64
+        let frames: Int64
+        let levels: [Double]
+    }
+    private var meterClips: [MeterClip] = []
+    private var scheduledFrames: Int64 = 0
+    private static let meterFrames = 480
+    private var playedFrames: Int64? {
+        guard let node, let renderTime = node.lastRenderTime else { return nil }
+        return node.playerTime(forNodeTime: renderTime)?.sampleTime
+    }
+    // Render position selects the window, so queued audio cannot animate speech before it plays.
+    public var level: Double {
+        guard let frame = playedFrames else { return 0 }
+        meterClips.removeAll { $0.start + $0.frames <= frame }
+        guard let clip = meterClips.first(where: { frame >= $0.start && frame < $0.start + $0.frames }) else { return 0 }
+        return clip.levels[Int(frame - clip.start) / Self.meterFrames]
+    }
     public init() {}
     public func play(_ pcm: Data, finished: @escaping @MainActor @Sendable () -> Void) throws {
         guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 24_000, channels: 1, interleaved: false),
@@ -138,9 +159,22 @@ import Observation
             self.engine = engine; self.node = node
             try engine.start(); node.play()
         }
+        let start = max(scheduledFrames, playedFrames ?? 0)
+        var levels: [Double] = []
+        for offset in stride(from: 0, to: Int(buffer.frameLength), by: Self.meterFrames) {
+            let end = min(offset + Self.meterFrames, Int(buffer.frameLength))
+            var energy = 0.0
+            for index in offset..<end { energy += Double(samples[index]) * Double(samples[index]) }
+            levels.append(sqrt(energy / Double(end - offset)))
+        }
+        meterClips.append(MeterClip(start: start, frames: Int64(buffer.frameLength), levels: levels))
+        scheduledFrames = start + Int64(buffer.frameLength)
         node?.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
             Task { @MainActor in finished() }
         }
     }
-    public func stop() { node?.stop(); engine?.stop(); node = nil; engine = nil }
+    public func stop() {
+        node?.stop(); engine?.stop(); node = nil; engine = nil
+        meterClips = []; scheduledFrames = 0
+    }
 }
