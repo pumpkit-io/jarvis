@@ -1,42 +1,30 @@
 import Foundation
 import Testing
-import JarvisClient
+@testable import JarvisClient
 
 @MainActor final class FakeTalkRecorder: TalkRecorder {
     var starts = 0
     var stops = 0
     var active = false
-    var pcm = Data([1, 0, 2, 0])
+    var pcm = Data(repeating: 1, count: 32_000)
     func start(limitReached: @escaping @MainActor @Sendable () -> Void) throws { starts += 1; active = true }
     func stop() -> Data { stops += 1; active = false; return pcm }
 }
 
+/// Stands in for the Hub socket and the Outbox around a TalkController.
 @MainActor final class TalkWire {
-    var commands: [HubCommand] = []
-    var uploads: [(String, String, Data)] = []
-    var retired: [String] = []
-    func send(_ command: HubCommand) async throws { commands.append(command) }
-    func upload(_ talk: String, _ id: String, _ data: Data) async throws -> CommandResult {
-        uploads.append((talk, id, data))
-        return try JSONDecoder().decode(CommandResult.self, from: Data("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(id)\",\"ok\":true,\"result\":{\"request_id\":\"r1\",\"talk_id\":\"\(talk)\"}}".utf8))
-    }
-}
+    var connected = true
+    var begins: [String] = []
+    var cancels: [String] = []
+    var deliveries: [(talkID: String, pcm: Data, recordedAt: Date)] = []
+    var commands: [String] { begins.map { _ in "talk_begin" } + cancels.map { _ in "talk_cancel" } }
 
-@MainActor @Test func releaseStopsCaptureBeforeUploadAndKeepsTalkIdentity() async throws {
-    let recorder = FakeTalkRecorder(), wire = TalkWire()
-    let talk = TalkController(recorder: recorder, permission: { true })
-    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { wire.retired.append($0) },
-                   upload: { try await wire.upload($0, $1, $2) })
-    await talk.press()
-    #expect(recorder.active)
-    #expect(talk.state == .recording)
-    let begin = try #require(wire.commands.first)
-    #expect(begin.type == "talk_begin")
-    await talk.release()
-    #expect(!recorder.active)
-    #expect(wire.uploads.count == 1)
-    #expect(begin.payload["talk_id"] == wire.uploads.first.map { .string($0.0) })
-    #expect(talk.state == .thinking)
+    func attach(_ talk: TalkController) {
+        talk.configure(begin: { id in
+            guard self.connected else { return false }
+            self.begins.append(id); return true
+        }, cancel: { self.cancels.append($0) }, deliver: { self.deliveries.append(($0, $1, $2)) })
+    }
 }
 
 @MainActor final class HeldMicrophonePermission {
@@ -45,59 +33,344 @@ import JarvisClient
     func grant() { waiter?.resume(returning: true); waiter = nil }
 }
 
-@MainActor @Test func delayedMicrophoneGrantCannotReviveReleasedCancelledOrDisconnectedHold() async throws {
-    for action in ["release", "cancel", "disconnect"] {
-        let recorder = FakeTalkRecorder(), wire = TalkWire(), permission = HeldMicrophonePermission()
-        let talk = TalkController(recorder: recorder, permission: { await permission.request() })
-        talk.configure(ready: true, send: { try await wire.send($0) }, retire: { wire.retired.append($0) },
-                       upload: { try await wire.upload($0, $1, $2) })
+@MainActor private func wired(_ recorder: FakeTalkRecorder, permission: @escaping @MainActor () async -> Bool = { true }) -> (TalkController, TalkWire) {
+    let talk = TalkController(recorder: recorder, permission: permission, clock: { Date(timeIntervalSince1970: 500) })
+    let wire = TalkWire(); wire.attach(talk)
+    return (talk, wire)
+}
+
+@MainActor @Test func releaseQueuesTheTalkUnderItsBegunIdentityAndTheKeyStaysFree() async throws {
+    let recorder = FakeTalkRecorder()
+    let (talk, wire) = wired(recorder)
+    await talk.press()
+    #expect(recorder.active && talk.state == .recording)
+    try await eventuallySession { wire.begins.count == 1 }
+    await talk.release()
+    #expect(!recorder.active)
+    #expect(wire.deliveries.map(\.talkID) == wire.begins)
+    #expect(wire.deliveries.first?.pcm == recorder.pcm)
+    #expect(wire.deliveries.first?.recordedAt == Date(timeIntervalSince1970: 500))
+    #expect(talk.state == .idle && talk.canPress)
+    await talk.press(); await talk.release()
+    #expect(wire.deliveries.count == 2)
+}
+
+@MainActor @Test func recordingNeverWaitsOnTheConnection() async throws {
+    let recorder = FakeTalkRecorder()
+    let (talk, wire) = wired(recorder)
+    wire.connected = false
+    #expect(talk.canPress)
+    await talk.press()
+    #expect(recorder.active)
+    await talk.release()
+    #expect(wire.deliveries.count == 1 && wire.begins.isEmpty)
+    await talk.press(); await talk.cancel()
+    #expect(wire.cancels.isEmpty && wire.deliveries.count == 1)
+}
+
+@MainActor @Test func delayedMicrophoneGrantCannotReviveReleasedOrCancelledHold() async throws {
+    for action in ["release", "cancel"] {
+        let recorder = FakeTalkRecorder(), permission = HeldMicrophonePermission()
+        let (talk, wire) = wired(recorder, permission: { await permission.request() })
         let press = Task { await talk.press() }
         try await eventuallySession { permission.waiter != nil }
-        switch action {
-        case "release": await talk.release()
-        case "cancel": await talk.cancel()
-        default: await talk.setReady(false)
-        }
+        if action == "release" { await talk.release() } else { await talk.cancel() }
         permission.grant(); await press.value
         #expect(recorder.starts == 0)
-        #expect(wire.commands.isEmpty)
-        #expect(wire.uploads.isEmpty)
+        #expect(wire.begins.isEmpty && wire.deliveries.isEmpty)
     }
 }
 
-@MainActor @Test func slideCancellationStopsRecorderAndNeverUploads() async throws {
-    let recorder = FakeTalkRecorder(), wire = TalkWire()
-    let talk = TalkController(recorder: recorder, permission: { true })
-    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { wire.retired.append($0) },
-                   upload: { try await wire.upload($0, $1, $2) })
+@MainActor @Test func slideCancellationStopsRecorderAndOnlyTellsAHubThatHeardTheBegin() async throws {
+    let recorder = FakeTalkRecorder()
+    let (talk, wire) = wired(recorder)
     await talk.press(); await talk.cancel(); await talk.release()
-    #expect(!recorder.active)
-    #expect(recorder.stops == 1)
-    #expect(wire.commands.map(\.type) == ["talk_begin", "talk_cancel"])
-    #expect(wire.uploads.isEmpty)
+    #expect(!recorder.active && recorder.stops == 1)
+    #expect(wire.cancels == wire.begins && wire.cancels.count == 1)
+    #expect(wire.deliveries.isEmpty)
+    #expect(talk.state == .cancelled && talk.message == "Talk cancelled.")
+    await talk.press()
+    #expect(recorder.starts == 2)
+}
+
+@MainActor @Test func aSlipOfTheFingerIsCancelledInsteadOfQueued() async throws {
+    let recorder = FakeTalkRecorder()
+    recorder.pcm = Data(repeating: 1, count: 9_598)
+    let (talk, wire) = wired(recorder)
+    await talk.press(); await talk.release()
+    #expect(wire.deliveries.isEmpty && wire.cancels.count == 1)
     #expect(talk.state == .cancelled)
-    await talk.setReady(false); await talk.press()
+}
+
+@MainActor @Test func fiveMinuteTimerSendsOnceAndPermissionRefusalDoesNotCapture() async throws {
+    let sleeper = FakeSleeper(), recorder = FakeTalkRecorder(), clock = TalkTestClock()
+    let talk = TalkController(recorder: recorder, permission: { true }, now: { clock.time }, sleep: { try await sleeper.sleep($0) })
+    let wire = TalkWire(); wire.attach(talk)
+    await talk.press()
+    try await eventuallySession { await sleeper.pending == 1 }
+    clock.time = 301
+    await sleeper.advance()
+    try await eventuallySession { wire.deliveries.count == 1 }
+    await talk.release()
+    #expect(recorder.stops == 1)
+    #expect(talk.elapsed == 300)
+    let refused = TalkController(recorder: recorder, permission: { false })
+    wire.attach(refused)
+    await refused.press()
+    #expect(refused.state == .refused)
+    #expect(refused.message == "Jarvis needs the microphone to hear you. Allow it in Settings.")
     #expect(recorder.starts == 1)
 }
 
-@Test func abandonedUnacknowledgedTalkBeginIsNotReplayedOnReconnect() async throws {
-    let transport = FakeTransport()
-    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }), sleep: { _ in })
-    await client.start()
-    try await eventually { await transport.socket(0) != nil }
-    let socket = try #require(await transport.socket(0))
+@MainActor final class TalkTestClock { var time = 0.0 }
+
+@MainActor @Test func permissionRefusalRemainsVisibleAfterPermissionDialogEndsHold() async throws {
+    let permission = HeldMicrophonePermission(), recorder = FakeTalkRecorder()
+    let (talk, wire) = wired(recorder, permission: { await permission.request() })
+    let press = Task { await talk.press() }
+    try await eventuallySession { permission.waiter != nil }
+    await talk.cancel()
+    permission.waiter?.resume(returning: false); permission.waiter = nil
+    await press.value
+    #expect(talk.microphoneRefused)
+    #expect(talk.message == "Jarvis needs the microphone to hear you. Allow it in Settings.")
+    #expect(recorder.starts == 0 && wire.begins.isEmpty)
+}
+
+@MainActor @Test func backgroundAndUnpairInvalidateDelayedPermissionThroughAppSession() async throws {
+    for transition in ["background", "unpair"] {
+        let socket = FakeSocket(), recorder = FakeTalkRecorder(), permission = HeldMicrophonePermission()
+        let controller = TalkController(recorder: recorder, permission: { await permission.request() })
+        let store = MemoryPairingStore(); store.record = try testPairingCredentials()
+        let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
+                                 makePaths: { nil }, talk: controller)
+        await session.launch(); await socket.ready()
+        try await eventuallySession { session.connection.canSend }
+        let press = Task { await session.talk.press() }
+        try await eventuallySession { permission.waiter != nil }
+        if transition == "background" { await session.setForeground(false) }
+        else { await session.unpair() }
+        permission.grant(); await press.value
+        #expect(recorder.starts == 0)
+        #expect(await socket.sent.contains(where: { $0.type == "talk_begin" }) == false)
+        await session.unpair()
+    }
+}
+
+@MainActor @Test func sessionInterruptsSpeechThenBeginsAndQueuesTheTalkUnderTheBegunIdentity() async throws {
+    let socket = FakeSocket(), recorder = FakeTalkRecorder(), store = MemoryPairingStore(), transport = FakeOutboxTransport()
+    store.record = try testPairingCredentials()
+    var stops = 0
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
+                             makePaths: { nil }, talk: TalkController(recorder: recorder, permission: { true }),
+                             makeOutboxTransport: { transport }, stopPlayback: { stops += 1 })
+    await session.launch(); await socket.ready()
+    try await eventuallySession { session.connection.canSend }
+    await socket.text(event(2, "speech_begin", #"{"speech_id":"older","reply_id":"older-reply","sample_rate":24000,"channels":1,"sample_width":2}"#))
+    try await eventuallySession { session.speechID == "older" }
+    session.reportCompletedClip(speechID: "older", index: 0)
+    session.reportCompletedClip(speechID: "stale", index: 50)
+    await session.talk.press()
+    #expect(stops == 1)
+    try await eventuallySession { await socket.sent.contains { $0.type == "talk_begin" } }
+    let commands = await socket.sent
+    let interrupt = try #require(commands.first(where: { $0.type == "interrupt" }))
+    #expect(interrupt.payload == ["speech_id": .string("older"), "last_clip_index": .integer(0)])
+    let begin = try #require(commands.first(where: { $0.type == "talk_begin" }))
+    #expect(commands.firstIndex(of: interrupt)! < commands.firstIndex(of: begin)!)
+    await session.talk.release()
+    #expect(session.talk.state == .idle && !recorder.active)
+    let upload = try #require(transport.started.first)
+    #expect(.string(String(upload.request.url!.lastPathComponent)) == begin.payload["talk_id"])
+    #expect(session.outbox?.items.first?.status == .sending)
+    await session.unpair()
+}
+
+@MainActor @Test func talkAndLinesQueueWhileTheMacIsUnreachableAndUnpairDropsThem() async throws {
+    let socket = FakeSocket(), recorder = FakeTalkRecorder(), store = MemoryPairingStore(), transport = FakeOutboxTransport()
+    store.record = try testPairingCredentials()
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
+                             makePaths: { nil }, talk: TalkController(recorder: recorder, permission: { true }),
+                             makeOutboxTransport: { transport })
+    await session.launch()
+    #expect(!session.connection.canSend && session.talk.canPress)
+    await session.talk.press(); await session.talk.release()
+    await session.talk.press(); await session.talk.release()
+    session.draft = "And one more thing"
+    #expect(session.canSubmit)
+    await session.sendTypedLine()
+    #expect(session.draft.isEmpty)
+    #expect(session.outbox?.items.map(\.status) == [.sending, .waiting, .waiting])
+    #expect(await socket.sent.isEmpty)
+    transport.answer(0, request: "r1")
+    transport.answer(1, request: "r2")
+    #expect(transport.started.last?.request.url?.path == "/v1/lines")
     await socket.ready()
-    try await eventually { await client.state == .ready }
-    try await client.send(HubCommand(id: "begin", type: "talk_begin", payload: ["talk_id": .string("abandoned")]))
-    try await client.send(HubCommand(id: "other", type: "take_focus"))
-    await client.retireTalkBegin(id: "begin")
-    try await eventually { await transport.socket(1) != nil }
-    let replacement = try #require(await transport.socket(1))
-    await replacement.ready(through: 2)
-    try await eventually { await replacement.sent.contains(where: { $0.id == "other" }) }
-    #expect(await replacement.sent.contains(where: { $0.id == "begin" }) == false)
-    #expect(await socket.closed)
-    await client.stop()
+    await socket.text(event(2, "heard", #"{"request_id":"r1","text":"First","spoken":true}"#))
+    try await eventuallySession { session.outbox?.items.count == 2 }
+    await session.unpair()
+    #expect(session.outbox == nil && transport.cancelled)
+}
+
+@MainActor @Test func tapStartsAndSendsThroughTheSameRecorderAndLabels() async throws {
+    let recorder = FakeTalkRecorder()
+    let (talk, wire) = wired(recorder)
+    await talk.setGesture(.tap)
+    #expect(talk.label == "Tap to talk")
+    await talk.tap()
+    #expect(recorder.active)
+    #expect(talk.label == "Tap to send. Slide up to cancel.")
+    await talk.tap()
+    #expect(!recorder.active)
+    #expect(wire.deliveries.count == 1)
+}
+
+@MainActor @Test func gestureChangeAndOldViewCleanupCannotCancelReleasedOrNewTalk() async throws {
+    let recorder = FakeTalkRecorder()
+    let (talk, wire) = wired(recorder)
+    let old = UUID(), current = UUID()
+    await talk.press(interaction: old)
+    await talk.setGesture(.tap)
+    #expect(!recorder.active && wire.deliveries.isEmpty)
+    await talk.press(interaction: current)
+    await talk.cancelInteraction(old)
+    await talk.releaseInteraction(old).value
+    #expect(recorder.active)
+    await talk.release()
+    await talk.cancelInteraction(current)
+    #expect(wire.deliveries.count == 1)
+    #expect(wire.cancels.count == 1)
+}
+
+@MainActor @Test func delayedTapPermissionIsInvalidatedBySecondTapOrGestureChange() async throws {
+    for change in [false, true] {
+        let recorder = FakeTalkRecorder(), permission = HeldMicrophonePermission()
+        let (talk, wire) = wired(recorder, permission: { await permission.request() })
+        await talk.setGesture(.tap)
+        let first = Task { await talk.tap() }
+        try await eventuallySession { permission.waiter != nil }
+        if change { await talk.setGesture(.hold) } else { await talk.tap() }
+        permission.grant(); await first.value
+        #expect(!recorder.active && recorder.starts == 0)
+        #expect(wire.begins.isEmpty && wire.deliveries.isEmpty)
+    }
+}
+
+@MainActor @Test func tapPermissionMayFinishAfterFingerReleaseWhileItsIntentIsStillOwned() async throws {
+    let recorder = FakeTalkRecorder(), permission = HeldMicrophonePermission()
+    let (talk, wire) = wired(recorder, permission: { await permission.request() })
+    await talk.setGesture(.tap)
+    let first = Task { await talk.tap() }
+    try await eventuallySession { permission.waiter != nil }
+    permission.grant(); await first.value
+    #expect(recorder.active)
+    await talk.tap()
+    #expect(!recorder.active && wire.deliveries.count == 1)
+}
+
+@MainActor @Test func cancelledDeferredPressCannotOutliveItsReplacementInteraction() async throws {
+    let recorder = FakeTalkRecorder()
+    let (talk, wire) = wired(recorder)
+    let old = UUID(), replacement = UUID()
+    let deferred = Task { await talk.press(interaction: old) }
+    deferred.cancel()
+    await talk.press(interaction: replacement)
+    await deferred.value
+    await talk.cancelInteraction(replacement)
+    #expect(recorder.starts == 1 && !recorder.active)
+    #expect(wire.begins.count == 1 && wire.cancels == wire.begins)
+    #expect(wire.deliveries.isEmpty)
+}
+
+@MainActor @Test func secondTapBeforeDeferredStartCannotLeaveTheMicrophoneRunning() async throws {
+    let recorder = FakeTalkRecorder()
+    let (talk, wire) = wired(recorder)
+    let intent = UUID()
+    let deferred = Task { await talk.press(interaction: intent) }
+    await talk.releaseInteraction(intent, pendingPress: deferred).value
+    await deferred.value
+    #expect(recorder.starts == 0 && !recorder.active)
+    #expect(wire.begins.isEmpty && wire.deliveries.isEmpty)
+}
+
+@MainActor @Test(arguments: [TalkGesture.hold, .tap])
+func interruptedHoldStopsCaptureAndNextHoldSendsNormally(gesture: TalkGesture) async throws {
+    let recorder = FakeTalkRecorder()
+    let (talk, wire) = wired(recorder)
+    await talk.setGesture(gesture)
+    let first = UUID(), second = UUID()
+    talk.holdBegan(interaction: first)
+    if gesture == .tap { await talk.holdEnded(interaction: first).value }
+    try await eventuallySession { recorder.active }
+    if gesture == .tap { talk.holdBegan(interaction: first) }
+    await talk.holdInterrupted(interaction: first).value
+    #expect(!recorder.active && wire.deliveries.isEmpty)
+    #expect(talk.state == .cancelled)
+    talk.holdBegan(interaction: second)
+    if gesture == .tap { await talk.holdEnded(interaction: second).value }
+    try await eventuallySession { recorder.active }
+    if gesture == .tap { talk.holdBegan(interaction: second) }
+    await talk.holdEnded(interaction: second).value
+    #expect(!recorder.active && wire.deliveries.count == 1)
+}
+
+@MainActor @Test(arguments: [TalkGesture.hold, .tap])
+func slideUpCancelsUntilFingerEndsAndNextTouchCanSend(gesture: TalkGesture) async throws {
+    let recorder = FakeTalkRecorder()
+    let (talk, wire) = wired(recorder)
+    await talk.setGesture(gesture)
+    let control = UUID()
+    talk.holdBegan(interaction: control)
+    if gesture == .tap { await talk.holdEnded(interaction: control).value }
+    try await eventuallySession { recorder.active }
+    talk.holdBegan(interaction: control)
+    await talk.holdMoved(verticalTranslation: -60, interaction: control).value
+    #expect(recorder.active)
+    await talk.holdMoved(verticalTranslation: -61, interaction: control).value
+    #expect(!recorder.active && wire.deliveries.isEmpty)
+    talk.holdBegan(interaction: control)
+    await talk.holdMoved(verticalTranslation: 0, interaction: control).value
+    await talk.holdEnded(interaction: control).value
+    #expect(!recorder.active && recorder.starts == 1)
+    talk.holdBegan(interaction: control)
+    if gesture == .tap { await talk.holdEnded(interaction: control).value }
+    try await eventuallySession { recorder.active }
+    if gesture == .tap { talk.holdBegan(interaction: control) }
+    await talk.holdEnded(interaction: control).value
+    #expect(!recorder.active && wire.deliveries.count == 1)
+}
+
+@MainActor @Test func endedTouchCannotBeCancelledByItsGestureStateReset() async throws {
+    let recorder = FakeTalkRecorder()
+    let (talk, wire) = wired(recorder)
+    let control = UUID()
+    talk.holdBegan(interaction: control)
+    try await eventuallySession { recorder.active }
+    let ended = talk.holdEnded(interaction: control)
+    await talk.holdInterrupted(interaction: control).value
+    await ended.value
+    #expect(wire.deliveries.count == 1)
+    #expect(wire.cancels.isEmpty)
+}
+
+@MainActor @Test func interruptedPermissionCannotReviveAndVoiceOverCanSendOrCancel() async throws {
+    let recorder = FakeTalkRecorder(), permission = HeldMicrophonePermission()
+    var askPermission = true
+    let (talk, wire) = wired(recorder, permission: { askPermission ? await permission.request() : true })
+    let control = UUID()
+    talk.holdBegan(interaction: control)
+    try await eventuallySession { permission.waiter != nil }
+    await talk.holdInterrupted(interaction: control).value
+    askPermission = false
+    await talk.activate(interaction: control).value
+    #expect(recorder.active)
+    permission.grant()
+    await talk.activate(interaction: control).value
+    #expect(!recorder.active && wire.deliveries.count == 1)
+    await talk.activate(interaction: control).value
+    #expect(recorder.active)
+    await talk.controlDisappeared(interaction: control)
+    #expect(!recorder.active && wire.deliveries.count == 1)
 }
 
 @MainActor final class FakeTalkSession: TalkAudioSession {
@@ -139,867 +412,4 @@ import JarvisClient
     #expect(throws: HubProtocolError.self) { try recorder.start {} }
     #expect(!session.active)
     #expect(session.releases == 2)
-}
-
-@MainActor @Test func fastReleaseAwaitsOnlyExistingHealthyBeginAcknowledgement() async throws {
-    let transport = FakeTransport()
-    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }), sleep: { _ in })
-    await client.start()
-    try await eventuallySession { await transport.socket(0) != nil }
-    let socket = try #require(await transport.socket(0))
-    await socket.ready()
-    try await eventuallySession { await client.state == .ready }
-    let recorder = FakeTalkRecorder(), wire = TalkWire()
-    let talk = TalkController(recorder: recorder, permission: { true })
-    talk.configure(ready: true, send: { try await client.send($0) }, retire: { await client.retireTalkBegin(id: $0) },
-                   upload: { id, command, pcm in
-                       #expect(!recorder.active)
-                       return try await wire.upload(id, command, pcm)
-                   }, admission: { await client.finishTalkBegin(id: $0) })
-    await talk.press()
-    let begin = try #require(await socket.sent.first(where: { $0.type == "talk_begin" }))
-    let release = Task { await talk.release() }
-    try await eventuallySession { !recorder.active }
-    #expect(talk.state == .uploading)
-    #expect(wire.uploads.isEmpty)
-    #expect(await socket.closed == false)
-    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(begin.id)\",\"ok\":true,\"result\":{\"talk_id\":\"t\"}}")
-    await release.value
-    #expect(talk.state == .thinking)
-    #expect(wire.uploads.count == 1)
-    #expect(await socket.closed == false)
-    await client.stop()
-}
-
-@MainActor @Test func canonicalReplyEndBeforeUploadResponseDoesNotLeaveTalkThinking() async throws {
-    let recorder = FakeTalkRecorder(), wire = TalkWire()
-    let talk = TalkController(recorder: recorder, permission: { true })
-    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { wire.retired.append($0) },
-                   upload: { id, command, bytes in
-                       let frame = try HubFrame.decode(Data(event(2, "reply_end", #"{"reply_id":"reply","request_id":"r1","text":"Done","reason":"complete"}"#).utf8))
-                       if case .event(let event) = frame { talk.receive(event) }
-                       return try await wire.upload(id, command, bytes)
-                   })
-    await talk.press(); await talk.release()
-    #expect(talk.requestID == "r1")
-    #expect(talk.state == .idle)
-}
-
-@MainActor @Test func fiveMinuteTimerSendsOnceAndPermissionRefusalDoesNotCapture() async throws {
-    let sleeper = FakeSleeper()
-    let recorder = FakeTalkRecorder(), wire = TalkWire()
-    let clock = TalkTestClock()
-    let talk = TalkController(recorder: recorder, permission: { true }, now: { clock.time }, sleep: { try await sleeper.sleep($0) })
-    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { wire.retired.append($0) },
-                   upload: { try await wire.upload($0, $1, $2) })
-    await talk.press()
-    try await eventuallySession { await sleeper.pending == 1 }
-    clock.time = 301
-    await sleeper.advance()
-    try await eventuallySession { wire.uploads.count == 1 }
-    await talk.release()
-    #expect(recorder.stops == 1)
-    #expect(talk.elapsed == 300)
-    let refused = TalkController(recorder: recorder, permission: { false })
-    refused.configure(ready: true, send: { try await wire.send($0) }, retire: { _ in }, upload: { try await wire.upload($0, $1, $2) })
-    await refused.press()
-    #expect(refused.state == .refused)
-    #expect(refused.message == "Jarvis needs the microphone to hear you. Allow it in Settings.")
-    #expect(recorder.starts == 1)
-}
-
-@MainActor final class TalkTestClock { var time = 0.0 }
-
-@MainActor @Test func uploadRetriesExactIdentityAndBytesThenFailsAtThirtySeconds() async throws {
-    let sleeper = FakeSleeper(), recorder = FakeTalkRecorder(), wire = TalkWire(), clock = TalkTestClock()
-    var attempts: [(String, String, Data)] = []
-    let talk = TalkController(recorder: recorder, permission: { true }, now: { clock.time }, sleep: { try await sleeper.sleep($0) })
-    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { _ in }, upload: { id, command, pcm in
-        #expect(!recorder.active)
-        attempts.append((id, command, pcm))
-        throw URLError(.networkConnectionLost)
-    })
-    await talk.press()
-    let release = Task { await talk.release() }
-    try await eventuallySession { let pending = await sleeper.pending; return attempts.count == 1 && pending == 2 }
-    // The retry deadline and retry delay are independently controllable.
-    await sleeper.advance()
-    await release.value
-    #expect(talk.state == .failed)
-    #expect(talk.message == "That didn't reach Jarvis. Hold to talk again.")
-    #expect(recorder.stops == 1)
-}
-
-@MainActor @Test func retriesPreserveUploadIDAndPcmAndSuppressLateResponseAfterCancel() async throws {
-    let sleeper = FakeSleeper(), recorder = FakeTalkRecorder(), wire = TalkWire()
-    var attempts: [(String, String, Data)] = []
-    var response: CheckedContinuation<CommandResult, any Error>?
-    let talk = TalkController(recorder: recorder, permission: { true }, sleep: { seconds in
-        if seconds == 30 { try await Task.sleep(for: .seconds(30)) }
-        else { try await sleeper.sleep(seconds) }
-    })
-    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { _ in }, upload: { id, command, pcm in
-        attempts.append((id, command, pcm))
-        if attempts.count == 1 { throw URLError(.networkConnectionLost) }
-        return try await withCheckedThrowingContinuation { response = $0 }
-    })
-    await talk.press()
-    let release = Task { await talk.release() }
-    try await eventuallySession { let pending = await sleeper.pending; return attempts.count == 1 && pending == 1 }
-    await sleeper.advance()
-    try await eventuallySession { response != nil }
-    #expect(attempts.count == 2)
-    #expect(attempts[0].0 == attempts[1].0)
-    #expect(attempts[0].1 == attempts[1].1)
-    #expect(attempts[0].2 == attempts[1].2)
-    await talk.cancel()
-    let result = try await wire.upload(attempts[1].0, attempts[1].1, attempts[1].2)
-    response?.resume(returning: result)
-    await release.value
-    #expect(talk.state == .cancelled)
-    #expect(talk.requestID == nil)
-}
-
-@Test func uploadUsesAuthenticatedExactPcmProtocolWithoutWavOrRedirects() async throws {
-    let credentials = try testPairingCredentials()
-    let upload = TalkUpload { request in
-        #expect(request.url?.absoluteString == "https://mac.example/v1/utterances/talk-1")
-        #expect(request.httpMethod == "POST")
-        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer secret")
-        #expect(request.value(forHTTPHeaderField: "Idempotency-Key") == "upload-1")
-        #expect(request.value(forHTTPHeaderField: "X-Jarvis-Audio-Format") == "pcm_s16le_16000_mono")
-        #expect(request.httpBody == Data([1, 0, 2, 0]))
-        return (Data(#"{"version":1,"type":"command_result","id":"upload-1","ok":true,"result":{"talk_id":"talk-1","request_id":"r"}}"#.utf8), 200)
-    }
-    #expect(try await upload.send(credentials: credentials, talkID: "talk-1", commandID: "upload-1", pcm: Data([1, 0, 2, 0])).ok)
-}
-
-@MainActor @Test func backgroundAndUnpairInvalidateDelayedPermissionThroughAppSession() async throws {
-    for transition in ["background", "unpair"] {
-        let socket = FakeSocket(), recorder = FakeTalkRecorder(), permission = HeldMicrophonePermission()
-        let controller = TalkController(recorder: recorder, permission: { await permission.request() })
-        let store = MemoryPairingStore(); store.record = try testPairingCredentials()
-        let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
-                                 makePaths: { nil }, talk: controller)
-        await session.launch(); await socket.ready()
-        try await eventuallySession { session.talk.canPress }
-        let press = Task { await session.talk.press() }
-        try await eventuallySession { permission.waiter != nil }
-        if transition == "background" { await session.setForeground(false) }
-        else { await session.unpair() }
-        permission.grant(); await press.value
-        #expect(recorder.starts == 0)
-        #expect(await socket.sent.contains(where: { $0.type == "talk_begin" }) == false)
-        await session.unpair()
-    }
-}
-
-@MainActor @Test func sessionInterruptCarriesOnlyCompletedClipThenTalkTranscriptAndReplySettle() async throws {
-    let socket = FakeSocket(), recorder = FakeTalkRecorder(), store = MemoryPairingStore()
-    store.record = try testPairingCredentials()
-    let controller = TalkController(recorder: recorder, permission: { true })
-    var stops = 0
-    let response = HeldUploadResponse()
-    let service = TalkUpload { request in try await response.post(request) }
-    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
-                             makePaths: { nil }, talk: controller, uploadTalk: service, stopPlayback: { stops += 1 })
-    await session.launch(); await socket.ready()
-    try await eventuallySession { session.talk.canPress }
-    await socket.text(event(2, "speech_begin", #"{"speech_id":"older","reply_id":"older-reply","sample_rate":24000,"channels":1,"sample_width":2}"#))
-    try await eventuallySession { session.speechID == "older" }
-    session.reportCompletedClip(speechID: "older", index: 0)
-    session.reportCompletedClip(speechID: "stale", index: 50)
-    await session.talk.press()
-    let commands = await socket.sent
-    let interrupt = try #require(commands.first(where: { $0.type == "interrupt" }))
-    #expect(interrupt.payload == ["speech_id": .string("older"), "last_clip_index": .integer(0)])
-    #expect(stops == 1)
-    let begin = try #require(commands.first(where: { $0.type == "talk_begin" }))
-    #expect(commands.firstIndex(of: interrupt)! < commands.firstIndex(of: begin)!)
-    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(begin.id)\",\"ok\":true,\"result\":{}}")
-    let released = Task { await session.talk.release() }
-    try await eventuallySession { await response.waiting }
-    await socket.text(event(4, "heard", #"{"request_id":"new-request","text":"check the tests","spoken":true}"#))
-    await socket.text(event(5, "reply_end", #"{"reply_id":"new-reply","request_id":"new-request","text":"They pass.","reason":"complete"}"#))
-    try await eventuallySession { session.conversation.rows.last?.text == "They pass." }
-    await response.finish()
-    await released.value
-    #expect(session.talk.state == .idle)
-    #expect(session.conversation.rows.map(\.text) == ["check the tests", "They pass."])
-    #expect(!recorder.active)
-    await session.unpair()
-}
-
-@Test func disconnectRetiresBeginBeforeReconnectEvenWhenItsWriteNeverReachedHub() async throws {
-    let transport = FakeTransport()
-    let sleeper = FakeSleeper()
-    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }), sleep: { try await sleeper.sleep($0) })
-    await client.start()
-    try await eventually { await transport.socket(0) != nil }
-    let first = try #require(await transport.socket(0))
-    await first.ready()
-    try await eventually { await client.state == .ready }
-    try await client.send(HubCommand(id: "lost-begin", type: "talk_begin", payload: ["talk_id": .string("lost")] ))
-    first.input.finish(throwing: URLError(.networkConnectionLost))
-    try await eventually { await sleeper.pending == 1 }
-    await sleeper.advance()
-    try await eventually { await transport.socket(1) != nil }
-    let next = try #require(await transport.socket(1))
-    await next.ready(through: 2)
-    try await eventually { await client.state == .ready }
-    #expect(await next.sent.contains(where: { $0.type == "talk_begin" }) == false)
-    await client.stop()
-}
-
-@MainActor @Test(arguments: [false, true]) func cancelledCaptureSurvivesReconnectBeforeFreshHoldCanStart(acknowledged: Bool) async throws {
-    let transport = FakeTransport()
-    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }))
-    await client.start()
-    try await eventuallySession { await transport.socket(0) != nil }
-    let first = try #require(await transport.socket(0))
-    await first.ready()
-    try await eventuallySession { await client.state == .ready }
-    let recorder = FakeTalkRecorder(), wire = TalkWire()
-    let talk = TalkController(recorder: recorder, permission: { true })
-    talk.configure(ready: true, send: { try await client.send($0) }, retire: { await client.retireTalkBegin(id: $0) },
-                   upload: { try await wire.upload($0, $1, $2) })
-    await talk.press()
-    let oldID = try #require(talk.talkID)
-    let begin = try #require(await first.sent.first(where: { $0.type == "talk_begin" }))
-    if acknowledged {
-        await first.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(begin.id)\",\"ok\":true,\"result\":{}}")
-        try await eventuallySession { await client.results[begin.id] != nil }
-        first.input.finish(throwing: URLError(.networkConnectionLost))
-        await talk.setReady(false)
-    } else { await talk.cancel() }
-    #expect(!recorder.active)
-    try await eventuallySession { await transport.socket(1) != nil }
-    let next = try #require(await transport.socket(1))
-    await next.ready(through: 2)
-    try await eventuallySession { await next.sent.contains(where: { $0.type == "talk_cancel" }) }
-    let cancellation = try #require(await next.sent.first(where: { $0.type == "talk_cancel" }))
-    #expect(cancellation.payload == ["talk_id": .string(oldID)])
-    #expect(await client.state != .ready)
-    #expect(await next.sent.contains(where: { $0.type == "talk_begin" }) == false)
-    await next.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(cancellation.id)\",\"ok\":true,\"result\":{\"cancelled\":true}}")
-    try await eventuallySession { await client.state == .ready }
-    await talk.setReady(true)
-    await talk.press()
-    #expect(talk.state == .recording)
-    let fresh = try #require(await next.sent.first(where: { $0.type == "talk_begin" }))
-    #expect(fresh.payload["talk_id"] != .string(oldID))
-    await first.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(begin.id)\",\"ok\":false,\"error\":{\"code\":\"talk_not_active\",\"message\":\"Old capture\",\"retry_after_seconds\":null}}")
-    await next.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(fresh.id)\",\"ok\":true,\"result\":{}}")
-    #expect(await client.finishTalkBegin(id: fresh.id))
-    #expect(talk.talkID.map { JSONValue.string($0) } == fresh.payload["talk_id"])
-    #expect(wire.uploads.isEmpty)
-    await talk.cancel()
-    await client.stop()
-}
-
-@MainActor @Test func lateBeginAdmissionCannotUploadCancelledTalkOrReplaceNewHold() async throws {
-    let recorder = FakeTalkRecorder(), wire = TalkWire()
-    var admission: CheckedContinuation<Bool, Never>?
-    let talk = TalkController(recorder: recorder, permission: { true })
-    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { _ in },
-                   upload: { try await wire.upload($0, $1, $2) }, admission: { _ in
-                       await withCheckedContinuation { admission = $0 }
-                   })
-    await talk.press()
-    let oldID = talk.talkID
-    let release = Task { await talk.release() }
-    try await eventuallySession { admission != nil }
-    #expect(!recorder.active)
-    await talk.cancel()
-    await talk.press()
-    #expect(talk.talkID != oldID)
-    admission?.resume(returning: true)
-    await release.value
-    #expect(wire.uploads.isEmpty)
-    #expect(talk.state == .recording)
-    #expect(recorder.active)
-    await talk.cancel()
-}
-
-@Test func healthyLostBeginAckExpiresWithoutEverReplayingBegin() async throws {
-    let transport = FakeTransport(), deadline = FakeSleeper()
-    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }),
-                           sleep: { _ in }, lifecycleSleep: { try await deadline.sleep($0) })
-    await client.start()
-    try await eventually { await transport.socket(0) != nil }
-    let first = try #require(await transport.socket(0))
-    await first.ready()
-    try await eventually { await client.state == .ready }
-    try await client.send(HubCommand(id: "begin-no-ack", type: "talk_begin", payload: ["talk_id": .string("t")]))
-    let finish = Task { await client.finishTalkBegin(id: "begin-no-ack") }
-    try await eventually { await deadline.pending == 1 }
-    await deadline.advance()
-    #expect(await finish.value == false)
-    try await eventually { await transport.socket(1) != nil }
-    let second = try #require(await transport.socket(1))
-    await second.ready(through: 2)
-    try await eventually { await client.state == .ready }
-    #expect(await second.sent.contains(where: { $0.type == "talk_begin" }) == false)
-    await client.stop()
-}
-
-actor HeldUploadResponse {
-    var waiter: CheckedContinuation<(Data, Int), any Error>?
-    var request: URLRequest?
-    var waiting: Bool { waiter != nil }
-    func post(_ request: URLRequest) async throws -> (Data, Int) {
-        self.request = request
-        return try await withCheckedThrowingContinuation { waiter = $0 }
-    }
-    func finish() {
-        let id = request!.value(forHTTPHeaderField: "Idempotency-Key")!
-        let talk = request!.url!.lastPathComponent
-        waiter?.resume(returning: (Data("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(id)\",\"ok\":true,\"result\":{\"talk_id\":\"\(talk)\",\"request_id\":\"new-request\"}}".utf8), 200))
-        waiter = nil
-    }
-}
-
-@MainActor @Test func permissionRefusalRemainsVisibleAfterPermissionDialogEndsHold() async throws {
-    let permission = HeldMicrophonePermission(), recorder = FakeTalkRecorder(), wire = TalkWire()
-    let talk = TalkController(recorder: recorder, permission: { await permission.request() })
-    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { _ in }, upload: { try await wire.upload($0, $1, $2) })
-    let press = Task { await talk.press() }
-    try await eventuallySession { permission.waiter != nil }
-    await talk.cancel()
-    permission.waiter?.resume(returning: false); permission.waiter = nil
-    await press.value
-    #expect(talk.microphoneRefused)
-    #expect(talk.message == "Jarvis needs the microphone to hear you. Allow it in Settings.")
-    #expect(recorder.starts == 0)
-    #expect(wire.commands.isEmpty)
-}
-
-@Test func cancellationRetainedDuringReconnectResendIsSentBeforeReady() async throws {
-    let transport = FakeTransport()
-    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }))
-    await client.start()
-    try await eventually { await transport.socket(0) != nil }
-    let first = try #require(await transport.socket(0))
-    await first.ready()
-    try await eventually { await client.state == .ready }
-    try await client.send(HubCommand(id: "retained", type: "take_focus"))
-    await client.pathChanged()
-    try await eventually { await transport.socket(1) != nil }
-    let next = try #require(await transport.socket(1))
-    await next.blockSend("take_focus")
-    await next.ready(through: 2)
-    try await eventually { await next.sendWaiter != nil }
-    try await client.send(HubCommand(id: "cancel-during-resend", type: "talk_cancel", payload: ["talk_id": .string("old")]))
-    #expect(await client.state != .ready)
-    await next.releaseSend()
-    try await eventually { await next.sent.contains(where: { $0.id == "cancel-during-resend" }) }
-    #expect(await client.state != .ready)
-    await #expect(throws: HubProtocolError.self) {
-        try await client.send(HubCommand(id: "premature", type: "talk_begin", payload: ["talk_id": .string("fresh")]))
-    }
-    await next.text(#"{"version":1,"type":"command_result","id":"cancel-during-resend","ok":true,"result":{"cancelled":true}}"#)
-    try await eventually { await client.state == .ready }
-    try await client.send(HubCommand(id: "fresh", type: "talk_begin", payload: ["talk_id": .string("fresh")]))
-    #expect(await next.sent.dropFirst().map(\.id) == ["retained", "cancel-during-resend", "fresh"])
-    await client.stop()
-}
-
-@MainActor @Test func backgroundedCaptureResendsOnlyCancellationBeforeNextHealthyHold() async throws {
-    let transport = FakeTransport(), store = MemoryPairingStore(), recorder = FakeTalkRecorder()
-    store.record = try testPairingCredentials()
-    let controller = TalkController(recorder: recorder, permission: { true })
-    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { await transport.connect($0) })) },
-                             makePaths: { nil }, talk: controller)
-    await session.launch()
-    try await eventuallySession { await transport.socket(0) != nil }
-    let first = try #require(await transport.socket(0))
-    await first.ready()
-    try await eventuallySession { session.talk.canPress }
-    await session.talk.press()
-    let oldID = try #require(session.talk.talkID)
-    await session.setForeground(false)
-    #expect(!recorder.active)
-    let nextIndex = await transport.sockets.count
-    await session.setForeground(true)
-    try await eventuallySession { await transport.socket(nextIndex) != nil }
-    let next = try #require(await transport.socket(nextIndex))
-    await next.ready(through: 2)
-    try await eventuallySession { await next.sent.contains(where: { $0.type == "talk_cancel" }) }
-    let cancel = try #require(await next.sent.first(where: { $0.type == "talk_cancel" }))
-    #expect(cancel.payload["talk_id"] == .string(oldID))
-    #expect(await next.sent.contains(where: { $0.type == "talk_begin" }) == false)
-    #expect(!session.talk.canPress)
-    await next.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(cancel.id)\",\"ok\":true,\"result\":{}}")
-    try await eventuallySession { session.talk.canPress }
-    await session.talk.press()
-    #expect(session.talk.state == .recording)
-    #expect(session.talk.talkID != oldID)
-    await session.unpair()
-    await next.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(cancel.id)\",\"ok\":true,\"result\":{}}")
-    #expect(session.credentials == nil)
-    #expect(!session.talk.canPress)
-    #expect(!recorder.active)
-}
-
-@MainActor @Test func freshHoldWaitsUntilPreviousCancellationRetirementReturns() async throws {
-    let recorder = FakeTalkRecorder(), wire = TalkWire()
-    var retirement: CheckedContinuation<Void, Never>?
-    let talk = TalkController(recorder: recorder, permission: { true })
-    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { _ in
-        await withCheckedContinuation { retirement = $0 }
-    }, upload: { try await wire.upload($0, $1, $2) })
-    await talk.press()
-    let cancelled = Task { await talk.cancel() }
-    try await eventuallySession { retirement != nil }
-    await talk.setReady(true)
-    await talk.press()
-    #expect(!recorder.active)
-    #expect(recorder.starts == 1)
-    #expect(!talk.canPress)
-    retirement?.resume(); retirement = nil
-    await cancelled.value
-    #expect(talk.canPress)
-    await talk.press()
-    #expect(recorder.starts == 2)
-    #expect(talk.state == .recording)
-}
-
-@MainActor @Test func unpairCancelsAcknowledgedUploadingTalkOnDepartingClientAndIgnoresLateResults() async throws {
-    let first = FakeSocket(), next = FakeSocket(), recorder = FakeTalkRecorder(), store = MemoryPairingStore()
-    store.record = try testPairingCredentials()
-    let response = HeldUploadResponse()
-    let controller = TalkController(recorder: recorder, permission: { true })
-    var connections = 0
-    let service = PairingService { _ in
-        (Data(#"{"version":1,"client_id":"iphone-2","device_token":"new-secret","mac_name":"Mac","origin":"https://mac.example"}"#.utf8), 201)
-    }
-    let session = AppSession(store: store, service: service, makeClient: { _ in
-        connections += 1
-        let socket = connections == 1 ? first : next
-        return HubClient(transport: HubTransport(connect: { _ in socket }))
-    }, makePaths: { nil }, talk: controller, uploadTalk: TalkUpload { try await response.post($0) })
-    await session.launch(); await first.ready()
-    try await eventuallySession { session.talk.canPress }
-    await session.talk.press()
-    let oldID = try #require(session.talk.talkID)
-    let begin = try #require(await first.sent.first(where: { $0.type == "talk_begin" }))
-    await first.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(begin.id)\",\"ok\":true,\"result\":{}}")
-    let released = Task { await session.talk.release() }
-    try await eventuallySession { await response.waiting }
-    await session.unpair()
-    let cancel = try #require(await first.sent.first(where: { $0.type == "talk_cancel" }))
-    #expect(cancel.payload == ["talk_id": .string(oldID)])
-    #expect(await first.closed)
-    #expect(store.record == nil)
-    await session.pair(try PairingInput(origin: "https://mac.example", code: "001234"))
-    await next.ready()
-    try await eventuallySession { session.talk.canPress }
-    await session.talk.press()
-    let freshID = try #require(session.talk.talkID)
-    await response.finish(); await released.value
-    await first.text(event(3, "heard", #"{"request_id":"new-request","text":"old transcript","spoken":true}"#))
-    await first.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(cancel.id)\",\"ok\":true,\"result\":{}}")
-    #expect(session.credentials?.deviceToken == "new-secret")
-    #expect(session.talk.talkID == freshID)
-    #expect(session.talk.state == .recording)
-    #expect(session.talk.requestID == nil)
-    #expect(session.conversation.rows.isEmpty)
-    #expect(await next.sent.contains(where: { $0.payload["talk_id"] == .string(oldID) }) == false)
-    await session.unpair()
-}
-
-@MainActor @Test func delayedBackgroundCancellationCannotSuspendLaterForegroundIntent() async throws {
-    let transport = FakeTransport(), recorder = FakeTalkRecorder(), store = MemoryPairingStore()
-    store.record = try testPairingCredentials()
-    let session = AppSession(store: store, makeClient: { _ in
-        HubClient(transport: HubTransport(connect: { await transport.connect($0) }))
-    }, makePaths: { nil }, talk: TalkController(recorder: recorder, permission: { true }))
-    await session.launch()
-    try await eventuallySession { await transport.socket(0) != nil }
-    let socket = try #require(await transport.socket(0))
-    await socket.ready()
-    try await eventuallySession { session.talk.canPress }
-    await session.talk.press()
-    let begin = try #require(await socket.sent.first(where: { $0.type == "talk_begin" }))
-    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(begin.id)\",\"ok\":true,\"result\":{}}")
-    await socket.blockSend("talk_cancel")
-    let background = Task { await session.setForeground(false) }
-    try await eventuallySession { await socket.sendWaiter != nil }
-    #expect(!recorder.active)
-    await session.setForeground(true)
-    try await eventuallySession { await transport.socket(1) != nil }
-    let next = try #require(await transport.socket(1))
-    await next.ready(through: 2)
-    try await eventuallySession { await next.sent.contains(where: { $0.type == "talk_cancel" }) }
-    let cancel = try #require(await next.sent.first(where: { $0.type == "talk_cancel" }))
-    await next.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(cancel.id)\",\"ok\":true,\"result\":{}}")
-    try await eventuallySession { await session.client?.state == .ready }
-    await socket.releaseSend(); await background.value
-    #expect(await session.client?.state == .ready)
-    #expect(await next.closed == false)
-    try await eventuallySession { session.talk.canPress }
-    session.draft = "Still here"
-    #expect(session.canSubmit)
-    await session.unpair()
-}
-
-@MainActor @Test(arguments: [false, true])
-func delayedLifecycleCancellationCannotRetireNewPairing(overlappingUnpair: Bool) async throws {
-    let first = FakeSocket(), next = FakeSocket(), recorder = FakeTalkRecorder(), store = MemoryPairingStore()
-    store.record = try testPairingCredentials()
-    var connections = 0
-    let service = PairingService { _ in
-        (Data(#"{"version":1,"client_id":"iphone-2","device_token":"new-secret","mac_name":"Mac","origin":"https://mac.example"}"#.utf8), 201)
-    }
-    let session = AppSession(store: store, service: service, makeClient: { _ in
-        connections += 1
-        let socket = connections == 1 ? first : next
-        return HubClient(transport: HubTransport(connect: { _ in socket }))
-    }, makePaths: { nil }, talk: TalkController(recorder: recorder, permission: { true }))
-    await session.launch(); await first.ready()
-    try await eventuallySession { session.talk.canPress }
-    await session.talk.press()
-    let begin = try #require(await first.sent.first(where: { $0.type == "talk_begin" }))
-    await first.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(begin.id)\",\"ok\":true,\"result\":{}}")
-    session.draft = "Departing draft"
-    #expect(session.canSubmit)
-    await first.blockSend("talk_cancel")
-    let delayed = Task {
-        if overlappingUnpair { await session.unpair() }
-        else { await session.setForeground(false) }
-    }
-    try await eventuallySession { await first.sendWaiter != nil }
-    #expect(!recorder.active)
-    #expect(!session.talk.canPress)
-    if overlappingUnpair {
-        #expect(!session.canSubmit)
-        #expect(!session.talk.ready)
-    }
-    await session.unpair()
-    await session.setForeground(true)
-    await session.pair(try PairingInput(origin: "https://mac.example", code: "001234"))
-    await next.ready()
-    try await eventuallySession { session.connection == .ready }
-    let replacement = try #require(session.client)
-    session.draft = "A new line"
-    #expect(session.canSubmit)
-    let clears = store.clears
-    await first.releaseSend(); await delayed.value
-    #expect(session.client === replacement)
-    #expect(session.credentials?.deviceToken == "new-secret")
-    #expect(store.record?.deviceToken == "new-secret")
-    #expect(store.clears == clears)
-    #expect(await replacement.state == .ready)
-    #expect(await next.closed == false)
-    #expect(session.canSubmit)
-    try await eventuallySession { session.talk.canPress }
-    await session.talk.press()
-    let freshID = try #require(session.talk.talkID)
-    let cancel = try #require(await first.sent.first(where: { $0.type == "talk_cancel" }))
-    await first.text(event(3, "heard", #"{"request_id":"old-request","text":"old transcript","spoken":true}"#))
-    await first.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(cancel.id)\",\"ok\":true,\"result\":{}}")
-    await first.text(event(4, "speech_begin", #"{"speech_id":"old-speech","reply_id":"r","sample_rate":24000,"channels":1,"sample_width":2}"#))
-    #expect(session.credentials?.deviceToken == "new-secret")
-    #expect(session.talk.talkID == freshID)
-    #expect(session.talk.state == .recording)
-    #expect(session.conversation.rows.isEmpty)
-    #expect(session.speechID == nil)
-    #expect(recorder.active)
-    await session.unpair()
-}
-
-@MainActor @Test func tapStartsAndSendsThroughTheSameRecorderAndLabels() async throws {
-    let recorder = FakeTalkRecorder(), wire = TalkWire()
-    let talk = TalkController(recorder: recorder, permission: { true })
-    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { wire.retired.append($0) },
-                   upload: { try await wire.upload($0, $1, $2) })
-    await talk.setGesture(.tap)
-    #expect(talk.label == "Tap to talk")
-    await talk.tap()
-    #expect(recorder.active)
-    #expect(talk.label == "Tap to send. Slide up to cancel.")
-    await talk.tap()
-    #expect(!recorder.active)
-    #expect(wire.uploads.count == 1)
-    #expect(wire.commands.map(\.type) == ["talk_begin"])
-}
-
-@MainActor @Test func gestureChangeAndOldViewCleanupCannotCancelReleasedOrNewTalk() async throws {
-    let recorder = FakeTalkRecorder(), wire = TalkWire()
-    let talk = TalkController(recorder: recorder, permission: { true })
-    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { wire.retired.append($0) },
-                   upload: { try await wire.upload($0, $1, $2) })
-    let old = UUID(), current = UUID()
-    await talk.press(interaction: old)
-    await talk.setGesture(.tap)
-    #expect(!recorder.active && wire.uploads.isEmpty)
-    await talk.press(interaction: current)
-    await talk.cancelInteraction(old)
-    await talk.releaseInteraction(old).value
-    #expect(recorder.active)
-    await talk.release()
-    await talk.cancelInteraction(current)
-    #expect(wire.uploads.count == 1)
-    #expect(wire.commands.filter { $0.type == "talk_cancel" }.count == 1)
-}
-
-@MainActor @Test func delayedTapPermissionIsInvalidatedBySecondTapOrGestureChange() async throws {
-    for change in [false, true] {
-        let recorder = FakeTalkRecorder(), wire = TalkWire(), permission = HeldMicrophonePermission()
-        let talk = TalkController(recorder: recorder, permission: { await permission.request() })
-        talk.configure(ready: true, send: { try await wire.send($0) }, retire: { wire.retired.append($0) },
-                       upload: { try await wire.upload($0, $1, $2) })
-        await talk.setGesture(.tap)
-        let first = Task { await talk.tap() }
-        try await eventuallySession { permission.waiter != nil }
-        if change { await talk.setGesture(.hold) } else { await talk.tap() }
-        permission.grant(); await first.value
-        #expect(!recorder.active && recorder.starts == 0)
-        #expect(wire.commands.isEmpty && wire.uploads.isEmpty)
-    }
-}
-
-@MainActor @Test func tapPermissionMayFinishAfterFingerReleaseWhileItsIntentIsStillOwned() async throws {
-    let recorder = FakeTalkRecorder(), wire = TalkWire(), permission = HeldMicrophonePermission()
-    let talk = TalkController(recorder: recorder, permission: { await permission.request() })
-    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { wire.retired.append($0) },
-                   upload: { try await wire.upload($0, $1, $2) })
-    await talk.setGesture(.tap)
-    let first = Task { await talk.tap() }
-    try await eventuallySession { permission.waiter != nil }
-    permission.grant(); await first.value
-    #expect(recorder.active)
-    await talk.tap()
-    #expect(!recorder.active && wire.uploads.count == 1)
-}
-
-@MainActor @Test func cancelledDeferredPressCannotOutliveItsReplacementInteraction() async throws {
-    let recorder = FakeTalkRecorder(), wire = TalkWire()
-    let talk = TalkController(recorder: recorder, permission: { true })
-    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { wire.retired.append($0) },
-                   upload: { try await wire.upload($0, $1, $2) })
-    let old = UUID(), replacement = UUID()
-    let deferred = Task { await talk.press(interaction: old) }
-    deferred.cancel()
-    await talk.press(interaction: replacement)
-    await deferred.value
-    await talk.cancelInteraction(replacement)
-    #expect(recorder.starts == 1 && !recorder.active)
-    #expect(wire.commands.map(\.type) == ["talk_begin", "talk_cancel"])
-    #expect(wire.uploads.isEmpty)
-}
-
-@MainActor @Test func secondTapBeforeDeferredStartCannotLeaveTheMicrophoneRunning() async throws {
-    let recorder = FakeTalkRecorder(), wire = TalkWire()
-    let talk = TalkController(recorder: recorder, permission: { true })
-    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { wire.retired.append($0) },
-                   upload: { try await wire.upload($0, $1, $2) })
-    let intent = UUID()
-    let deferred = Task { await talk.press(interaction: intent) }
-    await talk.releaseInteraction(intent, pendingPress: deferred).value
-    await deferred.value
-    #expect(recorder.starts == 0 && !recorder.active)
-    #expect(wire.commands.isEmpty && wire.uploads.isEmpty)
-}
-
-@MainActor final class CancellableBeginWire {
-    var commands: [HubCommand] = []
-    var deliveredBegin: String?
-    var admissionIDs: [String] = []
-    var waitingForWrite = false
-    private let writes: AsyncStream<Void>
-    private let writeInput: AsyncStream<Void>.Continuation
-    private var acknowledged: Bool?
-    private var admissionWaiter: CheckedContinuation<Bool, Never>?
-
-    init() { (writes, writeInput) = AsyncStream.makeStream() }
-
-    func send(_ command: HubCommand) async throws {
-        commands.append(command)
-        guard command.type == "talk_begin" else { return }
-        waitingForWrite = true
-        for await _ in writes { break }
-        try Task.checkCancellation()
-        deliveredBegin = command.id
-    }
-
-    func finishWrite() { writeInput.yield(()); writeInput.finish() }
-
-    func acknowledge() {
-        let accepted = deliveredBegin != nil
-        acknowledged = accepted
-        admissionWaiter?.resume(returning: accepted); admissionWaiter = nil
-    }
-
-    func admit(_ id: String) async -> Bool {
-        admissionIDs.append(id)
-        if let acknowledged { return acknowledged }
-        return await withCheckedContinuation { admissionWaiter = $0 }
-    }
-}
-
-@MainActor @Test func releasePreservesCancellableBeginWriteUntilItsAcknowledgementAndUploadsOnce() async throws {
-    let recorder = FakeTalkRecorder(), wire = CancellableBeginWire(), uploads = TalkWire()
-    let talk = TalkController(recorder: recorder, permission: { true })
-    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { uploads.retired.append($0) },
-                   upload: { try await uploads.upload($0, $1, $2) }, admission: { await wire.admit($0) })
-    let intent = UUID()
-    let press = Task { await talk.press(interaction: intent) }
-    try await eventuallySession { wire.waitingForWrite && recorder.active }
-    let begin = try #require(wire.commands.first)
-    let release = talk.releaseInteraction(intent, pendingPress: press)
-    try await eventuallySession { !recorder.active }
-    #expect(uploads.uploads.isEmpty)
-    wire.finishWrite(); await press.value
-    wire.acknowledge(); await release.value
-    #expect(wire.deliveredBegin == begin.id)
-    #expect(wire.admissionIDs == [begin.id])
-    #expect(wire.commands.map(\.type) == ["talk_begin"])
-    #expect(uploads.uploads.count == 1)
-    #expect(begin.payload["talk_id"] == uploads.uploads.first.map { .string($0.0) })
-}
-
-@MainActor @Test(arguments: [TalkGesture.hold, .tap])
-func interruptedHoldStopsCaptureAndNextHoldSendsNormally(gesture: TalkGesture) async throws {
-    let recorder = FakeTalkRecorder(), wire = TalkWire()
-    let talk = TalkController(recorder: recorder, permission: { true })
-    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { wire.retired.append($0) },
-                   upload: { try await wire.upload($0, $1, $2) })
-    await talk.setGesture(gesture)
-    let first = UUID(), second = UUID()
-    talk.holdBegan(interaction: first)
-    if gesture == .tap { await talk.holdEnded(interaction: first).value }
-    try await eventuallySession { recorder.active }
-    if gesture == .tap { talk.holdBegan(interaction: first) }
-    await talk.holdInterrupted(interaction: first).value
-    #expect(!recorder.active && wire.uploads.isEmpty)
-    #expect(talk.state == .cancelled)
-    talk.holdBegan(interaction: second)
-    if gesture == .tap { await talk.holdEnded(interaction: second).value }
-    try await eventuallySession { recorder.active }
-    if gesture == .tap { talk.holdBegan(interaction: second) }
-    await talk.holdEnded(interaction: second).value
-    #expect(!recorder.active && wire.uploads.count == 1)
-}
-
-@MainActor @Test(arguments: [TalkGesture.hold, .tap])
-func beginRefusalAndTransportLossShowTheirCause(gesture: TalkGesture) async throws {
-    for refusal in [false, true] {
-        let recorder = FakeTalkRecorder(), wire = TalkWire()
-        let talk = TalkController(recorder: recorder, permission: { true })
-        await talk.setGesture(gesture)
-        talk.configure(ready: true, send: { command in
-            try await wire.send(command)
-            if command.type == "talk_begin", !refusal { throw URLError(.networkConnectionLost) }
-        }, retire: { wire.retired.append($0) }, upload: { try await wire.upload($0, $1, $2) })
-        await talk.press()
-        if refusal {
-            let begin = try #require(wire.commands.first)
-            let result = try JSONDecoder().decode(CommandResult.self, from: Data("{\"id\":\"\(begin.id)\",\"ok\":false,\"error\":{\"code\":\"floor_busy\",\"message\":\"The Mac is listening. Try again.\"}}".utf8))
-            await talk.receive(result)
-        }
-        #expect(!recorder.active && talk.canPress)
-        #expect(talk.message == (refusal ? "The Mac is listening. Try again." : gesture == .hold ? "Couldn't reach the Mac. Hold to talk again." : "Couldn't reach the Mac. Tap to talk again."))
-        #expect(wire.uploads.isEmpty)
-    }
-}
-
-@MainActor @Test(arguments: [TalkGesture.hold, .tap])
-func slideUpCancelsUntilFingerEndsAndNextTouchCanSend(gesture: TalkGesture) async throws {
-    let recorder = FakeTalkRecorder(), wire = TalkWire()
-    let talk = TalkController(recorder: recorder, permission: { true })
-    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { wire.retired.append($0) },
-                   upload: { try await wire.upload($0, $1, $2) })
-    await talk.setGesture(gesture)
-    let control = UUID()
-    talk.holdBegan(interaction: control)
-    if gesture == .tap { await talk.holdEnded(interaction: control).value }
-    try await eventuallySession { recorder.active }
-    talk.holdBegan(interaction: control)
-    await talk.holdMoved(verticalTranslation: -60, interaction: control).value
-    #expect(recorder.active)
-    await talk.holdMoved(verticalTranslation: -61, interaction: control).value
-    #expect(!recorder.active && wire.uploads.isEmpty)
-    talk.holdBegan(interaction: control)
-    await talk.holdMoved(verticalTranslation: 0, interaction: control).value
-    await talk.holdEnded(interaction: control).value
-    #expect(!recorder.active && recorder.starts == 1)
-    talk.holdBegan(interaction: control)
-    if gesture == .tap { await talk.holdEnded(interaction: control).value }
-    try await eventuallySession { recorder.active }
-    if gesture == .tap { talk.holdBegan(interaction: control) }
-    await talk.holdEnded(interaction: control).value
-    #expect(!recorder.active && wire.uploads.count == 1)
-}
-
-@MainActor @Test func endedTouchCannotBeCancelledByItsGestureStateReset() async throws {
-    let recorder = FakeTalkRecorder(), wire = TalkWire()
-    let talk = TalkController(recorder: recorder, permission: { true })
-    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { wire.retired.append($0) },
-                   upload: { try await wire.upload($0, $1, $2) })
-    let control = UUID()
-    talk.holdBegan(interaction: control)
-    try await eventuallySession { recorder.active }
-    let ended = talk.holdEnded(interaction: control)
-    await talk.holdInterrupted(interaction: control).value
-    await ended.value
-    #expect(wire.uploads.count == 1)
-    #expect(wire.commands.map(\.type) == ["talk_begin"])
-}
-
-@MainActor @Test func interruptedPermissionCannotReviveAndVoiceOverCanSendOrCancel() async throws {
-    let recorder = FakeTalkRecorder(), wire = TalkWire(), permission = HeldMicrophonePermission()
-    var askPermission = true
-    let talk = TalkController(recorder: recorder, permission: { askPermission ? await permission.request() : true })
-    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { wire.retired.append($0) },
-                   upload: { try await wire.upload($0, $1, $2) })
-    let control = UUID()
-    talk.holdBegan(interaction: control)
-    try await eventuallySession { permission.waiter != nil }
-    await talk.holdInterrupted(interaction: control).value
-    askPermission = false
-    await talk.activate(interaction: control).value
-    #expect(recorder.active)
-    permission.grant()
-    await talk.activate(interaction: control).value
-    #expect(!recorder.active && wire.uploads.count == 1)
-    talk.receive(try talkEvent(kind: "reply_end", payload: #"{"reply_id":"reply","request_id":"r1","text":"Done","reason":"complete"}"#))
-    await talk.activate(interaction: control).value
-    #expect(recorder.active)
-    await talk.controlDisappeared(interaction: control)
-    #expect(!recorder.active && wire.uploads.count == 1)
-}
-
-private func talkEvent(kind: String, payload: String) throws -> HubEvent {
-    let frame = try HubFrame.decode(Data(event(2, kind, payload).utf8))
-    guard case .event(let event) = frame else { throw HubProtocolError.invalidFrame }
-    return event
-}
-
-@MainActor @Test func unansweredBeginReturnsToRestWithTransportMessage() async throws {
-    let recorder = FakeTalkRecorder(), wire = TalkWire()
-    let talk = TalkController(recorder: recorder, permission: { true })
-    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { wire.retired.append($0) },
-                   upload: { try await wire.upload($0, $1, $2) }, admission: { _ in false })
-    let control = UUID()
-    talk.holdBegan(interaction: control)
-    try await eventuallySession { recorder.active }
-    await talk.holdEnded(interaction: control).value
-    #expect(!recorder.active && talk.canPress)
-    #expect(talk.message == "Couldn't reach the Mac. Hold to talk again.")
-    #expect(wire.uploads.isEmpty)
-}
-
-@MainActor @Test func lateDefinitiveBeginRefusalReplacesUncertainTransportMessage() async throws {
-    let recorder = FakeTalkRecorder(), wire = TalkWire()
-    let talk = TalkController(recorder: recorder, permission: { true })
-    talk.configure(ready: true, send: { try await wire.send($0) }, retire: { wire.retired.append($0) },
-                   upload: { try await wire.upload($0, $1, $2) }, admission: { _ in false })
-    await talk.press()
-    let begin = try #require(wire.commands.first)
-    await talk.release()
-    let result = try JSONDecoder().decode(CommandResult.self, from: Data("{\"id\":\"\(begin.id)\",\"ok\":false,\"error\":{\"code\":\"floor_busy\",\"message\":\"The Mac is listening. Try again.\"}}".utf8))
-    await talk.receive(result)
-    #expect(talk.message == "The Mac is listening. Try again.")
-    #expect(talk.canPress && !recorder.active)
 }

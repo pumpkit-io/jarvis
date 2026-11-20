@@ -181,7 +181,7 @@ actor HeldPairing {
     await session.setVoiceOn(false)
     let off = try #require(await socket.sent.last { $0.type == "set_silence" })
     try await Task.sleep(for: .milliseconds(10))
-    #expect(recorder.active && talk.state == .recording && talk.ready)
+    #expect(recorder.active && talk.state == .recording)
     #expect(session.connection.canSend)
     await acknowledgeSilence(socket, off, value: true)
     try await eventuallySession { !session.voicePending }
@@ -228,18 +228,12 @@ actor HeldPairing {
 }
 
 @MainActor @Test func queuedEarlierOffConfirmationCannotConfirmLatestOffChoice() async throws {
-    let socket = FakeSocket(), store = MemoryPairingStore(), recorder = FakeTalkRecorder()
+    let socket = FakeSocket(), store = MemoryPairingStore()
     store.record = try testPairingCredentials()
-    let talk = TalkController(recorder: recorder, permission: { true })
     let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
-                             makePaths: { nil }, talk: talk)
+                             makePaths: { nil })
     await session.launch(); await socket.ready()
     try await eventuallySession { session.connection.canSend }
-    await talk.press()
-    let begin = try #require(await socket.sent.last { $0.type == "talk_begin" })
-    await socket.blockSend("talk_cancel")
-    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(begin.id)\",\"ok\":false,\"error\":{\"code\":\"busy\",\"message\":\"Try again\",\"retry_after_seconds\":null}}")
-    try await eventuallySession { await socket.sent.contains { $0.type == "talk_cancel" } }
     await session.setVoiceOn(false)
     let earlierOff = try #require(await socket.sent.last { $0.type == "set_silence" })
     await acknowledgeSilence(socket, earlierOff, value: true)
@@ -248,7 +242,6 @@ actor HeldPairing {
     await session.setVoiceOn(false)
     let latestOff = try #require(await socket.sent.last { $0.type == "set_silence" })
     #expect(latestOff.id != earlierOff.id)
-    await socket.releaseSend()
     await socket.text(event(2, "reply_end", #"{"reply_id":"barrier","text":"Consumer resumed.","reason":"complete"}"#))
     try await eventuallySession { session.conversation.rows.contains { $0.text == "Consumer resumed." } }
     #expect(!session.voiceOn && session.voicePending)

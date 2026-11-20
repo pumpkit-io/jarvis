@@ -152,7 +152,7 @@ actor RecordedCache {
     let replay = try #require(recorded["replay"] as? [[String: Any]])
     let transport = NativeReplayTransport()
     let cache = RecordedCache()
-    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }),
+    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }), sleep: { _ in },
                            cache: { await cache.commit($0, through: $1) })
     await client.start()
     try await eventually { await transport.socket(0) != nil }
@@ -162,7 +162,7 @@ actor RecordedCache {
         original.wire.input.yield(.text(try JSONSerialization.data(withJSONObject: frame)))
     }
     try await eventually { await client.cursor == after }
-    await client.pathChanged()
+    original.wire.input.finish(throwing: URLError(.networkConnectionLost))
     try await eventually { await transport.socket(1) != nil }
     let replacement = try #require(await transport.socket(1))
     for frame in replay { replacement.wire.input.yield(.text(try JSONSerialization.data(withJSONObject: frame))) }
