@@ -90,7 +90,7 @@ For a callback audit, emit checked iOS simulator SIL:
 
 ```sh
 swiftc -swift-version 6 -enable-actor-data-race-checks -parse-as-library \
-  -emit-sil -module-name JarvisClient -target arm64-apple-ios17.0-simulator \
+  -emit-sil -module-name JarvisClient -target arm64-apple-ios18.0-simulator \
   -sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" \
   ios/JarvisClient/Sources/JarvisClient/*.swift > /tmp/jarvis-callbacks.sil 2>&1
 ```
