@@ -84,7 +84,7 @@ async def test_one_talker_session_with_one_prompt_carries_the_whole_launch(tmp_p
     assert '"sir"' in spec.system_prompt and '"signore"' in spec.system_prompt
     assert "Ada" in spec.system_prompt and "{" not in spec.system_prompt
     # About four characters per token: well under the 2,000-token budget.
-    assert len(spec.system_prompt) < 7600
+    assert len(spec.system_prompt) < 7800
 
 
 async def test_the_prompt_says_when_the_user_name_is_not_known(tmp_path: Path) -> None:

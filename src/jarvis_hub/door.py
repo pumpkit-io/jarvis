@@ -8,6 +8,7 @@ import sqlite3
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from aiohttp import WSMsgType, web
@@ -100,6 +101,7 @@ class Door:
         hub: Conversation | None = None, log: EventLog | None = None, revocation_interval: float = 0.25,
         on_replay: Callable[[str], None] | None = None, now: Callable[[], float] = time.perf_counter,
         transcription: BufferTranscriber | None = None, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        wall: Callable[[], float] = time.time,
     ) -> None:
         self._enabled = enabled
         self._host = host
@@ -112,6 +114,7 @@ class Door:
         self._log = log
         self._on_replay: Callable[[str], None] = on_replay or (hub.publish_client_snapshots if hub is not None else lambda client_id: None)
         self._now = now
+        self._wall = wall
         self._connections: dict[str, _Connection] = {}
         self._operations: dict[tuple[str, str], asyncio.Task[dict[str, Any]]] = {}
         self._revocation_interval = revocation_interval
@@ -135,6 +138,7 @@ class Door:
         app = web.Application(client_max_size=65536)
         app.router.add_post("/v1/pair", self._pair)
         app.router.add_post("/v1/utterances/{talk_id}", self._utterance)
+        app.router.add_post("/v1/lines", self._line)
         app.router.add_get("/v1/health", self._get_health)
         app.router.add_get("/v1/events", self._events)
         app.router.add_get("/v1/history", self._history)
@@ -306,7 +310,7 @@ class Door:
         code = result.get("error", {}).get("code")
         status = {"unauthorized": 401, "invalid_payload": 400, "unsupported_audio": 415,
                   "audio_too_large": 413, "upload_rate_limited": 429, "empty_transcript": 422,
-                  "transcription_failed": 503}.get(code, 409 if code else 200)
+                  "transcription_failed": 503, "temporarily_unavailable": 503, "unsupported_version": 426}.get(code, 409 if code else 200)
         headers = {"Cache-Control": "no-store"}
         retry = result.get("error", {}).get("retry_after_seconds")
         if retry is not None:
@@ -360,7 +364,8 @@ class Door:
                         result = rejected(error.code, str(error), error.retry_after)
                         self._log.complete(client.id, command_id, result)
                     else:
-                        task = asyncio.create_task(self._upload(talk, command_id, body))
+                        delayed = self._delay(request.headers.get("X-Jarvis-Recorded-At"))
+                        task = asyncio.create_task(self._upload(talk, command_id, body, delayed))
                         talk.operation = task
                         self._operations[key] = task
                         task.add_done_callback(lambda done: self._operations.pop(key, None))
@@ -378,10 +383,60 @@ class Door:
         finally:
             body.clear()
 
-    async def _upload(self, talk: Talk, command_id: str, body: bytearray) -> dict[str, Any]:
+    async def _upload(self, talk: Talk, command_id: str, body: bytearray, delayed: float | None) -> dict[str, Any]:
         assert self._talks is not None and self._log is not None
-        result = await self._talks.upload(talk, body)
+        result = await self._talks.upload(talk, body, delayed)
         self._log.complete(talk.client_id, command_id, result)
+        return result
+
+    async def _line(self, request: web.Request) -> web.Response:
+        command_id = request.headers.get("Idempotency-Key", "")
+        client = await self._identity(request)
+        if client is None:
+            return self._upload_response(command_id, rejected("unauthorized", "Device token required"))
+        if not self._valid_id(command_id):
+            return self._upload_response(command_id, rejected("invalid_payload", "A command identifier is required"))
+        try:
+            body = json_object(await request.read())
+        except (ValueError, RecursionError, UnicodeError):
+            return self._upload_response(command_id, rejected("invalid_payload", "Expected a JSON object"))
+        if body.get("version") != 1:
+            return self._upload_response(command_id, rejected("unsupported_version", "Use protocol version 1"))
+        text, recorded_at = body.get("text"), body.get("recorded_at")
+        if (not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > 16384
+                or not (recorded_at is None or isinstance(recorded_at, str))):
+            return self._upload_response(command_id, rejected("invalid_payload", "text must be nonempty and at most 16384 UTF-8 bytes"))
+        if self._log is None or self._hub is None or self._closing:
+            return self._upload_response(command_id, rejected("temporarily_unavailable", "Conversation is unavailable"))
+        status, result = self._log.reserve(client.id, command_id, "say_text", {"text": text, "recorded_at": recorded_at})
+        key = client.id, command_id
+        if status == "conflict":
+            result = rejected("id_conflict", "Command id was already used with different content")
+        elif result is None:
+            task = self._operations.get(key)
+            if task is None and status == "new":
+                task = asyncio.create_task(self._admit_typed(client.id, command_id, text, self._delay(recorded_at)))
+                self._operations[key] = task
+                task.add_done_callback(lambda done: self._operations.pop(key, None))
+            if task is None:
+                result = rejected("outcome_unknown", "Previous operation outcome is unknown; reconcile with history")
+                self._log.complete(client.id, command_id, result)
+            else:
+                result = await asyncio.shield(task)
+        return self._upload_response(command_id, result)
+
+    async def _admit_typed(self, client_id: str, command_id: str, text: str, delayed: float | None) -> dict[str, Any]:
+        from jarvis_hub.hub import Line
+
+        assert self._hub is not None and self._log is not None
+        try:
+            request_id = await self._hub.admit_line(
+                Line(text, self._now(), client_id=client_id, delayed=delayed),
+                allowed=lambda: not self._closing and self._pairing is not None and bool(self._pairing.active_ids({client_id})))
+            result: dict[str, Any] = {"ok": True, "result": {"request_id": request_id}}
+        except ValueError:
+            result = rejected("temporarily_unavailable", "Conversation is unavailable")
+        self._log.complete(client_id, command_id, result)
         return result
 
     async def _history(self, request: web.Request) -> web.Response:
@@ -401,6 +456,18 @@ class Door:
         return web.json_response({"version": 1, "events": [wire_event(e) for e in events],
                                   "next_before": events[0].seq if events else None, "has_more": more},
                                  headers={"Cache-Control": "no-store"})
+
+    def _delay(self, recorded_at: str | None) -> float | None:
+        # The phone's clock is trusted only to say how long ago; a bad stamp means the line is current.
+        if recorded_at is None:
+            return None
+        try:
+            stamp = datetime.fromisoformat(recorded_at)
+        except ValueError:
+            return None
+        if stamp.tzinfo is None:
+            return None
+        return max(0.0, self._wall() - stamp.timestamp())
 
     @staticmethod
     def _cursor(value: str) -> int:
@@ -578,8 +645,10 @@ class Door:
                 text = payload.get("text")
                 if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > 16384:
                     raise ValueError("text must be nonempty and at most 16384 UTF-8 bytes")
+                recorded_at = payload.get("recorded_at")
                 request_id = await self._hub.admit_line(
-                    Line(text, self._now(), client_id=connection.client.id),
+                    Line(text, self._now(), client_id=connection.client.id,
+                         delayed=self._delay(recorded_at if isinstance(recorded_at, str) else None)),
                     allowed=lambda: self._active(connection))
                 result = {"ok": True, "result": {"request_id": request_id}}
             elif kind in ("talk_begin", "talk_cancel"):

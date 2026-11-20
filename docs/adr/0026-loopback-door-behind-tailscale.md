@@ -8,7 +8,7 @@ The phone receives conversation text, details the Hub shows, Task summaries and 
 
 An unlocked phone can speak an Approval. We add no Face ID check to Approvals: the Mac has no stronger check, since anyone in the room can say yes, and revoking the device is the remedy for a lost phone.
 
-A Talk is refused while the Hub is unreachable and is never queued for later. A request spoken minutes ago should not run a merge when the signal returns. An upload that loses its connection retries with the same id for about 30 seconds, then fails where the User can see it.
+ADR 0027 replaced the rule that a Talk is refused while the Hub is unreachable: Talks and typed lines now wait in the iPhone's Outbox.
 
 The User decided this on 2026-11-18.
 

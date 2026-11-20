@@ -16,14 +16,13 @@ struct ConversationView: View {
     @State private var detailsRevision = 0
     @State private var readingAnchor: String?
     @State private var scrollPhase: ScrollPhase = .idle
-    @State private var recoveryCandidate: String?
     @State var expandedDetails: Set<String> = []
     private var theme: JarvisTheme { JarvisTheme(scheme: scheme) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text(session.connection.message).accessibilityAddTraits(.isHeader)
+                Text(session.shownConnection.message).accessibilityAddTraits(.isHeader)
                 Spacer(minLength: 0)
                 if let openTasks {
                     Button(action: openTasks) {
@@ -79,8 +78,8 @@ struct ConversationView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .id(row.id)
                     }
-                    ForEach(session.typedLines.filter { !$0.message.isEmpty }) { line in
-                        typedLineStatus(line)
+                    ForEach(session.outbox?.items ?? []) { item in
+                        queued(item).id("outbox:\(item.id)")
                     }
                 }
                 .scrollTargetLayout()
@@ -110,42 +109,31 @@ struct ConversationView: View {
         .onChange(of: typing) { typingChanged(typing) }
         .onDisappear { typingChanged(false) }
         .safeAreaInset(edge: .bottom, spacing: 0) { composer }
-        .confirmationDialog("Restore as a new line?", isPresented: Binding(
-            get: { recoveryCandidate != nil }, set: { if !$0 { recoveryCandidate = nil } }
-        ), titleVisibility: .visible) {
-            Button("I've checked: restore line") {
-                if let id = recoveryCandidate { session.recoverTypedLine(id: id) }
-                recoveryCandidate = nil
-            }
-            Button("Cancel", role: .cancel) { recoveryCandidate = nil }
-        } message: {
-            Text("Check the conversation first. This line may already have reached Jarvis. Sending it again can repeat it. Restoring only puts it in the typing field.")
-        }
     }
 
-    private func typedLineStatus(_ line: TypedLine) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(line.message)
-            if line.canRecover {
-                Text(verbatim: line.text).textSelection(.enabled)
-                Button {
-                    if line.outcome == .outcomeUnknown { recoveryCandidate = line.id }
-                    else { session.recoverTypedLine(id: line.id) }
-                } label: {
-                    Text(line.outcome == .outcomeUnknown ? "Review and restore line" : "Restore line")
-                        .underline()
-                        .frame(minHeight: 44)
+    /// A message still on this phone, shown where the User's line will appear once Jarvis hears it.
+    private func queued(_ item: OutboxItem) -> some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            switch item.content {
+            case .line(let text): Text(verbatim: text).multilineTextAlignment(.trailing).textSelection(.enabled)
+            case .talk(_, let seconds): Text("Voice message, \(Int(seconds.rounded())) s")
+            }
+            Text(item.message)
+            HStack(spacing: 16) {
+                if item.isSettled {
+                    Button(item.status == .uncertain ? "Send again" : "Try again") { session.outbox?.retry(item.id) }
+                        .buttonStyle(.plain).underline().frame(minHeight: 44)
                 }
-                .buttonStyle(.plain)
-                .disabled(!session.draft.isEmpty && session.draft != line.text)
-                if !session.draft.isEmpty && session.draft != line.text {
-                    Text("Finish or clear your current draft to restore this line. You can also copy the text above.")
+                if item.status != .sending, !item.isSent {
+                    Button("Delete") { session.outbox?.delete(item.id) }
+                        .buttonStyle(.plain).underline().frame(minHeight: 44)
                 }
             }
         }
         .font(.system(size: controlSize))
         .foregroundStyle(theme.secondary)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .accessibilityElement(children: .contain)
     }
 
     private func gapDate(_ index: Int) -> Date? {
@@ -238,7 +226,6 @@ struct ConversationView: View {
                     .lineLimit(1...5)
                     .textFieldStyle(.plain)
                     .focused($typing)
-                    .disabled(!session.connection.canSend)
                     .frame(minHeight: 44)
                     .onSubmit { submit() }
                 Button(action: submit) {

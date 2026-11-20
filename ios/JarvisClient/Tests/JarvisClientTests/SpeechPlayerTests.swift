@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-import JarvisClient
+@testable import JarvisClient
 
 @MainActor final class FakeSpeechOutput: SpeechOutput {
     var bytes: [Data] = []
@@ -257,7 +257,7 @@ actor SpeechWait {
         output.callbacks[0]()
         try await eventuallySession { await clock.calls == 1 }
         await clock.advance()
-        try await eventuallySession { !audio.active }
+        try await eventuallySession { !audio.active && !session.playbackDrainPending }
     }
     await session.setForeground(false)
     #expect(await socket.closed)
@@ -446,8 +446,8 @@ actor SpeechWait {
     }, makePaths: { nil }, playback: player)
     await session.launch(); await socket.ready()
     try await eventuallySession { session.connection.canSend }
-    session.draft = "A line"; await session.sendTypedLine()
-    let unrelated = try #require(session.typedLines.first?.id)
+    await session.takeFocus()
+    let unrelated = try #require(await socket.sent.first { $0.type == "take_focus" }?.id)
     await socket.text(event(2, "speech_begin", #"{"speech_id":"long","reply_id":"r","sample_rate":24000,"channels":1,"sample_width":2}"#))
     await socket.text(event(3, "speech_clip", #"{"speech_id":"long","reply_id":"r","index":0,"text":"Still speaking.","byte_length":2}"#))
     socket.input.yield(.binary(Data([1, 0])))
@@ -495,7 +495,7 @@ actor SpeechWait {
     store.record = try testPairingCredentials()
     let player = SpeechPlayer(session: audio, output: output)
     let talk = TalkController(recorder: NativeTalkRecorder(session: audio, source: source), permission: { true })
-    let wire = TalkWire()
+    let wire = CommandLog()
     let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
                              makePaths: { nil }, talk: talk, playback: player, sendCommand: { client, command in
         await MainActor.run {
@@ -518,8 +518,11 @@ actor SpeechWait {
     output.callbacks[0]()
     await talk.press()
     #expect(source.active)
-    #expect(wire.commands.filter { $0.type == "interrupt" }.count == 1)
-    #expect(wire.commands.first { $0.type == "interrupt" }?.payload["last_clip_index"] == .integer(0))
+    #expect(player.playingSpeechID == nil && output.stops > 0)
+    try await eventuallySession { await socket.sent.contains { $0.type == "interrupt" } }
+    #expect(await socket.sent.filter { $0.type == "interrupt" }.count == 1)
+    #expect(await socket.sent.first { $0.type == "interrupt" }?.payload["last_clip_index"] == .integer(0))
+    #expect(wire.commands.isEmpty)
     #expect(await socket.sent.contains { $0.payload["state"] == .string("stopped") } == false)
     output.callbacks[1]()
     #expect(source.active)
@@ -528,6 +531,8 @@ actor SpeechWait {
     #expect(!source.active)
     #endif
 }
+
+@MainActor final class CommandLog { var commands: [HubCommand] = [] }
 
 actor HeldReplayError {
     var waiter: CheckedContinuation<Void, any Error>?

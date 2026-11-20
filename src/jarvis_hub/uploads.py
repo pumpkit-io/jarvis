@@ -49,6 +49,8 @@ class Talk:
     receiving: bool = False
     timer: asyncio.Task[None] | None = None
     operation: asyncio.Task[dict[str, Any]] | None = None
+    # Uploaded without a talk_begin, from a phone's offline queue: it holds no floor and needs no socket.
+    queued: bool = False
 
 
 class UploadedTalks:
@@ -121,6 +123,9 @@ class UploadedTalks:
 
     def claim(self, client_id: str, talk_id: str) -> Talk:
         talk = self._talks.get((client_id, talk_id))
+        if talk is None and self._log.begin_talk(client_id, talk_id):
+            talk = Talk(client_id, talk_id, '', self._now() + 30, queued=True)
+            self._talks[client_id, talk_id] = talk
         if talk is None or not self._valid(talk) or talk.state != 'recording':
             raise TalkError('talk_not_active', 'Talk is cancelled, expired or already uploaded')
         rate = self._rates.setdefault(client_id, deque())
@@ -150,7 +155,7 @@ class UploadedTalks:
             else:
                 self._hub.cancel_remote_talk(talk.client_id, talk.request_id)
 
-    async def upload(self, talk: Talk, body: bytearray) -> dict[str, Any]:
+    async def upload(self, talk: Talk, body: bytearray, delayed: float | None = None) -> dict[str, Any]:
         audio: Samples | None = None
         try:
             if self._transcription is None:
@@ -166,7 +171,8 @@ class UploadedTalks:
                 return rejected('empty_transcript', 'No speech was transcribed')
             request_id = await self._hub.admit_line(
                 Line(text, self._now(), typed=False, client_id=talk.client_id,
-                     request_id=talk.request_id, segments=(text,)), allowed=lambda: self._valid(talk))
+                     request_id=None if talk.queued else talk.request_id, segments=(text,), delayed=delayed),
+                allowed=lambda: self._valid(talk))
             if request_id is None:
                 return rejected('talk_not_active', 'A newer request superseded this Talk')
             self._finish(talk, 'admitted')

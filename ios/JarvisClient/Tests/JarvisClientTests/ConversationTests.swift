@@ -29,35 +29,6 @@ func conversationEvent(_ seq: Int64, _ type: String, _ payload: String, client: 
     #expect(script.events.count == 5)
 }
 
-@MainActor @Test func sessionOwnsTypedAcknowledgementsAndRemoteConversation() async throws {
-    let socket = FakeSocket()
-    let store = MemoryPairingStore(); store.record = try testPairingCredentials()
-    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) }, makePaths: { nil })
-    await session.launch()
-    session.draft = "Hello"
-    await session.sendTypedLine()
-    #expect(session.typedLines.isEmpty)
-    #expect(session.draft == "Hello")
-    await socket.ready()
-    try await eventuallySession { session.connection == .ready }
-    await session.sendTypedLine()
-    let line = try #require(session.typedLines.first)
-    #expect(line.command.type == "say_text")
-    #expect(line.command.payload == ["text": .string("Hello")])
-    #expect(line.outcome == .unanswered)
-    session.draft = "Hello"
-    await session.sendTypedLine()
-    #expect(session.typedLines.count == 1)
-    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(line.id)\",\"ok\":false,\"error\":{\"code\":\"outcome_unknown\",\"message\":\"Check history\",\"retry_after_seconds\":null}}")
-    try await eventuallySession { session.typedLines.first?.outcome == .outcomeUnknown }
-    await socket.text(event(2, "heard", #"{"request_id":"mac-r","text":"From Mac","spoken":true}"#))
-    try await eventuallySession { session.conversation.rows.first?.text == "From Mac" }
-    await session.unpair()
-    #expect(session.conversation.rows.isEmpty)
-    #expect(session.typedLines.isEmpty)
-    #expect(session.draft.isEmpty)
-}
-
 @Test func pythonCanonicalConversationReplaysThroughOneProjection() throws {
     let url = try #require(Bundle.module.url(forResource: "client-v1", withExtension: "json", subdirectory: "Fixtures"))
     let root = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
@@ -105,35 +76,11 @@ actor UncertainTypedSocket: HubSocket {
     func close() async { await socket.close() }
 }
 
-@MainActor @Test func typedWriteFailurePreservesIdentityAndDraftWithoutDuplicateRetry() async throws {
-    let socket = UncertainTypedSocket()
-    let store = MemoryPairingStore(); store.record = try testPairingCredentials()
-    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) }, makePaths: { nil })
-    await session.launch()
-    await socket.socket.ready()
-    try await eventuallySession { session.connection == .ready }
-    session.draft = String(repeating: "é", count: 8193)
-    #expect(!session.canSubmit)
-    #expect(session.draftValidationMessage != nil)
-    session.draft = "Maybe delivered"
-    await session.sendTypedLine()
-    #expect(session.draft == "Maybe delivered")
-    #expect(session.typedLines.first?.outcome == .deliveryUncertain)
-    #expect(!session.canSubmit)
-    let line = try #require(session.typedLines.first)
-    #expect(!line.canRecover)
-    #expect(!session.recoverTypedLine(id: line.id))
-    #expect(await session.client?.pendingCommands.contains(line.command) == true)
-    await session.sendTypedLine()
-    #expect(session.typedLines.count == 1)
-    await session.unpair()
-}
-
-@MainActor @Test func sessionRecoversAfterPathChangeWithoutLosingCanonicalScript() async throws {
+@MainActor @Test func sessionRecoversAfterLostSocketWithoutLosingCanonicalScript() async throws {
     let transport = FakeTransport()
     let store = MemoryPairingStore(); store.record = try testPairingCredentials()
     let session = AppSession(store: store, makeClient: { _ in
-        HubClient(transport: HubTransport(connect: { await transport.connect($0) }))
+        HubClient(transport: HubTransport(connect: { await transport.connect($0) }), sleep: { _ in })
     }, makePaths: { nil })
     await session.launch()
     try await eventuallySession { await transport.socket(0) != nil }
@@ -143,191 +90,13 @@ actor UncertainTypedSocket: HubSocket {
     await first.text(heard)
     try await eventuallySession { session.conversation.rows.count == 1 }
     await session.client?.pathChanged()
+    #expect(await transport.socket(1) == nil)
+    first.input.finish(throwing: URLError(.networkConnectionLost))
     try await eventuallySession { await transport.socket(1) != nil }
     let second = try #require(await transport.socket(1))
     await second.text(heard); await second.ready(through: 2)
     try await eventuallySession { session.connection == .ready }
     #expect(session.conversation.rows.map(\.text) == ["On the Mac"])
     #expect(await transport.cursors == [0, 2])
-    await session.unpair()
-}
-
-@MainActor @Test func definitivelyRejectedLineRemainsRecoverableWithoutReplacingNewerDraft() async throws {
-    let socket = FakeSocket()
-    let store = MemoryPairingStore(); store.record = try testPairingCredentials()
-    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) }, makePaths: { nil })
-    await session.launch(); await socket.ready()
-    try await eventuallySession { session.connection == .ready }
-    session.draft = "Original line"
-    await session.sendTypedLine()
-    let original = try #require(session.typedLines.first)
-    session.draft = "Newer draft"
-    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(original.id)\",\"ok\":false,\"error\":{\"code\":\"invalid_payload\",\"message\":\"Hub is stopping\",\"retry_after_seconds\":null}}")
-    try await eventuallySession { session.typedLines.first?.outcome == .rejected("Hub is stopping") }
-    #expect(session.typedLines.first?.canRecover == true)
-    #expect(session.typedLines.first?.text == "Original line")
-    #expect(!session.recoverTypedLine(id: original.id))
-    #expect(session.draft == "Newer draft")
-    session.draft = ""
-    #expect(session.recoverTypedLine(id: original.id))
-    #expect(session.draft == "Original line")
-    #expect(session.typedLines.first?.outcome == .recovered)
-    #expect(session.canSubmit)
-    await session.sendTypedLine()
-    let restored = try #require(session.typedLines.last)
-    #expect(restored.id != original.id)
-    #expect(restored.text == original.text)
-    await session.unpair()
-}
-
-@MainActor @Test func terminalUnknownRequiresDeliberateRecoveryBeforeANewCommand() async throws {
-    let socket = FakeSocket()
-    let store = MemoryPairingStore(); store.record = try testPairingCredentials()
-    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) }, makePaths: { nil })
-    await session.launch(); await socket.ready()
-    try await eventuallySession { session.connection == .ready }
-    session.draft = "Unconfirmed line"
-    await session.sendTypedLine()
-    let original = try #require(session.typedLines.first)
-    #expect(!original.canRecover)
-    #expect(!session.recoverTypedLine(id: original.id))
-    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(original.id)\",\"ok\":false,\"error\":{\"code\":\"outcome_unknown\",\"message\":\"Check history\",\"retry_after_seconds\":null}}")
-    try await eventuallySession { session.typedLines.first?.outcome == .outcomeUnknown }
-    session.draft = "Unconfirmed line"
-    #expect(!session.canSubmit)
-    #expect(session.typedLines.first?.canRecover == true)
-    #expect(await session.client?.pendingCommands.isEmpty == true)
-    session.draft = "A newer draft"
-    #expect(!session.recoverTypedLine(id: original.id))
-    #expect(session.draft == "A newer draft")
-    session.draft = "Unconfirmed line"
-    #expect(session.recoverTypedLine(id: original.id))
-    #expect(session.canSubmit)
-    #expect(await socket.sent.filter { $0.type == "say_text" }.count == 1)
-    await session.sendTypedLine()
-    #expect(session.typedLines.last?.id != original.id)
-    #expect(await socket.sent.filter { $0.type == "say_text" }.count == 2)
-    await session.unpair()
-}
-
-actor TypedSubmissionGate {
-    private var waiter: CheckedContinuation<Void, Never>?
-    var entered = false
-    func hold() async { entered = true; await withCheckedContinuation { waiter = $0 } }
-    func release() { waiter?.resume(); waiter = nil }
-}
-
-@MainActor @Test(arguments: [false, true]) func preflightDisconnectAfterQueuedFailureLeavesNoPhantomRequest(newerDraft: Bool) async throws {
-    let transport = FakeTransport()
-    let gate = TypedSubmissionGate()
-    let store = MemoryPairingStore(); store.record = try testPairingCredentials()
-    let session = AppSession(store: store, makeClient: { _ in
-        HubClient(transport: HubTransport(connect: { await transport.connect($0) }))
-    }, makePaths: { nil }, sendCommand: { client, command in
-        await gate.hold()
-        try await client.send(command)
-    })
-    await session.launch()
-    try await eventuallySession { await transport.socket(0) != nil }
-    let socket = try #require(await transport.socket(0)); await socket.ready()
-    try await eventuallySession { session.connection == .ready }
-    session.draft = "Definitely unsent"
-    let submission = Task { await session.sendTypedLine() }
-    try await eventuallySession { await gate.entered }
-    socket.input.finish(throwing: URLError(.networkConnectionLost))
-    try await eventuallySession { session.typedLines.first?.outcome == .deliveryUncertain }
-    if newerDraft { session.draft = "Keep this newer draft" }
-    await gate.release(); await submission.value
-    #expect(await session.client?.pendingCommands.isEmpty == true)
-    #expect(await session.client?.results.isEmpty == true)
-    if newerDraft {
-        #expect(session.draft == "Keep this newer draft")
-        let line = try #require(session.typedLines.first)
-        #expect(line.text == "Definitely unsent")
-        #expect(line.canRecover)
-        #expect(!session.recoverTypedLine(id: line.id))
-        session.draft = ""
-        #expect(session.recoverTypedLine(id: line.id))
-        #expect(session.draft == "Definitely unsent")
-    } else {
-        #expect(session.draft == "Definitely unsent")
-        #expect(session.typedLines.isEmpty)
-    }
-    await session.client?.pathChanged()
-    try await eventuallySession { await transport.socket(1) != nil }
-    let reconnected = try #require(await transport.socket(1)); await reconnected.ready(through: 1)
-    try await eventuallySession { session.connection == .ready }
-    #expect(session.canSubmit)
-    await session.unpair()
-}
-
-actor LateFailingTypedSocket: HubSocket {
-    let socket = FakeSocket()
-    let gate = TypedSubmissionGate()
-    func receive() async throws -> SocketMessage { try await socket.receive() }
-    func send(_ data: Data) async throws {
-        try await socket.send(data)
-        if try JSONDecoder().decode(HubCommand.self, from: data).type == "say_text" {
-            await gate.hold()
-            throw URLError(.networkConnectionLost)
-        }
-    }
-    func close() async { await socket.close() }
-}
-
-@MainActor @Test(arguments: ["accepted", "accepted-newer", "rejected", "unknown-recovered"])
-func lateWriteFailurePreservesCompletedResultAndUserRecovery(scenario: String) async throws {
-    let socket = LateFailingTypedSocket()
-    let store = MemoryPairingStore(); store.record = try testPairingCredentials()
-    let session = AppSession(store: store, makeClient: { _ in
-        HubClient(transport: HubTransport(connect: { _ in socket }))
-    }, makePaths: { nil })
-    await session.launch(); await socket.socket.ready()
-    try await eventuallySession { session.connection == .ready }
-    session.draft = "Original line"
-    let submission = Task { await session.sendTypedLine() }
-    try await eventuallySession { await socket.gate.entered }
-    let original = try #require(session.typedLines.first)
-    let accepted = scenario.hasPrefix("accepted")
-    let result = accepted ? #""ok":true,"result":{"request_id":"r"}"# :
-        "\"ok\":false,\"error\":{\"code\":\"\(scenario == "rejected" ? "invalid_payload" : "outcome_unknown")\",\"message\":\"Check conversation\",\"retry_after_seconds\":null}"
-    await socket.socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(original.id)\",\(result)}")
-    try await eventuallySession {
-        guard let line = session.typedLines.first else { return false }
-        return accepted ? line.outcome == .accepted : line.canRecover
-    }
-    if scenario == "unknown-recovered" { #expect(session.recoverTypedLine(id: original.id)) }
-    let expectedOutcome = try #require(session.typedLines.first?.outcome)
-    if scenario != "accepted" { session.draft = "Newer draft" }
-    await socket.gate.release(); await submission.value
-    #expect(session.typedLines.count == 1)
-    #expect(session.typedLines.first?.outcome == expectedOutcome)
-    #expect(session.draft == (scenario == "accepted" ? "" : "Newer draft"))
-    #expect(await session.client?.results[original.id]?.ok == accepted)
-    await session.unpair()
-}
-
-@MainActor @Test func lateLocalWriteCompletionCannotEraseExplicitlyRestoredDraft() async throws {
-    let socket = FakeSocket()
-    let gate = TypedSubmissionGate()
-    let store = MemoryPairingStore(); store.record = try testPairingCredentials()
-    let session = AppSession(store: store, makeClient: { _ in
-        HubClient(transport: HubTransport(connect: { _ in socket }))
-    }, makePaths: { nil }, sendCommand: { client, command in
-        try await client.send(command)
-        await gate.hold()
-    })
-    await session.launch(); await socket.ready()
-    try await eventuallySession { session.connection == .ready }
-    session.draft = "Restored words"
-    let submission = Task { await session.sendTypedLine() }
-    try await eventuallySession { await gate.entered }
-    let original = try #require(session.typedLines.first)
-    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(original.id)\",\"ok\":false,\"error\":{\"code\":\"invalid_payload\",\"message\":\"Not accepted\",\"retry_after_seconds\":null}}")
-    try await eventuallySession { session.typedLines.first?.canRecover == true }
-    #expect(session.recoverTypedLine(id: original.id))
-    await gate.release(); await submission.value
-    #expect(session.draft == "Restored words")
-    #expect(session.typedLines.first?.outcome == .recovered)
     await session.unpair()
 }

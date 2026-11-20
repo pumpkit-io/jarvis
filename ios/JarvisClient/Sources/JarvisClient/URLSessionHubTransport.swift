@@ -59,7 +59,8 @@ final class URLSessionHubSocket: NSObject, HubSocket, URLSessionWebSocketDelegat
         self.receiveMessage = receiveMessage
         super.init()
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 15
+        // Longer than the Hub's 18-second ping, so a quiet but healthy socket is not timed out; open and ping bound themselves.
+        configuration.timeoutIntervalForRequest = 60
         session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
         task = session.webSocketTask(with: request)
         // V1 limits Client-to-Hub commands; retained Hub events have no size ceiling.
@@ -74,7 +75,13 @@ final class URLSessionHubSocket: NSObject, HubSocket, URLSessionWebSocketDelegat
                     continuation = waiter; return false
                 }
                 if cancelled { waiter.resume(throwing: CancellationError()) }
-                else { task.resume() }
+                else {
+                    task.resume()
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 15) { [weak self] in
+                        guard let self, self.lock.withLock({ !self.opened }) else { return }
+                        self.shutdown()
+                    }
+                }
             }
         } onCancel: { self.shutdown() }
     }
@@ -99,6 +106,20 @@ final class URLSessionHubSocket: NSObject, HubSocket, URLSessionWebSocketDelegat
         } catch {
             if task.closeCode == .policyViolation { throw HubTransportError.unauthorized }
             throw error
+        }
+    }
+
+    func ping() async throws {
+        let answered = OnceFlag()
+        try await withCheckedThrowingContinuation { (waiter: CheckedContinuation<Void, any Error>) in
+            task.sendPing { error in
+                guard answered.claim() else { return }
+                if let error { waiter.resume(throwing: error) } else { waiter.resume() }
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 5) {
+                guard answered.claim() else { return }
+                waiter.resume(throwing: URLError(.timedOut))
+            }
         }
     }
 
@@ -162,4 +183,10 @@ public final class HubNetworkPaths: Sendable {
 
     public func cancel() { monitor.cancel(); continuation.finish() }
     deinit { monitor.cancel(); continuation.finish() }
+}
+
+private final class OnceFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var claimed = false
+    func claim() -> Bool { lock.withLock { defer { claimed = true }; return !claimed } }
 }

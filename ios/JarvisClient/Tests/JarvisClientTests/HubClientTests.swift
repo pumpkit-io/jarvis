@@ -28,6 +28,13 @@ actor FakeSocket: HubSocket {
             input.yield(.text(Data("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(command.id)\",\"ok\":true,\"result\":{\"can_show_text\":true}}".utf8)))
         }
     }
+    var pings = 0
+    var pingFails = false
+    func ping() async throws {
+        pings += 1
+        if pingFails { throw URLError(.timedOut) }
+    }
+    func failPings() { pingFails = true }
     func close() async {
         if closed { return }
         closed = true
@@ -370,21 +377,54 @@ func actualTransportOutcomesDetermineConnectionState(_ error: HubTransportError)
     await client.stop(); await clock.advance()
 }
 
-@Test func injectedPathChangesReplaceAttemptWithoutChangingCursor() async throws {
+@Test func pathChangesProbeAWorkingSocketAndOnlyReplaceAFailedOne() async throws {
     let transport = FakeTransport()
     let (paths, changes) = AsyncStream<Void>.makeStream()
-    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }), cursor: 42)
+    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }), cursor: 42,
+                           sleep: { _ in try await Task.sleep(for: .seconds(100)) })
     await client.start(paths: paths)
     try await eventually { await transport.socket(0) != nil }
     let first = try #require(await transport.socket(0))
+    await first.ready(through: 42)
+    try await eventually { await client.state == .ready }
+    changes.yield(())
+    try await eventually { await first.pings == 1 }
+    try await Task.sleep(for: .milliseconds(10))
+    #expect(await first.closed == false)
+    #expect(await transport.sockets.count == 1)
+    #expect(await client.state == .ready)
+    await first.failPings()
+    changes.yield(())
+    try await eventually { await client.state == .unreachable }
+    #expect(await first.closed)
     changes.yield(())
     try await eventually { await transport.socket(1) != nil }
-    #expect(await first.closed)
-    #expect(await transport.cursors == [42, 42])
+    #expect(await transport.cursors == [42, 43])
     await client.setForeground(false)
     changes.yield(())
     #expect(await transport.sockets.count == 2)
     changes.finish(); await client.stop()
+}
+
+@Test func keepaliveClosesASocketWhoseHubStoppedAnswering() async throws {
+    let transport = FakeTransport(), clock = FakeSleeper()
+    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }), sleep: { _ in },
+                           keepaliveSleep: { try await clock.sleep($0) })
+    await client.start()
+    try await eventually { await transport.socket(0) != nil }
+    let first = try #require(await transport.socket(0))
+    await first.ready()
+    try await eventually { await client.state == .ready }
+    try await eventually { await clock.pending == 1 }
+    await clock.advance()
+    try await eventually { await first.pings == 1 }
+    #expect(await first.closed == false)
+    await first.failPings()
+    try await eventually { await clock.pending == 1 }
+    await clock.advance()
+    try await eventually { await transport.socket(1) != nil }
+    #expect(await first.closed)
+    await client.stop()
 }
 
 @Test func invalidOriginsFailBeforeCreatingAnyNetworkRequest() throws {
@@ -417,24 +457,6 @@ func actualTransportOutcomesDetermineConnectionState(_ error: HubTransportError)
     await client.stop()
 }
 
-@Test func overlappingPathReplacementsCannotCreateTwoCurrentReaders() async throws {
-    let transport = FakeTransport()
-    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }))
-    await client.start()
-    try await eventually { await transport.socket(0) != nil }
-    let first = try #require(await transport.socket(0))
-    await first.blockClose()
-    let oldReplacement = Task { await client.pathChanged() }
-    try await eventually { await first.closed }
-    await client.pathChanged()
-    try await eventually { await transport.socket(1) != nil }
-    await first.releaseClose()
-    await oldReplacement.value
-    try await Task.sleep(for: .milliseconds(10))
-    #expect(await transport.sockets.count == 2)
-    await client.stop()
-}
-
 @Test func runningWarmupAndMissingStatusStayConnectingUntilPositiveReadiness() async throws {
     let transport = FakeTransport()
     let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }))
@@ -457,7 +479,7 @@ func actualTransportOutcomesDetermineConnectionState(_ error: HubTransportError)
 
 @Test func invalidLocalCommandsNeverEnterPendingOrDamageHealthyConnection() async throws {
     let transport = FakeTransport()
-    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }))
+    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }), sleep: { _ in })
     await client.start()
     try await eventually { await transport.socket(0) != nil }
     let socket = try #require(await transport.socket(0))
@@ -480,7 +502,7 @@ func actualTransportOutcomesDetermineConnectionState(_ error: HubTransportError)
     }
     let valid = HubCommand(id: "valid", type: "say_text", payload: ["text": .string("hello")])
     try await client.send(valid)
-    await client.pathChanged()
+    socket.input.finish(throwing: URLError(.networkConnectionLost))
     try await eventually { await transport.socket(1) != nil }
     let second = try #require(await transport.socket(1))
     await second.ready(through: 1)

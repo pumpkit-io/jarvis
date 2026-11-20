@@ -12,7 +12,7 @@ struct TalkKey: View {
 
     var body: some View {
         ZStack {
-            ForEach(Array([TalkState.idle, .authorizing, .recording, .thinking].enumerated()), id: \.offset) { _, state in
+            ForEach(Array([TalkState.idle, .authorizing, .recording].enumerated()), id: \.offset) { _, state in
                 label(talk.label(for: state), recording: state == .recording)
                     .hidden()
                     .accessibilityHidden(true)
@@ -26,8 +26,6 @@ struct TalkKey: View {
         .foregroundStyle(recording ? Color.white : theme.keyText)
         .background(recording ? theme.signal : theme.brass, in: RoundedRectangle(cornerRadius: 10))
         .scaleEffect(pressed && !talk.holdCancelled ? 0.98 : 1)
-        .opacity(talk.canPress || recording || talk.state == .authorizing ? 1 : 0.55)
-        .disabled(!talk.ready || talk.state == .uploading || talk.state == .thinking)
         .contentShape(Rectangle())
         .gesture(DragGesture(minimumDistance: 0)
             .updating($pressed) { _, pressed, _ in pressed = true }
@@ -44,7 +42,7 @@ struct TalkKey: View {
         .accessibilityAction { talk.activate(interaction: interaction) }
         .accessibilityAction(named: "Cancel Talk") { Task { await talk.controlDisappeared(interaction: interaction) } }
         .accessibilityHint(talk.gesture == .hold ? "Hold while speaking. Release to send. Slide up to cancel." : "Tap to start. Tap again to send. Slide up to cancel.")
-        .accessibilityValue(recording ? "Recording, \(talk.elapsed) seconds" : talk.ready ? talk.label : "Unavailable")
+        .accessibilityValue(recording ? "Recording, \(talk.elapsed) seconds" : talk.label)
         .onDisappear { Task { await talk.controlDisappeared(interaction: interaction) } }
     }
 

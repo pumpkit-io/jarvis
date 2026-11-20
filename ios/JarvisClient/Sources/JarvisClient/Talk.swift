@@ -12,15 +12,14 @@ public enum TalkGesture: String, Codable, CaseIterable, Sendable {
 }
 
 public enum TalkState: Equatable, Sendable {
-    case idle, authorizing, recording, uploading, thinking, refused, failed, cancelled
+    case idle, authorizing, recording, refused, failed, cancelled
 }
 
+/// Records a Talk and hands it to the Outbox. Nothing here waits on the connection.
 @MainActor @Observable public final class TalkController {
     public private(set) var state: TalkState = .idle
     public private(set) var elapsed = 0
-    public private(set) var ready = false
     public private(set) var talkID: String?
-    public private(set) var requestID: String?
     public private(set) var microphoneRefused = false
     public private(set) var gesture: TalkGesture = .hold
     private var interaction: UUID?
@@ -29,13 +28,11 @@ public enum TalkState: Equatable, Sendable {
     private var captureControl: UUID?
     private var pendingPress: Task<Void, Never>?
     public private(set) var holdCancelled = false
-    private var failureMessage: String?
     public var speaking = false
     public var label: String { label(for: state) }
     public func label(for state: TalkState) -> String {
         switch state {
         case .recording: gesture == .hold ? "Release to send. Slide up to cancel." : "Tap to send. Slide up to cancel."
-        case .uploading, .thinking: "Jarvis is thinking"
         case .authorizing: "Allow the microphone"
         default: gesture == .hold ? (speaking ? "Hold to interrupt" : "Hold to talk") : (speaking ? "Tap to interrupt" : "Tap to talk")
         }
@@ -46,48 +43,41 @@ public enum TalkState: Equatable, Sendable {
         }
         return switch state {
         case .refused: "Jarvis needs the microphone to hear you. Allow it in Settings."
-        case .failed: failureMessage ?? (gesture == .hold ? "That didn't reach Jarvis. Hold to talk again." : "That didn't reach Jarvis. Tap to talk again.")
+        case .failed: "The microphone couldn't start. Try again."
         case .cancelled: "Talk cancelled."
         default: nil
         }
     }
-    public var canPress: Bool { ready && retiring == 0 && ![.authorizing, .recording, .uploading, .thinking].contains(state) }
+    public var canPress: Bool { state != .authorizing && state != .recording }
+    /// Audio shorter than 0.3 seconds is a slip of the finger, not something said.
+    static let shortestBytes = TalkAudio.bytesPerSecond * 3 / 10
     private let recorder: any TalkRecorder
     private let permission: @MainActor () async -> Bool
     private let now: @MainActor () -> Double
+    private let clock: @MainActor () -> Date
     private let sleep: @Sendable (Double) async throws -> Void
-    private var send: (@MainActor (HubCommand) async throws -> Void)?
-    private var retire: (@MainActor (String) async -> Void)?
-    private var upload: (@MainActor (String, String, Data) async throws -> CommandResult)?
-    private var admission: @MainActor (String) async -> Bool = { _ in true }
-    private var completedRequests: [String] = []
+    private var begin: @MainActor (String) async -> Bool = { _ in false }
+    private var cancelBegun: @MainActor (String) async -> Void = { _ in }
+    private var deliver: (@MainActor (String, Data, Date) -> Void)?
     private var stopSpeech: @MainActor () async -> Void = {}
     private var generation: UInt64 = 0
-    private var retiring = 0
-    private var beginID: String?
-    private var failedBeginID: String?
+    private var beginning: Task<Bool, Never>?
     private var started = 0.0
     private var timer: Task<Void, Never>?
-    private var operation: Task<Void, Never>?
-    private var deadline: Task<Void, Never>?
 
     public init(recorder: any TalkRecorder, permission: @escaping @MainActor () async -> Bool,
                 now: @escaping @MainActor () -> Double = { ProcessInfo.processInfo.systemUptime },
+                clock: @escaping @MainActor () -> Date = { Date() },
                 sleep: @escaping @Sendable (Double) async throws -> Void = { try await Task.sleep(for: .seconds($0)) }) {
-        self.recorder = recorder; self.permission = permission; self.now = now; self.sleep = sleep
+        self.recorder = recorder; self.permission = permission; self.now = now; self.clock = clock; self.sleep = sleep
     }
 
-    public func configure(ready: Bool, send: @escaping @MainActor (HubCommand) async throws -> Void,
-                          retire: @escaping @MainActor (String) async -> Void,
-                          upload: @escaping @MainActor (String, String, Data) async throws -> CommandResult,
-                          admission: @escaping @MainActor (String) async -> Bool = { _ in true },
+    /// `begin` tells a connected Hub that the User is speaking and answers whether it was sent; `deliver` queues the finished Talk.
+    public func configure(begin: @escaping @MainActor (String) async -> Bool,
+                          cancel: @escaping @MainActor (String) async -> Void,
+                          deliver: @escaping @MainActor (String, Data, Date) -> Void,
                           stopSpeech: @escaping @MainActor () async -> Void = {}) {
-        self.ready = ready; self.send = send; self.retire = retire; self.upload = upload; self.admission = admission; self.stopSpeech = stopSpeech
-    }
-
-    public func setReady(_ value: Bool) async {
-        ready = value
-        if !value, state == .authorizing || state == .recording { await cancel(failed: true, message: transportFailureMessage) }
+        self.begin = begin; cancelBegun = cancel; self.deliver = deliver; self.stopSpeech = stopSpeech
     }
 
     public func setGesture(_ value: TalkGesture) async {
@@ -195,21 +185,19 @@ public enum TalkState: Equatable, Sendable {
     }
 
     public func press(interaction id: UUID = UUID()) async {
-        guard !Task.isCancelled, canPress, send != nil else { return }
+        guard !Task.isCancelled, canPress, deliver != nil else { return }
         interaction = id
         generation &+= 1
         let owner = generation
-        state = .authorizing; requestID = nil; elapsed = 0; failureMessage = nil; failedBeginID = nil
+        state = .authorizing; elapsed = 0
         await stopSpeech()
-        guard !Task.isCancelled, generation == owner, state == .authorizing, ready else { return }
+        guard !Task.isCancelled, generation == owner, state == .authorizing else { return }
         let allowed = await permission()
         // Permission belongs to the app; a grant still cannot revive the old capture intent.
         microphoneRefused = !allowed
-        guard !Task.isCancelled, generation == owner, state == .authorizing, ready else { return }
+        guard !Task.isCancelled, generation == owner, state == .authorizing else { return }
         guard allowed else { state = .refused; holdCancelled = true; return }
         let id = UUID().uuidString
-        let begin = HubCommand(type: "talk_begin", payload: ["talk_id": .string(id)])
-        talkID = id; beginID = begin.id
         do {
             try recorder.start { [weak self] in
                 Task {
@@ -217,105 +205,48 @@ public enum TalkState: Equatable, Sendable {
                     await self.release()
                 }
             }
-            state = .recording; started = now()
-            timer = Task { [weak self] in
-                while !Task.isCancelled {
-                    do { try await self?.sleep(0.2) } catch { return }
-                    guard let self, self.generation == owner, self.state == .recording else { return }
-                    self.elapsed = min(300, Int(max(0, self.now() - self.started)))
-                    if self.elapsed >= 300 { await self.release(); return }
-                }
+        } catch { state = .failed; return }
+        talkID = id
+        state = .recording; started = now()
+        timer = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await self?.sleep(0.2) } catch { return }
+                guard let self, self.generation == owner, self.state == .recording else { return }
+                self.elapsed = min(300, Int(max(0, self.now() - self.started)))
+                if self.elapsed >= 300 { await self.release(); return }
             }
-            do {
-                try await send?(begin)
-            } catch {
-                guard generation == owner, state == .recording else { return }
-                await cancel(failed: true, message: transportFailureMessage)
-            }
-        } catch {
-            guard generation == owner else { return }
-            await cancel(failed: true)
         }
+        let begin = begin
+        beginning = Task { await begin(id) }
     }
 
     public func release() async {
         if state == .authorizing { generation &+= 1; state = .idle; return }
-        guard state == .recording, let id = talkID, let beginID, let upload else { return }
-        let owner = generation
+        guard state == .recording, let id = talkID, let deliver else { return }
+        generation &+= 1
         let pcm = recorder.stop()
         timer?.cancel(); timer = nil
-        state = .uploading
-        let admitted = await admission(beginID)
-        guard generation == owner, state == .uploading else { return }
-        guard admitted else { await cancel(failed: true, message: transportFailureMessage); return }
-        guard !pcm.isEmpty, pcm.count <= 9_600_000, pcm.count.isMultiple(of: 2) else { await cancel(failed: true); return }
-        let uploadID = UUID().uuidString
-        let firstAttempt = now()
-        deadline = Task { [weak self] in
-            do { try await self?.sleep(30) } catch { return }
-            guard let self, self.generation == owner, self.state == .uploading else { return }
-            await self.cancel(failed: true)
+        talkID = nil
+        guard pcm.count >= Self.shortestBytes, pcm.count <= TalkAudio.maxBytes, pcm.count.isMultiple(of: 2) else {
+            state = .cancelled; holdCancelled = true
+            await endBegun(id)
+            return
         }
-        let task = Task { [weak self] in
-            guard let self else { return }
-            while self.generation == owner, !Task.isCancelled {
-                do {
-                    let result = try await upload(id, uploadID, pcm)
-                    guard self.generation == owner, self.state == .uploading else { return }
-                    guard result.id == uploadID, result.ok, case .string(let request) = result.result?["request_id"] else {
-                        await self.cancel(failed: true); return
-                    }
-                    self.requestID = request; self.state = self.completedRequests.contains(request) || self.speaking ? .idle : .thinking
-                    self.deadline?.cancel(); self.deadline = nil
-                    return
-                } catch {
-                    guard self.generation == owner, !Task.isCancelled else { return }
-                    if let error = error as? HubTransportError, case .http(let code) = error, code < 500, code != 429 {
-                        await self.cancel(failed: true); return
-                    }
-                    guard self.now() - firstAttempt < 30 else { await self.cancel(failed: true); return }
-                    do { try await self.sleep(1) } catch { return }
-                }
-            }
-        }
-        operation = task
-        await task.value
+        state = .idle
+        deliver(id, pcm, clock())
     }
 
-    private var transportFailureMessage: String {
-        gesture == .hold ? "Couldn't reach the Mac. Hold to talk again." : "Couldn't reach the Mac. Tap to talk again."
-    }
-
-    public func cancel(failed: Bool = false, message: String? = nil) async {
-        retiring += 1
-        defer { retiring -= 1 }
+    public func cancel() async {
         generation &+= 1
-        let id = talkID, begin = beginID
-        let retire = retire, send = send
+        let id = talkID
         if state == .recording { _ = recorder.stop() }
-        timer?.cancel(); timer = nil; operation?.cancel(); operation = nil; deadline?.cancel(); deadline = nil
-        state = failed ? .failed : .cancelled
-        failureMessage = message; failedBeginID = failed ? begin : nil; holdCancelled = true
-        talkID = nil; beginID = nil; requestID = nil
-        if let id { try? await send?(HubCommand(type: "talk_cancel", payload: ["talk_id": .string(id)])) }
-        if let begin { await retire?(begin) }
+        timer?.cancel(); timer = nil
+        state = .cancelled; holdCancelled = true; talkID = nil
+        if let id { await endBegun(id) }
     }
 
-    public func receive(_ result: CommandResult) async {
-        if let failedBeginID, result.id == failedBeginID, !result.ok, state == .failed {
-            failureMessage = result.error?.message ?? transportFailureMessage
-        }
-        if result.id == beginID, !result.ok, state == .recording || state == .uploading {
-            await cancel(failed: true, message: result.error?.message ?? transportFailureMessage)
-        }
-    }
-
-    public func receive(_ event: HubEvent) {
-        if event.kind == .speechBegin, state == .thinking { state = .idle }
-        if event.kind == .replyEnd, let request = event.string("request_id") {
-            completedRequests.append(request)
-            if completedRequests.count > 128 { completedRequests.removeFirst() }
-            if request == requestID, state == .thinking { state = .idle }
-        }
+    private func endBegun(_ id: String) async {
+        let beginning = beginning; self.beginning = nil
+        if await beginning?.value == true { await cancelBegun(id) }
     }
 }

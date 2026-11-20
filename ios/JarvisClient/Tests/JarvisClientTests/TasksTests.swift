@@ -70,7 +70,7 @@ import Testing
     #expect(session.openTasks.first?.approvalQuestion == nil)
     await session.talk.press()
     #expect(recorder.active)
-    #expect(await socket.sent.contains { $0.type == "talk_begin" })
+    try await eventuallySession { await socket.sent.contains { $0.type == "talk_begin" } }
     await session.setVoiceOn(false)
     #expect(recorder.active)
     let silence = try #require(await socket.sent.first { $0.type == "set_silence" })
@@ -79,13 +79,14 @@ import Testing
     #expect(!session.voiceOn)
     await session.talk.cancel()
     #expect(!recorder.active)
+    try await eventuallySession { await socket.sent.contains { $0.type == "talk_cancel" } }
     #expect(await socket.sent.map(\.type).filter { $0 == "talk_begin" || $0 == "talk_cancel" } == ["talk_begin", "talk_cancel"])
     #expect(await socket.sent.allSatisfy { !["approve", "refuse"].contains($0.type) })
     await session.unpair()
     #expect(session.openTasks.isEmpty)
 }
 
-@MainActor @Test func healthyTalkCancellationDoesNotMakeTasksWaitForAnotherSnapshot() async throws {
+@MainActor @Test func talkCancellationLeavesTheConnectionAndTasksAlone() async throws {
     let socket = FakeSocket()
     let store = MemoryPairingStore(); store.record = try testPairingCredentials()
     let controller = TalkController(recorder: FakeTalkRecorder(), permission: { true })
@@ -96,16 +97,9 @@ import Testing
     await socket.text(event(2, "task_snapshot", #"{"tasks":[{"id":"working","title":"Write tests","state":"working","last_report":"Running.","approval_question":null}]}"#))
     try await eventuallySession { !session.updatingTasks }
     await controller.press()
-    let begin = try #require(await socket.sent.first { $0.type == "talk_begin" })
-    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(begin.id)\",\"ok\":true,\"result\":{}}")
-    try await eventuallySession { await session.client?.results[begin.id]?.ok == true }
     await controller.cancel()
-    let cancel = try #require(await socket.sent.first { $0.type == "talk_cancel" })
-    try await eventuallySession { !session.connection.canSend }
-    #expect(!session.updatingTasks)
-    #expect(session.openTasks.map(\.title) == ["Write tests"])
-    await socket.text("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(cancel.id)\",\"ok\":true,\"result\":{}}")
-    try await eventuallySession { session.connection.canSend }
+    try await eventuallySession { await socket.sent.contains { $0.type == "talk_cancel" } }
+    #expect(session.connection.canSend)
     #expect(!session.updatingTasks)
     #expect(session.openTasks.map(\.title) == ["Write tests"])
     await session.unpair()
@@ -114,21 +108,19 @@ import Testing
 @MainActor @Test func actualReconnectKeepsTasksUpdatingUntilAFreshSnapshot() async throws {
     let transport = FakeTransport()
     let store = MemoryPairingStore(); store.record = try testPairingCredentials()
-    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { await transport.connect($0) })) }, makePaths: { nil })
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { await transport.connect($0) }), sleep: { _ in }) }, makePaths: { nil })
     await session.launch()
     try await eventuallySession { await transport.socket(0) != nil }
     let first = try #require(await transport.socket(0))
     await first.ready()
     await first.text(event(2, "task_snapshot", #"{"tasks":[{"id":"working","title":"Write tests","state":"working","last_report":"Running.","approval_question":null}]}"#))
     try await eventuallySession { session.connection.canSend && !session.updatingTasks }
-    await session.client?.pathChanged()
+    first.input.finish(throwing: URLError(.networkConnectionLost))
     try await eventuallySession { await transport.socket(1) != nil }
     let second = try #require(await transport.socket(1))
-    try await eventuallySession { session.updatingTasks }
     #expect(session.openTasks.map(\.title) == ["Write tests"])
     await second.text(event(3, "task_snapshot", #"{"tasks":[{"id":"working","title":"Write tests","state":"working","last_report":"Still running.","approval_question":null}]}"#))
     try await eventuallySession { session.openTasks.first?.lastReport == "Still running." }
-    #expect(session.updatingTasks)
     await second.ready(through: 3)
     try await eventuallySession { session.connection.canSend }
     #expect(session.updatingTasks)

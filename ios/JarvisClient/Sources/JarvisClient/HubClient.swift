@@ -7,10 +7,13 @@ public protocol HubSocket: Sendable {
     func send(_ data: Data) async throws
     func close() async
     func closeForProtocolError() async
+    /// Throws when the Hub does not answer a ping in time.
+    func ping() async throws
 }
 
 public extension HubSocket {
     func closeForProtocolError() async { await close() }
+    func ping() async throws {}
 }
 
 public struct HubTransport: Sendable {
@@ -45,6 +48,7 @@ public actor HubClient {
     private let sleep: @Sendable (Double) async throws -> Void
     private let acknowledgementSleep: @Sendable (Double) async throws -> Void
     private let lifecycleSleep: @Sendable (Double) async throws -> Void
+    private let keepaliveSleep: @Sendable (Double) async throws -> Void
     private let jitter: @Sendable () -> Double
     private let cache: @Sendable (HubEvent?, Int64) async throws -> Void
     private var socket: (any HubSocket)?
@@ -70,19 +74,22 @@ public actor HubClient {
     private var presenceID: String?
     private var presenceWaiter: CheckedContinuation<Void, Never>?
     private var presenceTimeout: Task<Void, Never>?
-    private var finishingTalks: [String: CheckedContinuation<Bool, Never>] = [:]
-    private var talkDeadlines: [String: Task<Void, Never>] = [:]
+    private var keepalive: Task<Void, Never>?
+    private var liveWrite: Task<Void, Never>?
+    private var waitingToRetry = false
 
     /// The cache closure must finish durable storage before returning. A nil event commits a replay watermark.
     public init(transport: HubTransport, cursor: Int64 = 0, desiredSilence: Bool? = nil,
                 sleep: @escaping @Sendable (Double) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
                 lifecycleSleep: @escaping @Sendable (Double) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
                 acknowledgementSleep: @escaping @Sendable (Double) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
+                keepaliveSleep: @escaping @Sendable (Double) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
                 jitter: @escaping @Sendable () -> Double = { Double.random(in: 0.8...1.2) },
                 cache: @escaping @Sendable (HubEvent?, Int64) async throws -> Void = { _, _ in }) {
         self.desiredSilence = desiredSilence
         self.transport = transport; self.cursor = max(0, cursor); self.sleep = sleep
         self.jitter = jitter; self.cache = cache; self.lifecycleSleep = lifecycleSleep; self.acknowledgementSleep = acknowledgementSleep
+        self.keepaliveSleep = keepaliveSleep
         (updates, continuation) = AsyncStream.makeStream()
     }
 
@@ -139,8 +146,32 @@ public actor HubClient {
         if generation == owner { setState(.suspended) }
     }
 
+    /// A network change only matters to a connection that is down or may have died: a working socket is checked, not replaced.
     public func pathChanged() async {
-        if running && foreground { await replace() }
+        guard running, foreground else { return }
+        if displayReady, let socket { probe(socket, owner: generation) } else { await replace() }
+    }
+
+    private func probe(_ socket: any HubSocket, owner: UInt64) {
+        Task {
+            do { try await socket.ping() }
+            catch { if generation == owner { await socket.close() } }
+        }
+    }
+
+    private func startKeepalive(_ socket: any HubSocket, owner: UInt64) {
+        keepalive?.cancel()
+        keepalive = Task {
+            while !Task.isCancelled {
+                do { try await keepaliveSleep(10) } catch { return }
+                guard generation == owner, !Task.isCancelled else { return }
+                do { try await socket.ping() }
+                catch {
+                    if generation == owner { await socket.close() }
+                    return
+                }
+            }
+        }
     }
 
     /// Call before surrendering foreground time. Only already-playing audio may drain in the background.
@@ -185,23 +216,6 @@ public actor HubClient {
     }
 
     public func send(_ command: HubCommand) async throws {
-        if command.type == "talk_cancel" {
-            guard running else { throw HubProtocolError.notConnected }
-            let data = try encodedCommand(command)
-            try retain(command, data: data)
-            refreshState()
-            // Cancellation survives capture's socket, including a disconnect before local retirement.
-            guard foreground, handover, displayReady, let socket else { return }
-            let owner = generation
-            do {
-                try await socket.send(pendingData[command.id] ?? data)
-                if generation == owner { startRetryDeadline(command.id, owner: owner) }
-            } catch {
-                if generation == owner { await socket.close() }
-                throw error
-            }
-            return
-        }
         guard running, foreground, handover, displayReady, state.canSend, let socket else { throw HubProtocolError.notConnected }
         let data = try encodedCommand(command)
         try retain(command, data: data)
@@ -216,18 +230,16 @@ public actor HubClient {
         }
     }
 
-    /// A released capture may await its existing write, but cannot replay a begin after reconnecting.
-    public func finishTalkBegin(id: String) async -> Bool {
-        if let result = results[id] { return result.ok }
-        guard pendingCommands.contains(where: { $0.id == id && $0.type == "talk_begin" }), socket != nil, state.canSend else { return false }
-        removePendingCommand(id)
-        return await withCheckedContinuation { waiter in
-            finishingTalks[id] = waiter
-            talkDeadlines[id] = Task {
-                do { try await lifecycleSleep(2) } catch { return }
-                await retireTalkBegin(id: id)
-            }
+    /// Sends a command that only means something on this socket, such as a Talk starting; it is never retained or resent.
+    public func sendLive(_ command: HubCommand) -> Bool {
+        guard running, foreground, handover, displayReady, state.canSend, let socket,
+              let data = try? encodedCommand(command) else { return false }
+        let previous = liveWrite
+        liveWrite = Task {
+            await previous?.value
+            try? await socket.send(data)
         }
+        return true
     }
 
     private func removePendingCommand(_ id: String) {
@@ -235,25 +247,6 @@ public actor HubClient {
         pendingData.removeValue(forKey: id)
         retryTimers.removeValue(forKey: id)?.1.cancel()
         unansweredCommands.remove(id)
-    }
-
-    private func retireTalkBegins() {
-        for command in pendingCommands where command.type == "talk_begin" { removePendingCommand(command.id) }
-        for timer in talkDeadlines.values { timer.cancel() }; talkDeadlines.removeAll()
-        for waiter in finishingTalks.values { waiter.resume(returning: false) }; finishingTalks.removeAll()
-    }
-
-    /// End capture intent without allowing a lost begin acknowledgement to become a later Talk.
-    public func retireTalkBegin(id: String) async {
-        let uncertain = pendingCommands.contains(where: { $0.id == id && $0.type == "talk_begin" }) || finishingTalks[id] != nil
-        removePendingCommand(id)
-        talkDeadlines.removeValue(forKey: id)?.cancel()
-        finishingTalks.removeValue(forKey: id)?.resume(returning: false)
-        // Closing also releases a floor admitted by the Hub whose acknowledgement was lost.
-        if uncertain {
-            if running && foreground { await replace() }
-            else { await retire() }
-        }
     }
 
     public func reportPlayback(_ command: HubCommand) async throws {
@@ -335,7 +328,7 @@ public actor HubClient {
         presenceTimeout?.cancel()
         presenceTimeout = Task {
             guard !Task.isCancelled else { return }
-            do { try await lifecycleSleep(2) } catch { return }
+            do { try await lifecycleSleep(10) } catch { return }
             await presenceExpired(id, owner: owner)
         }
     }
@@ -369,7 +362,7 @@ public actor HubClient {
         let owner = generation
         task?.cancel(); task = nil
         cancelRetries()
-        retireTalkBegins()
+        keepalive?.cancel(); keepalive = nil; waitingToRetry = false
         if let activeSpeechID { continuation.yield(.speechConnectionEnded(activeSpeechID)) }
         let old = socket; socket = nil; handover = false; displayReady = false; presenceID = nil; activeSpeechID = nil
         presenceTimeout?.cancel(); presenceTimeout = nil
@@ -398,6 +391,7 @@ public actor HubClient {
                 let opened = try await transport.connect(cursor)
                 current = opened
                 guard generation == owner, foreground, running else { await opened.close(); return }
+                startKeepalive(opened, owner: owner)
                 socket = opened; handover = false; displayReady = false; status = nil; silenceConfirmed = false; initialSettingsReady = false
                 var header: HubEvent?
                 var speechID: String?
@@ -439,9 +433,6 @@ public actor HubClient {
                                 guard generation == owner, foreground else { return }
                                 displayReady = true; refreshState()
                             }
-                        } else if let id = result.id, let waiter = finishingTalks.removeValue(forKey: id) {
-                            talkDeadlines.removeValue(forKey: id)?.cancel()
-                            results[id] = result; continuation.yield(.result(result)); waiter.resume(returning: result.ok)
                         } else if let id = result.id, pendingCommands.contains(where: { $0.id == id }) {
                             pendingCommands.removeAll { $0.id == id }
                             pendingData.removeValue(forKey: id)
@@ -511,7 +502,7 @@ public actor HubClient {
             } catch {
                 guard generation == owner else { await current?.close(); return }
                 cancelRetries()
-                retireTalkBegins()
+                keepalive?.cancel(); keepalive = nil
                 if let activeSpeechID { continuation.yield(.speechConnectionEnded(activeSpeechID)) }
                 socket = nil; handover = false; displayReady = false; presenceID = nil; activeSpeechID = nil
                 presenceTimeout?.cancel(); presenceTimeout = nil
@@ -534,8 +525,10 @@ public actor HubClient {
                 guard foreground, running else { return }
                 let base = min(15.0, pow(2, Double(min(failures, 4))))
                 failures += 1
+                waitingToRetry = true
                 do { try await sleep(base * max(0.8, min(1.2, jitter()))) }
-                catch { return }
+                catch { if generation == owner { waitingToRetry = false }; return }
+                if generation == owner { waitingToRetry = false }
             }
         }
     }
@@ -550,7 +543,6 @@ public actor HubClient {
         guard displayReady else { return }
         guard initialSettingsReady || desiredSilence == nil || silenceConfirmed else { setState(.connecting); return }
         initialSettingsReady = true
-        guard !pendingCommands.contains(where: { $0.type == "talk_cancel" }) else { setState(.connecting); return }
         if let status {
             if status.usage_limit.limited { setState(.usageLimited(resetTime: status.usage_limit.resets_at)) }
             else { setState(status.ready ? .ready : .connecting) }

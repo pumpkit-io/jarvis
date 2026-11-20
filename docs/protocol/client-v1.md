@@ -46,7 +46,7 @@ HTTP errors use the same `error` object with top-level `version: 1`; they omit `
 
 Command ids are unique per authenticated Client across WebSocket commands and utterance uploads. The Hub durably reserves `(client_id, id)` before any side effect. A completed repeat with the same type and payload receives its original result, including original errors and identifiers, without repeating the effect. A concurrent repeat waits for the reserved operation's result; it cannot run it again. Reusing an id with different content returns `id_conflict`. The command result record survives Hub restarts and is retained for the lifetime of the paired Client, independently of 30-day event pruning. If a restart leaves an admitted operation without a known result, return `outcome_unknown` for that id, never execute it again. The Client must show the uncertainty and reconcile with history before starting a new request.
 
-An interrupted upload retries the same id and byte-identical body for at most about 30 seconds from the first attempt. The reservation must distinguish incomplete receipt (safe to receive the same body again) from admission to transcription/the Talker (must not repeat it). A Client never queues a fresh Talk or typed request while disconnected.
+An interrupted upload retries the same id and byte-identical body. The reservation must distinguish incomplete receipt (safe to receive the same body again) from admission to transcription/the Talker (must not repeat it). A Client may queue Talks and typed lines while disconnected (ADR 0027) and sends them one at a time, oldest first, each under its original ids until it has a result.
 
 ### Client command catalog
 
@@ -54,7 +54,7 @@ Every example below is the `type` and `payload` portion of the command envelope.
 
 | Type | Payload and example | Successful result |
 |---|---|---|
-| `say_text` | `{"text":"How is the refactor going?"}` | `{"request_id":"request-1"}` |
+| `say_text` | `{"text":"How is the refactor going?","recorded_at":"2026-11-20T23:10:00Z"}` | `{"request_id":"request-1"}` |
 | `talk_begin` | `{"talk_id":"talk-1"}` | `{"talk_id":"talk-1"}` |
 | `talk_cancel` | `{"talk_id":"talk-1"}` | `{"talk_id":"talk-1","cancelled":true}` |
 | `interrupt` | `{"speech_id":"speech-1","last_clip_index":0}` | `{"speech_id":"speech-1","stopped":true}` |
@@ -65,7 +65,7 @@ Every example below is the `type` and `payload` portion of the command envelope.
 | `replay_speech` | `{"reply_id":"reply-1"}` | `{"speech_id":"speech-2","reply_id":"reply-1"}` |
 | `acknowledge` | `{"seq":42}` | `{"seq":42}` |
 
-`say_text` joins the one Talker inbox in arrival order, takes Focus and stops all speech. Its reply is text-only even if Silence is off. It uses the same Talker tools and Hub checks for Approval answers as terminal input.
+`say_text` joins the one Talker inbox in arrival order; the optional `recorded_at` is when the User wrote it, and a line two minutes or more late reaches the Talker marked as delayed. It takes Focus and stops all speech. Its reply is text-only even if Silence is off. It uses the same Talker tools and Hub checks for Approval answers as terminal input.
 
 `talk_begin` is sent when recording starts. It takes Focus, ends Quiet mode, stops all speech and suppresses the Mac microphone while the Talk is active. One Talk is active per Client. A new `talk_begin` from the same Client replaces its active Talk, which ends as cancelled, including any transcription in flight. The replaced Talk can no longer be uploaded. If the Client was playing speech, it first sends `interrupt` with what it heard, then `talk_begin`. `talk_cancel` discards the capture without a User line or a Talker turn. A cancelled, uploaded or expired Talk cannot later be uploaded under a new command id. Disconnect releases the active recording floor; the Hub retains the Talk identity for the 30-second upload retry window. An abandoned Talk also releases its floor after 300 seconds plus a 30-second upload allowance.
 
@@ -95,7 +95,7 @@ Every event has a durably allocated, globally increasing sequence, including liv
 
 A Client stores replayable events keyed by `seq`, applies each once, and preserves increasing order. It advances its live cursor only after safely caching the event; live-only frames may advance that cursor once handled. Older history pagination does not rewind the live cursor. The Client may advance to `through_seq` after replay completes, since any omitted events through that mark are unavailable or live-only. A cursor beyond the Hub's high-water mark returns HTTP 409 `invalid_cursor` before upgrading. If the cursor predates retained history, replay what remains and include `history_pruned: true` in `replay_complete`; the Client preserves its offline cache and does not imply that all older history was recovered.
 
-Conversation events expire after 30 days and are pruned at launch. The log never supplies the Talker's context on restart. Status and snapshot events describe their event time; only the latest is current. App backgrounding closes the socket unless speech is still playing under the audio background mode. Only a connected socket with foreground display presence can count a new text Announcement as delivered. A handshake or background socket cannot count unseen news as told. Existing audible replies may finish after display presence ends. WebSocket Ping/Pong detects a dead connection; the Hub closes a socket after 30 seconds without a Pong. Reconnect uses backoff (1, 2, 4, 8 seconds, capped at 15, with jitter), resetting when ready; a network change triggers a fresh attempt.
+Conversation events expire after 30 days and are pruned at launch. The log never supplies the Talker's context on restart. Status and snapshot events describe their event time; only the latest is current. App backgrounding closes the socket unless speech is still playing under the audio background mode. Only a connected socket with foreground display presence can count a new text Announcement as delivered. A handshake or background socket cannot count unseen news as told. Existing audible replies may finish after display presence ends. WebSocket Ping/Pong detects a dead connection; the Hub pings every 18 seconds and closes a socket after 30 seconds without a Pong, so a Client's idle timeout must exceed that. Reconnect uses backoff (1, 2, 4, 8 seconds, capped at 15, with jitter), resetting when ready. A network change starts a fresh attempt only while the Client is not connected; it never replaces a working socket.
 
 ### Event envelope
 
@@ -163,11 +163,15 @@ Successful HTTP 201:
 
 A reachable listener with `ready: false` is starting or stopping; a Usage limit is separate from transport failure. Refused connections and network timeouts are Client-side reachability errors. The protocol cannot by itself distinguish a sleeping Mac from a stopped Hub; the app must not claim that distinction from an HTTP timeout alone.
 
+### Send one typed line
+
+`POST /v1/lines` with the device token, `Idempotency-Key: cmd-line-1`, `Content-Type: application/json` and `{"version":1,"text":"How is the refactor going?","recorded_at":"2026-11-20T23:10:00Z"}`. It is `say_text` without a socket, for the Client's Outbox: the same text limits, Focus and Talker inbox, with the same command id rules, so a retry returns the original result. It responds HTTP 200 with the command result envelope, whose result holds `request_id`.
+
 ### Upload one Talk
 
-`POST /v1/utterances/{talk_id}` with the device token, `Idempotency-Key: cmd-upload-1` and `Content-Type: application/octet-stream` and `X-Jarvis-Audio-Format: pcm_s16le_16000_mono`. The body is signed 16-bit little-endian PCM, with no WAV header. It is mono, 16,000 Hz, at most 300 seconds and must have an even, nonzero byte length. A WAV input in the reference Client is decoded and converted before upload.
+`POST /v1/utterances/{talk_id}` with the device token, `Idempotency-Key: cmd-upload-1` and `Content-Type: application/octet-stream` and `X-Jarvis-Audio-Format: pcm_s16le_16000_mono`, and optionally `X-Jarvis-Recorded-At` with the RFC 3339 time the Talk ended. The body is signed 16-bit little-endian PCM, with no WAV header. It is mono, 16,000 Hz, at most 300 seconds and must have an even, nonzero byte length. A WAV input in the reference Client is decoded and converted before upload.
 
-The Talk must belong to the authenticated Client and have an accepted `talk_begin`; otherwise return HTTP 409 `talk_not_active`. After complete receipt, the Hub transcribes on the one shared service, discards uploaded bytes, and admits exactly one spoken line. It responds HTTP 200 with the command result envelope:
+A Talk with an accepted `talk_begin` must still be active. A Talk identity the Client never began is a queued Talk: it needs no open socket, holds no floor and does not end the Client's active Talk. Any other identity, such as a Talk that was cancelled, expired or already uploaded, returns HTTP 409 `talk_not_active`; the Client may send the same audio again under a new Talk identity and command id. After complete receipt, the Hub transcribes on the one shared service, discards uploaded bytes, and admits exactly one spoken line. It responds HTTP 200 with the command result envelope:
 
 ```json
 {"version":1,"type":"command_result","id":"cmd-upload-1","ok":true,"result":{"talk_id":"talk-1","request_id":"request-1"}}

@@ -4,6 +4,9 @@ import Observation
 @MainActor @Observable public final class AppSession {
     public private(set) var credentials: PairingCredentials?
     public private(set) var connection: HubConnectionState = .unpaired
+    /// What the header says: a working connection that drops for a moment keeps saying ready.
+    public private(set) var shownConnection: HubConnectionState = .unpaired
+    private var connectionNotice: Task<Void, Never>?
     public private(set) var loading = true
     public private(set) var pairing = false
     public private(set) var error: PairingError?
@@ -28,12 +31,16 @@ import Observation
     private let voiceStore: VoiceSettingStore?
     private var explicitSilence: Bool?
     private var voicePersistenceFailed = false
+    private var voiceChosenHere = false
     private var voiceRevision: UInt64 = 0
     private var history: HistoryStore?
     private var historyBefore: Int64?
     public var draft = ""
-    public private(set) var typedLines: [TypedLine] = []
     public private(set) var inputMessage: String?
+    public private(set) var outbox: Outbox?
+    private let makeOutboxTransport: @MainActor () -> any OutboxTransport
+    private let outboxDirectory: URL
+    private let noticeSleep: @Sendable (Double) async throws -> Void
     public let playback: SpeechPlayer
     private var playbackDelivery: Task<Void, Never>?
     private var playbackRevision: UInt64 = 0
@@ -44,8 +51,9 @@ import Observation
     public let talk: TalkController
     public private(set) var speechID: String?
     private var lastCompletedClip: Int64 = -1
-    private let uploadTalk: TalkUpload
     private let stopPlayback: @MainActor () -> Void
+
+    var playbackDrainPending: Bool { pendingPlaybackDrain != nil }
 
     public func reportCompletedClip(speechID: String, index: Int64) {
         guard self.speechID == speechID else { return }
@@ -64,9 +72,11 @@ import Observation
         playback.stop(reportStopped: false); stopPlayback()
         guard let speechID, let client else { return }
         self.speechID = nil; talk.speaking = false
-        try? await sendCommand(client, HubCommand(type: "interrupt", payload: [
+        let command = HubCommand(type: "interrupt", payload: [
             "speech_id": .string(speechID), "last_clip_index": .integer(finished)
-        ]))
+        ])
+        // Queued ahead of the Talk's begin on the same socket, so the Hub learns what was heard first, without holding up recording.
+        _ = await client.sendLive(command)
     }
 
     public var draftValidationMessage: String? {
@@ -74,63 +84,24 @@ import Observation
     }
 
     public var canSubmit: Bool {
-        connection.canSend && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && draft.utf8.count <= 16_384 && !typedLines.contains {
-                $0.text == draft && ($0.outcome == .unanswered || $0.outcome == .deliveryUncertain || $0.outcome == .outcomeUnknown)
-            }
-    }
-
-    @discardableResult public func recoverTypedLine(id: String) -> Bool {
-        guard let index = typedLines.firstIndex(where: { $0.id == id }),
-              typedLines[index].canRecover,
-              draft.isEmpty || draft == typedLines[index].text else { return false }
-        draft = typedLines[index].text
-        typedLines[index].outcome = .recovered
-        return true
+        outbox != nil && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.utf8.count <= 16_384
     }
 
     public func sendTypedLine() async {
-        guard canSubmit, let client else {
+        guard canSubmit, let outbox else {
             if let message = draftValidationMessage { inputMessage = message }
             return
         }
-        let owner = generation
-        let text = draft
-        let command = HubCommand(type: "say_text", payload: ["text": .string(text)])
-        typedLines.append(TypedLine(command: command, outcome: .unanswered)); inputMessage = nil
-        do {
-            try await sendCommand(client, command)
-            guard generation == owner else { return }
-            if draft == text && typedLines.first(where: { $0.id == command.id })?.outcome != .recovered { draft = "" }
-        } catch {
-            let delivery = await client.delivery(of: command.id)
-            guard generation == owner, let index = typedLines.firstIndex(where: { $0.id == command.id }) else { return }
-            if typedLines[index].outcome == .accepted {
-                if draft == text { draft = "" }
-                return
-            }
-            guard typedLines[index].outcome == .unanswered || typedLines[index].outcome == .deliveryUncertain else { return }
-            switch delivery {
-            case .pending: typedLines[index].outcome = .deliveryUncertain
-            case .completed(let result):
-                receive(.result(result))
-                if result.ok && draft == text { draft = "" }
-            case .absent:
-                if draft == text {
-                    typedLines.remove(at: index)
-                    inputMessage = "Can't reach the Mac. Your line is still here to send."
-                } else {
-                    typedLines[index].outcome = .notSent
-                }
-            }
-        }
+        outbox.enqueueLine(draft, recordedAt: historyNow())
+        draft = ""; inputMessage = nil
     }
 
     private func receive(_ update: HubClientUpdate) {
         switch update {
         case .event(let event):
-            conversation.ingest(event); talk.receive(event)
+            conversation.ingest(event)
             if event.kind == .taskSnapshot && !tasksReplaying { tasksNeedRefresh = false }
+            if event.kind == .heard, let request = event.string("request_id") { outbox?.heard(requestID: request) }
             switch event.kind {
             case .status:
                 if let status = try? event.decodePayload(HubStatus.self) {
@@ -169,15 +140,13 @@ import Observation
                 replayCommands.removeValue(forKey: entry.key)
                 replayMessages[entry.key] = result.ok ? nil : result.error?.message ?? "Jarvis could not play this reply."
             }
-            guard let index = typedLines.firstIndex(where: { $0.id == result.id }) else { return }
-            if result.ok { typedLines[index].outcome = .accepted }
-            else if result.error?.code == "outcome_unknown" { typedLines[index].outcome = .outcomeUnknown }
-            else { typedLines[index].outcome = .rejected(result.error?.message ?? "Jarvis could not accept your line.") }
         case .silence(let silence, let pending, let revision):
             guard revision == voiceRevision, explicitSilence == nil || explicitSilence == silence else { return }
             voiceOn = !silence; voicePending = pending
+            if !pending { voiceChosenHere = false }
+            // Every reconnect re-sends the saved choice; only a change made now is worth a message.
             voiceMessage = voicePersistenceFailed ? "Voice changed for this session, but could not be saved. Try again."
-                : pending ? "Voice setting saved here. Waiting for the Mac to confirm." : nil
+                : pending && voiceChosenHere ? "Voice setting saved here. Waiting for the Mac to confirm." : nil
             if silence { silencePlayback() }
         case .replayStarted:
             tasksNeedRefresh = true; tasksReplaying = true
@@ -188,11 +157,8 @@ import Observation
             playback.stop(speechID: id, reportStopped: false)
         case .failure:
             if focusPending { focusMessage = "Focus is not confirmed. Waiting for the Mac to reconcile it." }
-            if voicePending && !voicePersistenceFailed {
+            if voicePending && voiceChosenHere && !voicePersistenceFailed {
                 voiceMessage = "Voice setting isn't confirmed. It remains selected here; reconnect to reconcile it."
-            }
-            for index in typedLines.indices where typedLines[index].outcome == .unanswered {
-                typedLines[index].outcome = .deliveryUncertain
             }
         default: break
         }
@@ -220,7 +186,10 @@ import Observation
                 makeTransport: @escaping (PairingCredentials) throws -> HubTransport = {
                     try .urlSession(origin: $0.origin, token: $0.deviceToken)
                 }, makePaths: @escaping () -> HubNetworkPaths? = { HubNetworkPaths() },
-                talk: TalkController? = nil, playback: SpeechPlayer? = nil, uploadTalk: TalkUpload = TalkUpload(),
+                talk: TalkController? = nil, playback: SpeechPlayer? = nil,
+                makeOutboxTransport: (@MainActor () -> any OutboxTransport)? = nil,
+                outboxDirectory: URL? = nil,
+                noticeSleep: @escaping @Sendable (Double) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
                 stopPlayback: @escaping @MainActor () -> Void = {},
                 sendCommand: @escaping @Sendable (HubClient, HubCommand) async throws -> Void = { try await $0.send($1) }) {
         self.voiceStore = voiceStore
@@ -232,7 +201,15 @@ import Observation
         let audioSession = NativeTalkAudioSession()
         self.playback = playback ?? SpeechPlayer(session: audioSession)
         self.talk = talk ?? TalkController(recorder: NativeTalkRecorder(session: audioSession), permission: { await NativeTalkRecorder.requestPermission() })
-        self.uploadTalk = uploadTalk; self.stopPlayback = stopPlayback
+        // An injected Client means a test: its Outbox must never reach a real network or the app's folders.
+        let background: @MainActor () -> any OutboxTransport = { BackgroundOutboxTransport.shared }
+        let held: @MainActor () -> any OutboxTransport = { HeldOutboxTransport() }
+        self.makeOutboxTransport = makeOutboxTransport ?? (makeClient == nil ? background : held)
+        self.outboxDirectory = outboxDirectory ?? historyDirectory?.appendingPathComponent("Outbox")
+            ?? (makeClient == nil ? OutboxStore.applicationDirectory
+                : FileManager.default.temporaryDirectory.appendingPathComponent("JarvisOutbox-\(UUID().uuidString)"))
+        self.noticeSleep = noticeSleep
+        self.stopPlayback = stopPlayback
         self.playback.configure(report: { [weak self] command in
             guard let self, let client = self.client else { return }
             self.playbackRevision &+= 1
@@ -326,7 +303,7 @@ import Observation
         let silence = !value, owner = generation
         voiceRevision &+= 1
         let revision = voiceRevision
-        voiceOn = value; explicitSilence = silence; voicePending = true
+        voiceOn = value; explicitSilence = silence; voicePending = true; voiceChosenHere = true
         if silence { silencePlayback() }
         voicePersistenceFailed = false
         do { try voiceStore?.save(silence, for: credentials) }
@@ -383,9 +360,9 @@ import Observation
         let oldCredentials = credentials
         history = nil
         updates?.cancel(); updates = nil; paths?.cancel(); paths = nil
-        connection = .unpaired; speechID = nil; playback.stop(reportStopped: false); stopPlayback()
+        setConnection(.unpaired); speechID = nil; playback.stop(reportStopped: false); stopPlayback()
         playbackDelivery?.cancel(); playbackDelivery = nil; pendingPlaybackDrain = nil
-        await talk.setReady(false)
+        outbox?.retire(); outbox = nil
         var historyClearFailed = false
         do { try await oldHistory?.clear() } catch { historyClearFailed = true }
         guard generation == owner, client === old else { await old?.stop(); return }
@@ -397,18 +374,37 @@ import Observation
         } catch { historyClearFailed = true }
         focusHere = false; focusPending = false; focusCommand = nil; focusMessage = nil; gestureMessage = nil
         voiceOn = true; explicitSilence = nil; voicePending = false; voiceMessage = nil; voicePersistenceFailed = false; voiceRevision = 0
+        voiceChosenHere = false
         do { try store.clear(); error = historyClearFailed ? .storage : nil } catch { self.error = .storage }
         tasksNeedRefresh = true; tasksReplaying = true
-        conversation = ConversationProjection(); historyBefore = nil; hasOlderHistory = true; loadingHistory = false; historyMessage = nil; typedLines = []; draft = ""; inputMessage = nil
+        conversation = ConversationProjection(); historyBefore = nil; hasOlderHistory = true; loadingHistory = false; historyMessage = nil; draft = ""; inputMessage = nil
         playback.reset(); replayCommands = [:]; replayMessages = [:]
         await old?.stop()
+    }
+
+    private func setConnection(_ state: HubConnectionState) {
+        connection = state
+        let blip: [HubConnectionState] = [.connecting, .unreachable, .hubStopped, .suspended]
+        guard shownConnection == .ready, blip.contains(state) else {
+            connectionNotice?.cancel(); connectionNotice = nil
+            shownConnection = state
+            return
+        }
+        // One timer for the whole outage: retries switching between connecting and unreachable must not restart it.
+        guard connectionNotice == nil else { return }
+        connectionNotice = Task { [weak self, noticeSleep] in
+            do { try await noticeSleep(3) } catch { return }
+            guard let self, !Task.isCancelled else { return }
+            self.connectionNotice = nil
+            if self.connection != .ready { self.shownConnection = self.connection }
+        }
     }
 
     public func setForeground(_ value: Bool) async {
         foreground = value
         foregroundGeneration &+= 1
         let transition = foregroundGeneration, owner = generation, client = client
-        if !value { await talk.cancel() }
+        if !value { await talk.cancel(); outbox?.prepareForBackground() } else { outbox?.nudge() }
         guard foregroundGeneration == transition, generation == owner, self.client === client else { return }
         let playing = playback.activeSpeechID ?? pendingPlaybackDrain?.speechID ?? backgroundSpeechID
         backgroundSpeechID = value ? nil : playing
@@ -453,26 +449,33 @@ import Observation
         for row in conversation.rows where row.id.hasPrefix("reply:") {
             playback.markMissed(replyID: String(row.id.dropFirst(6)))
         }
-        self.credentials = credentials; self.client = client; connection = .connecting
-        talk.configure(ready: false, send: { [weak self] command in
-            guard let self, self.client === client,
-                  self.generation == owner || command.type == "talk_cancel" else { throw HubProtocolError.notConnected }
-            try await self.sendCommand(client, command)
-        }, retire: { await client.retireTalkBegin(id: $0) }, upload: { [weak self] id, commandID, pcm in
-            guard let self, self.generation == owner else { throw CancellationError() }
-            return try await self.uploadTalk.send(credentials: credentials, talkID: id, commandID: commandID, pcm: pcm)
-        }, admission: { await client.finishTalkBegin(id: $0) }, stopSpeech: { [weak self] in await self?.interruptSpeech() })
+        self.credentials = credentials; self.client = client; setConnection(.connecting)
+        let outbox = Outbox(store: OutboxStore(directory: outboxDirectory, credentials: credentials),
+                            transport: makeOutboxTransport(), credentials: credentials, now: historyNow)
+        self.outbox = outbox
+        talk.configure(begin: { [weak self] id in
+            guard let self, self.client === client, self.generation == owner else { return false }
+            return await client.sendLive(HubCommand(type: "talk_begin", payload: ["talk_id": .string(id)]))
+        }, cancel: { id in
+            _ = await client.sendLive(HubCommand(type: "talk_cancel", payload: ["talk_id": .string(id)]))
+        }, deliver: { [weak self] id, pcm, recordedAt in
+            guard let self, self.generation == owner else { return }
+            guard outbox.hasPending else { return outbox.enqueueTalk(talkID: id, pcm: pcm, recordedAt: recordedAt) }
+            // Waiting behind older messages, this Talk would hold the Hub's floor and the Mac's microphone; it goes as a queued Talk.
+            Task { _ = await client.sendLive(HubCommand(type: "talk_cancel", payload: ["talk_id": .string(id)])) }
+            outbox.enqueueTalk(talkID: UUID().uuidString, pcm: pcm, recordedAt: recordedAt)
+        }, stopSpeech: { [weak self] in await self?.interruptSpeech() })
+        await outbox.resume()
+        guard generation == owner else { await client.stop(); return }
         paths = makePaths()
         updates = Task { [weak self] in
             for await update in client.updates {
                 guard !Task.isCancelled, let self, self.generation == owner, self.client === client else { return }
                 if case .state(let state) = update {
                     if state == .unpaired { await self.unpair(); return }
-                    self.connection = state
-                    await self.talk.setReady(state.canSend)
+                    self.setConnection(state)
+                    if state.canSend { self.outbox?.nudge() }
                 } else {
-                    if case .result(let result) = update { await self.talk.receive(result) }
-                    guard self.generation == owner, self.client === client else { return }
                     self.receive(update)
                 }
             }
