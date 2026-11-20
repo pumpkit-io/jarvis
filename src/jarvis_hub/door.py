@@ -138,6 +138,7 @@ class Door:
         app = web.Application(client_max_size=65536)
         app.router.add_post("/v1/pair", self._pair)
         app.router.add_post("/v1/utterances/{talk_id}", self._utterance)
+        app.router.add_post("/v1/lines", self._line)
         app.router.add_get("/v1/health", self._get_health)
         app.router.add_get("/v1/events", self._events)
         app.router.add_get("/v1/history", self._history)
@@ -309,7 +310,7 @@ class Door:
         code = result.get("error", {}).get("code")
         status = {"unauthorized": 401, "invalid_payload": 400, "unsupported_audio": 415,
                   "audio_too_large": 413, "upload_rate_limited": 429, "empty_transcript": 422,
-                  "transcription_failed": 503}.get(code, 409 if code else 200)
+                  "transcription_failed": 503, "unsupported_version": 426}.get(code, 409 if code else 200)
         headers = {"Cache-Control": "no-store"}
         retry = result.get("error", {}).get("retry_after_seconds")
         if retry is not None:
@@ -386,6 +387,56 @@ class Door:
         assert self._talks is not None and self._log is not None
         result = await self._talks.upload(talk, body, delayed)
         self._log.complete(talk.client_id, command_id, result)
+        return result
+
+    async def _line(self, request: web.Request) -> web.Response:
+        command_id = request.headers.get("Idempotency-Key", "")
+        client = await self._identity(request)
+        if client is None:
+            return self._upload_response(command_id, rejected("unauthorized", "Device token required"))
+        if not self._valid_id(command_id):
+            return self._upload_response(command_id, rejected("invalid_payload", "A command identifier is required"))
+        try:
+            body = json_object(await request.read())
+        except (ValueError, RecursionError, UnicodeError):
+            return self._upload_response(command_id, rejected("invalid_payload", "Expected a JSON object"))
+        if body.get("version") != 1:
+            return self._upload_response(command_id, rejected("unsupported_version", "Use protocol version 1"))
+        text, recorded_at = body.get("text"), body.get("recorded_at")
+        if (not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > 16384
+                or not (recorded_at is None or isinstance(recorded_at, str))):
+            return self._upload_response(command_id, rejected("invalid_payload", "text must be nonempty and at most 16384 UTF-8 bytes"))
+        if self._log is None or self._hub is None or self._closing:
+            return self._upload_response(command_id, rejected("transcription_failed", "Conversation is unavailable"))
+        status, result = self._log.reserve(client.id, command_id, "say_text", {"text": text, "recorded_at": recorded_at})
+        key = client.id, command_id
+        if status == "conflict":
+            result = rejected("id_conflict", "Command id was already used with different content")
+        elif result is None:
+            task = self._operations.get(key)
+            if task is None and status == "new":
+                task = asyncio.create_task(self._admit_typed(client.id, command_id, text, self._delay(recorded_at)))
+                self._operations[key] = task
+                task.add_done_callback(lambda done: self._operations.pop(key, None))
+            if task is None:
+                result = rejected("outcome_unknown", "Previous operation outcome is unknown; reconcile with history")
+                self._log.complete(client.id, command_id, result)
+            else:
+                result = await asyncio.shield(task)
+        return self._upload_response(command_id, result)
+
+    async def _admit_typed(self, client_id: str, command_id: str, text: str, delayed: float | None) -> dict[str, Any]:
+        from jarvis_hub.hub import Line
+
+        assert self._hub is not None and self._log is not None
+        try:
+            request_id = await self._hub.admit_line(
+                Line(text, self._now(), client_id=client_id, delayed=delayed),
+                allowed=lambda: not self._closing and self._pairing is not None and bool(self._pairing.active_ids({client_id})))
+            result: dict[str, Any] = {"ok": True, "result": {"request_id": request_id}}
+        except ValueError:
+            result = rejected("transcription_failed", "Conversation is unavailable")
+        self._log.complete(client_id, command_id, result)
         return result
 
     async def _history(self, request: web.Request) -> web.Response:

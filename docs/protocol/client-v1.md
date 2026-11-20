@@ -163,6 +163,10 @@ Successful HTTP 201:
 
 A reachable listener with `ready: false` is starting or stopping; a Usage limit is separate from transport failure. Refused connections and network timeouts are Client-side reachability errors. The protocol cannot by itself distinguish a sleeping Mac from a stopped Hub; the app must not claim that distinction from an HTTP timeout alone.
 
+### Send one typed line
+
+`POST /v1/lines` with the device token, `Idempotency-Key: cmd-line-1`, `Content-Type: application/json` and `{"version":1,"text":"How is the refactor going?","recorded_at":"2026-11-20T23:10:00Z"}`. It is `say_text` without a socket, for the Client's Outbox: the same text limits, Focus and Talker inbox, with the same command id rules, so a retry returns the original result. It responds HTTP 200 with the command result envelope, whose result holds `request_id`.
+
 ### Upload one Talk
 
 `POST /v1/utterances/{talk_id}` with the device token, `Idempotency-Key: cmd-upload-1` and `Content-Type: application/octet-stream` and `X-Jarvis-Audio-Format: pcm_s16le_16000_mono`, and optionally `X-Jarvis-Recorded-At` with the RFC 3339 time the Talk ended. The body is signed 16-bit little-endian PCM, with no WAV header. It is mono, 16,000 Hz, at most 300 seconds and must have an even, nonzero byte length. A WAV input in the reference Client is decoded and converted before upload.

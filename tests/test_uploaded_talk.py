@@ -1030,3 +1030,44 @@ async def test_late_voice_and_typed_lines_tell_the_talker_how_late(tmp_path: Pat
         assert (await result(socket, 'typed'))['ok'] is True
         await until(lambda: len(backend.session('talker').received) == 3)
         assert f'typed="true"{marker}>' in backend.session('talker').received[-1]
+
+
+def line_headers(token: str, id: str = 'line') -> dict[str, str]:
+    return {'Authorization': f'Bearer {token}', 'Idempotency-Key': id, 'Content-Type': 'application/json'}
+
+
+async def test_typed_line_over_http_needs_no_socket_and_retries_exactly(tmp_path: Path) -> None:
+    async with rig(tmp_path) as (session, socket, door, hub, log, backend, _asr, phone, _clock, _pairing):
+        await socket.close()
+        await until(lambda: not client(hub, phone.client.id).connected)
+        url = f'http://127.0.0.1:{door.port}/v1/lines'
+        body = {'version': 1, 'text': 'Ciao', 'recorded_at': '1970-01-01T00:06:40Z'}
+        async with session.post(url, headers=line_headers(phone.token), json=body) as response:
+            assert response.status == 200
+            receipt = await response.json()
+        assert receipt['ok'] is True and receipt['id'] == 'line'
+        async with session.post(url, headers=line_headers(phone.token), json=body) as response:
+            assert await response.json() == receipt
+        await until(lambda: len(backend.session('talker').received) == 2)
+        assert 'typed="true" delayed="10 minutes">Ciao' in backend.session('talker').received[-1]
+        heard = [event for event in log.after(0) if event.type == 'heard']
+        assert len(heard) == 1 and heard[0].payload['request_id'] == receipt['result']['request_id']
+        async with session.post(url, headers=line_headers(phone.token), json={**body, 'text': 'Other'}) as response:
+            assert response.status == 409
+            assert (await response.json())['error']['code'] == 'id_conflict'
+
+
+async def test_typed_line_over_http_rejects_bad_requests(tmp_path: Path) -> None:
+    async with rig(tmp_path) as (session, _socket, door, _hub, log, _backend, _asr, phone, _clock, _pairing):
+        url = f'http://127.0.0.1:{door.port}/v1/lines'
+        for request_headers, body, status, code in [
+            (line_headers('wrong'), {'version': 1, 'text': 'Hi'}, 401, 'unauthorized'),
+            (line_headers(phone.token, ''), {'version': 1, 'text': 'Hi'}, 400, 'invalid_payload'),
+            (line_headers(phone.token, 'blank'), {'version': 1, 'text': '  '}, 400, 'invalid_payload'),
+            (line_headers(phone.token, 'long'), {'version': 1, 'text': 'x' * 16385}, 400, 'invalid_payload'),
+            (line_headers(phone.token, 'old'), {'version': 2, 'text': 'Hi'}, 426, 'unsupported_version'),
+        ]:
+            async with session.post(url, headers=request_headers, json=body) as response:
+                assert response.status == status
+                assert (await response.json())['error']['code'] == code
+        assert not [e for e in log.after(0) if e.type == 'heard']
