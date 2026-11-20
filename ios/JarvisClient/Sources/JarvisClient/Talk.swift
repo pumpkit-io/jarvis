@@ -31,7 +31,8 @@ public enum TalkState: Equatable, Sendable {
     public private(set) var holdCancelled = false
     private var failureMessage: String?
     public var speaking = false
-    public var label: String {
+    public var label: String { label(for: state) }
+    public func label(for state: TalkState) -> String {
         switch state {
         case .recording: gesture == .hold ? "Release to send. Slide up to cancel." : "Tap to send. Slide up to cancel."
         case .uploading, .thinking: "Jarvis is thinking"
