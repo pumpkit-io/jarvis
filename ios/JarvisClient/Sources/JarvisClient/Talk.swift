@@ -24,6 +24,12 @@ public enum TalkState: Equatable, Sendable {
     public private(set) var microphoneRefused = false
     public private(set) var gesture: TalkGesture = .hold
     private var interaction: UUID?
+    private var touch: UUID?
+    private var touchCapture: UUID?
+    private var captureControl: UUID?
+    private var pendingPress: Task<Void, Never>?
+    public private(set) var holdCancelled = false
+    private var failureMessage: String?
     public var speaking = false
     public var label: String {
         switch state {
@@ -39,7 +45,7 @@ public enum TalkState: Equatable, Sendable {
         }
         return switch state {
         case .refused: "Jarvis needs the microphone to hear you. Allow it in Settings."
-        case .failed: gesture == .hold ? "That didn't reach Jarvis. Hold to talk again." : "That didn't reach Jarvis. Tap to talk again."
+        case .failed: failureMessage ?? (gesture == .hold ? "That didn't reach Jarvis. Hold to talk again." : "That didn't reach Jarvis. Tap to talk again.")
         case .cancelled: "Talk cancelled."
         default: nil
         }
@@ -58,6 +64,7 @@ public enum TalkState: Equatable, Sendable {
     private var generation: UInt64 = 0
     private var retiring = 0
     private var beginID: String?
+    private var failedBeginID: String?
     private var started = 0.0
     private var timer: Task<Void, Never>?
     private var operation: Task<Void, Never>?
@@ -79,13 +86,93 @@ public enum TalkState: Equatable, Sendable {
 
     public func setReady(_ value: Bool) async {
         ready = value
-        if !value, state == .authorizing || state == .recording { await cancel() }
+        if !value, state == .authorizing || state == .recording { await cancel(failed: true, message: transportFailureMessage) }
     }
 
     public func setGesture(_ value: TalkGesture) async {
         guard gesture != value else { return }
         gesture = value
         if state == .authorizing || state == .recording { await cancel() }
+    }
+
+    public func holdBegan(interaction id: UUID) {
+        guard touch == nil else { return }
+        touch = id; holdCancelled = false
+        if gesture == .hold {
+            guard canPress else { holdCancelled = true; return }
+            let capture = UUID(); touchCapture = capture
+            startInteraction(capture, control: id)
+        } else {
+            if state == .recording || state == .authorizing { touchCapture = interaction }
+            else if pendingPress == nil { touchCapture = nil }
+        }
+    }
+
+    @discardableResult public func holdMoved(verticalTranslation: Double, interaction id: UUID) -> Task<Void, Never> {
+        guard touch == id, !holdCancelled, verticalTranslation < -60 else { return Task {} }
+        holdCancelled = true
+        return cancelTouchCapture()
+    }
+
+    @discardableResult public func holdEnded(interaction id: UUID) -> Task<Void, Never> {
+        guard touch == id else { return Task {} }
+        touch = nil
+        guard !holdCancelled else { return Task {} }
+        if gesture == .tap, touchCapture == nil, canPress {
+            let capture = UUID(); touchCapture = capture
+            startInteraction(capture, control: id)
+            return Task {}
+        }
+        guard let capture = touchCapture else { return Task {} }
+        touchCapture = nil
+        let task = pendingPress; pendingPress = nil
+        return releaseInteraction(capture, pendingPress: task)
+    }
+
+    @discardableResult public func holdInterrupted(interaction id: UUID) -> Task<Void, Never> {
+        guard touch == id else { return Task {} }
+        touch = nil; holdCancelled = true
+        return cancelTouchCapture()
+    }
+
+    public func controlDisappeared(interaction id: UUID) async {
+        if touch == id { await holdInterrupted(interaction: id).value }
+        else if captureControl == id {
+            pendingPress?.cancel(); pendingPress = nil
+            if let capture = touchCapture ?? interaction {
+                touchCapture = nil
+                await cancelInteraction(capture)
+            }
+        }
+    }
+
+    @discardableResult public func activate(interaction control: UUID) -> Task<Void, Never> {
+        if state == .recording || state == .authorizing || pendingPress != nil {
+            guard let capture = touchCapture ?? interaction else { return Task {} }
+            let task = pendingPress; pendingPress = nil
+            touchCapture = nil
+            return releaseInteraction(capture, pendingPress: task)
+        }
+        guard canPress else { return Task {} }
+        let capture = UUID(); touchCapture = capture
+        startInteraction(capture, control: control)
+        return pendingPress ?? Task {}
+    }
+
+    private func startInteraction(_ id: UUID, control: UUID) {
+        captureControl = control
+        pendingPress = Task {
+            await self.press(interaction: id)
+            if self.interaction == id { self.pendingPress = nil }
+        }
+    }
+
+    private func cancelTouchCapture() -> Task<Void, Never> {
+        pendingPress?.cancel(); pendingPress = nil
+        let capture = touchCapture; touchCapture = nil
+        return Task {
+            if let capture { await self.cancelInteraction(capture) }
+        }
     }
 
     public func tap() async {
@@ -111,14 +198,14 @@ public enum TalkState: Equatable, Sendable {
         interaction = id
         generation &+= 1
         let owner = generation
-        state = .authorizing; requestID = nil; elapsed = 0
+        state = .authorizing; requestID = nil; elapsed = 0; failureMessage = nil; failedBeginID = nil
         await stopSpeech()
         guard !Task.isCancelled, generation == owner, state == .authorizing, ready else { return }
         let allowed = await permission()
         // Permission belongs to the app; a grant still cannot revive the old capture intent.
         microphoneRefused = !allowed
         guard !Task.isCancelled, generation == owner, state == .authorizing, ready else { return }
-        guard allowed else { state = .refused; return }
+        guard allowed else { state = .refused; holdCancelled = true; return }
         let id = UUID().uuidString
         let begin = HubCommand(type: "talk_begin", payload: ["talk_id": .string(id)])
         talkID = id; beginID = begin.id
@@ -138,10 +225,14 @@ public enum TalkState: Equatable, Sendable {
                     if self.elapsed >= 300 { await self.release(); return }
                 }
             }
-            try await send?(begin)
-            guard generation == owner else { return }
+            do {
+                try await send?(begin)
+            } catch {
+                guard generation == owner, state == .recording else { return }
+                await cancel(failed: true, message: transportFailureMessage)
+            }
         } catch {
-            guard generation == owner, state == .recording else { return }
+            guard generation == owner else { return }
             await cancel(failed: true)
         }
     }
@@ -155,7 +246,7 @@ public enum TalkState: Equatable, Sendable {
         state = .uploading
         let admitted = await admission(beginID)
         guard generation == owner, state == .uploading else { return }
-        guard admitted else { await cancel(failed: true); return }
+        guard admitted else { await cancel(failed: true, message: transportFailureMessage); return }
         guard !pcm.isEmpty, pcm.count <= 9_600_000, pcm.count.isMultiple(of: 2) else { await cancel(failed: true); return }
         let uploadID = UUID().uuidString
         let firstAttempt = now()
@@ -190,7 +281,11 @@ public enum TalkState: Equatable, Sendable {
         await task.value
     }
 
-    public func cancel(failed: Bool = false) async {
+    private var transportFailureMessage: String {
+        gesture == .hold ? "Couldn't reach the Mac. Hold to talk again." : "Couldn't reach the Mac. Tap to talk again."
+    }
+
+    public func cancel(failed: Bool = false, message: String? = nil) async {
         retiring += 1
         defer { retiring -= 1 }
         generation &+= 1
@@ -199,13 +294,19 @@ public enum TalkState: Equatable, Sendable {
         if state == .recording { _ = recorder.stop() }
         timer?.cancel(); timer = nil; operation?.cancel(); operation = nil; deadline?.cancel(); deadline = nil
         state = failed ? .failed : .cancelled
+        failureMessage = message; failedBeginID = failed ? begin : nil; holdCancelled = true
         talkID = nil; beginID = nil; requestID = nil
         if let id { try? await send?(HubCommand(type: "talk_cancel", payload: ["talk_id": .string(id)])) }
         if let begin { await retire?(begin) }
     }
 
     public func receive(_ result: CommandResult) async {
-        if result.id == beginID, !result.ok, state == .recording || state == .uploading { await cancel(failed: true) }
+        if let failedBeginID, result.id == failedBeginID, !result.ok, state == .failed {
+            failureMessage = result.error?.message ?? transportFailureMessage
+        }
+        if result.id == beginID, !result.ok, state == .recording || state == .uploading {
+            await cancel(failed: true, message: result.error?.message ?? transportFailureMessage)
+        }
     }
 
     public func receive(_ event: HubEvent) {
