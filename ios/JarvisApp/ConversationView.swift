@@ -4,7 +4,6 @@ import SwiftUI
 struct ConversationView: View {
     @Bindable var session: AppSession
     var showsTalkControls = true
-    var openTasks: (() -> Void)? = nil
     var typingChanged: (Bool) -> Void = { _ in }
     @ScaledMetric(relativeTo: .body) var scriptSize = 18
     @ScaledMetric(relativeTo: .subheadline) var controlSize = 15
@@ -20,23 +19,6 @@ struct ConversationView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text(session.shownConnection.message).accessibilityAddTraits(.isHeader)
-                Spacer(minLength: 0)
-                if let openTasks {
-                    Button(action: openTasks) {
-                        Text("Tasks \(session.openTasks.count)").underline().frame(minHeight: 44)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Tasks, \(session.openTasks.count) open")
-                }
-                NavigationLink { SettingsView(session: session) } label: {
-                    Text("Settings").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
-                }
-            }
-            .font(.system(size: controlSize))
-            .foregroundStyle(theme.haze)
-            .padding(20)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 32) {
                     if session.hasOlderHistory {

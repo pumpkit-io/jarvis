@@ -3,21 +3,11 @@ import SwiftUI
 
 struct TasksView: View {
     @Bindable var session: AppSession
-    var conversation: () -> Void = {}
     @ScaledMetric(relativeTo: .subheadline) var controlSize = 15
     private var theme: JarvisTheme { JarvisTheme() }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Button(action: conversation) { Text("Conversation").underline().frame(minHeight: 44) }
-                    .buttonStyle(.plain)
-                Spacer()
-                Text("Tasks").accessibilityAddTraits(.isHeader)
-            }
-            .font(.system(size: controlSize))
-            .foregroundStyle(theme.haze)
-            .padding(.horizontal, 20)
             ScrollView {
                 TimelineView(.periodic(from: .now, by: 30)) { _ in
                     VStack(alignment: .leading, spacing: 32) {
@@ -69,23 +59,127 @@ struct TasksView: View {
 
 struct WorkspaceView: View {
     @Bindable var session: AppSession
-    @State private var showingTasks = false
     @State private var typing = false
     @ScaledMetric(relativeTo: .subheadline) private var controlSize = 15
 
     var body: some View {
-        Group {
-            if showingTasks { TasksView(session: session, conversation: { showingTasks = false }) }
-            else {
-                ConversationView(session: session, showsTalkControls: false,
-                                 openTasks: { typing = false; showingTasks = true }, typingChanged: { typing = $0 })
-            }
+        VStack(spacing: 0) {
+            WorkspaceTopBar(session: session, controlSize: controlSize)
+            ConversationView(session: session, showsTalkControls: false, typingChanged: { typing = $0 })
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if !typing || session.voiceMessage != nil || session.talk.message != nil {
                 TalkControls(session: session, controlSize: controlSize, showsKeys: !typing)
                     .padding(20).background(JarvisTheme().void)
             }
+        }
+        #if os(iOS)
+        .toolbar(.hidden, for: .navigationBar)
+        #endif
+    }
+}
+
+struct WorkspaceTopBar: View {
+    @Bindable var session: AppSession
+    var controlSize: CGFloat
+    @State private var showingConnection = false
+    private let theme = JarvisTheme()
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                settingsLink
+                Spacer(minLength: 0)
+                connectionButton(showsLabel: true)
+                Spacer(minLength: 0)
+                tasksLink
+            }
+            VStack(spacing: 0) {
+                HStack(spacing: 12) {
+                    settingsLink
+                    Spacer(minLength: 0)
+                    connectionButton(showsLabel: false)
+                    Spacer(minLength: 0)
+                    tasksLink
+                }
+                if let label = session.shownConnection.indicator.label {
+                    Text(label).multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityHidden(true)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .font(.system(size: controlSize))
+        .foregroundStyle(theme.haze)
+        .padding(.horizontal, 20)
+        .background(theme.void)
+        .alert("Connection status", isPresented: $showingConnection) {
+            Button("OK", role: .cancel) {}
+        } message: { Text(session.shownConnection.message) }
+    }
+
+    private var settingsLink: some View {
+        NavigationLink {
+            SettingsView(session: session)
+                .navigationTitle("Settings")
+                #if os(iOS)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar(.visible, for: .navigationBar)
+                #endif
+        } label: {
+            Image(systemName: "gearshape").frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel("Settings")
+        .fixedSize()
+    }
+
+    private func connectionButton(showsLabel: Bool) -> some View {
+        Button { showingConnection = true } label: {
+            HStack(spacing: 8) {
+                Circle().fill(connectionColor).frame(width: 8, height: 8)
+                if showsLabel, let label = session.shownConnection.indicator.label { Text(label) }
+            }
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .accessibilityLabel("Connection status")
+        .accessibilityValue(session.shownConnection.message)
+        .accessibilityHint("Show connection details")
+        .fixedSize()
+    }
+
+    private var tasksLink: some View {
+        NavigationLink {
+            TasksView(session: session)
+                .navigationTitle("Tasks")
+                #if os(iOS)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar(.visible, for: .navigationBar)
+                #endif
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    TalkControls(session: session, controlSize: controlSize)
+                        .padding(20).background(theme.void)
+                }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "checklist")
+                Text(session.openTasks.count, format: .number)
+            }
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .accessibilityLabel("Tasks")
+        .accessibilityValue("\(session.openTasks.count) open")
+        .fixedSize()
+    }
+
+    private var connectionColor: Color {
+        switch session.shownConnection.indicator.tone {
+        case .green: theme.green
+        case .amber: theme.amber
+        case .red: theme.signal
         }
     }
 }
