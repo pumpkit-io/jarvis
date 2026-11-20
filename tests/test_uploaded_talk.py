@@ -644,28 +644,89 @@ async def test_socket_replacement_releases_recording_floor_and_keeps_only_retry_
             assert asr.calls == 0
 
 
-async def test_reconnected_cancellation_retires_only_old_talk_before_fresh_capture(tmp_path: Path) -> None:
+async def test_reconnected_begin_replaces_abandoned_talk_before_fresh_capture(tmp_path: Path) -> None:
     async with rig(tmp_path) as (session, socket, door, hub, _log, _backend, asr, phone, _clock, _pairing):
         await socket.send_json(command('old-begin', 'talk_begin', talk_id='old'))
         assert (await result(socket, 'old-begin'))['ok'] is True
         await socket.close()
         await until(lambda: not client(hub, phone.client.id).connected)
         async with connect(session, door, phone.token) as replacement:
-            await replacement.send_json(command('blocked-begin', 'talk_begin', talk_id='fresh'))
-            assert (await result(replacement, 'blocked-begin'))['error']['code'] == 'talk_in_progress'
-            cancellation = command('old-cancel', 'talk_cancel', talk_id='old')
-            await replacement.send_json(cancellation)
-            receipt = await result(replacement, 'old-cancel')
-            assert receipt['result'] == {'talk_id': 'old', 'cancelled': True}
             await replacement.send_json(command('fresh-begin', 'talk_begin', talk_id='fresh'))
             assert (await result(replacement, 'fresh-begin'))['ok'] is True
-            await replacement.send_json(cancellation)
-            assert await result(replacement, 'old-cancel') == receipt
+            await replacement.send_json(command('old-cancel', 'talk_cancel', talk_id='old'))
+            assert (await result(replacement, 'old-cancel'))['result'] == {'talk_id': 'old', 'cancelled': False}
+            assert client(hub, phone.client.id).talking
             async with session.post(f'http://127.0.0.1:{door.port}/v1/utterances/old', headers=headers(phone.token, 'old-upload'), data=PCM) as response:
                 assert response.status == 409
+                assert (await response.json())['error']['code'] == 'talk_not_active'
+            assert asr.calls == 0
             async with session.post(f'http://127.0.0.1:{door.port}/v1/utterances/fresh', headers=headers(phone.token), data=PCM) as response:
                 assert response.status == 200
             assert asr.calls == 1
+
+
+async def test_replacing_transcribing_talk_cancels_asr_without_admitting_old_line(tmp_path: Path) -> None:
+    class CancellableTranscriber(Transcriber):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cancelled = asyncio.Event()
+            self.release.clear()
+
+        async def transcribe_buffer(self, audio: Samples) -> str:
+            try:
+                return await super().transcribe_buffer(audio)
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                raise
+
+    asr = CancellableTranscriber()
+    async with rig(tmp_path, asr) as (session, socket, door, hub, log, backend, _asr, phone, _clock, _pairing):
+        await socket.send_json(command('old-begin', 'talk_begin', talk_id='old'))
+        assert (await result(socket, 'old-begin'))['ok']
+        pending = asyncio.create_task(session.post(f'http://127.0.0.1:{door.port}/v1/utterances/old', headers=headers(phone.token, 'old-upload'), data=PCM))
+        await asr.entered.wait()
+        await socket.send_json(command('fresh-begin', 'talk_begin', talk_id='fresh'))
+        assert (await result(socket, 'fresh-begin'))['ok']
+        await asyncio.wait_for(asr.cancelled.wait(), 1)
+        async with await pending as response:
+            assert response.status == 409
+            assert (await response.json())['error']['code'] == 'talk_not_active'
+        assert not [e for e in log.after(0) if e.type == 'heard']
+        assert len(backend.session('talker').received) == 1
+        assert client(hub, phone.client.id).talking
+        asr.release.set()
+        async with session.post(f'http://127.0.0.1:{door.port}/v1/utterances/fresh', headers=headers(phone.token), data=PCM) as response:
+            assert response.status == 200
+        assert [e.payload['text'] for e in log.after(0) if e.type == 'heard'] == [asr.text]
+
+
+async def test_replacing_one_clients_talk_keeps_another_clients_talk_active(tmp_path: Path) -> None:
+    async with rig(tmp_path) as (session, socket, door, hub, _log, _backend, _asr, phone, _clock, pairing):
+        other = pairing.exchange(pairing.create_code('https://mac.example.ts.net'), 'Other', 'reference')
+        async with connect(session, door, other.token) as second:
+            await second.send_json(command('begin', 'talk_begin', talk_id='old'))
+            assert (await result(second, 'begin'))['ok']
+            await socket.send_json(command('old-begin', 'talk_begin', talk_id='old'))
+            assert (await result(socket, 'old-begin'))['ok']
+            await socket.send_json(command('fresh-begin', 'talk_begin', talk_id='fresh'))
+            assert (await result(socket, 'fresh-begin'))['ok']
+            await socket.send_json(command('cancel', 'talk_cancel', talk_id='fresh'))
+            assert (await result(socket, 'cancel'))['result']['cancelled']
+            assert not client(hub, phone.client.id).talking
+            assert client(hub, other.client.id).talking
+            await second.send_json(command('cancel', 'talk_cancel', talk_id='old'))
+            assert (await result(second, 'cancel'))['result']['cancelled']
+
+
+async def test_rejected_reused_talk_identity_does_not_cancel_current_talk(tmp_path: Path) -> None:
+    async with rig(tmp_path) as (session, socket, door, hub, _log, _backend, _asr, phone, _clock, _pairing):
+        await socket.send_json(command('begin', 'talk_begin', talk_id='talk'))
+        assert (await result(socket, 'begin'))['ok']
+        await socket.send_json(command('reused-begin', 'talk_begin', talk_id='talk'))
+        assert (await result(socket, 'reused-begin'))['error']['code'] == 'talk_not_active'
+        assert client(hub, phone.client.id).talking
+        async with session.post(f'http://127.0.0.1:{door.port}/v1/utterances/talk', headers=headers(phone.token), data=PCM) as response:
+            assert response.status == 200
 
 
 async def test_malformed_utf8_http_and_websocket_ids_are_safe_rejections(tmp_path: Path) -> None:

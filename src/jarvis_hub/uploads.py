@@ -64,13 +64,13 @@ class UploadedTalks:
         self._closing = False
 
     async def begin(self, client_id: str, talk_id: str, *, allowed: Callable[[], bool] = lambda: True) -> dict[str, Any]:
-        current = self._current.get(client_id)
-        if current is not None:
-            if self._valid(current):
-                raise TalkError('talk_in_progress', 'A Talk is already active')
-            self._finish(current, 'expired')
         if not self._log.begin_talk(client_id, talk_id):
             raise TalkError('talk_not_active', 'Talk identity has already been used')
+        current = self._current.get(client_id)
+        if current is not None:
+            self._finish(current, 'cancelled' if self._valid(current) else 'expired')
+            if current.operation is not None:
+                current.operation.cancel()
         talk = Talk(client_id, talk_id, '', self._now() + 330)
         self._talks[client_id, talk_id] = self._current[client_id] = talk
         try:
