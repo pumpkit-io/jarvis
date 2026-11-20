@@ -115,15 +115,19 @@ public final class TalkPCMBuffer: @unchecked Sendable {
     public func start(buffer: TalkPCMBuffer, limitReached: @escaping @MainActor @Sendable () -> Void) throws {
         let engine = AVAudioEngine()
         let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0,
-              let target = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true),
-              let converter = AVAudioConverter(from: format, to: target) else { throw HubProtocolError.invalidFrame }
-        let sink = NativePCMConverter(converter: converter, target: target, buffer: buffer, limitReached: limitReached)
-        input.installTap(onBus: 0, bufferSize: 2048, format: format) { pcm, _ in sink.receive(pcm) }
+        let handler = try Self.makeTapHandler(buffer: buffer, limitReached: limitReached)
+        input.installTap(onBus: 0, bufferSize: 2048, format: nil, block: handler)
         self.engine = engine
         engine.prepare()
         try engine.start()
+    }
+    // Core Audio invokes this closure on its render thread, outside the main actor.
+    nonisolated static func makeTapHandler(buffer: TalkPCMBuffer,
+                                          limitReached: @escaping @MainActor @Sendable () -> Void) throws -> AVAudioNodeTapBlock {
+        guard let target = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000,
+                                         channels: 1, interleaved: true) else { throw HubProtocolError.invalidFrame }
+        let sink = NativePCMConverter(target: target, buffer: buffer, limitReached: limitReached)
+        return { pcm, _ in sink.receive(pcm) }
     }
     public func stop() {
         guard let engine else { return }
@@ -133,15 +137,20 @@ public final class TalkPCMBuffer: @unchecked Sendable {
 }
 
 private final class NativePCMConverter: @unchecked Sendable {
-    let converter: AVAudioConverter
+    private var converter: AVAudioConverter?
     let target: AVAudioFormat
     let buffer: TalkPCMBuffer
     let limitReached: @MainActor @Sendable () -> Void
-    init(converter: AVAudioConverter, target: AVAudioFormat, buffer: TalkPCMBuffer,
+    init(target: AVAudioFormat, buffer: TalkPCMBuffer,
          limitReached: @escaping @MainActor @Sendable () -> Void) {
-        self.converter = converter; self.target = target; self.buffer = buffer; self.limitReached = limitReached
+        self.target = target; self.buffer = buffer; self.limitReached = limitReached
     }
     func receive(_ pcm: AVAudioPCMBuffer) {
+        if converter == nil {
+            guard pcm.format.sampleRate > 0, pcm.format.channelCount > 0 else { return }
+            converter = AVAudioConverter(from: pcm.format, to: target)
+        }
+        guard let converter else { return }
         let capacity = AVAudioFrameCount(ceil(Double(pcm.frameLength) * 16_000 / pcm.format.sampleRate) + 16)
         guard let output = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return }
         var supplied = false
