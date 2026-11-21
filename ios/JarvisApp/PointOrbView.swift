@@ -11,14 +11,14 @@ struct PointOrbView: View {
     private let theme = JarvisTheme()
 
     @State private var points: [SIMD3<Float>] = []
-    @State private var start = Date()
+    @State private var clock = OrbClock()
 
     var body: some View {
         TimelineView(.animation(minimumInterval: reduceMotion ? 1.0 / 30 : 1.0 / 60,
                                 paused: !isVisible || scenePhase != .active)) { timeline in
-            let t = Float(timeline.date.timeIntervalSince(start)) * (reduceMotion ? 0.35 : 1)
+            let motion = clock.advance(to: timeline.date, toward: speaker, rate: reduceMotion ? 0.35 : 1)
             Canvas { ctx, size in
-                draw(in: &ctx, size: size, t: t)
+                draw(in: &ctx, size: size, motion: motion)
             }
         }
         .onAppear {
@@ -26,7 +26,7 @@ struct PointOrbView: View {
         }
     }
 
-    private func draw(in ctx: inout GraphicsContext, size: CGSize, t: Float) {
+    private func draw(in ctx: inout GraphicsContext, size: CGSize, motion: OrbMotion) {
         guard !points.isEmpty else { return }
 
         let lvl = Float(min(max(level, 0), 1))
@@ -34,35 +34,29 @@ struct PointOrbView: View {
         let cx = Float(size.width) / 2
         let cy = Float(size.height) / 2
 
-        var (amp, freq, speed, spikes): (Float, Float, Float, Float) = switch speaker {
-        case .idle:   (0.035,              1.8, 0.35, 0.0)
-        case .user:   (0.04 + 0.22 * lvl,  2.6, 1.0,  0.25 * lvl)
-        case .jarvis: (0.05 + 0.40 * lvl,  3.2, 1.8,  0.6 * lvl)
-        }
+        var shape = motion.shape(level: Double(lvl))
+        if reduceMotion { shape = OrbShape(speech: shape.speech * 0.45, ripple: shape.ripple * 0.4) }
+        let color = blendedColor(motion.weights, in: ctx.environment)
 
-        if reduceMotion { amp *= 0.45; spikes *= 0.4 }
-
-        let color: Color = switch speaker {
-        case .idle:   theme.idleBlue
-        case .user:   theme.ice
-        case .jarvis: theme.cyan
-        }
-
-        let ay = t * 0.25
-        let ax = 0.35 * sin(t * 0.2)
+        let phase = Float(motion.phase)
+        let spin = Float(motion.spin)
+        let ay = spin * 0.25
+        let ax = 0.35 * sin(spin * 0.2)
         let cosY = cos(ay), sinY = sin(ay)
         let cosX = cos(ax), sinX = sin(ax)
 
-        let breathe: Float = 1 + 0.02 * sin(t * 1.4)
+        let breathe: Float = 1 + 0.02 * sin(spin * 1.4)
         let camera: Float = 3.0
 
         let buckets = 6
         var paths = Array(repeating: Path(), count: buckets)
 
         for p in points {
-            var n = noise(p * freq, t * speed)
-            if spikes > 0 { n += spikes * noise(p * freq * 2.3 + 7.1, t * speed * 1.7) }
-            let r = breathe * (1 + amp * n)
+            let surface = noise(p * 1.8, phase)
+            let speaking = shape.speech > 0.001
+            let bumps = speaking ? noise(p * 3.0 + 3.7, phase * 1.2) : 0
+            let fine = speaking ? noise(p * 6.9 + 7.1, phase * 1.7) : 0
+            let r = breathe * shape.radius(surface: surface, speech: bumps, ripple: fine)
             var x = p.x * r, y = p.y * r, z = p.z * r
 
             let x1 = x * cosY + z * sinY
@@ -97,6 +91,17 @@ struct PointOrbView: View {
         }
     }
 
+    private func blendedColor(_ weights: SIMD3<Double>, in environment: EnvironmentValues) -> Color {
+        let idle = theme.idleBlue.resolve(in: environment)
+        let user = theme.ice.resolve(in: environment)
+        let jarvis = theme.cyan.resolve(in: environment)
+        let w = SIMD3<Float>(weights)
+        func mix(_ a: Float, _ b: Float, _ c: Float) -> Float { w.x * a + w.y * b + w.z * c }
+        return Color(Color.Resolved(red: mix(idle.red, user.red, jarvis.red),
+                                    green: mix(idle.green, user.green, jarvis.green),
+                                    blue: mix(idle.blue, user.blue, jarvis.blue)))
+    }
+
     @inline(__always)
     private func noise(_ p: SIMD3<Float>, _ t: Float) -> Float {
         let a = sin(p.x + t)              * cos(p.y * 1.3 - t * 0.7)
@@ -117,3 +122,15 @@ struct PointOrbView: View {
     }
 }
 
+/// Steps the orb's motion from frame dates; a plain reference, so rendering advances it without invalidating the view.
+private final class OrbClock {
+    private var motion = OrbMotion()
+    private var lastFrame: Date?
+
+    func advance(to date: Date, toward speaker: OrbModel.Speaker, rate: Double) -> OrbMotion {
+        let seconds = lastFrame.map { date.timeIntervalSince($0) } ?? 0
+        lastFrame = date
+        motion.advance(by: seconds * rate, toward: speaker)
+        return motion
+    }
+}
