@@ -122,7 +122,7 @@ struct TalkKey: View {
         } else if locked {
             capsuleButton("pause.fill", label: "Pause Talk") { talk.pause() }
         } else if paused {
-            capsuleButton("mic.fill", label: "Resume Talk") { beforeResume(); talk.resume() }
+            capsuleButton("mic.fill", label: "Resume Talk") { beforeResume(); Task { await talk.resume() } }
         }
     }
 

@@ -587,7 +587,7 @@ func leavingALockedTalkRetiresTheMicrophoneWithoutSending(transition: String) as
     talk.pause()
     #expect(talk.state == .paused && !recorder.active && recorder.stops == 1)
     #expect(talk.recorded.count == 32_000)
-    talk.resume()
+    await talk.resume()
     #expect(talk.state == .recording && recorder.active && recorder.starts == 2)
     await talk.send()
     #expect(wire.deliveries.count == 1 && wire.deliveries[0].pcm.count == 64_000)
@@ -611,7 +611,7 @@ func leavingALockedTalkRetiresTheMicrophoneWithoutSending(transition: String) as
     talk.pause()
     clock.time = 30
     #expect(talk.duration == 4)
-    talk.resume()
+    await talk.resume()
     clock.time = 31.5
     #expect(talk.duration == 5.5)
 }
@@ -644,4 +644,24 @@ func leavingALockedTalkRetiresTheMicrophoneWithoutSending(transition: String) as
     #expect(bars[0] == 0 && bars[1] == 0)
     #expect(bars[2] == 1 && bars[3] == 1)
     #expect(TalkWaveform.levels(Data(), bars: 3) == [0, 0, 0])
+}
+
+@MainActor @Test func aTalkJoinedAcrossPausesIsTrimmedToTheLimitInsteadOfDropped() async throws {
+    let recorder = FakeTalkRecorder()
+    recorder.pcm = Data(repeating: 1, count: 6_000_000)
+    let (talk, wire) = try await lockedTalk(recorder)
+    talk.pause()
+    await talk.resume()
+    await talk.send()
+    #expect(wire.deliveries.count == 1 && wire.deliveries[0].pcm.count == 9_600_000)
+}
+
+@MainActor @Test func resumingStopsJarvisSpeechBeforeTheMicrophoneStarts() async throws {
+    let recorder = FakeTalkRecorder()
+    let (talk, _) = try await lockedTalk(recorder)
+    var stops = 0
+    talk.configure(begin: { _ in true }, cancel: { _ in }, deliver: { _, _, _ in }, stopSpeech: { stops += 1 })
+    talk.pause()
+    await talk.resume()
+    #expect(stops == 1 && talk.state == .recording)
 }

@@ -189,6 +189,7 @@ struct DiscardBin: View {
     private(set) var playing = false
     private var player: AVAudioPlayer?
     private var loadedBytes = -1
+    private var ownsSession = false
 
     var progress: Double {
         guard let player, player.duration > 0 else { return 0 }
@@ -202,14 +203,19 @@ struct DiscardBin: View {
             player?.delegate = self
             loadedBytes = pcm.count
         }
-        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
-        try? AVAudioSession.sharedInstance().setActive(true)
+        if !ownsSession {
+            try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+            ownsSession = (try? AVAudioSession.sharedInstance().setActive(true)) != nil
+        }
         playing = player?.play() ?? false
     }
 
     func stop() {
         guard player != nil else { return }
         player?.stop(); player = nil; loadedBytes = -1; playing = false
+        // Only the session this preview opened is closed, so Jarvis speech that started since keeps playing.
+        guard ownsSession else { return }
+        ownsSession = false
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 

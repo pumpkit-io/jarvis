@@ -260,10 +260,13 @@ public enum TalkWaveform {
         state = .paused
     }
 
-    public func resume() {
+    public func resume() async {
         guard state == .paused else { return }
         generation &+= 1
         let owner = generation
+        // Speech that started while paused holds the audio session the microphone needs.
+        await stopSpeech()
+        guard generation == owner, state == .paused else { return }
         // A microphone that won't restart leaves the paused Talk as it was, still ready to send.
         do { try startSegment(owner: owner) } catch { return }
         state = .recording
@@ -298,6 +301,8 @@ public enum TalkWaveform {
         isLocked = false; lockProgress = 0; discardProgress = 0
         var pcm = recorded
         if state == .recording { pcm.append(recorder.stop()) }
+        // Each resumed segment has its own buffer cap, so the joined Talk is held to the single-Talk limit here.
+        if pcm.count > TalkAudio.maxBytes { pcm = pcm.prefix(TalkAudio.maxBytes) }
         recorded = Data(); recordedSeconds = 0
         timer?.cancel(); timer = nil
         talkID = nil
