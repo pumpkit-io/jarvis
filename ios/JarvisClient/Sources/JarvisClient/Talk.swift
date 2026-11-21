@@ -97,7 +97,7 @@ public enum TalkState: Equatable, Sendable {
     }
 
     @discardableResult public func holdMoved(horizontalTranslation: Double = 0, verticalTranslation: Double, interaction id: UUID) -> Task<Void, Never> {
-        guard touch == id, !holdCancelled, !isLocked, state == .recording else { return Task {} }
+        guard touch == id, !holdCancelled, !isLocked else { return Task {} }
         lockProgress = min(1, max(0, -verticalTranslation / Self.lockDistance))
         discardProgress = min(1, max(0, -horizontalTranslation / Self.discardDistance))
         if horizontalTranslation < -Self.discardDistance {
@@ -105,7 +105,7 @@ public enum TalkState: Equatable, Sendable {
             return cancelTouchCapture()
         }
         // Locked controls replace the held mic, so the touch no longer owns capture.
-        if verticalTranslation < -Self.lockDistance { isLocked = true; touch = nil }
+        if state == .recording, verticalTranslation < -Self.lockDistance { isLocked = true; touch = nil }
         return Task {}
     }
 

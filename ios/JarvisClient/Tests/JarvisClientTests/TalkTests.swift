@@ -82,6 +82,42 @@ import Testing
     }
 }
 
+@MainActor @Test func slidingLeftDuringPermissionDiscardsBeforeRecordingCanStart() async throws {
+    let recorder = FakeTalkRecorder(), permission = HeldMicrophonePermission()
+    let (talk, wire) = wired(recorder, permission: { await permission.request() })
+    let control = UUID()
+    talk.holdBegan(interaction: control)
+    try await eventuallySession { permission.waiter != nil }
+    await talk.holdMoved(horizontalTranslation: -121, verticalTranslation: 0, interaction: control).value
+    #expect(talk.state == .cancelled && talk.outcome == .discarded)
+    permission.grant()
+    try await eventuallySession { talk.state != .authorizing }
+    await talk.holdEnded(interaction: control).value
+    #expect(recorder.starts == 0)
+    #expect(wire.begins.isEmpty && wire.deliveries.isEmpty)
+}
+
+@MainActor @Test func slidingLeftWhileInterruptingDiscardsBeforeRequestingPermission() async throws {
+    let recorder = FakeTalkRecorder()
+    var stoppedSpeech: CheckedContinuation<Void, Never>?
+    var permissionRequests = 0
+    let talk = TalkController(recorder: recorder, permission: { permissionRequests += 1; return true })
+    let wire = TalkWire()
+    talk.configure(begin: { id in wire.begins.append(id); return true },
+                   cancel: { wire.cancels.append($0) },
+                   deliver: { wire.deliveries.append(($0, $1, $2)) },
+                   stopSpeech: { await withCheckedContinuation { stoppedSpeech = $0 } })
+    let control = UUID()
+    talk.holdBegan(interaction: control)
+    try await eventuallySession { stoppedSpeech != nil }
+    await talk.holdMoved(horizontalTranslation: -121, verticalTranslation: 0, interaction: control).value
+    #expect(talk.state == .cancelled && talk.outcome == .discarded)
+    stoppedSpeech?.resume(); stoppedSpeech = nil
+    await talk.holdEnded(interaction: control).value
+    #expect(permissionRequests == 0 && recorder.starts == 0)
+    #expect(wire.begins.isEmpty && wire.deliveries.isEmpty)
+}
+
 @MainActor @Test func slideCancellationStopsRecorderAndOnlyTellsAHubThatHeardTheBegin() async throws {
     let recorder = FakeTalkRecorder()
     let (talk, wire) = wired(recorder)
