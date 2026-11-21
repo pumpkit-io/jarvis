@@ -78,7 +78,7 @@ public actor HubClient {
     private var liveWrite: Task<Void, Never>?
     private var waitingToRetry = false
 
-    /// The cache closure must finish durable storage before returning. A nil event commits a replay watermark.
+    /// The cache closure may write later but must keep events and cursor together, and throw once storage fails. A nil event commits a replay watermark.
     public init(transport: HubTransport, cursor: Int64 = 0, desiredSilence: Bool? = nil,
                 sleep: @escaping @Sendable (Double) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
                 lifecycleSleep: @escaping @Sendable (Double) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
