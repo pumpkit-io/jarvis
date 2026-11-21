@@ -83,8 +83,7 @@ struct WorkspaceView: View {
                         .allowsHitTesting(!showingExpanded)
                         .accessibilityHidden(showingExpanded)
                     expansionControl(showingExpanded: showingExpanded)
-                    ConversationView(session: session, showsInputBar: false,
-                                     collapse: showingExpanded ? { setExpanded(false) } : nil)
+                    ConversationView(session: session, showsInputBar: false)
                         .mask(alignment: .top) {
                             VStack(spacing: 0) {
                                 LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
@@ -92,12 +91,6 @@ struct WorkspaceView: View {
                                 Rectangle()
                             }
                         }
-                        .simultaneousGesture(DragGesture(minimumDistance: 30).onEnded { drag in
-                            if !showingExpanded, drag.translation.height < -50,
-                               abs(drag.translation.height) > abs(drag.translation.width) {
-                                withAnimation(.easeInOut(duration: 0.25)) { expanded = true }
-                            }
-                        })
                 }
                 .animation(.easeInOut(duration: 0.25), value: showingExpanded)
             }
@@ -121,34 +114,47 @@ struct WorkspaceView: View {
         Button {
             setExpanded(!showingExpanded)
         } label: {
-            VStack(spacing: 5) {
-                Capsule().frame(width: 28, height: 3)
-                Image(systemName: showingExpanded ? "chevron.down" : "chevron.up")
-                    .font(.system(size: controlSize, weight: .medium))
-            }
-            .frame(maxWidth: .infinity, minHeight: 44)
-            .contentShape(Rectangle())
+            BendingChevron(bend: showingExpanded ? -1 : 1)
+                .stroke(style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                .frame(width: 22, height: 6)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .foregroundStyle(theme.haze)
         .accessibilityLabel("Conversation")
         .accessibilityValue(showingExpanded ? "Expanded" : "Collapsed")
         .accessibilityHint(showingExpanded ? "Collapse the conversation" : "Expand the conversation")
-        .simultaneousGesture(DragGesture(minimumDistance: 20).onEnded { drag in
-            guard abs(drag.translation.height) > abs(drag.translation.width) else { return }
-            if drag.translation.height < -40 { setExpanded(true) }
-            else if drag.translation.height > 40 { setExpanded(false) }
-        })
     }
 
     private func setExpanded(_ value: Bool) {
-        #if os(iOS)
-        if !value, keyboardVisible {
-            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-        }
-        #endif
+        if !value, keyboardVisible { dismissKeyboard() }
         withAnimation(.easeInOut(duration: 0.25)) { expanded = value }
     }
+}
+
+/// A chevron that points up at bend 1 and down at bend -1, passing through a flat line between them.
+private struct BendingChevron: Shape {
+    var bend: CGFloat
+    var animatableData: CGFloat {
+        get { bend }
+        set { bend = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        let rise = rect.height / 2 * bend
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: rect.midY + rise))
+        path.addLine(to: CGPoint(x: rect.midX, y: rect.midY - rise))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.midY + rise))
+        return path
+    }
+}
+
+private func dismissKeyboard() {
+    #if os(iOS)
+    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    #endif
 }
 
 struct OrbArea: View {
@@ -158,6 +164,8 @@ struct OrbArea: View {
 
     var body: some View {
         PointOrbView(level: session.orb.level, speaker: session.orb.speaker, isVisible: isVisible)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: dismissKeyboard)
             .accessibilityHidden(true)
             .overlay(alignment: .bottomTrailing) {
                 if isVisible {
