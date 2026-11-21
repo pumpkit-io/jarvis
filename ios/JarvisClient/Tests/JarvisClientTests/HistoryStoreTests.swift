@@ -155,6 +155,15 @@ private func notice(_ seq: Int64, _ text: String = "Line") throws -> HubEvent {
 
 private let historyTime = Date(timeIntervalSince1970: 1_795_089_600)
 
+/// Waits up to five seconds for a batched write.
+private func eventuallyStored(_ condition: () async throws -> Bool) async throws {
+    let deadline = Date().addingTimeInterval(5)
+    while try await !condition() {
+        guard Date() < deadline else { Issue.record("Timed out waiting for the batched write"); return }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+}
+
 private func historyStore(_ directory: URL, writeDelay: Duration = .milliseconds(500)) throws -> HistoryStore {
     HistoryStore(directory: directory, credentials: try testPairingCredentials(), now: { historyTime }, writeDelay: writeDelay)
 }
@@ -179,8 +188,7 @@ private func historyStore(_ directory: URL, writeDelay: Duration = .milliseconds
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try historyStore(directory, writeDelay: .milliseconds(20))
     try await store.commit(try notice(3), through: 3)
-    try await Task.sleep(for: .milliseconds(300))
-    #expect(try await historyStore(directory).load().cursor == 3)
+    try await eventuallyStored { try await historyStore(directory).load().cursor == 3 }
 }
 
 @Test func duplicateAndOutOfOrderCommitsKeepOneOrderedCopy() async throws {
@@ -207,7 +215,7 @@ private func historyStore(_ directory: URL, writeDelay: Duration = .milliseconds
     try await store.flush()
     try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: directory.path)
     try await store.commit(try notice(2), through: 2)
-    try await Task.sleep(for: .milliseconds(300))
+    try await eventuallyStored { (try? await store.commit(nil, through: 2)) == nil }
     await #expect(throws: (any Error).self) { try await store.commit(try notice(3), through: 3) }
     try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
     try await store.commit(try notice(4), through: 4)

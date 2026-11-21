@@ -77,12 +77,7 @@ public actor HistoryStore {
         if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
     }
 
-    private var snapshot: CachedHistory {
-        var history = CachedHistory()
-        history.events = entries.map(\.event)
-        history.cursor = cursor
-        return history
-    }
+    private var snapshot: CachedHistory { CachedHistory(events: entries.map(\.event), cursor: cursor) }
 
     private func loadOnce() throws {
         guard !retired else { throw CancellationError() }
@@ -128,12 +123,12 @@ public actor HistoryStore {
     }
 
     private func writeBatch() {
+        guard !Task.isCancelled else { return }
         pendingWrite = nil
         guard !retired, unsaved else { return }
         try? save()
     }
 
-    /// Writes now and remembers a failure, so the next commit retries before accepting more.
     private func save() throws {
         do { try write(); failedWrite = nil } catch { failedWrite = error; throw error }
     }
