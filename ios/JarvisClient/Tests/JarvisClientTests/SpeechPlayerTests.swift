@@ -3,6 +3,7 @@ import Testing
 @testable import JarvisClient
 
 @MainActor final class FakeSpeechOutput: SpeechOutput {
+    var level: Double = 0
     var bytes: [Data] = []
     var callbacks: [@MainActor @Sendable () -> Void] = []
     var stops = 0

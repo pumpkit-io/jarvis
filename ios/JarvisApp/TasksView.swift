@@ -64,14 +64,43 @@ struct WorkspaceView: View {
     var body: some View {
         VStack(spacing: 0) {
             WorkspaceTopBar(session: session, controlSize: controlSize)
-            ConversationView(session: session, showsInputBar: false)
+            GeometryReader { geometry in
+                VStack(spacing: 0) {
+                    OrbArea(session: session, controlSize: controlSize)
+                        .frame(height: geometry.size.height * 0.4)
+                    ConversationView(session: session, showsInputBar: false)
+                        .mask(alignment: .top) {
+                            VStack(spacing: 0) {
+                                LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
+                                    .frame(height: 24)
+                                Rectangle()
+                            }
+                        }
+                }
+            }
         }
+        .background(JarvisTheme().void)
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            MessageInputBar(session: session)
+            MessageInputBar(session: session, showsVoiceControl: false)
         }
         #if os(iOS)
         .toolbar(.hidden, for: .navigationBar)
         #endif
+    }
+}
+
+struct OrbArea: View {
+    @Bindable var session: AppSession
+    var controlSize: CGFloat
+
+    var body: some View {
+        PointOrbView(level: session.orb.level, speaker: session.orb.speaker)
+            .accessibilityHidden(true)
+            .overlay(alignment: .bottomTrailing) {
+                VoiceControl(session: session, controlSize: controlSize)
+                    .padding(.trailing, 20)
+                    .padding(.bottom, 12)
+            }
     }
 }
 
