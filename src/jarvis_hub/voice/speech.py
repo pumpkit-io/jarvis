@@ -16,7 +16,7 @@ from uuid import uuid4
 
 import numpy as np
 
-from jarvis_hub.voice.language import Lang, voice_for
+from jarvis_hub.voice.language import Lang, detect_language, voice_for
 from jarvis_hub.voice.player import Clip, PlaybackReceipt, Player, RemotePlayer, Samples
 from jarvis_hub.voice.splitter import SentenceSplitter
 from jarvis_hub.voice.tts import Synthesizer
@@ -94,6 +94,7 @@ def closing(sample_rate: int) -> Samples:
 @dataclass
 class _Reply:
     turn: int
+    # Starts as the User's language and follows the text spoken: the voice of the next chunk of unclear language.
     lang: Lang
     began: float
     heard_at: float | None
@@ -125,6 +126,7 @@ class _Reply:
 class _Say:
     reply: _Reply
     text: str
+    lang: Lang
 
 
 @dataclass(frozen=True)
@@ -379,7 +381,9 @@ class Speech:
             if reply.first_chunk is None:
                 reply.first_chunk = self._clock.now()
             reply.chunks += 1
-            self._enqueue(_Say(reply, chunk))
+            # Each chunk is spoken in its own language; one too short to tell keeps the one before it.
+            reply.lang = detect_language(chunk, reply.lang)
+            self._enqueue(_Say(reply, chunk, reply.lang))
 
     def _load(self) -> None:
         self._tts.load()
@@ -449,11 +453,11 @@ class Speech:
 
     async def _handle(self, item: _Say | _Cached | _End) -> None:
         match item:
-            case _Say(reply, text):
+            case _Say(reply, text, lang):
                 if not self._reply_allowed(reply):
                     return
                 generation = self._generation
-                voice = voice_for(reply.lang)
+                voice = voice_for(lang)
                 samples = await asyncio.get_running_loop().run_in_executor(
                     self._thread, self._tts.synthesize, text, voice
                 )

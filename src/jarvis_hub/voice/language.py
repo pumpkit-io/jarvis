@@ -14,6 +14,8 @@ VOICES: dict[Lang, str] = {"en": "am_liam", "it": "im_nicola"}
 # A single word needs more confidence: "Hello" scores 0.69 Italian.
 CONFIDENT = 0.8
 CONFIDENT_ONE_WORD = 0.9
+# Lingua takes seconds on a reply of tens of thousands of characters, and a few sentences are enough to tell.
+DETECTED_CHARS = 400
 
 _CODES: dict[Language, Lang] = {Language.ENGLISH: "en", Language.ITALIAN: "it"}
 
@@ -67,7 +69,7 @@ def detect_language(text: str, previous: Lang) -> Lang:
     en += sum(_is_english_i(text, found, i) for i in range(len(found)))
     if en != it:
         return "en" if en > it else "it"
-    values = _detector().compute_language_confidence_values(text)
+    values = _detector().compute_language_confidence_values(text[:DETECTED_CHARS])
     if not values:
         return previous
     best = values[0]
