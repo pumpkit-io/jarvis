@@ -13,13 +13,14 @@ struct ConversationView: View {
     @State private var detailsRevision = 0
     @State private var position = ScrollPosition(idType: String.self)
     @State private var scrollPhase: ScrollPhase = .idle
+    @State private var olderHistoryVisible = false
     @State var expandedDetails: Set<String> = []
     private var theme: JarvisTheme { JarvisTheme() }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 32) {
+                VStack(alignment: .leading, spacing: 32) {
                     if session.hasOlderHistory {
                         VStack(alignment: .leading) {
                             if session.loadingHistory { ProgressView("Loading older history…") }
@@ -35,7 +36,12 @@ struct ConversationView: View {
                         .font(.system(size: controlSize))
                         .foregroundStyle(theme.haze).frame(minHeight: 44)
                         .modifier(ScriptColumn())
-                        .task(id: session.connection.canSend) { await session.loadOlderHistory() }
+                        // The stack builds every row up front, so paging waits until the reader reaches the top.
+                        .onScrollVisibilityChange(threshold: 0.1) { olderHistoryVisible = $0 }
+                        .task(id: OlderHistoryTrigger(visible: olderHistoryVisible, canSend: session.connection.canSend)) {
+                            guard olderHistoryVisible else { return }
+                            await session.loadOlderHistory()
+                        }
                     }
                     if let message = session.historyMessage {
                         Text(message).font(.system(size: controlSize)).foregroundStyle(theme.haze)
@@ -75,7 +81,7 @@ struct ConversationView: View {
             .defaultScrollAnchor(followsLatest ? .bottom : nil, for: .sizeChanges)
             .defaultScrollAnchor(.top, for: .alignment)
             .onScrollGeometryChange(for: CGFloat.self) { $0.containerSize.height } action: { old, new in
-                // Scrolling to the end by hand makes the lazy stack draw the rows a resize left blank; a reader's drag wins.
+                // A reader's drag wins over pinning the script to its end.
                 guard old != new, followsLatest, scrollPhase == .idle else { return }
                 position.scrollTo(edge: .bottom)
             }
@@ -226,6 +232,11 @@ struct ConversationView: View {
         return AttributedString(row.text[..<range.lowerBound]) + marked + AttributedString(row.text[range.upperBound...])
     }
 
+}
+
+private struct OlderHistoryTrigger: Equatable {
+    let visible: Bool
+    let canSend: Bool
 }
 
 /// Every scroll target spans the viewport from x = 0, with the column's margins inside it.
