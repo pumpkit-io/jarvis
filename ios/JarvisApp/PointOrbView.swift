@@ -35,7 +35,6 @@ struct PointOrbView: UIViewRepresentable {
 
 /// Must match `Uniforms` in ParticleOrb.metal field for field.
 private struct OrbUniforms {
-    var tint: SIMD4<Float>
     var time: Float
     var phase: Float
     var level: Float
@@ -47,12 +46,21 @@ private struct OrbUniforms {
     var viewW: Float
     var viewH: Float
     var dotPx: Float
-    var intensity: Float
+}
+
+/// Must match `OrbPoint` in ParticleOrb.metal.
+private struct OrbPoint {
+    var position: SIMD4<Float>
+    var random: SIMD4<Float>
 }
 
 @MainActor final class OrbRenderer: NSObject, MTKViewDelegate {
-    /// The theme's void, written raw because the drawable is not sRGB-converting.
-    static let background = MTLClearColor(red: 5 / 255.0, green: 7 / 255.0, blue: 12 / 255.0, alpha: 1)
+    /// The theme's sRGB components, written raw because the drawable does no colour conversion.
+    static let background: MTLClearColor = {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        UIColor(JarvisTheme().void).getRed(&r, green: &g, blue: &b, alpha: &a)
+        return MTLClearColor(red: Double(r), green: Double(g), blue: Double(b), alpha: 1)
+    }()
     private static let pointCount = 14_000
 
     let device: MTLDevice?
@@ -74,7 +82,10 @@ private struct OrbUniforms {
     }
 
     func configure(_ view: MTKView) {
-        guard let device, let library = device.makeDefaultLibrary() else { return }
+        guard let device, let library = device.makeDefaultLibrary() else {
+            assertionFailure("ParticleOrb.metal is missing from the app target")
+            return
+        }
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.vertexFunction = library.makeFunction(name: "orbVertex")
         descriptor.fragmentFunction = library.makeFunction(name: "orbFragment")
@@ -87,20 +98,31 @@ private struct OrbUniforms {
         color.destinationRGBBlendFactor = .one
         color.sourceAlphaBlendFactor = .one
         color.destinationAlphaBlendFactor = .one
-        pipeline = try? device.makeRenderPipelineState(descriptor: descriptor)
+        do {
+            pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+        } catch {
+            assertionFailure("Orb pipeline failed: \(error)")
+        }
         points = Self.fibonacciSphere(device: device, count: Self.pointCount)
     }
 
-    /// Evenly spread points on a unit sphere; w carries the point's index for per-point randomness.
+    /// Evenly spread points on a unit sphere, each with its own random values for wisps, shading and twinkle.
     private static func fibonacciSphere(device: MTLDevice, count n: Int) -> MTLBuffer? {
         let golden = Float.pi * (3 - sqrt(5))
-        let points = (0..<n).map { i -> SIMD4<Float> in
+        let points = (0..<n).map { i -> OrbPoint in
             let y = 1 - Float(i) / Float(n - 1) * 2
             let r = sqrt(max(0, 1 - y * y))
             let theta = golden * Float(i)
-            return SIMD4(cos(theta) * r, y, sin(theta) * r, Float(i))
+            let random = SIMD4<Float>(hash(i, 1), hash(i, 2), hash(i, 3), 0)
+            return OrbPoint(position: SIMD4(cos(theta) * r, y, sin(theta) * r, 1), random: random)
         }
-        return device.makeBuffer(bytes: points, length: MemoryLayout<SIMD4<Float>>.stride * n, options: .storageModeShared)
+        return device.makeBuffer(bytes: points, length: MemoryLayout<OrbPoint>.stride * n, options: .storageModeShared)
+    }
+
+    /// The reference's sine hash, in Double: the GPU's fast sine is inaccurate at these large arguments.
+    private static func hash(_ i: Int, _ k: Double) -> Float {
+        let v = sin(Double(i) * 12.9898 + k * 78.233) * 43758.5453
+        return Float(v - v.rounded(.down))
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
@@ -118,11 +140,10 @@ private struct OrbUniforms {
 
         let size = view.drawableSize
         let radius = Float(min(size.width, size.height)) * 0.36 * (1 + motion.pulse)
-        // Dot size keeps the preview's spacing at 14k points, measured against the 18k reference density.
+        // Dots grow as points thin out, so coverage matches an 18,000-point sphere.
         let density = sqrt(18_000 / Float(Self.pointCount))
         let surface = motion.surface
         var uniforms = OrbUniforms(
-            tint: SIMD4(1, 1, 1, 1),
             time: Float(motion.time),
             phase: Float(motion.phase),
             level: motion.level,
@@ -133,14 +154,12 @@ private struct OrbUniforms {
             radiusPx: radius,
             viewW: Float(size.width),
             viewH: Float(size.height),
-            dotPx: radius * 0.016 * density,
-            intensity: 0.9
+            dotPx: radius * 0.016 * density
         )
 
         encoder.setRenderPipelineState(pipeline)
         encoder.setVertexBuffer(points, offset: 0, index: 0)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<OrbUniforms>.stride, index: 1)
-        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<OrbUniforms>.stride, index: 0)
         encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: Self.pointCount)
         encoder.endEncoding()
         commands.present(drawable)

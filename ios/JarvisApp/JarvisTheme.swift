@@ -7,7 +7,6 @@ struct JarvisTheme {
     let haze = Color(hex: 0x7F8EA3)
     let cyan = Color(hex: 0x33E6FF)
     let ice = Color(hex: 0xD9EDFF)
-    let idleBlue = Color(hex: 0x5AB4FF)
     let signal = Color(hex: 0xD6402E)
     let green = Color(hex: 0x3DDC84)
     let amber = Color(hex: 0xF5B544)

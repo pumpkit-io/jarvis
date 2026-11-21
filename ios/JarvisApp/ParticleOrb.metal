@@ -6,7 +6,6 @@ using namespace metal;
 
 // Must match `OrbUniforms` in PointOrbView.swift field for field.
 struct Uniforms {
-    float4 tint;
     float time;        // rotation, twinkle and wisp drift
     float phase;       // surface noise time
     float level;
@@ -18,7 +17,12 @@ struct Uniforms {
     float viewW;
     float viewH;
     float dotPx;
-    float intensity;
+};
+
+// Must match `OrbPoint` in PointOrbView.swift.
+struct OrbPoint {
+    float4 position;   // unit sphere, w unused
+    float4 random;     // three per-point values in 0...1, w unused
 };
 
 struct VOut {
@@ -26,10 +30,6 @@ struct VOut {
     float  pointSize [[point_size]];
     float  bright;
 };
-
-static float hash01(float i, float k) {
-    return fract(sin(i * 12.9898 + k * 78.233) * 43758.5453);
-}
 
 // Layered sines, roughly -1...1.
 static float orbNoise(float3 p, float t) {
@@ -40,12 +40,10 @@ static float orbNoise(float3 p, float t) {
 }
 
 vertex VOut orbVertex(uint vid [[vertex_id]],
-                      const device float4 *points [[buffer(0)]],
+                      const device OrbPoint *points [[buffer(0)]],
                       constant Uniforms &u [[buffer(1)]]) {
-    float4 d  = points[vid];
-    float3 p  = d.xyz;
-    float  id = d.w;
-    float h1 = hash01(id, 1.0), h2 = hash01(id, 2.0), h3 = hash01(id, 3.0);
+    float3 p = points[vid].position.xyz;
+    float h1 = points[vid].random.x, h2 = points[vid].random.y, h3 = points[vid].random.z;
     float t = u.phase;
 
     // Radial ripple: a broad swell plus finer bumps make the outline wavy.
@@ -63,7 +61,9 @@ vertex VOut orbVertex(uint vid [[vertex_id]],
     // Wisps: some points detach, drift outward and smear sideways.
     float edge  = 1.0 - u.looseShare;
     float loose = smoothstep(edge - 0.02, edge + 0.02, h1);
-    float drift = u.looseDrift * (0.3 + h2) * (0.6 + 0.4 * sin(u.time * (0.5 + h3) + h1 * 20.0));
+    // Drift rates step by 0.05 so time can wrap without a seam.
+    float rate  = 0.5 + floor(h3 * 20.0) / 20.0;
+    float drift = u.looseDrift * (0.3 + h2) * (0.6 + 0.4 * sin(u.time * rate + h1 * 20.0));
     q *= 1.0 + drift * loose;
     q += tangent * 0.06 * loose * (0.5 + u.level);
 
@@ -94,15 +94,14 @@ vertex VOut orbVertex(uint vid [[vertex_id]],
     out.position  = float4(off.x / (u.viewW * 0.5), off.y / (u.viewH * 0.5), 0.5, 1.0);
     out.pointSize = max(2.0, u.dotPx * s);
     // Each point stays a crisp dot; brightness above full only comes from points overlapping.
-    out.bright    = min(1.0, b * u.intensity);
+    out.bright    = min(1.0, b * 0.9);
     return out;
 }
 
 fragment float4 orbFragment(VOut in [[stage_in]],
-                            float2 pc [[point_coord]],
-                            constant Uniforms &u [[buffer(0)]]) {
+                            float2 pc [[point_coord]]) {
     float r = length(pc * 2.0 - 1.0);
     if (r > 1.0 || in.bright < 0.02) discard_fragment();
-    float a = 1.0 - smoothstep(0.75, 1.0, r);
-    return float4(u.tint.rgb * in.bright * a, 1.0);
+    float a = r < 0.75 ? 1.0 : 1.0 - (r - 0.75) / 0.25;
+    return float4(float3(in.bright * a), 1.0);
 }

@@ -22,7 +22,6 @@ public struct OrbSurface: Sendable, Equatable {
     public var looseShare: Float
     /// How far detached points drift out, in sphere radii.
     public var looseDrift: Float
-    /// Rate of the surface noise.
     public var speed: Float
 
     public static func target(for speaker: OrbModel.Speaker, level: Float) -> OrbSurface {
@@ -57,6 +56,10 @@ public struct OrbMotion: Sendable {
     static let levelEasing: Float = 0.25
     static let surfaceEasing: Float = 0.08
     static let largestPulse: Float = 0.06
+    /// Surface noise rates are multiples of 0.01, so the phase wraps here without a visible seam.
+    public static let phasePeriod = 200 * Double.pi
+    /// Rotation, wobble, twinkle and wisp rates are multiples of 0.05, so time wraps here without a seam.
+    public static let timePeriod = 40 * Double.pi
 
     public private(set) var level: Float = 0
     public private(set) var surface = OrbSurface.target(for: .idle, level: 0)
@@ -79,8 +82,8 @@ public struct OrbMotion: Sendable {
         level += ((speaker == .idle ? 0 : spoken) - level) * Self.ease(Self.levelEasing, frames)
         surface = surface.moved(toward: .target(for: speaker, level: level), by: Self.ease(Self.surfaceEasing, frames))
         let pace = reducedMotion ? Self.reducedPace : 1
-        phase += dt * pace * Double(surface.speed)
-        time += dt * pace
+        phase = (phase + dt * pace * Double(surface.speed)).truncatingRemainder(dividingBy: Self.phasePeriod)
+        time = (time + dt * pace).truncatingRemainder(dividingBy: Self.timePeriod)
     }
 
     static func ease(_ perFrame: Float, _ frames: Float) -> Float { 1 - pow(1 - perFrame, frames) }

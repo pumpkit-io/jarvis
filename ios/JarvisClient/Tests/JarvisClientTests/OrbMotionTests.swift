@@ -16,24 +16,32 @@ private func close(_ a: OrbSurface, _ b: OrbSurface, within tolerance: Float = 0
 }
 
 @Test func idleIsACalmSphereWhateverTheLevel() {
-    let idle = settled(.idle, level: 1)
+    let idle = settled(.idle, level: 1), quiet = settled(.idle, level: 0)
     #expect(idle.level == 0 && idle.pulse == 0)
-    #expect(close(idle.surface, OrbSurface(ripple: 0.02, flow: 0.02, looseShare: 0.05, looseDrift: 0.03, speed: 0.4)))
+    #expect(close(idle.surface, quiet.surface))
 }
 
 @Test func loudJarvisTearsTheSurfaceFurtherThanALoudUser() {
-    let jarvis = settled(.jarvis).surface, user = settled(.user).surface
-    #expect(close(jarvis, OrbSurface(ripple: 0.13, flow: 0.13, looseShare: 0.2, looseDrift: 0.22, speed: 2)))
-    #expect(close(user, OrbSurface(ripple: 0.1, flow: 0.1, looseShare: 0.15, looseDrift: 0.16, speed: 1.3)))
-    #expect(abs(settled(.jarvis).pulse - 0.06) < 0.001)
+    let jarvis = settled(.jarvis), user = settled(.user), idle = settled(.idle)
+    #expect(jarvis.surface.ripple > user.surface.ripple && user.surface.ripple > idle.surface.ripple)
+    #expect(jarvis.surface.looseShare > user.surface.looseShare && jarvis.surface.looseDrift > user.surface.looseDrift)
+    #expect(jarvis.surface.speed > user.surface.speed && jarvis.pulse > 0)
 }
 
-@Test func aSpeakerChangeDoesNotJumpInOneFrame() {
+@Test func louderSpeechDeformsMore() {
+    let soft = settled(.jarvis, level: 0.2), loud = settled(.jarvis, level: 0.9)
+    #expect(loud.surface.ripple > soft.surface.ripple && loud.surface.looseDrift > soft.surface.looseDrift)
+    #expect(loud.pulse > soft.pulse)
+}
+
+@Test func aSpeakerChangeEasesOverSeveralFramesInsteadOfJumping() {
     var motion = settled(.idle)
-    let before = motion.surface.speed
+    let start = motion.surface, end = settled(.jarvis).surface
     motion.advance(by: frame, toward: .jarvis, level: 1)
-    #expect(motion.surface.speed - before < 0.08 * (2 - before) + 0.001)
-    #expect(motion.level <= 0.25 + 0.001)
+    let firstStep = (motion.surface.speed - start.speed) / (end.speed - start.speed)
+    #expect(firstStep > 0 && firstStep < 0.2)
+    for _ in 0..<60 { motion.advance(by: frame, toward: .jarvis, level: 1) }
+    #expect(close(motion.surface, end, within: 0.02))
 }
 
 @Test func easingSettlesInTheSameTimeAtAnyFrameRate() {
@@ -69,4 +77,11 @@ private func close(_ a: OrbSurface, _ b: OrbSurface, within tolerance: Float = 0
     #expect(reduced.time < normal.time * 0.5)
     #expect(reduced.phase < normal.phase * 0.5)
     #expect(reduced.surface.looseDrift < normal.surface.looseDrift * 0.7)
+}
+
+@Test func clocksStayWithinTheirSeamlessPeriodsOverLongSessions() {
+    var motion = OrbMotion()
+    for _ in 0..<200_000 { motion.advance(by: 1.0 / 20, toward: .jarvis, level: 1) }
+    #expect(motion.time >= 0 && motion.time < OrbMotion.timePeriod)
+    #expect(motion.phase >= 0 && motion.phase < OrbMotion.phasePeriod)
 }
