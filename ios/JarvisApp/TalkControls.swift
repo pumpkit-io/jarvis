@@ -9,9 +9,11 @@ struct MessageInputBar: View {
     @State private var discarded = false
     @State private var visible = false
     @State private var pillHeight: CGFloat = 56
+    @State private var preview = TalkPreview()
     private let barBottomPadding: CGFloat = 8
     private let theme = JarvisTheme()
     private var recording: Bool { session.talk.state == .recording }
+    private var paused: Bool { session.talk.state == .paused }
     private var hasDraft: Bool { !session.draft.isEmpty }
 
     var body: some View {
@@ -28,26 +30,33 @@ struct MessageInputBar: View {
                 }
                 .modifier(StatusBackground())
             }
-            pill
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { pillHeight = $0 }
-                .background { keyboardDismissPadding }
+            HStack(alignment: .bottom, spacing: 8) {
+                if paused {
+                    Button { preview.stop(); Task { await session.talk.discard() } } label: {
+                        Image(systemName: "trash")
+                            .font(.system(size: 20, weight: .medium))
+                            .foregroundStyle(theme.signal)
+                            .frame(width: 56, height: 56)
+                            .background(theme.deep, in: Circle())
+                            .overlay { Circle().strokeBorder(theme.rim, lineWidth: 1) }
+                    }
+                    .buttonStyle(.plain)
+                    .transition(.scale.combined(with: .opacity))
+                    .accessibilityLabel("Discard Talk")
+                } else if discarded {
+                    DiscardBin().transition(.scale.combined(with: .opacity))
+                }
+                pill
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { pillHeight = $0 }
+                    .background { keyboardDismissPadding }
+            }
+            .animation(.spring(response: 0.3, dampingFraction: 0.85), value: paused)
         }
         .font(.system(size: controlSize))
         .foregroundStyle(theme.haze)
         .padding(.horizontal, 20)
         .padding(.top, 8)
         .padding(.bottom, barBottomPadding)
-        .overlay(alignment: .bottomTrailing) {
-            if discarded {
-                Image(systemName: "trash.fill")
-                    .font(.system(size: 28))
-                    .foregroundStyle(theme.signal)
-                    .padding(.trailing, 36)
-                    .offset(y: -84)
-                    .transition(.scale.combined(with: .opacity))
-                    .accessibilityHidden(true)
-            }
-        }
         .task(id: TalkFeedbackKey(discards: session.talk.discards, visible: visible)) {
             // Settings and Tasks keep the main screen's bar alive, so only the bar on screen claims a discard.
             guard visible, session.talk.takeDiscardConfirmation() else { return }
@@ -55,8 +64,8 @@ struct MessageInputBar: View {
             UINotificationFeedbackGenerator().notificationOccurred(.warning)
             #endif
             AccessibilityNotification.Announcement("Talk discarded").post()
-            withAnimation(.spring(response: 0.25)) { discarded = true }
-            do { try await Task.sleep(for: .milliseconds(650)) } catch { discarded = false; return }
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { discarded = true }
+            do { try await Task.sleep(for: .milliseconds(1_400)) } catch { discarded = false; return }
             withAnimation(.easeOut(duration: 0.25)) { discarded = false }
         }
         .onChange(of: session.talk.outcome) { _, outcome in
@@ -65,6 +74,9 @@ struct MessageInputBar: View {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             #endif
             AccessibilityNotification.Announcement("Too short to send").post()
+        }
+        .onChange(of: session.talk.state) { _, state in
+            if state != .paused { preview.stop() }
         }
         .onChange(of: typing) { typingChanged(typing) }
         .onAppear { visible = true }
@@ -90,7 +102,7 @@ struct MessageInputBar: View {
                 .frame(minHeight: 56)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Group {
-                if hasDraft && !recording {
+                if hasDraft && !recording && !paused {
                     Button { Task { await session.sendTypedLine() } } label: {
                         Image(systemName: "arrow.up").font(.system(size: max(20, controlSize), weight: .semibold))
                             .frame(width: TalkKey.diameter, height: TalkKey.diameter)
@@ -100,7 +112,7 @@ struct MessageInputBar: View {
                     .disabled(!session.canSubmit)
                     .accessibilityLabel("Send line")
                 } else {
-                    TalkKey(talk: session.talk, controlSize: controlSize, level: session.orb.level)
+                    TalkKey(talk: session.talk, controlSize: controlSize, level: session.orb.level, beforeResume: preview.stop)
                 }
             }
             .padding([.trailing, .bottom], 6)
@@ -113,42 +125,10 @@ struct MessageInputBar: View {
     }
 
     @ViewBuilder private var field: some View {
-        if recording {
-            HStack(spacing: 8) {
-                if session.talk.isLocked {
-                    Button { Task { await session.talk.discard() } } label: {
-                        Image(systemName: "trash").frame(width: 44, height: 44).contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain).foregroundStyle(theme.signal)
-                    // Keeps the 44-point target without making the locked row taller than a line of text.
-                    .padding(.vertical, -6)
-                    .padding(.leading, -12)
-                    .accessibilityLabel("Discard Talk")
-                }
-                Circle().fill(theme.signal).frame(width: 8, height: 8).accessibilityHidden(true)
-                Text(String(format: "%d:%02d", session.talk.elapsed / 60, session.talk.elapsed % 60))
-                    .monospacedDigit().fontWeight(.semibold)
-                if session.talk.isLocked {
-                    HStack(alignment: .center, spacing: 2) {
-                        ForEach(0..<(controlSize > 20 ? 5 : 9)) { index in
-                            Capsule().fill(theme.ice)
-                                .frame(width: 3, height: 3 + 25 * session.orb.level * (0.35 + 0.65 * abs(sin(Double(index + 1)))))
-                        }
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: 28)
-                    .accessibilityLabel("Microphone level")
-                } else {
-                    Text("‹ Slide to cancel")
-                        .font(.system(size: controlSize))
-                        .foregroundStyle(theme.haze)
-                        .opacity(1 - 0.7 * session.talk.discardProgress)
-                        .offset(x: -24 * session.talk.discardProgress)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.trailing, 48)
-                }
-            }
-            .accessibilityElement(children: .contain)
+        if paused {
+            PausedRow(talk: session.talk, preview: preview, controlSize: controlSize)
+        } else if recording {
+            RecordingRow(talk: session.talk, controlSize: controlSize)
         } else {
             TextField("Message Jarvis", text: $session.draft, prompt: Text("Message Jarvis").foregroundStyle(theme.haze), axis: .vertical)
                 .lineLimit(1...5)

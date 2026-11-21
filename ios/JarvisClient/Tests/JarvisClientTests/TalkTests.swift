@@ -567,3 +567,81 @@ func leavingALockedTalkRetiresTheMicrophoneWithoutSending(transition: String) as
     await talk.holdMoved(horizontalTranslation: -121, verticalTranslation: 0, interaction: control).value
     #expect(talk.discards == 0)
 }
+
+@MainActor private func lockedTalk(_ recorder: FakeTalkRecorder, clock: TalkTestClock? = nil) async throws -> (TalkController, TalkWire) {
+    let talk = TalkController(recorder: recorder, permission: { true }, now: { clock?.time ?? 0 },
+                              clock: { Date(timeIntervalSince1970: 500) })
+    let wire = TalkWire(); wire.attach(talk)
+    let control = UUID()
+    talk.holdBegan(interaction: control)
+    try await eventuallySession { recorder.active }
+    await talk.holdMoved(verticalTranslation: -61, interaction: control).value
+    await talk.holdEnded(interaction: control).value
+    #expect(talk.isLocked)
+    return (talk, wire)
+}
+
+@MainActor @Test func aPausedTalkSendsEverySegmentItRecorded() async throws {
+    let recorder = FakeTalkRecorder()
+    let (talk, wire) = try await lockedTalk(recorder)
+    talk.pause()
+    #expect(talk.state == .paused && !recorder.active && recorder.stops == 1)
+    #expect(talk.recorded.count == 32_000)
+    talk.resume()
+    #expect(talk.state == .recording && recorder.active && recorder.starts == 2)
+    await talk.send()
+    #expect(wire.deliveries.count == 1 && wire.deliveries[0].pcm.count == 64_000)
+    #expect(talk.state == .idle && talk.recorded.isEmpty)
+}
+
+@MainActor @Test func aTalkCanBeSentStraightFromPause() async throws {
+    let recorder = FakeTalkRecorder()
+    let (talk, wire) = try await lockedTalk(recorder)
+    talk.pause()
+    await talk.send()
+    #expect(wire.deliveries.count == 1 && wire.deliveries[0].pcm.count == 32_000)
+    #expect(recorder.stops == 1)
+}
+
+@MainActor @Test func pausingStopsTheClockUntilTheTalkResumes() async throws {
+    let recorder = FakeTalkRecorder(), clock = TalkTestClock()
+    let (talk, _) = try await lockedTalk(recorder, clock: clock)
+    clock.time = 4
+    #expect(talk.duration == 4)
+    talk.pause()
+    clock.time = 30
+    #expect(talk.duration == 4)
+    talk.resume()
+    clock.time = 31.5
+    #expect(talk.duration == 5.5)
+}
+
+@MainActor @Test func aPausedTalkIsDiscardedOrRetiredLikeARecordingOne() async throws {
+    let recorder = FakeTalkRecorder()
+    let (talk, wire) = try await lockedTalk(recorder)
+    talk.pause()
+    await talk.discard()
+    #expect(talk.state == .cancelled && talk.discards == 1 && talk.recorded.isEmpty)
+    #expect(wire.deliveries.isEmpty && wire.cancels.count == 1)
+
+    let other = FakeTalkRecorder()
+    let (retired, retiredWire) = try await lockedTalk(other)
+    retired.pause()
+    await retired.cancel()
+    #expect(retired.state == .cancelled && retired.discards == 0 && retiredWire.deliveries.isEmpty)
+    await retired.press()
+    #expect(retired.state == .recording && retired.recorded.isEmpty)
+}
+
+@Test func theWaveformFollowsLoudnessAcrossTheTalk() {
+    var pcm = Data(count: 32_000)
+    for index in stride(from: 16_000, to: 32_000, by: 2) {
+        let sample = Int16(index % 4 == 0 ? 12_000 : -12_000)
+        withUnsafeBytes(of: sample.littleEndian) { pcm.replaceSubrange(index..<(index + 2), with: $0) }
+    }
+    let bars = TalkWaveform.levels(pcm, bars: 4)
+    #expect(bars.count == 4)
+    #expect(bars[0] == 0 && bars[1] == 0)
+    #expect(bars[2] == 1 && bars[3] == 1)
+    #expect(TalkWaveform.levels(Data(), bars: 3) == [0, 0, 0])
+}

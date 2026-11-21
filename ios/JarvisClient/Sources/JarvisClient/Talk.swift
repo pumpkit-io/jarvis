@@ -10,7 +10,29 @@ import Observation
 public enum TalkOutcome: Equatable, Sendable { case tooShort, discarded }
 
 public enum TalkState: Equatable, Sendable {
-    case idle, authorizing, recording, refused, failed, cancelled
+    case idle, authorizing, recording, paused, refused, failed, cancelled
+}
+
+/// Loudness bars for showing a recorded Talk, each between 0 and 1 relative to the loudest.
+public enum TalkWaveform {
+    public static func levels(_ pcm: Data, bars: Int) -> [Double] {
+        guard bars > 0 else { return [] }
+        let samples = pcm.count / 2
+        guard samples > 0 else { return Array(repeating: 0, count: bars) }
+        let rms = pcm.withUnsafeBytes { raw in
+            (0..<bars).map { bar -> Double in
+                let lower = bar * samples / bars, upper = max(lower + 1, (bar + 1) * samples / bars)
+                var sum = 0.0
+                for index in lower..<min(upper, samples) {
+                    let value = Double(Int16(littleEndian: raw.loadUnaligned(fromByteOffset: index * 2, as: Int16.self))) / 32_768
+                    sum += value * value
+                }
+                return (sum / Double(upper - lower)).squareRoot()
+            }
+        }
+        let peak = rms.max() ?? 0
+        return peak > 0 ? rms.map { $0 / peak } : rms
+    }
 }
 
 /// Records a Talk and hands it to the Outbox. Nothing here waits on the connection.
@@ -34,12 +56,18 @@ public enum TalkState: Equatable, Sendable {
     public static let lockDistance = 60.0
     public static let discardDistance = 120.0
     public private(set) var holdCancelled = false
+    /// The audio of the segments recorded before a pause; the segment being recorded joins it on send.
+    public private(set) var recorded = Data()
+    private var recordedSeconds = 0.0
+    /// Seconds recorded so far, without the time spent paused.
+    public var duration: Double { recordedSeconds + (state == .recording ? max(0, now() - started) : 0) }
     public var speaking = false
     public var level: Double { state == .recording ? recorder.level : 0 }
     public var label: String { label(for: state) }
     public func label(for state: TalkState) -> String {
         switch state {
         case .recording: isLocked ? "Send Talk" : "Release to send. Slide up to lock or left to cancel."
+        case .paused: "Send Talk"
         case .authorizing: "Allow the microphone"
         default: speaking ? "Hold to interrupt" : "Hold to talk"
         }
@@ -54,7 +82,8 @@ public enum TalkState: Equatable, Sendable {
         default: nil
         }
     }
-    public var canPress: Bool { state != .authorizing && state != .recording }
+    public var canPress: Bool { state != .authorizing && state != .recording && state != .paused }
+    private var capturing: Bool { state == .authorizing || state == .recording || state == .paused }
     /// Audio shorter than 0.3 seconds is a slip of the finger, not something said.
     static let shortestBytes = TalkAudio.bytesPerSecond * 3 / 10
     private let recorder: any TalkRecorder
@@ -100,7 +129,7 @@ public enum TalkState: Equatable, Sendable {
         discardProgress = min(1, max(0, -horizontalTranslation / Self.discardDistance))
         if horizontalTranslation < -Self.discardDistance {
             holdCancelled = true
-            if state == .authorizing || state == .recording || pendingPress != nil { discards += 1 }
+            if capturing || pendingPress != nil { discards += 1 }
             return cancelTouchCapture()
         }
         // Locked controls replace the held mic, so the touch no longer owns capture.
@@ -110,14 +139,14 @@ public enum TalkState: Equatable, Sendable {
 
     public func send() async { await release() }
     public func discard() async {
-        guard state == .authorizing || state == .recording else { return }
+        guard capturing else { return }
         discards += 1
         await cancel()
     }
 
     /// The accessibility Cancel Talk action: a discard, retiring a press that hasn't started too.
     public func cancel(interaction id: UUID) async {
-        guard state == .authorizing || state == .recording || pendingPress != nil else { return }
+        guard capturing || pendingPress != nil else { return }
         discards += 1
         await controlDisappeared(interaction: id)
     }
@@ -157,7 +186,7 @@ public enum TalkState: Equatable, Sendable {
     }
 
     @discardableResult public func activate(interaction control: UUID) -> Task<Void, Never> {
-        if state == .recording || state == .authorizing || pendingPress != nil {
+        if capturing || pendingPress != nil {
             guard let capture = touchCapture ?? interaction else { return Task {} }
             let task = pendingPress; pendingPress = nil
             touchCapture = nil
@@ -194,7 +223,7 @@ public enum TalkState: Equatable, Sendable {
     }
 
     public func cancelInteraction(_ id: UUID) async {
-        guard interaction == id, state == .authorizing || state == .recording else { return }
+        guard interaction == id, capturing else { return }
         await cancel()
     }
 
@@ -204,6 +233,7 @@ public enum TalkState: Equatable, Sendable {
         generation &+= 1
         let owner = generation
         state = .authorizing; elapsed = 0; outcome = nil; isLocked = false; lockProgress = 0; discardProgress = 0
+        recorded = Data(); recordedSeconds = 0
         await stopSpeech()
         guard !Task.isCancelled, generation == owner, state == .authorizing else { return }
         let allowed = await permission()
@@ -212,34 +242,63 @@ public enum TalkState: Equatable, Sendable {
         guard !Task.isCancelled, generation == owner, state == .authorizing else { return }
         guard allowed else { state = .refused; holdCancelled = true; return }
         let id = UUID().uuidString
-        do {
-            try recorder.start { [weak self] in
-                Task {
-                    guard let self, self.generation == owner, self.state == .recording else { return }
-                    await self.release()
-                }
-            }
-        } catch { state = .failed; return }
+        do { try startSegment(owner: owner) } catch { state = .failed; return }
         talkID = id
-        state = .recording; started = now()
-        timer = Task { [weak self] in
-            while !Task.isCancelled {
-                do { try await self?.sleep(0.2) } catch { return }
-                guard let self, self.generation == owner, self.state == .recording else { return }
-                self.elapsed = min(300, Int(max(0, self.now() - self.started)))
-                if self.elapsed >= 300 { await self.release(); return }
-            }
-        }
+        state = .recording
+        runClock(owner: owner)
         let begin = begin
         beginning = Task { await begin(id) }
     }
 
+    /// Stops the microphone and keeps what was said, so a locked Talk can be resumed or sent later.
+    public func pause() {
+        guard state == .recording, isLocked else { return }
+        generation &+= 1
+        recordedSeconds = duration
+        recorded.append(recorder.stop())
+        timer?.cancel(); timer = nil
+        state = .paused
+    }
+
+    public func resume() {
+        guard state == .paused else { return }
+        generation &+= 1
+        let owner = generation
+        // A microphone that won't restart leaves the paused Talk as it was, still ready to send.
+        do { try startSegment(owner: owner) } catch { return }
+        state = .recording
+        runClock(owner: owner)
+    }
+
+    private func startSegment(owner: UInt64) throws {
+        try recorder.start { [weak self] in
+            Task {
+                guard let self, self.generation == owner, self.state == .recording else { return }
+                await self.release()
+            }
+        }
+    }
+
+    private func runClock(owner: UInt64) {
+        started = now()
+        timer = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await self?.sleep(0.2) } catch { return }
+                guard let self, self.generation == owner, self.state == .recording else { return }
+                self.elapsed = min(300, Int(self.duration))
+                if self.elapsed >= 300 { await self.release(); return }
+            }
+        }
+    }
+
     public func release() async {
         if state == .authorizing { generation &+= 1; state = .idle; return }
-        guard state == .recording, let id = talkID, let deliver else { return }
+        guard state == .recording || state == .paused, let id = talkID, let deliver else { return }
         generation &+= 1
         isLocked = false; lockProgress = 0; discardProgress = 0
-        let pcm = recorder.stop()
+        var pcm = recorded
+        if state == .recording { pcm.append(recorder.stop()) }
+        recorded = Data(); recordedSeconds = 0
         timer?.cancel(); timer = nil
         talkID = nil
         guard pcm.count >= Self.shortestBytes, pcm.count <= TalkAudio.maxBytes, pcm.count.isMultiple(of: 2) else {
@@ -257,6 +316,7 @@ public enum TalkState: Equatable, Sendable {
         let id = talkID
         if state == .recording { _ = recorder.stop() }
         timer?.cancel(); timer = nil
+        recorded = Data(); recordedSeconds = 0
         state = .cancelled; holdCancelled = true; talkID = nil; outcome = .discarded
         isLocked = false; lockProgress = 0; discardProgress = 0
         if let id { await endBegun(id) }
