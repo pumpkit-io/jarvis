@@ -32,6 +32,7 @@ import Testing
     let cache = HistoryStore(directory: directory, credentials: credentials, now: { Date(timeIntervalSince1970: 1000) })
     let saved = try conversationEvent(20, "task_snapshot", #"{"tasks":[{"id":"old","title":"Cached Task","state":"needs_user","last_report":"Waiting for your answer.","approval_question":"May I merge it?"}]}"#)
     try await cache.commit(saved, through: 20)
+    try await cache.flush()
     let socket = FakeSocket()
     let store = MemoryPairingStore(); store.record = credentials
     let session = AppSession(store: store, historyDirectory: directory, historyNow: { Date(timeIntervalSince1970: 1000) },
