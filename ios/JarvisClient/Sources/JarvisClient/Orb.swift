@@ -22,6 +22,9 @@ public struct OrbMotion: Sendable {
     /// A frame gap longer than this, such as the orb returning from hidden, resumes instead of jumping.
     static let longestStep = 1.0 / 20
     static let surfaceSpeed = SIMD3<Double>(0.35, 1.0, 1.8)
+    /// The noise and rotation frequencies are multiples of 0.01 and 0.05, so these periods wrap without a visible seam.
+    static let phasePeriod = 200 * Double.pi
+    static let spinPeriod = 40 * Double.pi
 
     /// Blend of idle, User and Jarvis; always sums to 1.
     public private(set) var weights = SIMD3<Double>(1, 0, 0)
@@ -34,20 +37,23 @@ public struct OrbMotion: Sendable {
 
     public func weight(of speaker: OrbModel.Speaker) -> Double { weights[Self.index(speaker)] }
 
-    public mutating func advance(by seconds: Double, toward speaker: OrbModel.Speaker) {
+    /// `pace` slows surface motion and rotation, as Reduce Motion asks, without slowing the blend between speakers.
+    public mutating func advance(by seconds: Double, toward speaker: OrbModel.Speaker, pace: Double = 1) {
         let dt = min(max(seconds, 0), Self.longestStep)
         var target = SIMD3<Double>(repeating: 0)
         target[Self.index(speaker)] = 1
         weights += (target - weights) * (1 - exp(-dt / Self.blendTime))
-        phase += dt * (weights * Self.surfaceSpeed).sum()
-        spin += dt
+        phase = (phase + dt * pace * (weights * Self.surfaceSpeed).sum()).truncatingRemainder(dividingBy: Self.phasePeriod)
+        spin = (spin + dt * pace).truncatingRemainder(dividingBy: Self.spinPeriod)
     }
 
-    public func shape(level: Double) -> OrbShape {
+    public func shape(level: Double, reducedMotion: Bool = false) -> OrbShape {
         let level = min(max(level, 0), 1)
-        let speech = weights * SIMD3(0, 0.29 * level, 0.52 * level)
-        let ripple = weights * SIMD3(0, 0.3, 0.7)
-        return OrbShape(speech: Float(speech.sum()), ripple: Float(ripple.sum()))
+        let speech = (weights * SIMD3(0, 0.03 + 0.235 * level, 0.04 + 0.43 * level)).sum()
+        let ripple = (weights * SIMD3(0, 0.25, 0.5)).sum()
+        return reducedMotion
+            ? OrbShape(speech: Float(speech * 0.45), ripple: Float(ripple * 0.4))
+            : OrbShape(speech: Float(speech), ripple: Float(ripple))
     }
 
     private static func index(_ speaker: OrbModel.Speaker) -> Int {
@@ -59,23 +65,24 @@ public struct OrbMotion: Sendable {
     }
 }
 
-/// The idle surface moves in every state; speech adds finer bumps on top, so the orb itself never changes.
+/// The idle surface keeps moving in every state; speech adds finer bumps and ripples on top of it.
 public struct OrbShape: Sendable {
     static let surface: Float = 0.035
+    /// Displacement stays linear up to the knee, then eases toward the limit, which keeps the
+    /// perspective silhouette inside a frame whose base radius is 0.34 of its shorter side.
+    static let knee: Float = 0.2
+    static let limit: Float = 0.29
+
     public let speech: Float
     public let ripple: Float
-    /// Displacement stays linear up to the knee, then eases toward the limit so loud peaks stay inside the frame.
-    static let knee: Float = 0.34
-    static let limit: Float = 0.46
 
     public init(speech: Float, ripple: Float) {
         self.speech = speech
         self.ripple = ripple
     }
 
-    /// Radius of a unit-sphere point from its idle surface noise and its speech and ripple noise.
-    public func radius(surface: Float, speech bumps: Float, ripple fine: Float) -> Float {
-        let displacement = Self.surface * surface + speech * (bumps + ripple * fine)
+    public func radius(surfaceNoise: Float, speechNoise: Float, rippleNoise: Float) -> Float {
+        let displacement = Self.surface * surfaceNoise + speech * (speechNoise + ripple * rippleNoise)
         let size = abs(displacement)
         guard size > Self.knee else { return 1 + displacement }
         let eased = Self.knee + (Self.limit - Self.knee) * tanh((size - Self.knee) / (Self.limit - Self.knee))

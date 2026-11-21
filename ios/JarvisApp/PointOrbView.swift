@@ -16,7 +16,7 @@ struct PointOrbView: View {
     var body: some View {
         TimelineView(.animation(minimumInterval: reduceMotion ? 1.0 / 30 : 1.0 / 60,
                                 paused: !isVisible || scenePhase != .active)) { timeline in
-            let motion = clock.advance(to: timeline.date, toward: speaker, rate: reduceMotion ? 0.35 : 1)
+            let motion = clock.advance(to: timeline.date, toward: speaker, pace: reduceMotion ? 0.35 : 1)
             Canvas { ctx, size in
                 draw(in: &ctx, size: size, motion: motion)
             }
@@ -34,8 +34,8 @@ struct PointOrbView: View {
         let cx = Float(size.width) / 2
         let cy = Float(size.height) / 2
 
-        var shape = motion.shape(level: Double(lvl))
-        if reduceMotion { shape = OrbShape(speech: shape.speech * 0.45, ripple: shape.ripple * 0.4) }
+        let shape = motion.shape(level: level, reducedMotion: reduceMotion)
+        let speaking = shape.speech > 0.001
         let color = blendedColor(motion.weights, in: ctx.environment)
 
         let phase = Float(motion.phase)
@@ -53,10 +53,9 @@ struct PointOrbView: View {
 
         for p in points {
             let surface = noise(p * 1.8, phase)
-            let speaking = shape.speech > 0.001
             let bumps = speaking ? noise(p * 3.0 + 3.7, phase * 1.2) : 0
             let fine = speaking ? noise(p * 6.9 + 7.1, phase * 1.7) : 0
-            let r = breathe * shape.radius(surface: surface, speech: bumps, ripple: fine)
+            let r = breathe * shape.radius(surfaceNoise: surface, speechNoise: bumps, rippleNoise: fine)
             var x = p.x * r, y = p.y * r, z = p.z * r
 
             let x1 = x * cosY + z * sinY
@@ -127,10 +126,10 @@ private final class OrbClock {
     private var motion = OrbMotion()
     private var lastFrame: Date?
 
-    func advance(to date: Date, toward speaker: OrbModel.Speaker, rate: Double) -> OrbMotion {
+    func advance(to date: Date, toward speaker: OrbModel.Speaker, pace: Double) -> OrbMotion {
         let seconds = lastFrame.map { date.timeIntervalSince($0) } ?? 0
         lastFrame = date
-        motion.advance(by: seconds * rate, toward: speaker)
+        motion.advance(by: seconds, toward: speaker, pace: pace)
         return motion
     }
 }

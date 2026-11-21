@@ -37,23 +37,41 @@ private let frame = 1.0 / 60
     #expect(motion.spin - spin < 0.06)
 }
 
-@Test func idleShapeIsUnchangedAndLoudSpeechStaysInsideTheFrame() {
-    var motion = OrbMotion()
-    motion.advance(by: frame, toward: .idle)
-    #expect(abs(motion.shape(level: 0).radius(surface: 1.6, speech: 0, ripple: 0) - 1.056) < 0.002)
-    for _ in 0..<120 { motion.advance(by: frame, toward: .jarvis) }
-    let loud = motion.shape(level: 1)
-    #expect(loud.radius(surface: 1.6, speech: 1.6, ripple: 1.6) <= 1.46)
-    #expect(loud.radius(surface: -1.6, speech: -1.6, ripple: -1.6) > 0.539)
+@Test func reduceMotionSlowsTheSurfaceButNotTheBlend() {
+    var normal = OrbMotion(), reduced = OrbMotion()
+    for _ in 0..<24 {
+        normal.advance(by: frame, toward: .user)
+        reduced.advance(by: frame, toward: .user, pace: 0.35)
+    }
+    #expect(reduced.weight(of: .user) == normal.weight(of: .user))
+    #expect(reduced.phase < normal.phase * 0.5)
 }
 
-@Test func speechDeformsTheOrbMoreThanBefore() {
+@Test func idleSurfaceKeepsItsGentleDepth() {
+    var motion = OrbMotion()
+    motion.advance(by: frame, toward: .idle)
+    let idle = motion.shape(level: 0)
+    #expect(abs(idle.radius(surfaceNoise: 1.6, speechNoise: 1.6, rippleNoise: 1.6) - 1.056) < 0.002)
+}
+
+@Test func loudSpeechStaysWithinThePerspectiveFrame() {
     var motion = OrbMotion()
     for _ in 0..<120 { motion.advance(by: frame, toward: .jarvis) }
-    // Before this change Jarvis at half level reached 1 + 0.25 × (1 + 0.3) for unit noise.
-    #expect(motion.shape(level: 0.5).radius(surface: 1, speech: 1, ripple: 1) > 1.38)
-    var user = OrbMotion()
-    for _ in 0..<120 { user.advance(by: frame, toward: .user) }
-    // The User at half level reached 1 + 0.15 × (1 + 0.125).
-    #expect(user.shape(level: 0.5).radius(surface: 1, speech: 1, ripple: 1) > 1.21)
+    let loud = motion.shape(level: 1)
+    // With breathing (x1.02) and the camera at 3, a radius of 1.29 projects to half the frame.
+    #expect(loud.radius(surfaceNoise: 1.6, speechNoise: 1.6, rippleNoise: 1.6) <= 1.29)
+    #expect(loud.radius(surfaceNoise: -1.6, speechNoise: -1.6, rippleNoise: -1.6) >= 0.71)
+}
+
+@Test func halfLevelSpeechDeformsAboutAThirdMoreThanTheFirstOrb() {
+    // Typical noise of 0.5: the first orb displaced Jarvis by 0.16 and the User by 0.084 at half level.
+    var jarvis = OrbMotion(), user = OrbMotion()
+    for _ in 0..<120 {
+        jarvis.advance(by: frame, toward: .jarvis)
+        user.advance(by: frame, toward: .user)
+    }
+    let jarvisRadius = jarvis.shape(level: 0.5).radius(surfaceNoise: 0.5, speechNoise: 0.5, rippleNoise: 0.5)
+    let userRadius = user.shape(level: 0.5).radius(surfaceNoise: 0.5, speechNoise: 0.5, rippleNoise: 0.5)
+    #expect((1.19...1.23).contains(jarvisRadius))
+    #expect((1.10...1.12).contains(userRadius))
 }
