@@ -12,21 +12,6 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 32) {
                 Text("Settings").accessibilityAddTraits(.isHeader)
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Talk gesture").foregroundStyle(theme.haze)
-                    ForEach(TalkGesture.allCases, id: \.self) { gesture in
-                        Button { Task { await session.setTalkGesture(gesture) } } label: {
-                            HStack(alignment: .firstTextBaseline) {
-                                Text(gesture.label).multilineTextAlignment(.leading)
-                                Spacer(minLength: 12)
-                                if session.talk.gesture == gesture { Image(systemName: "checkmark") }
-                            }.frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityValue(session.talk.gesture == gesture ? "Selected" : "")
-                    }
-                    if let message = session.gestureMessage { Text(message).foregroundStyle(theme.haze) }
-                }
-                VStack(alignment: .leading, spacing: 12) {
                     Button { Task { await session.takeFocus() } } label: {
                         Text("Send updates here").frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                             .contentShape(Rectangle())

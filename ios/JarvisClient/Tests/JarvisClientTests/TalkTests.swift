@@ -3,6 +3,7 @@ import Testing
 @testable import JarvisClient
 
 @MainActor final class FakeTalkRecorder: TalkRecorder {
+    var level = 0.0
     var starts = 0
     var stops = 0
     var active = false
@@ -81,6 +82,42 @@ import Testing
     }
 }
 
+@MainActor @Test func slidingLeftDuringPermissionDiscardsBeforeRecordingCanStart() async throws {
+    let recorder = FakeTalkRecorder(), permission = HeldMicrophonePermission()
+    let (talk, wire) = wired(recorder, permission: { await permission.request() })
+    let control = UUID()
+    talk.holdBegan(interaction: control)
+    try await eventuallySession { permission.waiter != nil }
+    await talk.holdMoved(horizontalTranslation: -121, verticalTranslation: 0, interaction: control).value
+    #expect(talk.state == .cancelled && talk.outcome == .discarded)
+    permission.grant()
+    try await eventuallySession { talk.state != .authorizing }
+    await talk.holdEnded(interaction: control).value
+    #expect(recorder.starts == 0)
+    #expect(wire.begins.isEmpty && wire.deliveries.isEmpty)
+}
+
+@MainActor @Test func slidingLeftWhileInterruptingDiscardsBeforeRequestingPermission() async throws {
+    let recorder = FakeTalkRecorder()
+    var stoppedSpeech: CheckedContinuation<Void, Never>?
+    var permissionRequests = 0
+    let talk = TalkController(recorder: recorder, permission: { permissionRequests += 1; return true })
+    let wire = TalkWire()
+    talk.configure(begin: { id in wire.begins.append(id); return true },
+                   cancel: { wire.cancels.append($0) },
+                   deliver: { wire.deliveries.append(($0, $1, $2)) },
+                   stopSpeech: { await withCheckedContinuation { stoppedSpeech = $0 } })
+    let control = UUID()
+    talk.holdBegan(interaction: control)
+    try await eventuallySession { stoppedSpeech != nil }
+    await talk.holdMoved(horizontalTranslation: -121, verticalTranslation: 0, interaction: control).value
+    #expect(talk.state == .cancelled && talk.outcome == .discarded)
+    stoppedSpeech?.resume(); stoppedSpeech = nil
+    await talk.holdEnded(interaction: control).value
+    #expect(permissionRequests == 0 && recorder.starts == 0)
+    #expect(wire.begins.isEmpty && wire.deliveries.isEmpty)
+}
+
 @MainActor @Test func slideCancellationStopsRecorderAndOnlyTellsAHubThatHeardTheBegin() async throws {
     let recorder = FakeTalkRecorder()
     let (talk, wire) = wired(recorder)
@@ -99,7 +136,8 @@ import Testing
     let (talk, wire) = wired(recorder)
     await talk.press(); await talk.release()
     #expect(wire.deliveries.isEmpty && wire.cancels.count == 1)
-    #expect(talk.state == .cancelled)
+    #expect(talk.state == .cancelled && talk.outcome == .tooShort)
+    #expect(talk.message == "Hold to talk.")
 }
 
 @MainActor @Test func fiveMinuteTimerSendsOnceAndPermissionRefusalDoesNotCapture() async throws {
@@ -256,60 +294,30 @@ import Testing
     await session.unpair()
 }
 
-@MainActor @Test func tapStartsAndSendsThroughTheSameRecorderAndLabels() async throws {
-    let recorder = FakeTalkRecorder()
-    let (talk, wire) = wired(recorder)
-    await talk.setGesture(.tap)
-    #expect(talk.label == "Tap to talk")
-    await talk.tap()
-    #expect(recorder.active)
-    #expect(talk.label == "Tap to send. Slide up to cancel.")
-    await talk.tap()
-    #expect(!recorder.active)
-    #expect(wire.deliveries.count == 1)
-}
-
-@MainActor @Test func gestureChangeAndOldViewCleanupCannotCancelReleasedOrNewTalk() async throws {
+@MainActor @Test func oldViewCleanupCannotCancelTheCurrentCapture() async throws {
     let recorder = FakeTalkRecorder()
     let (talk, wire) = wired(recorder)
     let old = UUID(), current = UUID()
     await talk.press(interaction: old)
-    await talk.setGesture(.tap)
-    #expect(!recorder.active && wire.deliveries.isEmpty)
+    await talk.cancel()
     await talk.press(interaction: current)
+    await talk.controlDisappeared(interaction: old)
     await talk.cancelInteraction(old)
-    await talk.releaseInteraction(old).value
     #expect(recorder.active)
     await talk.release()
-    await talk.cancelInteraction(current)
     #expect(wire.deliveries.count == 1)
-    #expect(wire.cancels.count == 1)
 }
 
-@MainActor @Test func delayedTapPermissionIsInvalidatedBySecondTapOrGestureChange() async throws {
-    for change in [false, true] {
-        let recorder = FakeTalkRecorder(), permission = HeldMicrophonePermission()
-        let (talk, wire) = wired(recorder, permission: { await permission.request() })
-        await talk.setGesture(.tap)
-        let first = Task { await talk.tap() }
-        try await eventuallySession { permission.waiter != nil }
-        if change { await talk.setGesture(.hold) } else { await talk.tap() }
-        permission.grant(); await first.value
-        #expect(!recorder.active && recorder.starts == 0)
-        #expect(wire.begins.isEmpty && wire.deliveries.isEmpty)
-    }
-}
-
-@MainActor @Test func tapPermissionMayFinishAfterFingerReleaseWhileItsIntentIsStillOwned() async throws {
+@MainActor @Test func secondAccessibilityActionRetiresPendingPermission() async throws {
     let recorder = FakeTalkRecorder(), permission = HeldMicrophonePermission()
     let (talk, wire) = wired(recorder, permission: { await permission.request() })
-    await talk.setGesture(.tap)
-    let first = Task { await talk.tap() }
+    let control = UUID()
+    let first = talk.activate(interaction: control)
     try await eventuallySession { permission.waiter != nil }
+    await talk.activate(interaction: control).value
     permission.grant(); await first.value
-    #expect(recorder.active)
-    await talk.tap()
-    #expect(!recorder.active && wire.deliveries.count == 1)
+    #expect(!recorder.active && recorder.starts == 0)
+    #expect(wire.begins.isEmpty && wire.deliveries.isEmpty)
 }
 
 @MainActor @Test func cancelledDeferredPressCannotOutliveItsReplacementInteraction() async throws {
@@ -337,50 +345,18 @@ import Testing
     #expect(wire.begins.isEmpty && wire.deliveries.isEmpty)
 }
 
-@MainActor @Test(arguments: [TalkGesture.hold, .tap])
-func interruptedHoldStopsCaptureAndNextHoldSendsNormally(gesture: TalkGesture) async throws {
+@MainActor @Test func interruptedHoldStopsCaptureAndNextHoldSendsNormally() async throws {
     let recorder = FakeTalkRecorder()
     let (talk, wire) = wired(recorder)
-    await talk.setGesture(gesture)
     let first = UUID(), second = UUID()
     talk.holdBegan(interaction: first)
-    if gesture == .tap { await talk.holdEnded(interaction: first).value }
     try await eventuallySession { recorder.active }
-    if gesture == .tap { talk.holdBegan(interaction: first) }
     await talk.holdInterrupted(interaction: first).value
     #expect(!recorder.active && wire.deliveries.isEmpty)
     #expect(talk.state == .cancelled)
     talk.holdBegan(interaction: second)
-    if gesture == .tap { await talk.holdEnded(interaction: second).value }
     try await eventuallySession { recorder.active }
-    if gesture == .tap { talk.holdBegan(interaction: second) }
     await talk.holdEnded(interaction: second).value
-    #expect(!recorder.active && wire.deliveries.count == 1)
-}
-
-@MainActor @Test(arguments: [TalkGesture.hold, .tap])
-func slideUpCancelsUntilFingerEndsAndNextTouchCanSend(gesture: TalkGesture) async throws {
-    let recorder = FakeTalkRecorder()
-    let (talk, wire) = wired(recorder)
-    await talk.setGesture(gesture)
-    let control = UUID()
-    talk.holdBegan(interaction: control)
-    if gesture == .tap { await talk.holdEnded(interaction: control).value }
-    try await eventuallySession { recorder.active }
-    talk.holdBegan(interaction: control)
-    await talk.holdMoved(verticalTranslation: -60, interaction: control).value
-    #expect(recorder.active)
-    await talk.holdMoved(verticalTranslation: -61, interaction: control).value
-    #expect(!recorder.active && wire.deliveries.isEmpty)
-    talk.holdBegan(interaction: control)
-    await talk.holdMoved(verticalTranslation: 0, interaction: control).value
-    await talk.holdEnded(interaction: control).value
-    #expect(!recorder.active && recorder.starts == 1)
-    talk.holdBegan(interaction: control)
-    if gesture == .tap { await talk.holdEnded(interaction: control).value }
-    try await eventuallySession { recorder.active }
-    if gesture == .tap { talk.holdBegan(interaction: control) }
-    await talk.holdEnded(interaction: control).value
     #expect(!recorder.active && wire.deliveries.count == 1)
 }
 
@@ -456,4 +432,77 @@ func slideUpCancelsUntilFingerEndsAndNextTouchCanSend(gesture: TalkGesture) asyn
     #expect(throws: HubProtocolError.self) { try recorder.start {} }
     #expect(!session.active)
     #expect(session.releases == 2)
+}
+
+@MainActor @Test func slidingUpLocksAndReleasingKeepsTheTalkUntilExplicitSend() async throws {
+    let recorder = FakeTalkRecorder()
+    let (talk, wire) = wired(recorder)
+    let control = UUID()
+    talk.holdBegan(interaction: control)
+    try await eventuallySession { recorder.active }
+    await talk.holdMoved(horizontalTranslation: 0, verticalTranslation: -61, interaction: control).value
+    #expect(talk.isLocked && talk.state == .recording)
+    await talk.holdEnded(interaction: control).value
+    #expect(recorder.active && wire.deliveries.isEmpty)
+    await talk.send()
+    await talk.send()
+    #expect(!recorder.active && wire.deliveries.count == 1)
+    talk.holdBegan(interaction: control)
+    try await eventuallySession { recorder.active }
+    await talk.holdEnded(interaction: control).value
+    #expect(wire.deliveries.count == 2)
+}
+
+@MainActor @Test func slidingLeftOrTrashingALockedTalkDiscardsWithoutDelivery() async throws {
+    for locked in [false, true] {
+        let recorder = FakeTalkRecorder()
+        let (talk, wire) = wired(recorder)
+        let control = UUID()
+        talk.holdBegan(interaction: control)
+        try await eventuallySession { recorder.active }
+        await talk.holdMoved(horizontalTranslation: -60, verticalTranslation: -30, interaction: control).value
+        #expect(talk.lockProgress == 0.5 && talk.discardProgress == 0.5)
+        if locked {
+            await talk.holdMoved(verticalTranslation: -61, interaction: control).value
+            await talk.holdEnded(interaction: control).value
+            await talk.discard()
+        } else {
+            await talk.holdMoved(horizontalTranslation: -121, verticalTranslation: 0, interaction: control).value
+            await talk.holdEnded(interaction: control).value
+        }
+        #expect(!recorder.active && !talk.isLocked)
+        #expect(wire.deliveries.isEmpty && wire.cancels.count == 1)
+    }
+}
+
+@MainActor @Test(arguments: ["control", "background", "unpair"])
+func leavingALockedTalkRetiresTheMicrophoneWithoutSending(transition: String) async throws {
+    let recorder = FakeTalkRecorder(), store = MemoryPairingStore(), socket = FakeSocket()
+    store.record = try testPairingCredentials()
+    let talk = TalkController(recorder: recorder, permission: { true })
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) }, makePaths: { nil }, talk: talk)
+    await session.launch(); await socket.ready()
+    try await eventuallySession { session.connection.canSend }
+    let control = UUID()
+    talk.holdBegan(interaction: control)
+    try await eventuallySession { recorder.active }
+    await talk.holdMoved(verticalTranslation: -61, interaction: control).value
+    await talk.holdEnded(interaction: control).value
+    #expect(talk.isLocked && recorder.active)
+    if transition == "control" { await talk.controlDisappeared(interaction: control) }
+    else if transition == "background" { await session.setForeground(false) }
+    else { await session.unpair() }
+    #expect(!recorder.active && !talk.isLocked)
+    #expect(session.outbox?.items.isEmpty ?? true)
+    await session.unpair()
+}
+
+@MainActor @Test func accessibilityStartsAndSendsOneTalk() async throws {
+    let recorder = FakeTalkRecorder()
+    let (talk, wire) = wired(recorder)
+    let control = UUID()
+    await talk.activate(interaction: control).value
+    #expect(recorder.active)
+    await talk.activate(interaction: control).value
+    #expect(!recorder.active && wire.deliveries.count == 1)
 }

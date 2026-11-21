@@ -134,3 +134,63 @@ import Testing
     try await eventuallySession { session.orb.speaker == .jarvis }
     await session.unpair()
 }
+
+@MainActor @Test func orbFollowsTheUsersTalkAndIdlesAfterSendingOrCancelling() async throws {
+    let store = MemoryPairingStore(), socket = FakeSocket(), frames = FakeSleeper(), recorder = FakeTalkRecorder()
+    store.record = try testPairingCredentials()
+    let talk = TalkController(recorder: recorder, permission: { true })
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
+                             makePaths: { nil }, talk: talk, orbSleep: { try await frames.sleep($0) })
+    await session.launch(); await socket.ready()
+    try await eventuallySession { session.connection.canSend }
+    recorder.level = 0.5
+    await talk.press()
+    try await eventuallySession { await frames.pending == 1 }
+    await frames.advance()
+    try await eventuallySession { session.orb.speaker == .user }
+    #expect(abs(session.orb.level - 0.1) < 0.000001)
+    recorder.level = 1
+    await frames.advance()
+    try await eventuallySession { session.orb.level > 0.1 }
+    #expect(abs(session.orb.level - 0.28) < 0.000001)
+    await talk.release()
+    await frames.advance()
+    try await eventuallySession { session.orb.speaker == .idle }
+    await talk.press()
+    await frames.advance()
+    try await eventuallySession { session.orb.speaker == .user }
+    await talk.cancel()
+    await frames.advance()
+    try await eventuallySession { session.orb.speaker == .idle }
+    await session.unpair()
+}
+
+@MainActor @Test func startingATalkMovesTheOrbFromJarvisToTheUser() async throws {
+    let store = MemoryPairingStore(), socket = FakeSocket(), frames = FakeSleeper()
+    let recorder = FakeTalkRecorder(), output = FakeSpeechOutput()
+    store.record = try testPairingCredentials()
+    let talk = TalkController(recorder: recorder, permission: { true })
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
+                             makePaths: { nil }, talk: talk, playback: SpeechPlayer(session: SpeechSession(), output: output),
+                             orbSleep: { try await frames.sleep($0) })
+    await session.launch(); await socket.ready()
+    try await eventuallySession { session.connection.canSend }
+    await socket.text(event(2, "speech_begin", #"{"speech_id":"s","reply_id":"r","sample_rate":24000,"channels":1,"sample_width":2}"#))
+    await socket.text(event(3, "speech_clip", #"{"speech_id":"s","reply_id":"r","index":0,"text":"One.","byte_length":2}"#))
+    socket.input.yield(.binary(Data([0, 64])))
+    try await eventuallySession { output.bytes.count == 1 }
+    output.level = 0.5
+    try await eventuallySession { await frames.pending == 1 }
+    await frames.advance()
+    try await eventuallySession { session.orb.speaker == .jarvis }
+    recorder.level = 1
+    await talk.press()
+    #expect(session.playback.playingSpeechID == nil && output.stops > 0)
+    await frames.advance()
+    try await eventuallySession { session.orb.speaker == .user }
+    #expect(abs(session.orb.level - 0.28) < 0.000001)
+    await talk.cancel()
+    await frames.advance()
+    try await eventuallySession { session.orb.speaker == .idle }
+    await session.unpair()
+}

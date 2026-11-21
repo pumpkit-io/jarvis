@@ -18,7 +18,9 @@ import Testing
             continuation.resume()
         }
     }
+    #expect(abs(buffer.level - 0.5) < 0.000001)
     let bytes = buffer.finish()
+    #expect(buffer.level == 0)
     #expect(bytes.count == 640)
     #expect(bytes == Data((0..<320).flatMap { _ in [UInt8(0), UInt8(64)] }))
 }

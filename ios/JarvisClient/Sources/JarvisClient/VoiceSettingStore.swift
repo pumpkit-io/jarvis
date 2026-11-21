@@ -26,16 +26,6 @@ public struct VoiceSettingStore: Sendable {
         if FileManager.default.fileExists(atPath: gesture.path) { try FileManager.default.removeItem(at: gesture) }
     }
 
-    public func loadGesture(_ credentials: PairingCredentials) throws -> TalkGesture? {
-        let file = file(credentials).deletingPathExtension().appendingPathExtension("gesture.json")
-        guard FileManager.default.fileExists(atPath: file.path) else { return nil }
-        return try JSONDecoder().decode(TalkGesture.self, from: Data(contentsOf: file))
-    }
-
-    public func saveGesture(_ gesture: TalkGesture, for credentials: PairingCredentials) throws {
-        try write(gesture, to: file(credentials).deletingPathExtension().appendingPathExtension("gesture.json"))
-    }
-
     private func write<Value: Encodable>(_ value: Value, to file: URL) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try JSONEncoder().encode(value).write(to: file, options: .atomic)

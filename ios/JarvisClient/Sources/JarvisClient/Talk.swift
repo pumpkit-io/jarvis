@@ -2,14 +2,16 @@ import Foundation
 import Observation
 
 @MainActor public protocol TalkRecorder: AnyObject {
+    var level: Double { get }
     func start(limitReached: @escaping @MainActor @Sendable () -> Void) throws
     func stop() -> Data
 }
 
-public enum TalkGesture: String, Codable, CaseIterable, Sendable {
-    case hold, tap
-    public var label: String { self == .hold ? "Hold to talk" : "Tap to start and stop" }
+public extension TalkRecorder {
+    var level: Double { 0 }
 }
+
+public enum TalkOutcome: Equatable, Sendable { case tooShort, discarded }
 
 public enum TalkState: Equatable, Sendable {
     case idle, authorizing, recording, refused, failed, cancelled
@@ -21,20 +23,26 @@ public enum TalkState: Equatable, Sendable {
     public private(set) var elapsed = 0
     public private(set) var talkID: String?
     public private(set) var microphoneRefused = false
-    public private(set) var gesture: TalkGesture = .hold
+    public private(set) var outcome: TalkOutcome?
     private var interaction: UUID?
     private var touch: UUID?
     private var touchCapture: UUID?
     private var captureControl: UUID?
     private var pendingPress: Task<Void, Never>?
+    public private(set) var isLocked = false
+    public private(set) var lockProgress = 0.0
+    public private(set) var discardProgress = 0.0
+    public static let lockDistance = 60.0
+    public static let discardDistance = 120.0
     public private(set) var holdCancelled = false
     public var speaking = false
+    public var level: Double { state == .recording ? recorder.level : 0 }
     public var label: String { label(for: state) }
     public func label(for state: TalkState) -> String {
         switch state {
-        case .recording: gesture == .hold ? "Release to send. Slide up to cancel." : "Tap to send. Slide up to cancel."
+        case .recording: isLocked ? "Send Talk" : "Release to send. Slide up to lock or left to cancel."
         case .authorizing: "Allow the microphone"
-        default: gesture == .hold ? (speaking ? "Hold to interrupt" : "Hold to talk") : (speaking ? "Tap to interrupt" : "Tap to talk")
+        default: speaking ? "Hold to interrupt" : "Hold to talk"
         }
     }
     public var message: String? {
@@ -44,7 +52,7 @@ public enum TalkState: Equatable, Sendable {
         return switch state {
         case .refused: "Jarvis needs the microphone to hear you. Allow it in Settings."
         case .failed: "The microphone couldn't start. Try again."
-        case .cancelled: "Talk cancelled."
+        case .cancelled: outcome == .tooShort ? "Hold to talk." : "Talk cancelled."
         default: nil
         }
     }
@@ -80,40 +88,34 @@ public enum TalkState: Equatable, Sendable {
         self.begin = begin; cancelBegun = cancel; self.deliver = deliver; self.stopSpeech = stopSpeech
     }
 
-    public func setGesture(_ value: TalkGesture) async {
-        guard gesture != value else { return }
-        gesture = value
-        if state == .authorizing || state == .recording { await cancel() }
-    }
-
     public func holdBegan(interaction id: UUID) {
         guard touch == nil else { return }
         touch = id; holdCancelled = false
-        if gesture == .hold {
-            guard canPress else { holdCancelled = true; return }
-            let capture = UUID(); touchCapture = capture
-            startInteraction(capture, control: id)
-        } else {
-            if state == .recording || state == .authorizing { touchCapture = interaction }
-            else if pendingPress == nil { touchCapture = nil }
-        }
+        guard canPress else { holdCancelled = true; return }
+        let capture = UUID(); touchCapture = capture
+        startInteraction(capture, control: id)
     }
 
-    @discardableResult public func holdMoved(verticalTranslation: Double, interaction id: UUID) -> Task<Void, Never> {
-        guard touch == id, !holdCancelled, verticalTranslation < -60 else { return Task {} }
-        holdCancelled = true
-        return cancelTouchCapture()
+    @discardableResult public func holdMoved(horizontalTranslation: Double = 0, verticalTranslation: Double, interaction id: UUID) -> Task<Void, Never> {
+        guard touch == id, !holdCancelled, !isLocked else { return Task {} }
+        lockProgress = min(1, max(0, -verticalTranslation / Self.lockDistance))
+        discardProgress = min(1, max(0, -horizontalTranslation / Self.discardDistance))
+        if horizontalTranslation < -Self.discardDistance {
+            holdCancelled = true
+            return cancelTouchCapture()
+        }
+        // Locked controls replace the held mic, so the touch no longer owns capture.
+        if state == .recording, verticalTranslation < -Self.lockDistance { isLocked = true; touch = nil }
+        return Task {}
     }
+
+    public func send() async { await release() }
+    public func discard() async { await cancel() }
 
     @discardableResult public func holdEnded(interaction id: UUID) -> Task<Void, Never> {
         guard touch == id else { return Task {} }
         touch = nil
-        guard !holdCancelled else { return Task {} }
-        if gesture == .tap, touchCapture == nil, canPress {
-            let capture = UUID(); touchCapture = capture
-            startInteraction(capture, control: id)
-            return Task {}
-        }
+        guard !holdCancelled, !isLocked else { return Task {} }
         guard let capture = touchCapture else { return Task {} }
         touchCapture = nil
         let task = pendingPress; pendingPress = nil
@@ -166,11 +168,6 @@ public enum TalkState: Equatable, Sendable {
         }
     }
 
-    public func tap() async {
-        if state == .recording || state == .authorizing { await release() }
-        else { await press() }
-    }
-
     @discardableResult public func releaseInteraction(_ id: UUID, pendingPress: Task<Void, Never>? = nil) -> Task<Void, Never> {
         if interaction != id || state != .recording { pendingPress?.cancel() }
         return Task {
@@ -189,7 +186,7 @@ public enum TalkState: Equatable, Sendable {
         interaction = id
         generation &+= 1
         let owner = generation
-        state = .authorizing; elapsed = 0
+        state = .authorizing; elapsed = 0; outcome = nil; isLocked = false; lockProgress = 0; discardProgress = 0
         await stopSpeech()
         guard !Task.isCancelled, generation == owner, state == .authorizing else { return }
         let allowed = await permission()
@@ -224,11 +221,13 @@ public enum TalkState: Equatable, Sendable {
         if state == .authorizing { generation &+= 1; state = .idle; return }
         guard state == .recording, let id = talkID, let deliver else { return }
         generation &+= 1
+        isLocked = false; lockProgress = 0; discardProgress = 0
         let pcm = recorder.stop()
         timer?.cancel(); timer = nil
         talkID = nil
         guard pcm.count >= Self.shortestBytes, pcm.count <= TalkAudio.maxBytes, pcm.count.isMultiple(of: 2) else {
             state = .cancelled; holdCancelled = true
+            outcome = pcm.count < Self.shortestBytes ? .tooShort : .discarded
             await endBegun(id)
             return
         }
@@ -241,7 +240,8 @@ public enum TalkState: Equatable, Sendable {
         let id = talkID
         if state == .recording { _ = recorder.stop() }
         timer?.cancel(); timer = nil
-        state = .cancelled; holdCancelled = true; talkID = nil
+        state = .cancelled; holdCancelled = true; talkID = nil; outcome = .discarded
+        isLocked = false; lockProgress = 0; discardProgress = 0
         if let id { await endBegun(id) }
     }
 

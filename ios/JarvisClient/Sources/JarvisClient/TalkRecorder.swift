@@ -58,17 +58,29 @@ public final class TalkPCMBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var data = Data()
     private var closed = false
+    private var currentLevel = 0.0
+    public var level: Double { lock.withLock { currentLevel } }
     public init() {}
     @discardableResult public func append(_ bytes: Data) -> Bool {
         lock.withLock {
             guard !closed else { return false }
             let count = min(Self.maximumBytes - data.count, bytes.count - bytes.count % 2)
             data.append(bytes.prefix(count))
+            if count > 0 {
+                currentLevel = bytes.withUnsafeBytes { raw in
+                    var energy = 0.0
+                    for offset in stride(from: 0, to: count, by: 2) {
+                        let sample = Double(Int16(littleEndian: raw.loadUnaligned(fromByteOffset: offset, as: Int16.self))) / 32768
+                        energy += sample * sample
+                    }
+                    return sqrt(energy / Double(count / 2))
+                }
+            }
             if data.count == Self.maximumBytes { closed = true; return true }
             return false
         }
     }
-    public func finish() -> Data { lock.withLock { closed = true; defer { data = Data() }; return data } }
+    public func finish() -> Data { lock.withLock { closed = true; currentLevel = 0; defer { data = Data() }; return data } }
 }
 
 @MainActor public protocol TalkCaptureSource: AnyObject {
@@ -80,6 +92,7 @@ public final class TalkPCMBuffer: @unchecked Sendable {
     private let session: any TalkAudioSession
     private let source: any TalkCaptureSource
     private var capture: TalkPCMBuffer?
+    public var level: Double { capture?.level ?? 0 }
     public init(session: any TalkAudioSession = NativeTalkAudioSession(), source: any TalkCaptureSource = NativeTalkCaptureSource()) {
         self.session = session; self.source = source
     }
