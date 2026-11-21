@@ -100,13 +100,16 @@ struct MessageInputBar: View {
                     .disabled(!session.canSubmit)
                     .accessibilityLabel("Send line")
                 } else {
-                    TalkKey(talk: session.talk, controlSize: controlSize)
+                    TalkKey(talk: session.talk, controlSize: controlSize, level: session.orb.level)
                 }
             }
             .padding([.trailing, .bottom], 6)
         }
-        .background(theme.deep, in: RoundedRectangle(cornerRadius: 28))
-        .overlay { RoundedRectangle(cornerRadius: 28).strokeBorder(theme.rim, lineWidth: 1) }
+        // The rim sits behind the contents, so the held mic covers the pill instead of being crossed by it.
+        .background {
+            RoundedRectangle(cornerRadius: 28).fill(theme.deep)
+                .overlay { RoundedRectangle(cornerRadius: 28).strokeBorder(theme.rim, lineWidth: 1) }
+        }
     }
 
     @ViewBuilder private var field: some View {
@@ -140,7 +143,7 @@ struct MessageInputBar: View {
                         .offset(x: -24 * session.talk.discardProgress)
                         .frame(maxWidth: .infinity, alignment: .trailing)
                         .fixedSize(horizontal: false, vertical: true)
-                        .padding(.trailing, 28)
+                        .padding(.trailing, 48)
                 }
             }
             .accessibilityElement(children: .contain)

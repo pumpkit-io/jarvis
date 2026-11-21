@@ -5,10 +5,13 @@ struct TalkKey: View {
     static let diameter: CGFloat = 44
     @Bindable var talk: TalkController
     var controlSize: CGFloat
+    var level: Double = 0
     @State private var interaction = UUID()
     @GestureState private var pressed = false
     private let theme = JarvisTheme()
+    private static let heldDiameter: CGFloat = 80
     private var recording: Bool { talk.state == .recording }
+    private var holding: Bool { recording && !talk.holdCancelled }
 
     var body: some View {
         ZStack {
@@ -27,8 +30,14 @@ struct TalkKey: View {
                     .frame(width: Self.diameter, height: Self.diameter)
                     .foregroundStyle(theme.void)
                     .background(theme.cyan, in: Circle())
-                    .scaleEffect(recording && !talk.holdCancelled ? 80 / Self.diameter : 1)
-                    .animation(.easeOut(duration: 0.15), value: recording)
+                    .scaleEffect(holding ? Self.heldDiameter / Self.diameter : 1)
+                    .background {
+                        if holding {
+                            TalkWaves(level: level, radius: Self.heldDiameter / 2)
+                                .transition(.scale(scale: 0.6).combined(with: .opacity))
+                        }
+                    }
+                    .animation(.easeOut(duration: 0.15), value: holding)
                     .contentShape(Circle())
                     .gesture(DragGesture(minimumDistance: 0)
                         .updating($pressed) { _, pressed, _ in pressed = true }
@@ -51,7 +60,7 @@ struct TalkKey: View {
                             .foregroundStyle(theme.haze)
                             .padding(12)
                             .background(theme.deep, in: Capsule())
-                            .offset(y: -86 - 24 * talk.lockProgress)
+                            .offset(y: -106 - 24 * talk.lockProgress)
                             .opacity(0.6 + 0.4 * talk.lockProgress)
                             .accessibilityHidden(true)
                         }
