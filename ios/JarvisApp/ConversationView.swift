@@ -11,7 +11,7 @@ struct ConversationView: View {
     @State private var isAtBottom = true
     @State private var detailsChanging = false
     @State private var detailsRevision = 0
-    @State private var readingAnchor: String?
+    @State private var position = ScrollPosition(idType: String.self)
     @State private var scrollPhase: ScrollPhase = .idle
     @State var expandedDetails: Set<String> = []
     private var theme: JarvisTheme { JarvisTheme() }
@@ -69,12 +69,18 @@ struct ConversationView: View {
                 .padding(20)
                 .containerRelativeFrame(.horizontal)
             }
-            // Leading anchors and a container-wide column leave no horizontal offset for a resize to introduce.
-            .scrollPosition(id: $readingAnchor, anchor: .topLeading)
-            .defaultScrollAnchor(.bottomLeading, for: .initialOffset)
-            .defaultScrollAnchor(followsLatest ? .bottomLeading : nil, for: .sizeChanges)
-            .defaultScrollAnchor(.topLeading, for: .alignment)
+            // Centred anchors: a leading one lines a row's padded edge up with the viewport and offsets the script sideways.
+            .scrollPosition($position, anchor: .top)
+            .defaultScrollAnchor(.bottom, for: .initialOffset)
+            .defaultScrollAnchor(followsLatest ? .bottom : nil, for: .sizeChanges)
+            .defaultScrollAnchor(.top, for: .alignment)
             .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+            .onScrollGeometryChange(for: CGFloat.self) { $0.containerSize.height } action: { old, new in
+                guard old != new else { return }
+                // Restoring the position by hand makes the lazy stack lay out the rows a resize left undrawn.
+                if followsLatest { position.scrollTo(edge: .bottom) }
+                else if let row = position.viewID(type: String.self) { position.scrollTo(id: row, anchor: .top) }
+            }
             .scrollBounceBehavior(.always, axes: .vertical)
             .scrollDismissesKeyboard(.interactively)
             .onScrollGeometryChange(for: Bool.self) { geometry in

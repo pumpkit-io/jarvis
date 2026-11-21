@@ -20,6 +20,8 @@ public enum TalkState: Equatable, Sendable {
     public private(set) var talkID: String?
     public private(set) var microphoneRefused = false
     public private(set) var outcome: TalkOutcome?
+    /// Counts the User's own discards, so the screen can confirm each one once; lifecycle retirements don't count.
+    public private(set) var discards = 0
     private var interaction: UUID?
     private var touch: UUID?
     private var touchCapture: UUID?
@@ -48,7 +50,6 @@ public enum TalkState: Equatable, Sendable {
         return switch state {
         case .refused: "Jarvis needs the microphone to hear you. Allow it in Settings."
         case .failed: "The microphone couldn't start. Try again."
-        case .cancelled: outcome == .tooShort ? "Hold to talk." : "Talk cancelled."
         default: nil
         }
     }
@@ -98,6 +99,7 @@ public enum TalkState: Equatable, Sendable {
         discardProgress = min(1, max(0, -horizontalTranslation / Self.discardDistance))
         if horizontalTranslation < -Self.discardDistance {
             holdCancelled = true
+            discards += 1
             return cancelTouchCapture()
         }
         // Locked controls replace the held mic, so the touch no longer owns capture.
@@ -106,7 +108,11 @@ public enum TalkState: Equatable, Sendable {
     }
 
     public func send() async { await release() }
-    public func discard() async { await cancel() }
+    public func discard() async {
+        guard state == .authorizing || state == .recording else { return }
+        discards += 1
+        await cancel()
+    }
 
     @discardableResult public func holdEnded(interaction id: UUID) -> Task<Void, Never> {
         guard touch == id else { return Task {} }

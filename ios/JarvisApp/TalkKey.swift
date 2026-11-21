@@ -2,6 +2,7 @@ import JarvisClient
 import SwiftUI
 
 struct TalkKey: View {
+    static let diameter: CGFloat = 44
     @Bindable var talk: TalkController
     var controlSize: CGFloat
     @State private var interaction = UUID()
@@ -14,19 +15,19 @@ struct TalkKey: View {
             if talk.isLocked {
                 Button { Task { await talk.send() } } label: {
                     Image(systemName: "arrow.up")
-                        .font(.system(size: max(22, controlSize), weight: .semibold))
-                        .frame(width: 56, height: 56)
+                        .font(.system(size: max(20, controlSize), weight: .semibold))
+                        .frame(width: Self.diameter, height: Self.diameter)
                         .foregroundStyle(theme.void)
                         .background(theme.cyan, in: Circle())
                 }
                 .buttonStyle(.plain)
             } else {
                 Image(systemName: "mic.fill")
-                    .font(.system(size: max(22, controlSize), weight: .semibold))
-                    .frame(width: 56, height: 56)
+                    .font(.system(size: max(20, controlSize), weight: .semibold))
+                    .frame(width: Self.diameter, height: Self.diameter)
                     .foregroundStyle(theme.void)
                     .background(theme.cyan, in: Circle())
-                    .scaleEffect(recording && !talk.holdCancelled ? 80.0 / 56.0 : 1)
+                    .scaleEffect(recording && !talk.holdCancelled ? 80 / Self.diameter : 1)
                     .animation(.easeOut(duration: 0.15), value: recording)
                     .contentShape(Circle())
                     .gesture(DragGesture(minimumDistance: 0)
@@ -50,7 +51,7 @@ struct TalkKey: View {
                             .foregroundStyle(theme.haze)
                             .padding(12)
                             .background(theme.deep, in: Capsule())
-                            .offset(y: -92 - 24 * talk.lockProgress)
+                            .offset(y: -86 - 24 * talk.lockProgress)
                             .opacity(0.6 + 0.4 * talk.lockProgress)
                             .accessibilityHidden(true)
                         }
