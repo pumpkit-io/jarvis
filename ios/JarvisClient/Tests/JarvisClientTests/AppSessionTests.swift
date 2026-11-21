@@ -269,21 +269,22 @@ actor HeldPairing {
     await session.unpair()
 }
 
-@MainActor @Test func disconnectedFocusDoesNotQueueAndGestureSurvivesRestartThenUnpairClearsIt() async throws {
+@MainActor @Test func disconnectedFocusDoesNotQueueAndUnpairClearsLegacyGesture() async throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: directory) }
     let settings = VoiceSettingStore(directory: directory), store = MemoryPairingStore()
-    store.record = try testPairingCredentials()
-    let first = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in throw URLError(.notConnectedToInternet) })) }, voiceStore: settings, makePaths: { nil })
-    await first.launch(); await first.takeFocus()
-    #expect(first.focusMessage == "Couldn't reach the Mac. Not changed.")
-    await first.setTalkGesture(.tap)
-    let second = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in throw URLError(.notConnectedToInternet) })) }, voiceStore: settings, makePaths: { nil })
-    await second.launch()
-    #expect(second.talk.gesture == .tap)
-    await second.unpair()
-    #expect(try settings.loadGesture(testPairingCredentials()) == nil)
-    await first.unpair()
+    let credentials = try testPairingCredentials()
+    store.record = credentials
+    try settings.save(false, for: credentials)
+    let voiceFile = try #require(FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).first)
+    let legacyFile = voiceFile.deletingPathExtension().appendingPathExtension("gesture.json")
+    try Data("\"tap\"".utf8).write(to: legacyFile)
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in throw URLError(.notConnectedToInternet) })) }, voiceStore: settings, makePaths: { nil })
+    await session.launch(); await session.takeFocus()
+    #expect(session.focusMessage == "Couldn't reach the Mac. Not changed.")
+    await session.unpair()
+    #expect(!FileManager.default.fileExists(atPath: legacyFile.path))
+    #expect(try settings.load(credentials) == nil)
 }
 
 @MainActor @Test func uncertainFocusRetainsOneRequestAndDoesNotClaimNotChanged() async throws {
@@ -299,26 +300,5 @@ actor HeldPairing {
     #expect(session.focusPending)
     #expect(session.focusMessage?.contains("not confirmed") == true)
     #expect(await socket.sent.filter { $0.type == "take_focus" }.count == 1)
-    await session.unpair()
-}
-
-@MainActor @Test func newestGesturePersistsWhileOldCaptureCancellationWriteIsHeld() async throws {
-    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    defer { try? FileManager.default.removeItem(at: directory) }
-    let settings = VoiceSettingStore(directory: directory), store = MemoryPairingStore(), socket = FakeSocket(), recorder = FakeTalkRecorder()
-    store.record = try testPairingCredentials()
-    let talk = TalkController(recorder: recorder, permission: { true })
-    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) }, voiceStore: settings,
-                             makePaths: { nil }, talk: talk)
-    await session.launch(); await socket.ready()
-    try await eventuallySession { session.connection.canSend }
-    await talk.press(); await socket.blockSend("talk_cancel")
-    let first = Task { await session.setTalkGesture(.tap) }
-    try await eventuallySession { await socket.sendWaiter != nil }
-    #expect(!recorder.active)
-    await session.setTalkGesture(.hold)
-    await socket.releaseSend(); await first.value
-    #expect(talk.gesture == .hold)
-    #expect(try settings.loadGesture(testPairingCredentials()) == .hold)
     await session.unpair()
 }
