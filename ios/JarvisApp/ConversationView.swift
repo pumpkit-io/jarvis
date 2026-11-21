@@ -3,11 +3,10 @@ import SwiftUI
 
 struct ConversationView: View {
     @Bindable var session: AppSession
-    var showsTalkControls = true
+    var showsInputBar = true
     var typingChanged: (Bool) -> Void = { _ in }
     @ScaledMetric(relativeTo: .body) var scriptSize = 18
     @ScaledMetric(relativeTo: .subheadline) var controlSize = 15
-    @FocusState private var typing: Bool
     @State private var followsLatest = true
     @State private var isAtBottom = true
     @State private var detailsChanging = false
@@ -88,9 +87,9 @@ struct ConversationView: View {
             }
         }
         .background(theme.void)
-        .onChange(of: typing) { typingChanged(typing) }
-        .onDisappear { typingChanged(false) }
-        .safeAreaInset(edge: .bottom, spacing: 0) { composer }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if showsInputBar { MessageInputBar(session: session, typingChanged: typingChanged) }
+        }
     }
 
     /// A message still on this phone, shown where the User's line will appear once Jarvis hears it.
@@ -218,60 +217,4 @@ struct ConversationView: View {
         return AttributedString(row.text[..<range.lowerBound]) + marked + AttributedString(row.text[range.upperBound...])
     }
 
-    private var composer: some View {
-        VStack(spacing: 12) {
-            if let message = session.draftValidationMessage ?? session.inputMessage {
-                Text(message).foregroundStyle(theme.haze)
-            }
-            HStack(alignment: .bottom, spacing: 8) {
-                TextField("Type instead", text: $session.draft, axis: .vertical)
-                    .lineLimit(1...5)
-                    .textFieldStyle(.plain)
-                    .focused($typing)
-                    .frame(minHeight: 44)
-                    .onSubmit { submit() }
-                Button(action: submit) {
-                    Image(systemName: "arrow.up").frame(width: 44, height: 44)
-                }
-                .accessibilityLabel("Send line")
-                .buttonStyle(.plain)
-                .disabled(!session.canSubmit)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 4)
-            .foregroundStyle(theme.frost)
-            .background(theme.deep, in: RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.haze, lineWidth: 1))
-
-            if showsTalkControls { TalkControls(session: session, controlSize: controlSize, showsKeys: !typing) }
-        }
-        .font(.system(size: controlSize))
-        .padding(20)
-        .background(theme.void)
-    }
-
-    private func submit() { Task { await session.sendTypedLine() } }
-}
-
-struct VoiceControl: View {
-    @Bindable var session: AppSession
-    var controlSize: CGFloat
-    private var theme: JarvisTheme { JarvisTheme() }
-
-    var body: some View {
-        Button { Task { await session.setVoiceOn(!session.voiceOn) } } label: {
-            Text(session.voiceOn ? "Voice on" : "Voice off")
-                .font(.system(size: controlSize))
-                .multilineTextAlignment(.center)
-                .padding(12)
-                .frame(minWidth: 72, minHeight: controlSize > 20 ? 44 : 88)
-                .frame(maxWidth: controlSize > 20 ? .infinity : nil)
-                .contentShape(Rectangle())
-                .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.haze, lineWidth: 1))
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(theme.haze)
-        .accessibilityHint(session.voiceOn ? "Turn off speech on this phone" : "Turn on speech on this phone")
-        .accessibilityValue(session.voicePending ? "Waiting for the Mac" : session.voiceOn ? "On" : "Off")
-    }
 }

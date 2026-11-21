@@ -59,19 +59,15 @@ struct TasksView: View {
 
 struct WorkspaceView: View {
     @Bindable var session: AppSession
-    @State private var typing = false
     @ScaledMetric(relativeTo: .subheadline) private var controlSize = 15
 
     var body: some View {
         VStack(spacing: 0) {
             WorkspaceTopBar(session: session, controlSize: controlSize)
-            ConversationView(session: session, showsTalkControls: false, typingChanged: { typing = $0 })
+            ConversationView(session: session, showsInputBar: false)
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            if !typing || session.voiceMessage != nil || session.talk.message != nil {
-                TalkControls(session: session, controlSize: controlSize, showsKeys: !typing)
-                    .padding(20).background(JarvisTheme().void)
-            }
+            MessageInputBar(session: session)
         }
         #if os(iOS)
         .toolbar(.hidden, for: .navigationBar)
@@ -159,8 +155,7 @@ struct WorkspaceTopBar: View {
                 .toolbar(.visible, for: .navigationBar)
                 #endif
                 .safeAreaInset(edge: .bottom, spacing: 0) {
-                    TalkControls(session: session, controlSize: controlSize)
-                        .padding(20).background(theme.void)
+                    MessageInputBar(session: session)
                 }
         } label: {
             HStack(spacing: 5) {

@@ -1,37 +1,85 @@
 import JarvisClient
 import SwiftUI
 
-struct TalkControls: View {
+struct MessageInputBar: View {
     @Bindable var session: AppSession
-    var controlSize: CGFloat
-    var showsKeys = true
-    private var theme: JarvisTheme { JarvisTheme() }
+    var typingChanged: (Bool) -> Void = { _ in }
+    @ScaledMetric(relativeTo: .subheadline) var controlSize = 15
+    @FocusState private var typing: Bool
+    private let theme = JarvisTheme()
+    private var recording: Bool { session.talk.state == .recording }
+    private var hasDraft: Bool { !session.draft.isEmpty }
 
     var body: some View {
-        VStack(spacing: 12) {
-            if let message = session.voiceMessage { Text(message) }
+        VStack(alignment: .leading, spacing: 8) {
+            if let message = session.draftValidationMessage ?? session.inputMessage {
+                Text(message).fixedSize(horizontal: false, vertical: true)
+            }
+            if let message = session.voiceMessage { Text(message).fixedSize(horizontal: false, vertical: true) }
             if let message = session.talk.message {
-                Text(message)
+                Text(message).fixedSize(horizontal: false, vertical: true)
                 if session.talk.microphoneRefused {
-                    Link("Open Settings", destination: microphoneSettingsURL).underline().frame(minHeight: 44)
+                    Link("Open Settings", destination: microphoneSettingsURL)
+                        .underline().frame(minHeight: 44)
                 }
             }
-            if showsKeys {
-                if controlSize > 20 {
-                    VStack(spacing: 12) {
-                        TalkKey(talk: session.talk, controlSize: controlSize)
-                        VoiceControl(session: session, controlSize: controlSize)
+            HStack {
+                Spacer()
+                VoiceControl(session: session, controlSize: controlSize)
+            }
+            HStack(alignment: .bottom, spacing: 12) {
+                field
+                if hasDraft && !recording {
+                    Button { Task { await session.sendTypedLine() } } label: {
+                        Image(systemName: "arrow.up").font(.system(size: max(22, controlSize), weight: .semibold))
+                            .frame(width: 56, height: 56)
+                            .foregroundStyle(theme.void).background(theme.cyan, in: Circle())
                     }
+                    .buttonStyle(.plain)
+                    .disabled(!session.canSubmit)
+                    .accessibilityLabel("Send line")
                 } else {
-                    HStack(alignment: .top, spacing: 12) {
-                        TalkKey(talk: session.talk, controlSize: controlSize)
-                        VoiceControl(session: session, controlSize: controlSize)
-                    }
+                    TalkKey(talk: session.talk, controlSize: controlSize)
                 }
             }
+            .padding(.vertical, recording ? 12 : 0)
         }
         .font(.system(size: controlSize))
         .foregroundStyle(theme.haze)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 8)
+        .background(theme.void)
+        .onChange(of: typing) { typingChanged(typing) }
+        .onDisappear { typingChanged(false) }
+    }
+
+    private var field: some View {
+        Group {
+            if recording {
+                HStack(spacing: 8) {
+                    Circle().fill(theme.signal).frame(width: 8, height: 8).accessibilityHidden(true)
+                    Text(String(format: "%d:%02d", session.talk.elapsed / 60, session.talk.elapsed % 60))
+                        .monospacedDigit().fontWeight(.semibold)
+                    Spacer(minLength: 0)
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Recording")
+                .accessibilityValue("\(session.talk.elapsed) seconds")
+            } else {
+                TextField("Message Jarvis", text: $session.draft, prompt: Text("Message Jarvis").foregroundStyle(theme.haze), axis: .vertical)
+                    .lineLimit(1...5)
+                    .textFieldStyle(.plain)
+                    .tint(theme.cyan)
+                    .focused($typing)
+                    .onSubmit { Task { await session.sendTypedLine() } }
+            }
+        }
+        .foregroundStyle(theme.frost)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .frame(minHeight: 56)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(theme.deep, in: RoundedRectangle(cornerRadius: 28))
     }
 
     private var microphoneSettingsURL: URL {
@@ -40,5 +88,25 @@ struct TalkControls: View {
         #else
         URL(string: "app-settings:")!
         #endif
+    }
+}
+
+struct VoiceControl: View {
+    @Bindable var session: AppSession
+    var controlSize: CGFloat
+    private let theme = JarvisTheme()
+
+    var body: some View {
+        Button { Task { await session.setVoiceOn(!session.voiceOn) } } label: {
+            Image(systemName: session.voiceOn ? "speaker.wave.2" : "speaker.slash")
+                .font(.system(size: controlSize))
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(theme.haze)
+        .accessibilityLabel("Jarvis voice")
+        .accessibilityHint(session.voiceOn ? "Turn off speech on this phone" : "Turn on speech on this phone")
+        .accessibilityValue(session.voicePending ? "Waiting for the Mac" : session.voiceOn ? "On" : "Off")
     }
 }

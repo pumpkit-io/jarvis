@@ -6,55 +6,40 @@ struct TalkKey: View {
     var controlSize: CGFloat
     @State private var interaction = UUID()
     @GestureState private var pressed = false
-    private var theme: JarvisTheme { JarvisTheme() }
+    private let theme = JarvisTheme()
     private var recording: Bool { talk.state == .recording }
 
     var body: some View {
-        ZStack {
-            ForEach(Array([TalkState.idle, .authorizing, .recording].enumerated()), id: \.offset) { _, state in
-                label(talk.label(for: state), recording: state == .recording)
-                    .hidden()
-                    .accessibilityHidden(true)
+        Image(systemName: "mic.fill")
+            .font(.system(size: max(22, controlSize), weight: .semibold))
+            .frame(width: 56, height: 56)
+            .foregroundStyle(theme.void)
+            .background(theme.cyan, in: Circle())
+            .scaleEffect(recording && !talk.holdCancelled ? 80.0 / 56.0 : 1)
+            .animation(.easeOut(duration: 0.15), value: recording)
+            .contentShape(Circle())
+            .gesture(DragGesture(minimumDistance: 0)
+                .updating($pressed) { _, pressed, _ in pressed = true }
+                .onChanged { value in
+                    talk.holdBegan(interaction: interaction)
+                    talk.holdMoved(verticalTranslation: value.translation.height, interaction: interaction)
+                }
+                .onEnded { _ in talk.holdEnded(interaction: interaction) })
+            .onChange(of: pressed) { _, value in
+                if !value { talk.holdInterrupted(interaction: interaction) }
             }
-            label(talk.label, recording: recording)
-        }
-        .font(.system(size: controlSize))
-        .frame(maxWidth: .infinity, minHeight: 88)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .foregroundStyle(recording ? theme.frost : theme.void)
-        .background(recording ? theme.deep : theme.cyan, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(recording ? theme.signal : theme.cyan))
-        .scaleEffect(pressed && !talk.holdCancelled ? 0.98 : 1)
-        .contentShape(Rectangle())
-        .gesture(DragGesture(minimumDistance: 0)
-            .updating($pressed) { _, pressed, _ in pressed = true }
-            .onChanged { value in
-                talk.holdBegan(interaction: interaction)
-                talk.holdMoved(verticalTranslation: value.translation.height, interaction: interaction)
+            .onChange(of: recording) { _, value in
+                #if os(iOS)
+                if value { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+                #endif
             }
-            .onEnded { _ in talk.holdEnded(interaction: interaction) })
-        .onChange(of: pressed) { _, value in
-            if !value { talk.holdInterrupted(interaction: interaction) }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction { talk.activate(interaction: interaction) }
-        .accessibilityAction(named: "Cancel Talk") { Task { await talk.controlDisappeared(interaction: interaction) } }
-        .accessibilityHint(talk.gesture == .hold ? "Hold while speaking. Release to send. Slide up to cancel." : "Tap to start. Tap again to send. Slide up to cancel.")
-        .accessibilityValue(recording ? "Recording, \(talk.elapsed) seconds" : talk.label)
-        .onDisappear { Task { await talk.controlDisappeared(interaction: interaction) } }
-    }
-
-    private func label(_ text: String, recording: Bool) -> some View {
-        VStack(spacing: 8) {
-            if recording {
-                Text(String(format: "%d:%02d", talk.elapsed / 60, talk.elapsed % 60))
-                    .monospacedDigit().fontWeight(.semibold)
-            }
-            Text(text).fontWeight(.semibold).multilineTextAlignment(.center)
-        }
-        .fixedSize(horizontal: false, vertical: true)
-        .frame(maxWidth: .infinity)
+            .accessibilityElement(children: .ignore)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel(talk.label)
+            .accessibilityAction { talk.activate(interaction: interaction) }
+            .accessibilityAction(named: "Cancel Talk") { Task { await talk.controlDisappeared(interaction: interaction) } }
+            .accessibilityHint(talk.gesture == .hold ? "Hold while speaking. Release to send. Slide up to cancel." : "Tap to start. Tap again to send. Slide up to cancel.")
+            .accessibilityValue(recording ? "Recording, \(talk.elapsed) seconds" : talk.label)
+            .onDisappear { Task { await talk.controlDisappeared(interaction: interaction) } }
     }
 }
