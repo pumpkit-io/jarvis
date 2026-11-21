@@ -1732,8 +1732,6 @@ class Hub:
         delivery = news_delivery
         if self._news_delivery is not None and self._news_delivery is not delivery and self._news_delivery_told(self._news_delivery):
             self._news_delivery = None
-        if self._output.log is not None and self._output.reply_id is not None:
-            self._output.log.set_reply_language(self._output.reply_id, self._lang)
         audible = self._turn_spoken and self._client_can_speak(destination_id)
         speech = self._speech if audible else _Silent()
         if audible:
@@ -1793,6 +1791,9 @@ class Hub:
             if self._interrupted_turn != turn:
                 speech.end()
             if show:
+                # The language of the reply, not of the User's turn: a replay speaks it with that voice.
+                if self._output.log is not None and self._output.reply_id is not None:
+                    self._output.log.set_reply_language(self._output.reply_id, detect_language(shown, self._lang))
                 reason = ("stand_by" if self._silenced_turn == turn else
                           "interrupted" if self._interrupted_turn == turn else
                           "complete" if end.outcome == "completed" else "error")

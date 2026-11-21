@@ -1,3 +1,5 @@
+import time
+
 import pytest
 
 from jarvis_hub.voice.language import Lang, detect_language, voice_for
@@ -48,3 +50,11 @@ def test_detects_english_or_italian_and_keeps_the_previous_language_when_unsure(
 def test_each_language_has_its_voice_and_none_is_british() -> None:
     assert voice_for("en") == "am_liam"
     assert voice_for("it") == "im_nicola"
+
+
+def test_a_very_long_text_is_detected_from_its_start_in_a_moment() -> None:
+    # A long reply is detected on the Hub's event loop at the end of each turn.
+    started = time.perf_counter()
+
+    assert detect_language("Buongiorno signor Stark. " + "Pull request aperta. " * 20000, "en") == "it"
+    assert time.perf_counter() - started < 1

@@ -3,9 +3,11 @@
 import asyncio
 import threading
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
 
+from jarvis_hub.event_log import EventLog, EventOutput
 from jarvis_hub.hub import Hub
 from jarvis_hub.voice.speech import Speech
 from tests.fakes import (
@@ -111,7 +113,7 @@ async def test_text_either_side_of_a_tool_call_is_two_sentences(
     assert player.texts == ["Let me see, sir.", "Nothing is running"]
 
 
-async def test_the_voice_follows_the_language_of_the_users_last_turn(
+async def test_the_voice_follows_the_language_of_the_reply_which_here_matches_the_users_turn(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, speech: Speech, player: RecordingPlayer
 ) -> None:
     backend = FakeBackend(
@@ -134,6 +136,82 @@ async def test_the_voice_follows_the_language_of_the_users_last_turn(
         '<user lang="it" typed="true">ok</user>',
         '<user lang="en" typed="true">What are you working on?</user>',
     ]
+
+
+async def test_an_italian_reply_to_a_turn_tagged_english_is_spoken_with_the_italian_voice(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, speech: Speech, player: RecordingPlayer
+) -> None:
+    backend = FakeBackend(clock, [[Text("Ho aperto la pull request per il login.")]])
+    hub = speaking_hub(backend, output, metrics, speech)
+
+    await hub.start()
+    await hub.run(lines(clock, "Open it"))
+    await speech.idle()
+
+    assert backend.sessions[0].received[1:] == ['<user lang="en" typed="true">Open it</user>']
+    assert list(zip(player.texts, player.voices)) == [("Ho aperto la pull request per il login.", "im_nicola")]
+    [row] = speech_rows(metrics)
+    assert (row["lang"], row["voice"]) == ("it", "im_nicola")
+
+
+async def test_an_english_reply_to_a_turn_tagged_italian_is_spoken_with_the_english_voice(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, speech: Speech, player: RecordingPlayer
+) -> None:
+    backend = FakeBackend(clock, [[Text("I opened the pull request for the login.")]])
+    hub = speaking_hub(backend, output, metrics, speech)
+
+    await hub.start()
+    await hub.run(lines(clock, "Apri la pull request per il login"))
+    await speech.idle()
+
+    assert backend.sessions[0].received[1:] == ['<user lang="it" typed="true">Apri la pull request per il login</user>']
+    assert list(zip(player.texts, player.voices)) == [("I opened the pull request for the login.", "am_liam")]
+
+
+async def test_each_sentence_of_a_mixed_reply_is_spoken_in_its_own_language(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, speech: Speech, player: RecordingPlayer
+) -> None:
+    backend = FakeBackend(clock, [[Text("Ho aperto la pull request per il login. The checks are all green. Ok.")]])
+    hub = speaking_hub(backend, output, metrics, speech)
+
+    await hub.start()
+    await hub.run(lines(clock, "Open it"))
+    await speech.idle()
+
+    assert list(zip(player.texts, player.voices)) == [
+        ("Ho aperto la pull request per il login.", "im_nicola"),
+        ("The checks are all green.", "am_liam"),
+        # Too short to tell: it keeps the voice before it.
+        ("Ok.", "am_liam"),
+    ]
+
+
+async def test_a_sentence_too_short_to_tell_keeps_the_language_of_the_users_turn(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, speech: Speech, player: RecordingPlayer
+) -> None:
+    backend = FakeBackend(clock, [[Text("Ok.")]])
+    hub = speaking_hub(backend, output, metrics, speech)
+
+    await hub.start()
+    await hub.run(lines(clock, "Su cosa stai lavorando?"))
+    await speech.idle()
+
+    assert list(zip(player.texts, player.voices)) == [("Ok.", "im_nicola")]
+
+
+async def test_the_retained_reply_is_logged_in_the_language_it_was_spoken_in(
+    clock: FakeClock, metrics: RecordingMetrics, speech: Speech, tmp_path: Path
+) -> None:
+    backend = FakeBackend(clock, [[Text("Ho aperto la pull request per il login.")]])
+    with EventLog(tmp_path / "events.db") as log:
+        hub = make_hub(backend, EventOutput(log, RecordingOutput()), metrics, speech=speech)
+
+        await hub.start()
+        await hub.run(lines(clock, "Open it"))
+        await speech.idle()
+
+        [end] = [e for e in log.after(0) if e.type == "reply_end"]
+        assert log.retained_reply(end.payload["reply_id"]) == ("Ho aperto la pull request per il login.", "it")
 
 
 async def test_news_is_spoken_in_the_language_of_the_users_last_turn(
