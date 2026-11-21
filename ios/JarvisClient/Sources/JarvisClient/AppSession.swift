@@ -22,8 +22,6 @@ import Observation
     public private(set) var focusHere = false
     public private(set) var focusPending = false
     public private(set) var focusMessage: String?
-    public private(set) var gestureMessage: String?
-    private var gestureRevision: UInt64 = 0
     private var focusCommand: HubCommand?
     public private(set) var voiceOn = true
     public private(set) var voicePending = false
@@ -307,17 +305,6 @@ import Observation
         }
     }
 
-    public func setTalkGesture(_ value: TalkGesture) async {
-        guard let credentials else { return }
-        let owner = generation
-        gestureRevision &+= 1
-        let revision = gestureRevision
-        await talk.setGesture(value)
-        guard generation == owner, gestureRevision == revision, self.credentials == credentials else { return }
-        do { try voiceStore?.saveGesture(value, for: credentials); gestureMessage = nil }
-        catch { gestureMessage = "Talk gesture changed for this session, but could not be saved. Try again." }
-    }
-
     public func takeFocus() async {
         guard !focusPending else { return }
         guard connection.canSend, let client else { focusMessage = "Couldn't reach the Mac. Not changed."; return }
@@ -412,7 +399,7 @@ import Observation
         do {
             if let oldCredentials { try voiceStore?.clear(oldCredentials) }
         } catch { historyClearFailed = true }
-        focusHere = false; focusPending = false; focusCommand = nil; focusMessage = nil; gestureMessage = nil
+        focusHere = false; focusPending = false; focusCommand = nil; focusMessage = nil
         voiceOn = true; explicitSilence = nil; voicePending = false; voiceMessage = nil; voicePersistenceFailed = false; voiceRevision = 0
         voiceChosenHere = false
         do { try store.clear(); error = historyClearFailed ? .storage : nil } catch { self.error = .storage }
@@ -472,9 +459,6 @@ import Observation
             }
             guard generation == owner else { return }
         }
-        let gesture = try voiceStore?.loadGesture(credentials) ?? .hold
-        await talk.setGesture(gesture)
-        guard generation == owner else { return }
         explicitSilence = try voiceStore?.load(credentials)
         voiceOn = !(explicitSilence ?? false); voicePending = explicitSilence != nil
         let client: HubClient

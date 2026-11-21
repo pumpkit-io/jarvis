@@ -1,6 +1,6 @@
 # Jarvis on iPhone
 
-The app target is in `JarvisApp/`. Shared Client logic is in the `JarvisClient` Swift package, which builds and tests on the Mac without a phone. On first launch, Pairing accepts the QR printed by `./jarvis pair` or its HTTPS origin and six-digit code. The paired app opens the live Conversation script and typed composer. The Talk key records while held and sends on release. Voice on/off controls speech on this iPhone; Settings provides Hold or Tap gestures, Focus and confirmed unpairing. Pairing requests camera permission only when Scan is pressed; microphone permission is requested on the first Talk press.
+The app target is in `JarvisApp/`. Shared Client logic is in the `JarvisClient` Swift package, which builds and tests on the Mac without a phone. On first launch, Pairing accepts the QR printed by `./jarvis pair` or its HTTPS origin and six-digit code. The paired app opens the live Conversation script and typed composer. The mic records while held and sends on release; sliding up locks a Talk for hands-free recording and sliding left discards it. The sound button controls speech on this iPhone; Settings provides Focus and confirmed unpairing. Pairing requests camera permission only when Scan is pressed; microphone permission is requested on the first Talk press.
 
 ## Hub client package
 
@@ -40,7 +40,9 @@ Native macOS-hosted renders cover offline cached text, populated, loading histor
 
 ## Talk
 
-The full-width key records only while held, whatever the connection. It shows a timer and “Release to send. Slide up to cancel.” while recording, and is free again as soon as it is released. Sliding up by 60 points cancels that gesture without uploading; sliding back does not begin another capture. The first press requests microphone permission. A refusal shows “Jarvis needs the microphone to hear you. Allow it in Settings.” and an Open Settings link. A permission dialog, release, cancellation, backgrounding or unpairing retires the old hold, so a delayed grant cannot turn the microphone on. Returning from the permission dialog can require a fresh hold.
+Hold the round mic to record a Talk, whatever the connection. The input bar shows a red dot, timer and “‹ Slide to cancel”; the mic grows and a lock capsule appears above it. Slide up past 60 points to lock the Talk, then release your finger and keep speaking. The locked bar has trash, timer, a live microphone waveform and Send. Slide left past 120 points while holding, or tap trash while locked, to discard without putting anything in the Outbox. Release an unlocked Talk or tap Send on a locked Talk to queue it once. A capture shorter than 0.3 seconds sends nothing and shows “Hold to talk.” Start, lock and discard give haptic feedback; discard also animates a trash symbol. The thresholds are named controller constants for device tuning.
+
+VoiceOver activation starts a Talk and the next activation sends it; Cancel Talk discards it. There is one gesture, with no Hold/Tap preference. Existing saved gesture files are ignored and removed on unpair. The first press requests microphone permission. A refusal keeps the existing message and Open Settings link. Releasing before permission resolves, cancelling, backgrounding, unpairing or leaving the control retires the capture intent; a delayed grant cannot turn the microphone on. A locked Talk is also retired on those lifecycle changes.
 
 `TalkController` owns capture intent. `NativeTalkRecorder` activates the audio session, converts input to 16 kHz mono PCM16, and synchronously stops its source and releases the session before any acknowledgement or upload wait. The audio callback buffer caps the body at 9,600,000 bytes, independently of the five-minute UI timer. Neither idle nor thinking activates the session. A Talk stops local speech through the session's player hook and sends `interrupt` with only fully completed clips before `talk_begin`. `AppSession` stops its native player before awaiting the interrupt or recording. It sends one interrupt carrying the last contiguous finished clip, without a second stopped report that could cancel a newer turn.
 
@@ -48,9 +50,9 @@ The full-width key records only while held, whatever the connection. It shows a 
 
 Public package tests inject permission, capture source, recorder, session, upload, socket and clock fakes. They cover immediate session release, bounded PCM, the five-minute stop, cancellation, delayed grants across lifecycle transitions, recording while unreachable, interruption order and Outbox order, retries, renewals, persistence and background handover. No test opens a microphone or spends model usage.
 
-Native macOS-hosted renders were inspected at 320 × 740 and 393 × 852 points in both themes for recording, uploading, thinking, unreachable, refused, failed and cancelled states, before the Outbox removed the uploading and thinking states; queued rows and the always-available key have not been rendered yet. Explicit 38/30-point type stress checks wrapping. The original Signal red against white was 4.45:1; the adjusted `#D6402E` reaches 4.53:1, with a 3.11:1 edge against Baize and 3.86:1 against Linen. This keeps red reserved for active recording. These renders and a Swift 6 direct iOS 17 compile/link do not establish physical Dynamic Type, microphone-indicator timing, permission-dialog behavior, audio routing, VoiceOver or real gestures.
+The dark input bar uses Frost on Deep, Cyan controls with Void icons and Signal recording/discard indicators. Package tests exercise hold, lock, release, explicit send, slide and trash discard, too-short feedback, VoiceOver activation, delayed permission and cleanup on control disappearance, backgrounding and unpairing. Native simulator checks use fake audio and never open a microphone.
 
-Waiting on the User's hands: install and exercise the hold, slide-up, permission refusal/Settings recovery and five-minute flow on the iPhone; verify the system microphone indicator and audio session are off immediately on release/cancel and during idle/thinking. Device checks remain in the first-slice checklist. No device, simulator, actual capture, permission prompt or live Hub was used for this implementation.
+Physical threshold feel, haptics, VoiceOver and microphone-indicator release after locked send/discard still need the User's iPhone.
 
 ## Pairing
 
@@ -127,11 +129,11 @@ Waiting on User: installed-iPhone Voice off mid-sentence, AirPods/current-route 
 
 ## Settings
 
-Open Settings from the Conversation screen. Hold to talk remains the default. With Tap to start and stop selected, the first tap starts the same Talk recorder and the next sends it. Tap to interrupt stops the current reply before recording. Sliding up cancels; changing gesture or leaving the Talk control cancels an active capture without sending it. Leaving the screen after release keeps the admitted upload intact. Permission, backgrounding, disconnect and unpair guards still apply. The gesture is stored privately beside this pairing's Voice choice and is removed on unpair.
+Open Settings from the top-bar icon. Talk always uses hold, slide-up lock and slide-left discard; there is no gesture setting. Leaving the Talk control cancels an active hold or locked recording without sending, while leaving after send keeps the admitted Outbox item.
 
 Send updates here requests Focus without starting a conversation or model turn. Updates come to this iPhone follows current sequenced Hub status, including another Client taking Focus; a late command acknowledgement cannot override it. Definite offline failure says “Couldn't reach the Mac. Not changed.” An unanswered request remains pending under its original identity and is described as unconfirmed, since it may already have reached the Hub. The Settings screen shows the paired Mac's name and confirms Unpair this iPhone before invoking the existing credential, history, audio and preference cleanup.
 
-Package tests use fake sockets, recorders, permission gates and private temporary stores. They cover tap capture/send, delayed permission, old-view cleanup, gesture changes during capture, restart and unpair, stale Focus results and uncertain delivery. Device gestures, permission prompts, VoiceOver and signed navigation remain manual checks.
+Package tests use fake sockets, recorders, permission gates and private temporary stores. They cover hold and locked capture, delayed permission, old-view cleanup, legacy gesture-file removal on unpair, stale Focus results and uncertain delivery. Device gestures, permission prompts, VoiceOver and signed navigation remain manual checks.
 
 ## Install on your iPhone
 
