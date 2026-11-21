@@ -8,7 +8,11 @@ import Testing
     var stops = 0
     var active = false
     var pcm = Data(repeating: 1, count: 32_000)
-    func start(limitReached: @escaping @MainActor @Sendable () -> Void) throws { starts += 1; active = true }
+    var fails = false
+    func start(limitReached: @escaping @MainActor @Sendable () -> Void) throws {
+        if fails { throw CocoaError(.featureUnsupported) }
+        starts += 1; active = true
+    }
     func stop() -> Data { stops += 1; active = false; return pcm }
 }
 
@@ -551,4 +555,15 @@ func leavingALockedTalkRetiresTheMicrophoneWithoutSending(transition: String) as
     #expect(talk.discards == 1 && talk.takeDiscardConfirmation())
     await talk.cancel(interaction: control)
     #expect(talk.discards == 1)
+}
+
+@MainActor @Test func slidingAwayAFailedMicrophoneIsNotADiscard() async throws {
+    let recorder = FakeTalkRecorder()
+    recorder.fails = true
+    let (talk, _) = wired(recorder)
+    let control = UUID()
+    talk.holdBegan(interaction: control)
+    try await eventuallySession { talk.state == .failed }
+    await talk.holdMoved(horizontalTranslation: -121, verticalTranslation: 0, interaction: control).value
+    #expect(talk.discards == 0)
 }

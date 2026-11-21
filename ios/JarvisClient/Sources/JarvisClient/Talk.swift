@@ -100,7 +100,7 @@ public enum TalkState: Equatable, Sendable {
         discardProgress = min(1, max(0, -horizontalTranslation / Self.discardDistance))
         if horizontalTranslation < -Self.discardDistance {
             holdCancelled = true
-            discards += 1
+            if state == .authorizing || state == .recording || pendingPress != nil { discards += 1 }
             return cancelTouchCapture()
         }
         // Locked controls replace the held mic, so the touch no longer owns capture.
