@@ -4,11 +4,14 @@ import SwiftUI
 struct ConversationView: View {
     @Bindable var session: AppSession
     var showsInputBar = true
+    var collapse: (() -> Void)? = nil
     var typingChanged: (Bool) -> Void = { _ in }
     @ScaledMetric(relativeTo: .body) var scriptSize = 18
     @ScaledMetric(relativeTo: .subheadline) var controlSize = 15
     @State private var followsLatest = true
     @State private var isAtBottom = true
+    @State private var isAtTop = true
+    @State private var dragStartedAtTop: Bool?
     @State private var detailsChanging = false
     @State private var detailsRevision = 0
     @State private var readingAnchor: String?
@@ -73,6 +76,18 @@ struct ConversationView: View {
             .defaultScrollAnchor(.bottom, for: .initialOffset)
             .defaultScrollAnchor(followsLatest ? .bottom : nil, for: .sizeChanges)
             .defaultScrollAnchor(.top, for: .alignment)
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                geometry.contentOffset.y <= -geometry.contentInsets.top + 1
+            } action: { _, atTop in isAtTop = atTop }
+            .simultaneousGesture(DragGesture(minimumDistance: 30)
+                .onChanged { _ in
+                    if dragStartedAtTop == nil { dragStartedAtTop = isAtTop }
+                }
+                .onEnded { drag in
+                    defer { dragStartedAtTop = nil }
+                    if dragStartedAtTop == true, drag.translation.height > 50,
+                       abs(drag.translation.height) > abs(drag.translation.width) { collapse?() }
+                })
             .onScrollGeometryChange(for: Bool.self) { geometry in
                 geometry.contentSize.height - geometry.visibleRect.maxY <= 60
             } action: { _, atBottom in

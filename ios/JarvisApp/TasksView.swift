@@ -60,46 +60,111 @@ struct TasksView: View {
 struct WorkspaceView: View {
     @Bindable var session: AppSession
     @ScaledMetric(relativeTo: .subheadline) private var controlSize = 15
+    @ScaledMetric(relativeTo: .body) private var scriptSize = 18
+    @State private var expanded = false
+    @State private var keyboardVisible = false
+    private let theme = JarvisTheme()
 
     var body: some View {
         VStack(spacing: 0) {
             WorkspaceTopBar(session: session, controlSize: controlSize)
             GeometryReader { geometry in
+                let minimumConversation = 3 * (scriptSize * 1.25 + 5) + 40
+                let automaticallyExpanded = keyboardVisible && geometry.size.height < 120 + minimumConversation + 44
+                let showingExpanded = expanded || automaticallyExpanded
+                let orbHeight = keyboardVisible
+                    ? max(120, min(geometry.size.height * 0.4, geometry.size.height - minimumConversation - 44))
+                    : geometry.size.height * 0.4
                 VStack(spacing: 0) {
-                    OrbArea(session: session, controlSize: controlSize)
-                        .frame(height: geometry.size.height * 0.4)
-                    ConversationView(session: session, showsInputBar: false)
+                    OrbArea(session: session, controlSize: controlSize, isVisible: !showingExpanded)
+                        .frame(height: showingExpanded ? 0 : orbHeight)
+                        .opacity(showingExpanded ? 0 : 1)
+                        .clipped()
+                        .allowsHitTesting(!showingExpanded)
+                        .accessibilityHidden(showingExpanded)
+                    expansionControl(showingExpanded: showingExpanded)
+                    ConversationView(session: session, showsInputBar: false,
+                                     collapse: showingExpanded ? { setExpanded(false) } : nil)
                         .mask(alignment: .top) {
                             VStack(spacing: 0) {
                                 LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
-                                    .frame(height: 24)
+                                    .frame(height: showingExpanded ? 0 : 24)
                                 Rectangle()
                             }
                         }
+                        .simultaneousGesture(DragGesture(minimumDistance: 30).onEnded { drag in
+                            if !showingExpanded, drag.translation.height < -50,
+                               abs(drag.translation.height) > abs(drag.translation.width) {
+                                withAnimation(.easeInOut(duration: 0.25)) { expanded = true }
+                            }
+                        })
                 }
+                .animation(.easeInOut(duration: 0.25), value: showingExpanded)
             }
         }
-        .background(JarvisTheme().void)
+        .background(theme.void)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             MessageInputBar(session: session, showsVoiceControl: false)
         }
         #if os(iOS)
         .toolbar(.hidden, for: .navigationBar)
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+            keyboardVisible = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            keyboardVisible = false
+        }
         #endif
+    }
+
+    private func expansionControl(showingExpanded: Bool) -> some View {
+        Button {
+            setExpanded(!showingExpanded)
+        } label: {
+            VStack(spacing: 5) {
+                Capsule().frame(width: 28, height: 3)
+                Image(systemName: showingExpanded ? "chevron.down" : "chevron.up")
+                    .font(.system(size: controlSize, weight: .medium))
+            }
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(theme.haze)
+        .accessibilityLabel("Conversation")
+        .accessibilityValue(showingExpanded ? "Expanded" : "Collapsed")
+        .accessibilityHint(showingExpanded ? "Collapse the conversation" : "Expand the conversation")
+        .simultaneousGesture(DragGesture(minimumDistance: 20).onEnded { drag in
+            guard abs(drag.translation.height) > abs(drag.translation.width) else { return }
+            if drag.translation.height < -40 { setExpanded(true) }
+            else if drag.translation.height > 40 { setExpanded(false) }
+        })
+    }
+
+    private func setExpanded(_ value: Bool) {
+        #if os(iOS)
+        if !value, keyboardVisible {
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        }
+        #endif
+        withAnimation(.easeInOut(duration: 0.25)) { expanded = value }
     }
 }
 
 struct OrbArea: View {
     @Bindable var session: AppSession
     var controlSize: CGFloat
+    var isVisible = true
 
     var body: some View {
-        PointOrbView(level: session.orb.level, speaker: session.orb.speaker)
+        PointOrbView(level: session.orb.level, speaker: session.orb.speaker, isVisible: isVisible)
             .accessibilityHidden(true)
             .overlay(alignment: .bottomTrailing) {
-                VoiceControl(session: session, controlSize: controlSize)
-                    .padding(.trailing, 20)
-                    .padding(.bottom, 12)
+                if isVisible {
+                    VoiceControl(session: session, controlSize: controlSize)
+                        .padding(.trailing, 20)
+                        .padding(.bottom, 12)
+                }
             }
     }
 }
