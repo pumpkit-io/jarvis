@@ -8,7 +8,11 @@ import Testing
     var stops = 0
     var active = false
     var pcm = Data(repeating: 1, count: 32_000)
-    func start(limitReached: @escaping @MainActor @Sendable () -> Void) throws { starts += 1; active = true }
+    var fails = false
+    func start(limitReached: @escaping @MainActor @Sendable () -> Void) throws {
+        if fails { throw CocoaError(.featureUnsupported) }
+        starts += 1; active = true
+    }
     func stop() -> Data { stops += 1; active = false; return pcm }
 }
 
@@ -125,7 +129,7 @@ import Testing
     #expect(!recorder.active && recorder.stops == 1)
     #expect(wire.cancels == wire.begins && wire.cancels.count == 1)
     #expect(wire.deliveries.isEmpty)
-    #expect(talk.state == .cancelled && talk.message == "Talk cancelled.")
+    #expect(talk.state == .cancelled && talk.outcome == .discarded && talk.message == nil)
     await talk.press()
     #expect(recorder.starts == 2)
 }
@@ -137,7 +141,7 @@ import Testing
     await talk.press(); await talk.release()
     #expect(wire.deliveries.isEmpty && wire.cancels.count == 1)
     #expect(talk.state == .cancelled && talk.outcome == .tooShort)
-    #expect(talk.message == "Hold to talk.")
+    #expect(talk.message == nil)
 }
 
 @MainActor @Test func fiveMinuteTimerSendsOnceAndPermissionRefusalDoesNotCapture() async throws {
@@ -505,4 +509,61 @@ func leavingALockedTalkRetiresTheMicrophoneWithoutSending(transition: String) as
     #expect(recorder.active)
     await talk.activate(interaction: control).value
     #expect(!recorder.active && wire.deliveries.count == 1)
+}
+
+@MainActor @Test func onlyTheUsersDiscardsCountAsDiscards() async throws {
+    let recorder = FakeTalkRecorder()
+    let (talk, _) = wired(recorder)
+    let control = UUID()
+    talk.holdBegan(interaction: control)
+    try await eventuallySession { recorder.active }
+    await talk.holdMoved(horizontalTranslation: -121, verticalTranslation: 0, interaction: control).value
+    await talk.holdEnded(interaction: control).value
+    #expect(talk.discards == 1)
+
+    talk.holdBegan(interaction: control)
+    try await eventuallySession { recorder.active }
+    await talk.holdMoved(verticalTranslation: -61, interaction: control).value
+    await talk.holdEnded(interaction: control).value
+    await talk.discard()
+    #expect(talk.discards == 2)
+
+    talk.holdBegan(interaction: control)
+    try await eventuallySession { recorder.active }
+    await talk.controlDisappeared(interaction: control)
+    #expect(!recorder.active && talk.outcome == .discarded)
+    #expect(talk.discards == 2)
+}
+
+@MainActor @Test func eachDiscardIsConfirmedOnceWhicheverScreenAsks() async throws {
+    let recorder = FakeTalkRecorder()
+    let (talk, _) = wired(recorder)
+    #expect(!talk.takeDiscardConfirmation())
+    await talk.press(); await talk.discard()
+    #expect(talk.takeDiscardConfirmation())
+    #expect(!talk.takeDiscardConfirmation())
+}
+
+@MainActor @Test func cancellingFromVoiceOverIsADiscard() async throws {
+    let recorder = FakeTalkRecorder()
+    let (talk, wire) = wired(recorder)
+    let control = UUID()
+    await talk.activate(interaction: control).value
+    #expect(recorder.active)
+    await talk.cancel(interaction: control)
+    #expect(!recorder.active && wire.deliveries.isEmpty)
+    #expect(talk.discards == 1 && talk.takeDiscardConfirmation())
+    await talk.cancel(interaction: control)
+    #expect(talk.discards == 1)
+}
+
+@MainActor @Test func slidingAwayAFailedMicrophoneIsNotADiscard() async throws {
+    let recorder = FakeTalkRecorder()
+    recorder.fails = true
+    let (talk, _) = wired(recorder)
+    let control = UUID()
+    talk.holdBegan(interaction: control)
+    try await eventuallySession { talk.state == .failed }
+    await talk.holdMoved(horizontalTranslation: -121, verticalTranslation: 0, interaction: control).value
+    #expect(talk.discards == 0)
 }

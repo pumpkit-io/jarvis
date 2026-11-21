@@ -11,15 +11,16 @@ struct ConversationView: View {
     @State private var isAtBottom = true
     @State private var detailsChanging = false
     @State private var detailsRevision = 0
-    @State private var readingAnchor: String?
+    @State private var position = ScrollPosition(idType: String.self)
     @State private var scrollPhase: ScrollPhase = .idle
+    @State private var olderHistoryVisible = false
     @State var expandedDetails: Set<String> = []
     private var theme: JarvisTheme { JarvisTheme() }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 32) {
+                VStack(alignment: .leading, spacing: 32) {
                     if session.hasOlderHistory {
                         VStack(alignment: .leading) {
                             if session.loadingHistory { ProgressView("Loading older history…") }
@@ -34,10 +35,17 @@ struct ConversationView: View {
                         }
                         .font(.system(size: controlSize))
                         .foregroundStyle(theme.haze).frame(minHeight: 44)
-                        .task(id: session.connection.canSend) { await session.loadOlderHistory() }
+                        .modifier(ScriptColumn())
+                        // The stack builds every row up front, so paging waits until the reader reaches the top.
+                        .onScrollVisibilityChange(threshold: 0.1) { olderHistoryVisible = $0 }
+                        .task(id: OlderHistoryTrigger(visible: olderHistoryVisible, canSend: session.connection.canSend)) {
+                            guard olderHistoryVisible else { return }
+                            await session.loadOlderHistory()
+                        }
                     }
                     if let message = session.historyMessage {
                         Text(message).font(.system(size: controlSize)).foregroundStyle(theme.haze)
+                            .modifier(ScriptColumn())
                     }
                     if session.conversation.rows.isEmpty && (session.outbox?.items.isEmpty ?? true) {
                         Text("Ask Jarvis anything.")
@@ -45,7 +53,7 @@ struct ConversationView: View {
                             .foregroundStyle(theme.haze)
                             .lineSpacing(5)
                             .padding(.top, 24)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .modifier(ScriptColumn())
                     }
                     ForEach(Array(session.conversation.rows.enumerated()), id: \.element.id) { index, row in
                         VStack(alignment: .leading, spacing: 12) {
@@ -56,24 +64,27 @@ struct ConversationView: View {
                             }
                             scriptRow(row)
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .modifier(ScriptColumn())
                         .id(row.id)
                     }
                     ForEach(session.outbox?.items ?? []) { item in
-                        queued(item).id("outbox:\(item.id)")
+                        queued(item).modifier(ScriptColumn()).id("outbox:\(item.id)")
                     }
                 }
                 .scrollTargetLayout()
                 .foregroundStyle(theme.frost)
-                .frame(minWidth: 0, maxWidth: 640, alignment: .leading)
-                .padding(20)
+                .padding(.vertical, 20)
                 .containerRelativeFrame(.horizontal)
             }
-            // Leading anchors and a container-wide column leave no horizontal offset for a resize to introduce.
-            .scrollPosition(id: $readingAnchor, anchor: .topLeading)
-            .defaultScrollAnchor(.bottomLeading, for: .initialOffset)
-            .defaultScrollAnchor(followsLatest ? .bottomLeading : nil, for: .sizeChanges)
-            .defaultScrollAnchor(.topLeading, for: .alignment)
+            .scrollPosition($position, anchor: .top)
+            .defaultScrollAnchor(.bottom, for: .initialOffset)
+            .defaultScrollAnchor(followsLatest ? .bottom : nil, for: .sizeChanges)
+            .defaultScrollAnchor(.top, for: .alignment)
+            .onScrollGeometryChange(for: CGFloat.self) { $0.containerSize.height } action: { old, new in
+                // A reader's drag wins over pinning the script to its end.
+                guard old != new, followsLatest, scrollPhase == .idle else { return }
+                position.scrollTo(edge: .bottom)
+            }
             .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
             .scrollBounceBehavior(.always, axes: .vertical)
             .scrollDismissesKeyboard(.interactively)
@@ -221,4 +232,20 @@ struct ConversationView: View {
         return AttributedString(row.text[..<range.lowerBound]) + marked + AttributedString(row.text[range.upperBound...])
     }
 
+}
+
+private struct OlderHistoryTrigger: Equatable {
+    let visible: Bool
+    let canSend: Bool
+}
+
+/// Every scroll target spans the viewport from x = 0, with the column's margins inside it.
+/// iOS 26 scrolls sideways to a restored row's leading edge, so a row inset by the margin would shift the script.
+private struct ScriptColumn: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .frame(maxWidth: 640, alignment: .leading)
+            .padding(.horizontal, 20)
+            .frame(maxWidth: .infinity)
+    }
 }
