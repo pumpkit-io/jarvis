@@ -37,9 +37,10 @@ public struct OrbMotion: Sendable {
 
     public func weight(of speaker: OrbModel.Speaker) -> Double { weights[Self.index(speaker)] }
 
-    /// `pace` slows surface motion and rotation, as Reduce Motion asks, without slowing the blend between speakers.
-    public mutating func advance(by seconds: Double, toward speaker: OrbModel.Speaker, pace: Double = 1) {
+    /// Reduce Motion slows surface motion and rotation without slowing the blend between speakers.
+    public mutating func advance(by seconds: Double, toward speaker: OrbModel.Speaker, reducedMotion: Bool = false) {
         let dt = min(max(seconds, 0), Self.longestStep)
+        let pace = reducedMotion ? 0.35 : 1
         var target = SIMD3<Double>(repeating: 0)
         target[Self.index(speaker)] = 1
         weights += (target - weights) * (1 - exp(-dt / Self.blendTime))
@@ -71,7 +72,7 @@ public struct OrbShape: Sendable {
     /// Displacement stays linear up to the knee, then eases toward the limit, which keeps the
     /// perspective silhouette inside a frame whose base radius is 0.34 of its shorter side.
     static let knee: Float = 0.2
-    static let limit: Float = 0.29
+    static let limit: Float = 0.27
 
     public let speech: Float
     public let ripple: Float

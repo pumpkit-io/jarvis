@@ -41,7 +41,7 @@ private let frame = 1.0 / 60
     var normal = OrbMotion(), reduced = OrbMotion()
     for _ in 0..<24 {
         normal.advance(by: frame, toward: .user)
-        reduced.advance(by: frame, toward: .user, pace: 0.35)
+        reduced.advance(by: frame, toward: .user, reducedMotion: true)
     }
     #expect(reduced.weight(of: .user) == normal.weight(of: .user))
     #expect(reduced.phase < normal.phase * 0.5)

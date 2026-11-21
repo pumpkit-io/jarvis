@@ -16,7 +16,7 @@ struct PointOrbView: View {
     var body: some View {
         TimelineView(.animation(minimumInterval: reduceMotion ? 1.0 / 30 : 1.0 / 60,
                                 paused: !isVisible || scenePhase != .active)) { timeline in
-            let motion = clock.advance(to: timeline.date, toward: speaker, pace: reduceMotion ? 0.35 : 1)
+            let motion = clock.advance(to: timeline.date, toward: speaker, reducedMotion: reduceMotion)
             Canvas { ctx, size in
                 draw(in: &ctx, size: size, motion: motion)
             }
@@ -126,10 +126,10 @@ private final class OrbClock {
     private var motion = OrbMotion()
     private var lastFrame: Date?
 
-    func advance(to date: Date, toward speaker: OrbModel.Speaker, pace: Double) -> OrbMotion {
+    func advance(to date: Date, toward speaker: OrbModel.Speaker, reducedMotion: Bool) -> OrbMotion {
         let seconds = lastFrame.map { date.timeIntervalSince($0) } ?? 0
         lastFrame = date
-        motion.advance(by: seconds, toward: speaker, pace: pace)
+        motion.advance(by: seconds, toward: speaker, reducedMotion: reducedMotion)
         return motion
     }
 }
