@@ -3,7 +3,6 @@ import SwiftUI
 
 struct MessageInputBar: View {
     @Bindable var session: AppSession
-    var showsVoiceControl = true
     var typingChanged: (Bool) -> Void = { _ in }
     @ScaledMetric(relativeTo: .subheadline) var controlSize = 15
     @FocusState private var typing: Bool
@@ -23,12 +22,6 @@ struct MessageInputBar: View {
                 if session.talk.microphoneRefused {
                     Link("Open Settings", destination: microphoneSettingsURL)
                         .underline().frame(minHeight: 44)
-                }
-            }
-            if showsVoiceControl {
-                HStack {
-                    Spacer()
-                    VoiceControl(session: session, controlSize: controlSize)
                 }
             }
             HStack(alignment: .bottom, spacing: 12) {

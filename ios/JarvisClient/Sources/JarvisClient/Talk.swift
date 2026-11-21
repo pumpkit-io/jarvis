@@ -7,10 +7,6 @@ import Observation
     func stop() -> Data
 }
 
-public extension TalkRecorder {
-    var level: Double { 0 }
-}
-
 public enum TalkOutcome: Equatable, Sendable { case tooShort, discarded }
 
 public enum TalkState: Equatable, Sendable {

@@ -194,3 +194,25 @@ import Testing
     try await eventuallySession { session.orb.speaker == .idle }
     await session.unpair()
 }
+
+@MainActor @Test func unpairStopsOrbFramesAfterAReentrantForegroundTransition() async throws {
+    let store = MemoryPairingStore(), socket = FakeSocket(), frames = FakeSleeper()
+    let talk = TalkController(recorder: FakeTalkRecorder(), permission: { true })
+    store.record = try testPairingCredentials()
+    let session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
+                             makePaths: { nil }, talk: talk, orbSleep: { try await frames.sleep($0) })
+    await session.launch(); await socket.ready()
+    try await eventuallySession { session.connection.canSend }
+    try await eventuallySession { await frames.pending == 1 }
+    var begun: CheckedContinuation<Bool, Never>?
+    talk.configure(begin: { _ in await withCheckedContinuation { begun = $0 } }, cancel: { _ in }, deliver: { _, _, _ in })
+    await talk.press()
+    try await eventuallySession { begun != nil }
+    let unpairing = Task { await session.unpair() }
+    try await eventuallySession { talk.state == .cancelled }
+    await session.setForeground(true)
+    begun?.resume(returning: true); begun = nil
+    await unpairing.value
+    #expect(session.credentials == nil && session.orb.speaker == .idle)
+    try await eventuallySession { await frames.pending == 0 }
+}

@@ -395,6 +395,8 @@ import Observation
         guard generation == owner, client === old else { await old?.stop(); return }
         await talk.cancel()
         guard generation == owner, client === old else { await old?.stop(); return }
+        // Foreground can restart metering while Talk cancellation waits.
+        orbFrames?.cancel(); orbFrames = nil
         client = nil; credentials = nil; pairing = false; loading = false
         do {
             if let oldCredentials { try voiceStore?.clear(oldCredentials) }

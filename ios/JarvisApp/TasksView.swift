@@ -104,7 +104,7 @@ struct WorkspaceView: View {
         }
         .background(theme.void)
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            MessageInputBar(session: session, showsVoiceControl: false)
+            MessageInputBar(session: session)
         }
         #if os(iOS)
         .toolbar(.hidden, for: .navigationBar)
