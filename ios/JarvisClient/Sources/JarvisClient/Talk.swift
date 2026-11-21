@@ -2,8 +2,13 @@ import Foundation
 import Observation
 
 @MainActor public protocol TalkRecorder: AnyObject {
+    var level: Double { get }
     func start(limitReached: @escaping @MainActor @Sendable () -> Void) throws
     func stop() -> Data
+}
+
+public extension TalkRecorder {
+    var level: Double { 0 }
 }
 
 public enum TalkOutcome: Equatable, Sendable { case tooShort, discarded }
@@ -31,6 +36,7 @@ public enum TalkState: Equatable, Sendable {
     public static let discardDistance = 120.0
     public private(set) var holdCancelled = false
     public var speaking = false
+    public var level: Double { state == .recording ? recorder.level : 0 }
     public var label: String { label(for: state) }
     public func label(for state: TalkState) -> String {
         switch state {

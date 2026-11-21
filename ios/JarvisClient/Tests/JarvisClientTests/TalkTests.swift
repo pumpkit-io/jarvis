@@ -3,6 +3,7 @@ import Testing
 @testable import JarvisClient
 
 @MainActor final class FakeTalkRecorder: TalkRecorder {
+    var level = 0.0
     var starts = 0
     var stops = 0
     var active = false
