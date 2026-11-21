@@ -6,9 +6,19 @@ import Observation
     public private(set) var speaker: Speaker = .idle
     public private(set) var level: Double = 0
 
+    /// Meters report linear RMS, where ordinary speech sits near 0.03 to 0.2; these decibel bounds map it to 0...1.
+    nonisolated static let quietestDecibels = -55.0
+    nonisolated static let loudestDecibels = -15.0
+
+    nonisolated static func loudness(rms: Double) -> Double {
+        guard rms > 0 else { return 0 }
+        let decibels = 20 * log10(rms)
+        return min(1, max(0, (decibels - quietestDecibels) / (loudestDecibels - quietestDecibels)))
+    }
+
     func update(speaker: Speaker, target: Double) {
         self.speaker = speaker
-        level = level * 0.8 + min(1, max(0, target)) * 0.2
+        level = level * 0.5 + min(1, max(0, target)) * 0.5
     }
 
     func reset() { speaker = .idle; level = 0 }
@@ -29,11 +39,11 @@ public struct OrbSurface: Sendable, Equatable {
         case .idle:
             OrbSurface(ripple: 0.02, flow: 0.02, looseShare: 0.05, looseDrift: 0.03, speed: 0.4)
         case .user:
-            OrbSurface(ripple: 0.02 + 0.08 * level, flow: 0.02 + 0.08 * level,
-                       looseShare: 0.05 + 0.10 * level, looseDrift: 0.03 + 0.13 * level, speed: 1.3)
-        case .jarvis:
             OrbSurface(ripple: 0.02 + 0.11 * level, flow: 0.02 + 0.11 * level,
-                       looseShare: 0.05 + 0.15 * level, looseDrift: 0.03 + 0.19 * level, speed: 2.0)
+                       looseShare: 0.05 + 0.13 * level, looseDrift: 0.03 + 0.17 * level, speed: 1.4)
+        case .jarvis:
+            OrbSurface(ripple: 0.02 + 0.15 * level, flow: 0.02 + 0.15 * level,
+                       looseShare: 0.05 + 0.18 * level, looseDrift: 0.03 + 0.25 * level, speed: 2.2)
         }
     }
 
@@ -55,7 +65,7 @@ public struct OrbMotion: Sendable {
     /// Per-frame easing tuned at 60 fps; other frame rates convert it so the orb settles in the same time.
     static let levelEasing: Float = 0.25
     static let surfaceEasing: Float = 0.08
-    static let largestPulse: Float = 0.06
+    static let largestPulse: Float = 0.09
     /// Surface noise rates are multiples of 0.01, so the phase wraps here without a visible seam.
     public static let phasePeriod = 200 * Double.pi
     /// Rotation, wobble, twinkle and wisp rates are multiples of 0.05, so time wraps here without a seam.

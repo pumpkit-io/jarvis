@@ -264,9 +264,9 @@ import Observation
 
     private func sampleOrb() {
         if talk.state == .recording {
-            orb.update(speaker: .user, target: talk.level)
+            orb.update(speaker: .user, target: OrbModel.loudness(rms: talk.level))
         } else if playback.playingSpeechID != nil {
-            orb.update(speaker: .jarvis, target: playback.level)
+            orb.update(speaker: .jarvis, target: OrbModel.loudness(rms: playback.level))
         } else if !voiceOn, let reply = streamingReply {
             let time = max(0, orbNow() - reply.started)
             let target = abs(sin(7 * time) * sin(2.3 * time)) * (0.6 + 0.4 * abs(sin(0.9 * time)))

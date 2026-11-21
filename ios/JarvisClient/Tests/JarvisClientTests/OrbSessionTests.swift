@@ -38,15 +38,15 @@ import Testing
     await socket.text(event(3, "speech_clip", #"{"speech_id":"s","reply_id":"r","index":0,"text":"One.","byte_length":2}"#))
     socket.input.yield(.binary(Data([0, 64])))
     try await eventuallySession { output.bytes.count == 1 }
-    output.level = 0.5
+    output.level = 0.05
     try await eventuallySession { await frames.pending == 1 }
     await frames.advance()
     try await eventuallySession { session.orb.speaker == .jarvis }
-    #expect(abs(session.orb.level - 0.1) < 0.000001)
-    output.level = 1
+    let first = session.orb.level
+    #expect(first > 0.3)
+    output.level = 0.2
     await frames.advance()
-    try await eventuallySession { session.orb.level > 0.1 }
-    #expect(abs(session.orb.level - 0.28) < 0.000001)
+    try await eventuallySession { session.orb.level > first }
     await socket.text(event(4, "speech_end", #"{"speech_id":"s","reply_id":"r","last_clip_index":0}"#))
     await socket.text(event(5, "reply_end", #"{"reply_id":"r","text":"One.","reason":"complete"}"#))
     try await eventuallySession { session.conversation.rows.contains { $0.text == "One." } }
@@ -71,7 +71,7 @@ import Testing
     try await eventuallySession { await frames.pending == 1 }
     await frames.advance()
     try await eventuallySession { session.orb.speaker == .jarvis }
-    #expect(abs(session.orb.level - 0.04956333428234101) < 0.000001)
+    #expect(abs(session.orb.level - 0.12390833570585253) < 0.000001)
     await socket.text(event(3, "reply_end", #"{"reply_id":"r","text":"Still writing after Silence.","reason":"complete"}"#))
     try await eventuallySession { session.conversation.rows.contains { $0.text == "Still writing after Silence." } }
     await frames.advance()
@@ -102,7 +102,7 @@ import Testing
     try await eventuallySession { await frames.pending == 1 }
     await frames.advance()
     try await eventuallySession { session.orb.speaker == .jarvis }
-    #expect(abs(session.orb.level - 0.04956333428234101) < 0.000001)
+    #expect(abs(session.orb.level - 0.12390833570585253) < 0.000001)
     await session.unpair()
     #expect(session.orb.speaker == .idle && session.orb.level == 0)
 }
@@ -143,16 +143,16 @@ import Testing
                              makePaths: { nil }, talk: talk, orbSleep: { try await frames.sleep($0) })
     await session.launch(); await socket.ready()
     try await eventuallySession { session.connection.canSend }
-    recorder.level = 0.5
+    recorder.level = 0.05
     await talk.press()
     try await eventuallySession { await frames.pending == 1 }
     await frames.advance()
     try await eventuallySession { session.orb.speaker == .user }
-    #expect(abs(session.orb.level - 0.1) < 0.000001)
-    recorder.level = 1
+    let first = session.orb.level
+    #expect(first > 0.3)
+    recorder.level = 0.2
     await frames.advance()
-    try await eventuallySession { session.orb.level > 0.1 }
-    #expect(abs(session.orb.level - 0.28) < 0.000001)
+    try await eventuallySession { session.orb.level > first }
     await talk.release()
     await frames.advance()
     try await eventuallySession { session.orb.speaker == .idle }
@@ -188,7 +188,7 @@ import Testing
     #expect(session.playback.playingSpeechID == nil && output.stops > 0)
     await frames.advance()
     try await eventuallySession { session.orb.speaker == .user }
-    #expect(abs(session.orb.level - 0.28) < 0.000001)
+    #expect(session.orb.level > 0.5)
     await talk.cancel()
     await frames.advance()
     try await eventuallySession { session.orb.speaker == .idle }

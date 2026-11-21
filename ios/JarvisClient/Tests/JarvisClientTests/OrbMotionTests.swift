@@ -65,7 +65,7 @@ private func close(_ a: OrbSurface, _ b: OrbSurface, within tolerance: Float = 0
     let phase = motion.phase, time = motion.time
     motion.advance(by: 5, toward: .jarvis, level: 1)
     #expect(motion.time - time <= 0.05 + 1e-9)
-    #expect(motion.phase - phase <= 0.1 + 1e-6)
+    #expect(motion.phase - phase <= 0.05 * Double(motion.surface.speed) + 1e-6)
 }
 
 @Test func reduceMotionSlowsTheOrbAndSoftensSpeech() {
@@ -84,4 +84,17 @@ private func close(_ a: OrbSurface, _ b: OrbSurface, within tolerance: Float = 0
     for _ in 0..<200_000 { motion.advance(by: 1.0 / 20, toward: .jarvis, level: 1) }
     #expect(motion.time >= 0 && motion.time < OrbMotion.timePeriod)
     #expect(motion.phase >= 0 && motion.phase < OrbMotion.phasePeriod)
+}
+
+@Test func ordinarySpeechMetersAsClearlyLoud() {
+    // Normal speech measures about 0.03 to 0.2 linear RMS.
+    #expect(OrbModel.loudness(rms: 0.03) > 0.5)
+    #expect(OrbModel.loudness(rms: 0.2) > 0.9)
+    #expect(OrbModel.loudness(rms: 0.03) < OrbModel.loudness(rms: 0.1))
+}
+
+@Test func silenceAndBackgroundHissStayStill() {
+    #expect(OrbModel.loudness(rms: 0) == 0)
+    #expect(OrbModel.loudness(rms: 0.001) == 0)
+    #expect(OrbModel.loudness(rms: 1) == 1)
 }
