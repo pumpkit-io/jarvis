@@ -1,17 +1,16 @@
 import SwiftUI
 
 struct JarvisTheme {
-    let scheme: ColorScheme
-
-    var background: Color { scheme == .dark ? Self.baize : Self.linen }
-    var text: Color { scheme == .dark ? Self.linen : Self.baize }
-    var secondary: Color { Color(hex: scheme == .dark ? 0x8FA39C : 0x536D64) }
-    var brass: Color { Color(hex: scheme == .dark ? 0xC39A4A : 0x806020) }
-    var signal: Color { Color(hex: 0xD6402E) }
-    var keyText: Color { scheme == .dark ? Self.baize : Self.linen }
-
-    static let baize = Color(hex: 0x16302B)
-    static let linen = Color(hex: 0xE9EEEA)
+    let void = Color(hex: 0x05070C)
+    let deep = Color(hex: 0x0E1420)
+    let frost = Color(hex: 0xE6EEF5)
+    let haze = Color(hex: 0x7F8EA3)
+    let cyan = Color(hex: 0x33E6FF)
+    let ice = Color(hex: 0xD9EDFF)
+    let idleBlue = Color(hex: 0x5AB4FF)
+    let signal = Color(hex: 0xD6402E)
+    let green = Color(hex: 0x3DDC84)
+    let amber = Color(hex: 0xF5B544)
 }
 
 private extension Color {

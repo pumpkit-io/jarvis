@@ -4,10 +4,9 @@ import SwiftUI
 struct TalkKey: View {
     @Bindable var talk: TalkController
     var controlSize: CGFloat
-    @Environment(\.colorScheme) private var scheme
     @State private var interaction = UUID()
     @GestureState private var pressed = false
-    private var theme: JarvisTheme { JarvisTheme(scheme: scheme) }
+    private var theme: JarvisTheme { JarvisTheme() }
     private var recording: Bool { talk.state == .recording }
 
     var body: some View {
@@ -23,8 +22,9 @@ struct TalkKey: View {
         .frame(maxWidth: .infinity, minHeight: 88)
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .foregroundStyle(recording ? Color.white : theme.keyText)
-        .background(recording ? theme.signal : theme.brass, in: RoundedRectangle(cornerRadius: 10))
+        .foregroundStyle(recording ? theme.frost : theme.void)
+        .background(recording ? theme.deep : theme.cyan, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(recording ? theme.signal : theme.cyan))
         .scaleEffect(pressed && !talk.holdCancelled ? 0.98 : 1)
         .contentShape(Rectangle())
         .gesture(DragGesture(minimumDistance: 0)

@@ -15,10 +15,8 @@ struct PairingView: View {
     @State var manual = false
     @State private var origin = ""
     @State private var code = ""
-    @Environment(\.colorScheme) private var scheme
-    @ScaledMetric(relativeTo: .body) private var scriptSize = 19
     @ScaledMetric(relativeTo: .subheadline) private var controlSize = 15
-    private var theme: JarvisTheme { JarvisTheme(scheme: scheme) }
+    private var theme: JarvisTheme { JarvisTheme() }
 
     var body: some View {
         ScrollView {
@@ -27,13 +25,13 @@ struct PairingView: View {
                     .font(.system(size: controlSize))
                     .accessibilityAddTraits(.isHeader)
                 Text("Run ./jarvis pair on the Mac, then scan the code or type it here.")
-                    .font(.system(size: scriptSize, design: .serif))
+                    .font(.system(size: controlSize))
                     .lineSpacing(5)
                     .padding(.top, 24)
                 VStack(alignment: .leading, spacing: 16) {
                     if cameraRefused {
                         Text("Allow the camera in Settings to scan, or type the code.")
-                            .foregroundStyle(theme.secondary)
+                            .foregroundStyle(theme.haze)
                         Button("Settings", action: settings).buttonStyle(.plain).frame(minHeight: 44)
                     } else {
                         outlinedButton(pairing ? "Pairing…" : "Scan code", action: scan)
@@ -58,25 +56,25 @@ struct PairingView: View {
                         }
                         .textFieldStyle(.plain)
                         .padding(16)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.secondary))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.haze))
                         outlinedButton(pairing ? "Pairing…" : "Pair") { submit(origin, code) }
                     }
                     if let error {
                         Text(error.message)
-                            .foregroundStyle(theme.secondary)
+                            .foregroundStyle(theme.haze)
                             .accessibilityLabel(error.message.replacingOccurrences(of: "`", with: ""))
                     }
                 }
                 .font(.system(size: controlSize))
                 .disabled(pairing)
             }
-            .foregroundStyle(theme.text)
+            .foregroundStyle(theme.frost)
             .frame(maxWidth: 520, alignment: .leading)
             .padding(20)
             .frame(maxWidth: .infinity)
         }
-        .background(theme.background)
-        .tint(theme.text)
+        .background(theme.void)
+        .tint(theme.frost)
     }
 
     private func outlinedButton(_ title: String, action: @escaping () -> Void) -> some View {
@@ -85,14 +83,13 @@ struct PairingView: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.secondary))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.haze))
     }
 }
 
 struct JarvisRootView: View {
     @State private var session: AppSession
     @Environment(\.scenePhase) private var phase
-    @Environment(\.colorScheme) private var scheme
     #if os(iOS)
     @State private var camera = PairingCamera(request: { await AVCaptureDevice.requestAccess(for: .video) })
     @State private var scanning = false
@@ -105,12 +102,15 @@ struct JarvisRootView: View {
             if session.loading {
                 ProgressView("Connecting…").frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if session.credentials != nil {
-                NavigationStack { WorkspaceView(session: session) }.tint(JarvisTheme(scheme: scheme).text)
+                NavigationStack { WorkspaceView(session: session) }.tint(JarvisTheme().frost)
             } else {
                 PairingView(pairing: session.pairing, error: session.error, cameraRefused: cameraRefused,
                             scan: scan, submit: submit, settings: openSettings)
             }
         }
+        .background(JarvisTheme().void)
+        .foregroundStyle(JarvisTheme().frost)
+        .preferredColorScheme(.dark)
         .task { await session.launch() }
         .onChange(of: phase) { _, value in
             Task { await session.setForeground(value == .active) }
