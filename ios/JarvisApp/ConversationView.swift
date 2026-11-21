@@ -34,10 +34,12 @@ struct ConversationView: View {
                         }
                         .font(.system(size: controlSize))
                         .foregroundStyle(theme.haze).frame(minHeight: 44)
+                        .modifier(ScriptColumn())
                         .task(id: session.connection.canSend) { await session.loadOlderHistory() }
                     }
                     if let message = session.historyMessage {
                         Text(message).font(.system(size: controlSize)).foregroundStyle(theme.haze)
+                            .modifier(ScriptColumn())
                     }
                     if session.conversation.rows.isEmpty && (session.outbox?.items.isEmpty ?? true) {
                         Text("Ask Jarvis anything.")
@@ -45,7 +47,7 @@ struct ConversationView: View {
                             .foregroundStyle(theme.haze)
                             .lineSpacing(5)
                             .padding(.top, 24)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .modifier(ScriptColumn())
                     }
                     ForEach(Array(session.conversation.rows.enumerated()), id: \.element.id) { index, row in
                         VStack(alignment: .leading, spacing: 12) {
@@ -56,20 +58,18 @@ struct ConversationView: View {
                             }
                             scriptRow(row)
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .modifier(ScriptColumn())
                         .id(row.id)
                     }
                     ForEach(session.outbox?.items ?? []) { item in
-                        queued(item).id("outbox:\(item.id)")
+                        queued(item).modifier(ScriptColumn()).id("outbox:\(item.id)")
                     }
                 }
                 .scrollTargetLayout()
                 .foregroundStyle(theme.frost)
-                .frame(minWidth: 0, maxWidth: 640, alignment: .leading)
-                .padding(20)
+                .padding(.vertical, 20)
                 .containerRelativeFrame(.horizontal)
             }
-            // Centred anchors: a leading one lines a row's padded edge up with the viewport and offsets the script sideways.
             .scrollPosition($position, anchor: .top)
             .defaultScrollAnchor(.bottom, for: .initialOffset)
             .defaultScrollAnchor(followsLatest ? .bottom : nil, for: .sizeChanges)
@@ -226,4 +226,15 @@ struct ConversationView: View {
         return AttributedString(row.text[..<range.lowerBound]) + marked + AttributedString(row.text[range.upperBound...])
     }
 
+}
+
+/// Every scroll target spans the viewport from x = 0, with the column's margins inside it.
+/// iOS 26 scrolls sideways to a restored row's leading edge, so a row inset by the margin would shift the script.
+private struct ScriptColumn: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .frame(maxWidth: 640, alignment: .leading)
+            .padding(.horizontal, 20)
+            .frame(maxWidth: .infinity)
+    }
 }
