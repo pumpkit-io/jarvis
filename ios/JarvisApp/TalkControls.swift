@@ -7,7 +7,7 @@ struct MessageInputBar: View {
     @ScaledMetric(relativeTo: .subheadline) var controlSize = 15
     @FocusState private var typing: Bool
     @State private var discarded = false
-    @State private var shownDiscards: Int?
+    @State private var visible = false
     @State private var pillHeight: CGFloat = 56
     private let barBottomPadding: CGFloat = 8
     private let theme = JarvisTheme()
@@ -48,25 +48,27 @@ struct MessageInputBar: View {
                     .accessibilityHidden(true)
             }
         }
-        .task(id: session.talk.discards) {
-            // Coming back to this screen reruns the task; only a discard it hasn't shown animates.
-            guard let shown = shownDiscards else { shownDiscards = session.talk.discards; return }
-            guard session.talk.discards != shown else { return }
-            shownDiscards = session.talk.discards
+        .task(id: TalkFeedbackKey(discards: session.talk.discards, visible: visible)) {
+            // Settings and Tasks keep the main screen's bar alive, so only the bar on screen claims a discard.
+            guard visible, session.talk.takeDiscardConfirmation() else { return }
             #if os(iOS)
             UINotificationFeedbackGenerator().notificationOccurred(.warning)
             #endif
+            AccessibilityNotification.Announcement("Talk discarded").post()
             withAnimation(.spring(response: 0.25)) { discarded = true }
             do { try await Task.sleep(for: .milliseconds(650)) } catch { discarded = false; return }
             withAnimation(.easeOut(duration: 0.25)) { discarded = false }
         }
         .onChange(of: session.talk.outcome) { _, outcome in
+            guard visible, outcome == .tooShort else { return }
             #if os(iOS)
-            if outcome == .tooShort { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
             #endif
+            AccessibilityNotification.Announcement("Too short to send").post()
         }
         .onChange(of: typing) { typingChanged(typing) }
-        .onDisappear { typingChanged(false) }
+        .onAppear { visible = true }
+        .onDisappear { visible = false; typingChanged(false) }
     }
 
     @ViewBuilder private var keyboardDismissPadding: some View {
@@ -161,6 +163,11 @@ struct MessageInputBar: View {
     }
 }
 
+private struct TalkFeedbackKey: Equatable {
+    let discards: Int
+    let visible: Bool
+}
+
 /// Keeps a status line readable while the conversation scrolls behind the transparent bar.
 private struct StatusBackground: ViewModifier {
     func body(content: Content) -> some View {
@@ -180,9 +187,13 @@ private struct KeyboardDismissPadding: UIViewRepresentable {
     func updateUIView(_ view: Probe, context: Context) { view.padding = padding }
 
     final class Probe: UIView {
-        var padding: CGFloat = 0 { didSet { apply() } }
-        override func didMoveToWindow() { super.didMoveToWindow(); apply() }
-        override func layoutSubviews() { super.layoutSubviews(); apply() }
+        var padding: CGFloat = 0 { didSet { if padding != oldValue { apply() } } }
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            apply()
+            // The conversation's scroll view can join the window in the same pass, after this probe.
+            DispatchQueue.main.async { [weak self] in self?.apply() }
+        }
         // UIKit doesn't say whose guide the dismiss gesture reads, so every candidate gets the padding.
         private func apply() {
             guard let window else { return }

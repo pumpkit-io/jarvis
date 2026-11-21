@@ -74,13 +74,12 @@ struct ConversationView: View {
             .defaultScrollAnchor(.bottom, for: .initialOffset)
             .defaultScrollAnchor(followsLatest ? .bottom : nil, for: .sizeChanges)
             .defaultScrollAnchor(.top, for: .alignment)
-            .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
             .onScrollGeometryChange(for: CGFloat.self) { $0.containerSize.height } action: { old, new in
-                guard old != new else { return }
-                // Restoring the position by hand makes the lazy stack lay out the rows a resize left undrawn.
-                if followsLatest { position.scrollTo(edge: .bottom) }
-                else if let row = position.viewID(type: String.self) { position.scrollTo(id: row, anchor: .top) }
+                // Scrolling to the end by hand makes the lazy stack draw the rows a resize left blank; a reader's drag wins.
+                guard old != new, followsLatest, scrollPhase == .idle else { return }
+                position.scrollTo(edge: .bottom)
             }
+            .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
             .scrollBounceBehavior(.always, axes: .vertical)
             .scrollDismissesKeyboard(.interactively)
             .onScrollGeometryChange(for: Bool.self) { geometry in

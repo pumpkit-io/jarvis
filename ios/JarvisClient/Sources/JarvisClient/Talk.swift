@@ -20,8 +20,9 @@ public enum TalkState: Equatable, Sendable {
     public private(set) var talkID: String?
     public private(set) var microphoneRefused = false
     public private(set) var outcome: TalkOutcome?
-    /// Counts the User's own discards, so the screen can confirm each one once; lifecycle retirements don't count.
+    /// Counts the User's own discards; lifecycle retirements don't count.
     public private(set) var discards = 0
+    private var confirmedDiscards = 0
     private var interaction: UUID?
     private var touch: UUID?
     private var touchCapture: UUID?
@@ -112,6 +113,20 @@ public enum TalkState: Equatable, Sendable {
         guard state == .authorizing || state == .recording else { return }
         discards += 1
         await cancel()
+    }
+
+    /// The accessibility Cancel Talk action: a discard, retiring a press that hasn't started too.
+    public func cancel(interaction id: UUID) async {
+        guard state == .authorizing || state == .recording || pendingPress != nil else { return }
+        discards += 1
+        await controlDisappeared(interaction: id)
+    }
+
+    /// Answers true once per discard, so only one of the screens' input bars confirms it.
+    public func takeDiscardConfirmation() -> Bool {
+        guard confirmedDiscards < discards else { return false }
+        confirmedDiscards = discards
+        return true
     }
 
     @discardableResult public func holdEnded(interaction id: UUID) -> Task<Void, Never> {

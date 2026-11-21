@@ -530,3 +530,25 @@ func leavingALockedTalkRetiresTheMicrophoneWithoutSending(transition: String) as
     #expect(!recorder.active && talk.outcome == .discarded)
     #expect(talk.discards == 2)
 }
+
+@MainActor @Test func eachDiscardIsConfirmedOnceWhicheverScreenAsks() async throws {
+    let recorder = FakeTalkRecorder()
+    let (talk, _) = wired(recorder)
+    #expect(!talk.takeDiscardConfirmation())
+    await talk.press(); await talk.discard()
+    #expect(talk.takeDiscardConfirmation())
+    #expect(!talk.takeDiscardConfirmation())
+}
+
+@MainActor @Test func cancellingFromVoiceOverIsADiscard() async throws {
+    let recorder = FakeTalkRecorder()
+    let (talk, wire) = wired(recorder)
+    let control = UUID()
+    await talk.activate(interaction: control).value
+    #expect(recorder.active)
+    await talk.cancel(interaction: control)
+    #expect(!recorder.active && wire.deliveries.isEmpty)
+    #expect(talk.discards == 1 && talk.takeDiscardConfirmation())
+    await talk.cancel(interaction: control)
+    #expect(talk.discards == 1)
+}

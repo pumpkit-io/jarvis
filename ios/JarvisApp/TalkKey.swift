@@ -72,7 +72,7 @@ struct TalkKey: View {
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel(talk.label)
         .accessibilityAction { talk.activate(interaction: interaction) }
-        .accessibilityAction(named: "Cancel Talk") { Task { await talk.controlDisappeared(interaction: interaction) } }
+        .accessibilityAction(named: "Cancel Talk") { Task { await talk.cancel(interaction: interaction) } }
         .accessibilityHint(talk.isLocked ? "Send the recorded Talk" : "Hold while speaking. Release to send. Slide up to lock or left to cancel.")
         .accessibilityValue(recording ? "Recording, \(talk.elapsed) seconds" : talk.label)
         .onDisappear { Task { await talk.controlDisappeared(interaction: interaction) } }
