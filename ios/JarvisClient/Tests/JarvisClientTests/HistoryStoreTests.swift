@@ -149,24 +149,27 @@ actor HeldHistoryPage {
     await session.unpair()
 }
 
-private func historyEvent(_ seq: Int64, time: String = "2026-11-19T12:00:00.123456Z", text: String = "Line") throws -> HubEvent {
-    try JSONDecoder().decode(HubEvent.self, from: Data(#"{"seq":\#(seq),"time":"\#(time)","type":"notice","payload":{"text":"\#(text)"}}"#.utf8))
+private func notice(_ seq: Int64, _ text: String = "Line") throws -> HubEvent {
+    try conversationEvent(seq, "notice", #"{"text":"\#(text)"}"#)
+}
+
+private let historyTime = Date(timeIntervalSince1970: 1_795_089_600)
+
+private func historyStore(_ directory: URL, writeDelay: Duration = .milliseconds(500)) throws -> HistoryStore {
+    HistoryStore(directory: directory, credentials: try testPairingCredentials(), now: { historyTime }, writeDelay: writeDelay)
 }
 
 @Test func batchedCommitsLeaveTheLastConsistentHistoryOnDiskUntilFlushed() async throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: directory) }
-    let credentials = try testPairingCredentials()
-    let now = Date(timeIntervalSince1970: 1_795_089_600)
-    let store = HistoryStore(directory: directory, credentials: credentials, now: { now }, writeDelay: .seconds(60))
-    let first = try historyEvent(1), second = try historyEvent(2)
+    let store = try historyStore(directory, writeDelay: .seconds(60))
+    let first = try notice(1), second = try notice(2)
     try await store.commit(first, through: 1)
     try await store.commit(nil, through: 5)
-    let reader = { try await HistoryStore(directory: directory, credentials: credentials, now: { now }).load() }
-    #expect(try await reader().cursor == 0)
+    #expect(try await historyStore(directory).load().cursor == 0)
     try await store.flush()
     try await store.commit(second, through: 6)
-    let killed = try await reader()
+    let killed = try await historyStore(directory).load()
     #expect(killed.events == [first] && killed.cursor == 5)
     #expect(try await store.load().events == [first, second])
 }
@@ -174,46 +177,55 @@ private func historyEvent(_ seq: Int64, time: String = "2026-11-19T12:00:00.1234
 @Test func batchedCommitsReachDiskAfterTheWriteDelay() async throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: directory) }
-    let credentials = try testPairingCredentials()
-    let now = Date(timeIntervalSince1970: 1_795_089_600)
-    let store = HistoryStore(directory: directory, credentials: credentials, now: { now }, writeDelay: .milliseconds(20))
-    try await store.commit(try historyEvent(3), through: 3)
-    let deadline = Date().addingTimeInterval(5)
-    while try await HistoryStore(directory: directory, credentials: credentials, now: { now }).load().cursor != 3 {
-        #expect(Date() < deadline); if Date() >= deadline { return }
-        try await Task.sleep(for: .milliseconds(10))
-    }
+    let store = try historyStore(directory, writeDelay: .milliseconds(20))
+    try await store.commit(try notice(3), through: 3)
+    try await Task.sleep(for: .milliseconds(300))
+    #expect(try await historyStore(directory).load().cursor == 3)
 }
 
-@Test func aFailedBatchedWriteStopsTheNextCommit() async throws {
+@Test func duplicateAndOutOfOrderCommitsKeepOneOrderedCopy() async throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try historyStore(directory)
+    try await store.commit(try notice(3), through: 3)
+    try await store.commit(try notice(1), through: 1)
+    try await store.commit(try notice(3, "Again"), through: 3)
+    try await store.flush()
+    let saved = try await historyStore(directory).load()
+    #expect(saved.events.map(\.seq) == [1, 3] && saved.cursor == 3)
+    #expect(saved.events.last?.string("text") == "Line")
+}
+
+@Test func aFailedBatchedWriteStopsLaterCommitsUntilAWriteSucceeds() async throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer {
         try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
         try? FileManager.default.removeItem(at: directory)
     }
-    let credentials = try testPairingCredentials()
-    let now = Date(timeIntervalSince1970: 1_795_089_600)
-    let store = HistoryStore(directory: directory, credentials: credentials, now: { now }, writeDelay: .seconds(60))
-    try await store.commit(try historyEvent(1), through: 1)
+    let store = try historyStore(directory, writeDelay: .milliseconds(20))
+    try await store.commit(try notice(1), through: 1)
     try await store.flush()
     try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: directory.path)
-    try await store.commit(try historyEvent(2), through: 2)
-    await #expect(throws: (any Error).self) { try await store.flush() }
+    try await store.commit(try notice(2), through: 2)
+    try await Task.sleep(for: .milliseconds(300))
+    await #expect(throws: (any Error).self) { try await store.commit(try notice(3), through: 3) }
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+    try await store.commit(try notice(4), through: 4)
+    try await store.flush()
+    #expect(try await historyStore(directory).load().events.map(\.seq) == [1, 2, 4])
 }
 
 @Test func aCatchUpOfThousandsOfEventsCommitsInUnderTwoSeconds() async throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: directory) }
-    let credentials = try testPairingCredentials()
-    let now = Date(timeIntervalSince1970: 1_795_089_600)
-    let store = HistoryStore(directory: directory, credentials: credentials, now: { now })
+    let store = try historyStore(directory)
     let text = String(repeating: "Task snapshot text. ", count: 90)
-    try await store.merge(try (1...1500).map { try historyEvent($0, text: text) })
+    try await store.merge(try (1...1500).map { try notice($0, text) })
     let start = Date()
-    for seq in Int64(1501)...3000 { try await store.commit(try historyEvent(seq, text: text), through: seq) }
+    for seq in Int64(1501)...3000 { try await store.commit(try notice(seq, text), through: seq) }
     try await store.flush()
     #expect(Date().timeIntervalSince(start) < 2)
-    #expect(try await HistoryStore(directory: directory, credentials: credentials, now: { now }).load().events.count == 3000)
+    #expect(try await historyStore(directory).load().events.count == 3000)
 }
 
 @MainActor @Test func goingToTheBackgroundSavesTheBatchedHistory() async throws {

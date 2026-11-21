@@ -437,8 +437,9 @@ import Observation
         foregroundGeneration &+= 1
         let transition = foregroundGeneration, owner = generation, client = client
         if !value {
-            await talk.cancel(); outbox?.prepareForBackground()
+            // A failed save is kept by the store, so the next commit retries it.
             try? await history?.flush()
+            await talk.cancel(); outbox?.prepareForBackground()
         } else { outbox?.nudge() }
         guard foregroundGeneration == transition, generation == owner, self.client === client else { return }
         let playing = playback.activeSpeechID ?? pendingPlaybackDrain?.speechID ?? backgroundSpeechID
