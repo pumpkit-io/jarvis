@@ -117,9 +117,11 @@ struct MessageInputBar: View {
             HStack(spacing: 8) {
                 if session.talk.isLocked {
                     Button { Task { await session.talk.discard() } } label: {
-                        Image(systemName: "trash").frame(minWidth: 44, minHeight: 44)
+                        Image(systemName: "trash").frame(width: 44, height: 44).contentShape(Rectangle())
                     }
                     .buttonStyle(.plain).foregroundStyle(theme.signal)
+                    // Keeps the 44-point target without making the locked row taller than a line of text.
+                    .padding(.vertical, -6)
                     .padding(.leading, -12)
                     .accessibilityLabel("Discard Talk")
                 }
@@ -133,7 +135,7 @@ struct MessageInputBar: View {
                                 .frame(width: 3, height: 3 + 25 * session.orb.level * (0.35 + 0.65 * abs(sin(Double(index + 1)))))
                         }
                     }
-                    .frame(maxWidth: .infinity, minHeight: 30)
+                    .frame(maxWidth: .infinity, maxHeight: 28)
                     .accessibilityLabel("Microphone level")
                 } else {
                     Text("‹ Slide to cancel")
