@@ -40,9 +40,10 @@ struct ConversationView: View {
                     if let message = session.historyMessage {
                         Text(message).font(.system(size: controlSize)).foregroundStyle(theme.haze)
                     }
-                    if session.conversation.rows.isEmpty {
-                        Text("Nothing said yet. Hold the key and ask Jarvis something.")
-                            .font(.system(size: scriptSize, design: .serif))
+                    if session.conversation.rows.isEmpty && (session.outbox?.items.isEmpty ?? true) {
+                        Text("Ask Jarvis anything.")
+                            .font(.system(size: controlSize))
+                            .foregroundStyle(theme.haze)
                             .lineSpacing(5)
                             .padding(.top, 24)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -94,27 +95,40 @@ struct ConversationView: View {
 
     /// A message still on this phone, shown where the User's line will appear once Jarvis hears it.
     private func queued(_ item: OutboxItem) -> some View {
-        VStack(alignment: .trailing, spacing: 8) {
-            switch item.content {
-            case .line(let text): Text(verbatim: text).multilineTextAlignment(.trailing).textSelection(.enabled)
-            case .talk(_, let seconds): Text("Voice message, \(Int(seconds.rounded())) s")
-            }
-            Text(item.message)
-            HStack(spacing: 16) {
-                if item.isSettled {
-                    Button(item.status == .uncertain ? "Send again" : "Try again") { session.outbox?.retry(item.id) }
-                        .buttonStyle(.plain).underline().frame(minHeight: 44)
+        userBubble {
+            VStack(alignment: .leading, spacing: 8) {
+                switch item.content {
+                case .line(let text): Text(verbatim: text).textSelection(.enabled)
+                case .talk(_, let seconds):
+                    Label("\(Int(seconds.rounded())) s", systemImage: "waveform")
+                        .accessibilityLabel("Talk, \(Int(seconds.rounded())) seconds")
                 }
-                if item.status != .sending, !item.isSent {
-                    Button("Delete") { session.outbox?.delete(item.id) }
-                        .buttonStyle(.plain).underline().frame(minHeight: 44)
+                Label(item.message, systemImage: "clock")
+                    .foregroundStyle(theme.haze)
+                HStack(spacing: 16) {
+                    if item.isSettled {
+                        Button(item.status == .uncertain ? "Send again" : "Try again") { session.outbox?.retry(item.id) }
+                            .buttonStyle(.plain).underline().frame(minHeight: 44)
+                    }
+                    if item.status != .sending, !item.isSent {
+                        Button("Delete") { session.outbox?.delete(item.id) }
+                            .buttonStyle(.plain).underline().frame(minHeight: 44)
+                    }
                 }
+                .foregroundStyle(theme.haze)
             }
         }
         .font(.system(size: controlSize))
-        .foregroundStyle(theme.haze)
-        .frame(maxWidth: .infinity, alignment: .trailing)
         .accessibilityElement(children: .contain)
+    }
+
+    private func userBubble<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        content()
+            .foregroundStyle(theme.frost)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(theme.deep, in: RoundedRectangle(cornerRadius: 20))
+            .frame(maxWidth: .infinity, alignment: .trailing)
     }
 
     private func gapDate(_ index: Int) -> Date? {
@@ -127,14 +141,21 @@ struct ConversationView: View {
     private func scriptRow(_ row: ConversationRow) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             if !row.text.isEmpty {
-                Text(spokenText(row))
-                    .font(.system(size: row.speaker == .user ? controlSize : scriptSize,
-                                  design: row.speaker == .user ? .default : .serif))
-                    .lineSpacing(row.speaker == .user ? 2 : 5)
-                    .foregroundStyle(row.speaker == .user ? theme.haze : theme.frost)
-                    .multilineTextAlignment(row.speaker == .user ? .trailing : .leading)
-                    .frame(maxWidth: .infinity, alignment: row.speaker == .user ? .trailing : .leading)
-                    .textSelection(.enabled)
+                if row.speaker == .user {
+                    userBubble {
+                        Text(verbatim: row.text)
+                            .font(.system(size: controlSize))
+                            .lineSpacing(2)
+                            .textSelection(.enabled)
+                    }
+                } else {
+                    Text(spokenText(row))
+                        .font(.system(size: scriptSize, design: .serif))
+                        .lineSpacing(5)
+                        .foregroundStyle(theme.frost)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
             }
             if row.id.hasPrefix("reply:"), session.playback.missedReplies.contains(String(row.id.dropFirst(6))),
                session.playback.replyID != String(row.id.dropFirst(6)) {
