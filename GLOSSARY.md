@@ -93,7 +93,7 @@ The Hub's pending decision about which existing Tasks an already locally admitte
 _Avoid_: treating a local floor decision as a Task selection
 
 **Talk**:
-One push-to-talk capture on the iPhone Client, from press to release. The iPhone Client listens at no other time, and each Talk is a new Spoken request.
+One push-to-talk capture on the iPhone Client, from press until the User sends or discards it. The User holds to speak and may lock the Talk to speak hands-free. The iPhone Client listens at no other time, and each sent Talk is a new Spoken request.
 _Avoid_: recording, voice message, push
 
 **Outbox**:
