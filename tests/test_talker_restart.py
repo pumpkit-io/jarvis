@@ -1,11 +1,13 @@
-"""The Talker restarts between turns once its context passes the threshold, seeded by the Hub from its own records."""
+"""The Talker restarts between turns once its context passes the threshold, seeded with the newest of the saved
+Conversation and the Hub's own records."""
 
 import asyncio
+from collections.abc import AsyncIterator
 
 import pytest
 
 from jarvis_hub.agents.backend import Context
-from jarvis_hub.hub import RESTART_RETRY_AFTER
+from jarvis_hub.hub import RESTART_RETRY_AFTER, Line
 from tests.fakes import (
     Fail,
     FakeBackend,
@@ -48,7 +50,7 @@ def user_messages(*sessions: object) -> list[str]:
     return [m for s in sessions for m in s.received if m.startswith("<user")]  # type: ignore[attr-defined]
 
 
-async def test_context_past_the_threshold_restarts_the_talker_with_the_tasks_and_recent_exchanges(
+async def test_context_past_the_threshold_restarts_the_talker_with_the_recent_exchanges_then_the_tasks(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
 ) -> None:
     hold_task = asyncio.Event()
@@ -77,6 +79,7 @@ async def test_context_past_the_threshold_restarts_the_talker_with_the_tasks_and
     assert "T1" in seed and "Check the open PRs" in seed
     assert "Hello" in seed and "Evening, sir." in seed
     assert "Look at the open PRs" in seed and "Right away, sir." in seed
+    assert seed.index("</conversation>") < seed.index("<open_tasks>\n")
     assert old.closed
     assert new.spec.system_prompt == old.spec.system_prompt
     assert user_messages(new) == ['<user lang="en" typed="true">How is it going?</user>']
@@ -189,21 +192,26 @@ async def test_a_finished_task_is_not_an_open_task(
     assert "<you>Done, sir.</you>" in seed
 
 
-async def test_only_the_last_few_exchanges_are_in_the_seed(
+async def test_the_seed_holds_the_newest_exchanges_up_to_40000_tokens(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
 ) -> None:
-    words = [f"word{i}" for i in range(10)]
-    scripts = [[Text(f"reply{i}.")] for i in range(9)] + [[Text("reply9."), at(50)], [Text("after.")]]
+    # Each line is about 16,000 tokens at 3.5 characters a token, so the newest two fit and three do not.
+    words = ["alpha", "bravo", "charlie", "delta"]
+    said = [(word + " ") * (56_000 // (len(word) + 1)) for word in words]
+    scripts = [[Text("Noted.")] for _ in range(3)] + [[Text("Noted."), at(50)], [Text("after.")]]
     backend = FakeBackend(clock, scripts)
     hub = make_hub(backend, output, metrics)
 
+    async def inputs() -> AsyncIterator[Line]:
+        for text in [*said, "last"]:
+            yield Line(text, clock.now(), lang="en")
+
     await hub.start()
-    await hub.run(lines(clock, *words, "last"))
+    await hub.run(inputs())
     await hub.close()
 
     seed = backend.all_sessions("talker")[1].received[0]
-    assert "word9" in seed and "reply9." in seed
-    assert "word0" not in seed and "reply0." not in seed
+    assert [word for word in words if f"{word} {word}" in seed] == ["charlie", "delta"]
 
 
 async def test_a_restart_that_cannot_open_keeps_the_session_and_the_conversation_goes_on(

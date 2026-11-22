@@ -12,7 +12,7 @@ import pytest
 
 from jarvis_hub.agents.backend import Context, SessionSpec
 from jarvis_hub.subagents import Subagent
-from jarvis_hub.hub import WARM_UP, Hub
+from jarvis_hub.hub import Hub
 from jarvis_hub.voice.assessment import Verdict
 from jarvis_hub.voice.state import Heard, SpeechStarted, SpokenWake, Timing
 from jarvis_hub.voice.voice_mode import VoiceMode, merge
@@ -1397,7 +1397,7 @@ async def speaking(rig: Rig) -> None:
 
 
 def talker_got(rig: Rig) -> list[str]:
-    return [m for m in rig.backend.session("talker").received if m != WARM_UP]
+    return [m for m in rig.backend.session("talker").received if not m.startswith('<event source="hub" reason="launch"')]
 
 
 async def test_okay_over_jarvis_is_judged_while_it_talks_on_without_a_gap(rig_for: MakeRig) -> None:

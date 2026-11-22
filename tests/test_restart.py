@@ -1,4 +1,5 @@
-"""A Hub restart through the one seam: what was waited on comes back from the runtime folder's state file."""
+"""A Hub restart through the one seam: what was waited on comes back from the runtime folder's state file, and the
+Conversation from the saved conversation."""
 
 import asyncio
 import json
@@ -56,6 +57,7 @@ def a_hub(clock: FakeClock, state: Path, output: RecordingOutput, **options: Any
     scripts = options.pop("scripts", ())
     orchestrator = options.pop("orchestrator", ())
     backend = FakeBackend(clock, scripts, orchestrator=orchestrator, subagents=options.pop("subagents", None))
+    options.setdefault("conversation_path", state.with_name("conversation.json"))
     return make_hub(backend, output, RecordingMetrics(), state_path=state, **options), backend
 
 
@@ -548,3 +550,32 @@ async def test_backlog_not_yet_attached_survives_another_restart(clock: FakeCloc
     [_, first_turn] = talker_received(backend)
     assert BACKLOG_OPENER.format(n=1) in first_turn and "Three PRs are open." in first_turn
     assert backend.all_sessions("orchestrator") == []
+
+
+async def test_the_talker_continues_the_conversation_and_the_backlog_still_waits_for_the_user(
+    clock: FakeClock, state: Path
+) -> None:
+    await interrupted_task(clock, state, request="Count the open PRs on pumpkit")
+
+    output = RecordingOutput()
+    second, backend = a_hub(
+        clock, state, output, scripts=[[Text("Three, sir, as you asked before.")]],
+        orchestrator=[[report("T1", "Three PRs are open.")]],
+    )
+    typist = Typist(clock)
+    await second.start()
+    running = asyncio.create_task(second.run(typist.lines()))
+    await until(lambda: "Three PRs are open." in state.read_text())
+    await asyncio.sleep(0.02)
+    assert output.replies == []
+    typist.type("What did I ask you before?")
+    typist.end()
+    await running
+    await second.close()
+
+    [seed, first_turn] = talker_received(backend)
+    assert seed.startswith('<event source="hub" reason="launch">')
+    assert "Count the open PRs on pumpkit</user>" in seed and "<you>Let me look.</you>" in seed
+    assert "Three PRs are open." not in seed
+    assert first_turn.startswith(BACKLOG_OPENER.format(n=1)) and "Three PRs are open." in first_turn
+    assert output.replies == ["Three, sir, as you asked before."]

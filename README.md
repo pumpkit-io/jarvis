@@ -64,11 +64,11 @@ A phone with unfinished playback does not keep the terminal session open. Undeli
 
 The [voice trace](docs/notes/voice-tracing.md) correlates captured requests, endpointing, transcription, Hub turns and estimated meaningful playback. It distinguishes missing measurements from zero delay.
 
-Type into the same terminal during voice mode for a text-only reply. Details appear on screen and in `.jarvis/show.log`. Ctrl-D or Ctrl-C stops the Hub. Each launch starts a fresh conversation; saved Tasks and waits survive restart, and interrupted Subagents keep their branches.
+Type into the same terminal during voice mode for a text-only reply. Details appear on screen and in `.jarvis/show.log`. Ctrl-D or Ctrl-C stops the Hub. Jarvis continues the same Conversation after a restart, without opening on news ([ADR 0028](docs/adr/0028-one-conversation-across-restarts-folded-into-memory.md)); saved Tasks and waits survive restart, and interrupted Subagents keep their branches.
 
 Startup shows loading and ready notices for the conversation model, speech and listening. The short readiness tone means speech output is ready; check the model and listening notices before speaking. There is no prerecorded greeting.
 
-The Talker warms in the background at startup, using one hidden subscription turn ([ADR 0006](docs/adr/0006-warm-up-in-the-background.md)). The Orchestrator connects without a prompt. Idle listening and stop phrases use no model call; pending work and Announcements may still need agent turns.
+The Talker reads the saved Conversation in the background at startup, using one hidden subscription turn ([ADR 0006](docs/adr/0006-warm-up-in-the-background.md)). The Orchestrator connects without a prompt. Idle listening and stop phrases use no model call; pending work and Announcements may still need agent turns.
 
 Ask for status or to cancel a Task by name. Quiet mode holds routine Announcements until the next Wake word; news that needs you can still be announced. A direct action request grants permission for that action. You can also authorize a Task unattended, or explicitly authorize the whole session. Task permission survives restarts; session permission ends at restart. Each Boundary action still gets a concrete Approval, using existing permission without another question when it applies. Approval replies use natural language. The Hub runs approved merges and branch deletions; other approved actions go to a Subagent. See [ADR 0022](docs/adr/0022-natural-language-authorization.md) for the permission model and its limits.
 
@@ -139,7 +139,7 @@ This slice requires a terminal running `./jarvis` on a Mac that stays awake and 
 - Jarvis pauses or stops on its own speaker: compare the speaker checklist with `--headphones` before tuning thresholds. Cancellation now runs before model inference can queue microphone audio; [the adapter replay](docs/notes/playback-capture-isolation.md) explains the reproduced stall defect and remaining physical gate. Device delay, room cancellation and Barge-in still need the real speaker run.
 - A writing Subagent cannot start: check that the sdlc plugin is installed and its worktree script is available, that the clone belongs to the configured Org, and that its worktree is not locked by another session.
 - Usage limit: an on-screen notice shows the reset time, or says it is unavailable, and gives the next step. Held Tasks and new Subagents wait and retry with backoff. Send a new request after reset; no conversational model call phrases the unavailable notice. A timer clearing the hold does not confirm recovery: the recovery notice and any generated Announcement follow a successful turn. Startup, limit and backend failures use no cached spoken sentences. Stats reports observed limit hits and token usage; these are not API charges. Real limit handling is tested with fakes, not an exhausted account.
-- Unexpected restart recovery: inspect `.jarvis/state.json` and terminal notices before changing saved data. `.jarvis/metrics.jsonl`, `.jarvis/show.log` and `.jarvis/subagents/` hold timings, shown details and Subagent progress. They may contain private work; keep them local.
+- Unexpected restart recovery: inspect `.jarvis/state.json`, `.jarvis/conversation.json` and terminal notices before changing saved data. `.jarvis/metrics.jsonl`, `.jarvis/show.log` and `.jarvis/subagents/` hold timings, shown details and Subagent progress. They may contain private work; keep them local.
 
 ## Wake-word license
 

@@ -62,6 +62,23 @@ def numbered(record_id: object, prefix: str) -> int:
     return int(record_id[1:])
 
 
+def write_atomically(path: Path, data: dict[str, Any], *, indent: int | None = 1) -> None:
+    """Written to a temporary file and renamed over the old one, so a crash mid-write leaves the old file whole."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}-", suffix=path.suffix)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, ensure_ascii=False, indent=indent)
+            # Without it a power cut after the rename can leave an empty file in place of both versions.
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
+
+
 class UnreadableState(Exception):
     """The state file could not be used and was moved aside; the message says where, for the User."""
 
@@ -89,20 +106,7 @@ class StateFile:
         return cast(dict[str, Any], data)
 
     def save(self, data: dict[str, Any]) -> None:
-        """Written to a temporary file and renamed over the old one, so a crash mid-write leaves the old state whole."""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(dir=self._path.parent, prefix=".state-", suffix=".json")
-        try:
-            with os.fdopen(fd, "w") as f:
-                json.dump({"version": VERSION, **data}, f, ensure_ascii=False, indent=1)
-                # Without it a power cut after the rename can leave an empty file in place of both states.
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(temporary, self._path)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(temporary)
-            raise
+        write_atomically(self._path, {"version": VERSION, **data})
 
     def set_aside(self, problem: str) -> str:
         """Moves the file out of the way, so the next save starts clean; returns the notice saying where it went."""

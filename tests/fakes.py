@@ -21,7 +21,7 @@ from jarvis_hub.agents.backend import (
     TurnEnd,
     Usage,
 )
-from jarvis_hub.hub import WARM_UP, Hub, Line, Output
+from jarvis_hub.hub import Hub, Line, Output
 from jarvis_hub.limits import UsageLimit
 from jarvis_hub.voice.language import Lang
 from jarvis_hub.subagents import Refusal, Subagent, SubagentSetup
@@ -254,8 +254,8 @@ class FakeSession:
 
 
 class FakeBackend:
-    """Plays one script per message, in order, per role; `warm_up` answers the Talker's warm-up message and
-    `seed_reply` the seed a restarted Talker starts with.
+    """Plays one script per message, in order, per role; `warm_up` answers the seed the Talker starts with at launch
+    and `seed_reply` the seed a restarted Talker starts with.
 
     An Orchestrator with no script left ends its turn without a report.
     """
@@ -336,7 +336,7 @@ class FakeBackend:
             return self.orchestrator_scripts.pop(0) if self.orchestrator_scripts else ()
         if role == "subagent":
             return self.subagent_scripts.get(message, (Text("Done."),))
-        if message == WARM_UP:
+        if message.startswith("<event source=\"hub\" reason=\"launch\""):
             return self.warm_up
         if message.startswith("<event source=\"hub\" reason=\"restart\""):
             return self.seed_reply

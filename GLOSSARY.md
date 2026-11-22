@@ -80,6 +80,10 @@ _Avoid_: rate limit, quota, billing limit
 
 ### Conversation
 
+**Conversation**:
+The one thread of exchanges between the User and Jarvis, shared by the Mac and the iPhone and continued across Hub restarts until the User resets it. Each exchange keeps the device it came from.
+_Avoid_: chat, session, thread, history
+
 **Wake word**:
 A phrase such as "Hey Jarvis", "Hi Jarvis", "Ehi Jarvis" or "Jarvis" that makes an idle Jarvis start listening. During playback it is evidence that speech addresses Jarvis, interpreted in context rather than treated as an unconditional Interruption.
 _Avoid_: hotword, trigger phrase
