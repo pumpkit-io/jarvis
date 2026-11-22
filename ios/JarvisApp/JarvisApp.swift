@@ -4,11 +4,13 @@ import JarvisClient
 @main
 struct JarvisApp: App {
     @UIApplicationDelegateAdaptor(OutboxWake.self) private var wake
+    @State private var scriptStyle = ScriptStyleSetting()
 
     var body: some Scene {
         WindowGroup {
             JarvisRootView(session: AppSession(store: KeychainPairingStore()))
                 .preferredColorScheme(.dark)
+                .environment(scriptStyle)
         }
     }
 }
