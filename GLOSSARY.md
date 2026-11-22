@@ -34,6 +34,10 @@ _Avoid_: Jarvis, manager, planner
 An agent the Orchestrator starts to do practical work, such as changing code, investigating or reviewing. The Orchestrator picks its model by how hard the task is.
 _Avoid_: worker, helper, child agent
 
+**Summariser**:
+The agent that writes each new Memory during a Fold, from the previous Memory and the exchanges being folded. It has no tools and never speaks to the User.
+_Avoid_: compactor, memory agent
+
 ### Scope
 
 **Org**:
@@ -75,7 +79,7 @@ The User's preferences for how agents behave while doing work. The Orchestrator 
 _Avoid_: orchestrator preferences, rules
 
 **Usage limit**:
-The Max subscription's cap on model use, which stops a session until its window resets. Jarvis says so with the reset time, holds the Orchestrator's Task and any new Subagent until then (at least a minute, doubling each time a reset turns out early), and makes one Announcement that it reset, only once a turn of a held session completes after its hold cleared, so the User is never told a reset that was not real. A retry that is limited again stays silent unless the reset the User heard moves later or becomes unknown. Until a limited session has a successful turn again it is the same limit, told of once.
+The Max subscription's cap on model use, which stops a session until its window resets. When it stops the Talker, the Orchestrator or a Subagent, Jarvis says so with the reset time, holds the Orchestrator's Task and any new Subagent until then (at least a minute, doubling each time a reset turns out early), and makes one Announcement that it reset, only once a turn of a held session completes after its hold cleared, so the User is never told a reset that was not real. A retry that is limited again stays silent unless the reset the User heard moves later or becomes unknown. Until a limited session has a successful turn again it is the same limit, told of once. A limit on the Summariser is never told: it only holds the next Fold until the reset.
 _Avoid_: rate limit, quota, billing limit
 
 ### Conversation
