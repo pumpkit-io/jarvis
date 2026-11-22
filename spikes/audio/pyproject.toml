@@ -22,6 +22,7 @@ dependencies = [
   "transformers",
   # misaki needs this spaCy model and otherwise pip-installs it into whatever venv is active.
   "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+  "mlx-audio>=0.6.7",
 ]
 
 [tool.uv]
