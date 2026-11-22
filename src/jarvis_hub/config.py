@@ -16,6 +16,8 @@ Effort = Literal["low", "medium", "high", "xhigh", "max"]
 _Choice = TypeVar("_Choice", bound=str)
 # Lowest first, so a level's index orders it.
 EFFORTS: tuple[Effort, ...] = get_args(Effort)
+# Each name has a synthesizer in `jarvis_hub.voice.tts.TTS_ENGINES`.
+TtsEngine = Literal["qwen3", "kokoro"]
 
 _ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
 _QUOTED = re.compile(r"^\"([^\"]*)\"|^'([^']*)'")
@@ -42,7 +44,7 @@ class VoiceSettings:
     wake_engine: Literal["openwakeword"] = "openwakeword"
     wake_threshold: float = 0.2
     stt_engine: Literal["parakeet"] = "parakeet"
-    tts_engine: Literal["qwen3", "kokoro"] = "qwen3"
+    tts_engine: TtsEngine = "qwen3"
     aec: Literal["webrtc", "off"] = "webrtc"
     vad_threshold: float = 0.5
     end_silence_ms: int = 500
@@ -166,8 +168,8 @@ def load_settings(
                 return option
         raise ConfigError(f"{name}={value!r} is not one of {', '.join(allowed)}")
 
-    def tts_engine() -> Literal["qwen3", "kokoro"]:
-        return choice("JARVIS_TTS_ENGINE", "qwen3", ("qwen3", "kokoro"))
+    def tts_engine() -> TtsEngine:
+        return choice("JARVIS_TTS_ENGINE", "qwen3", get_args(TtsEngine))
 
     def voice_settings() -> VoiceSettings:
         return VoiceSettings(

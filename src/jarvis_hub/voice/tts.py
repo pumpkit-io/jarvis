@@ -10,10 +10,11 @@ import math
 from pathlib import Path
 import shutil
 import tempfile
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Protocol, cast
 
 import numpy as np
 
+from jarvis_hub.config import TtsEngine
 from jarvis_hub.voice.language import Lang
 from jarvis_hub.voice.player import Samples
 
@@ -54,7 +55,6 @@ def configure_espeak() -> None:
         raise RuntimeError(f"Cannot prepare eSpeak speech resources: {error}. {repair}") from error
 
 
-
 # One piece of a sentence: the words it says and their audio.
 Piece = tuple[str, Samples]
 
@@ -68,7 +68,6 @@ class Synthesizer(Protocol):
     def load(self) -> None: ...
 
     def voice_for(self, lang: Lang) -> str:
-        """The voice this engine speaks `lang` in."""
         ...
 
     def stream(self, text: str, voice: str) -> Generator[Piece]:
@@ -116,8 +115,8 @@ STREAM_INTERVAL_S = 0.5
 # Both cloned voices measured about 2 dB louder than Kokoro, whose level the speech gate, barge-in thresholds and
 # echo measurements were tuned on. A fixed gain, so pieces of one sentence keep their relative level.
 GAIN = 10 ** (-2.0 / 20)
-# Slightly faster than both voices speak (15 to 18.5), so a piece's words are rarely late.
-CHARS_PER_SECOND = 19.0
+# Within the 15 to 18.5 both voices speak, so a piece's words are seldom early or late.
+CHARS_PER_SECOND = 17.0
 # Carries words the estimate had not reached when the audio ended.
 TAIL_S = 0.02
 
@@ -149,8 +148,6 @@ QWEN3_VOICES: dict[Lang, ClonedVoice] = {
 
 
 class Cloner(Protocol):
-    """A loaded voice-cloning model."""
-
     @property
     def sample_rate(self) -> int: ...
 
@@ -163,7 +160,7 @@ class Qwen3Synthesizer:
     sample_rate = 24_000
 
     def __init__(
-        self, voices: dict[Lang, ClonedVoice] = QWEN3_VOICES, load_model: "Callable[[], Cloner] | None" = None
+        self, voices: dict[Lang, ClonedVoice] = QWEN3_VOICES, load_model: Callable[[], Cloner] | None = None
     ) -> None:
         self._voices = voices
         self._by_name = {voice.name: voice for voice in voices.values()}
@@ -242,7 +239,6 @@ class _MlxQwen3:
             yield np.asarray(chunk.audio, dtype=np.float32)
 
 
-TtsEngine = Literal["qwen3", "kokoro"]
 TTS_ENGINES: dict[TtsEngine, Callable[[], Synthesizer]] = {"qwen3": Qwen3Synthesizer, "kokoro": KokoroSynthesizer}
 
 

@@ -535,7 +535,7 @@ requires-dist = [
     { name = "lingua-language-detector", specifier = ">=2.2" },
     { name = "livekit", specifier = "==1.2.0" },
     { name = "mlx", specifier = ">=0.32.4" },
-    { name = "mlx-audio", specifier = ">=0.6.7" },
+    { name = "mlx-audio", specifier = ">=0.6.7,<0.7" },
     { name = "numpy", specifier = ">=2" },
     { name = "onnxruntime", specifier = ">=1.20" },
     { name = "openwakeword", specifier = "==0.6.0" },

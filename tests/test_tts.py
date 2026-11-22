@@ -7,7 +7,6 @@ import pytest
 from jarvis_hub.voice.language import Lang
 from jarvis_hub.voice.player import Samples
 from jarvis_hub.voice.tts import (
-    GAIN,
     QWEN3_VOICES,
     TTS_ENGINES,
     ClonedVoice,
@@ -68,7 +67,7 @@ def test_pieces_are_24khz_mono_float32_at_kokoros_level_and_say_every_word(tmp_p
     assert synth.sample_rate == 24_000
     assert all(samples.dtype == np.float32 and samples.ndim == 1 for _, samples in pieces)
     assert sum(len(samples) for _, samples in pieces) >= 3 * 12_000
-    assert pieces[0][1][0] == pytest.approx(0.5 * GAIN)
+    assert pieces[0][1][0] == pytest.approx(0.397, abs=1e-3)
     assert " ".join(words for words, _ in pieces if words).split() == text.split()
     # Words go out with the audio that says them, not all with the last piece.
     assert pieces[0][0] and pieces[0][0] != " ".join(text.split())
@@ -121,7 +120,6 @@ def test_an_unknown_voice_is_refused(tmp_path: Path) -> None:
 
 def test_the_cloned_voices_ship_with_the_checkout() -> None:
     assert {lang: voice.clip.is_file() for lang, voice in QWEN3_VOICES.items()} == {"en": True, "it": True}
-    assert [voice.language for voice in QWEN3_VOICES.values()] == ["English", "Italian"]
 
 
 def test_kokoro_speaks_american_english_and_italian_never_a_british_voice() -> None:

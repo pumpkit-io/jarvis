@@ -24,6 +24,7 @@ from jarvis_hub.agents.backend import (
 from jarvis_hub.hub import WARM_UP, Hub, Line, Output
 from jarvis_hub.limits import UsageLimit
 from jarvis_hub.voice.language import Lang
+from jarvis_hub.voice.tts import KOKORO_VOICES
 from jarvis_hub.subagents import Refusal, Subagent, SubagentSetup
 from jarvis_hub.waits import WaitSetup
 from jarvis_hub.voice.player import REWIND_MS, Clip, PlaybackReceipt, Samples
@@ -685,7 +686,7 @@ class FakeTts:
         return np.full(len(text) * self.sample_rate // 20, 0.1, dtype=np.float32)
 
     def voice_for(self, lang: Lang) -> str:
-        return {"en": "am_liam", "it": "im_nicola"}[lang]
+        return KOKORO_VOICES[lang]
 
     def stream(self, text: str, voice: str) -> Generator[tuple[str, Samples]]:
         samples, words = self.synthesize(text, voice), text.split()

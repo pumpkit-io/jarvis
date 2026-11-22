@@ -147,7 +147,7 @@ Scripts: `spikes/audio/` (`uv run <script>` from there). `make_synthetic.py` ren
 | Recording session | **Kit ready, waiting on the User.** `cd spikes/audio && uv run session.py`, about 44 minutes with the User (34 without the #4 baseline step, 41 without the optional headphones step), then about 78 minutes unattended: an hour of the room with a video playing, then the analysis. |
 | STT latency, partials, memory | **Measured.** `parakeet-mlx` is 2.5 to 6 times faster than VoiceMode's whisper.cpp small, 5.5 to 15 times faster than `mlx-whisper` turbo and 9.5 to 26 times faster than whisper.cpp turbo, and the only engine under 100 ms on 0.4 to 0.8 s partials. |
 | STT word error rate on the User's clips | **Waiting on the User.** Synthetic WER: parakeet 2.2 %, mlx-whisper turbo 2.2 %, whisper.cpp turbo 2.9 %, VoiceMode's small 7.6 %. Provisional leader: `parakeet-mlx`. |
-| TTS | **Chosen: `kokoro-mlx` in-process; since 2026-11-22 the fallback to Qwen3-TTS 0.6B 8-bit, streamed (ADR 0029, measured under `### TTS`).** First audio 222 ms (EN) and 240 ms (IT) against 358 and 371 ms for VoiceMode's server; `am_liam` and `im_nicola` present in both; speed 1.0. Doesn't depend on the User's voice. |
+| TTS | **Chosen: `kokoro-mlx` in-process.** First audio 222 ms (EN) and 240 ms (IT) against 358 and 371 ms for VoiceMode's server; `am_liam` and `im_nicola` present in both; speed 1.0. Doesn't depend on the User's voice. Since 2026-11-22 Qwen3-TTS 0.6B 8-bit, streamed, is the default and Kokoro the fallback (ADR 0029, measured under `### TTS`). |
 | Echo cancellation | **Pipeline proven, acoustic run waiting on the User.** On digital echo the WebRTC APM takes VAD speech frames during Jarvis alone from 86.8 % to at most 0.5 % and detects 3 of 3 Barge-ins over the echo, against 1 of 3 on the raw mic. The Voice Processing I/O helper is built for the session. Headphones mode, with echo cancellation off, is scored by an optional session step. |
 | Wake word recall | **Waiting on the User.** Synthetic, at threshold 0.5: "Hey Jarvis" 10/10, "Hi Jarvis" 9/10, "Jarvis" 7/10, "Ehi Jarvis" 5/10. The last two are at risk. The session records 20 takes per phrasing, so 95 % is 19 of 20. |
 | Wake word false accepts per hour | **Measured on public audio: 0 per hour at threshold 0.5** over 11.5 h of English and Italian audiobooks; at 0.3, 5 false accepts, 0.43 per hour (all in the Italian book). The session adds 5 minutes of the room with a video playing while the User is there, and an unattended hour of it for the per-hour figure. |
@@ -203,7 +203,7 @@ The 12-word sentences in `corpus.py` (`TTS_SENTENCES`), speed 1.0, p50 of five r
 - The first call per voice takes 1.2 to 1.9 s, encoding the reference clip, which mlx-audio then caches per clip and transcript. Speech's warm-up pays it at load; loading and warming both voices took 7.2 s.
 - The voice holds across runs: cosine similarity of the speaker embeddings is 0.97 to 0.99 against the reference clip and 0.98 to 1.00 between runs, without a seed or a lower temperature.
 - Output is 24 kHz. Its RMS is about 2 dB above Kokoro's in both languages (EN -23.3 against -25.2 dB, IT -20.5 against -22.4 dB), so the Hub cuts it by a fixed 2 dB.
-- Both voices speak 15 to 18.5 characters a second, which sets how the Hub spreads a sentence's words across its pieces.
+- Both voices speak 15 to 18.5 characters a second; the Hub spreads a sentence's words across its pieces at 17.
 
 ### Echo cancellation
 
