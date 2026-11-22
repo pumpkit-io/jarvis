@@ -13,7 +13,7 @@ public struct MessageStamp: Equatable, Sendable {
 
     public init(_ date: Date, now: Date = Date(), locale: Locale = .autoupdatingCurrent,
                 timeZone: TimeZone = .autoupdatingCurrent) {
-        var calendar = Calendar(identifier: .gregorian)
+        var calendar = locale.calendar
         calendar.timeZone = timeZone
         let showsYear = calendar.component(.year, from: date) != calendar.component(.year, from: now)
         var day = Date.FormatStyle(locale: locale, calendar: calendar, timeZone: timeZone).day().month(.abbreviated)
