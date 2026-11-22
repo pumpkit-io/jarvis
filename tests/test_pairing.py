@@ -165,7 +165,7 @@ def settings(*args, **kwargs):
 def forbidden(*args, **kwargs):
     raise AssertionError("pairing CLI must not start models, audio, or Claude checks")
 entry.load_settings = settings
-entry.Mouth = entry.KokoroSynthesizer = entry.SoundPlayer = entry.SdkBackend = forbidden
+entry.Mouth = entry.make_synthesizer = entry.SoundPlayer = entry.SdkBackend = forbidden
 entry.shutil.which = forbidden
 entry.main()
 '''

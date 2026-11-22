@@ -41,7 +41,7 @@ from jarvis_hub.voice.player import NoLocalPlayer, Player, Samples, SoundPlayer
 from jarvis_hub.voice.speech import Speech, SpeechClock
 from jarvis_hub.voice.transcription import TranscriptionService
 from jarvis_hub.voice.state import Timing
-from jarvis_hub.voice.tts import KokoroSynthesizer, Synthesizer
+from jarvis_hub.voice.tts import Synthesizer, make_synthesizer
 from jarvis_hub.voice.voice_mode import AudioInput, VoiceMode, merge
 from jarvis_hub.waits import WaitSetup
 from jarvis_hub.workspace import default_workspace
@@ -312,7 +312,7 @@ async def text_mode(
                 )
         local_speech = speech is not None
         if speech is None and settings.remote:
-            speech = Speech(voice.tts if voice is not None else KokoroSynthesizer(), NoLocalPlayer(), clock, metrics=metrics, notice=output.notice)
+            speech = Speech(voice.tts if voice is not None else make_synthesizer(settings.voice.tts_engine), NoLocalPlayer(), clock, metrics=metrics, notice=output.notice)
         hub = settings_hub(
             settings, backend=backend, clock=clock, output=output, metrics=metrics, speech=speech,
             terminal_speech=local_speech,
@@ -609,7 +609,6 @@ def main() -> None:
             sys.exit(f"jarvis-hub: {e}")
         return
 
-    voice = Mouth(KokoroSynthesizer(), SoundPlayer) if args.speak else None
     cli = shutil.which("claude")
     if cli is None:
         sys.exit("jarvis-hub: the claude CLI is not on PATH; install Claude Code and log in with your Max plan.")
@@ -619,6 +618,7 @@ def main() -> None:
         )
     except ConfigError as e:
         sys.exit(f"jarvis-hub: {e}")
+    voice = Mouth(make_synthesizer(settings.voice.tts_engine), SoundPlayer) if args.speak else None
 
     # Ctrl-C reaches the claude CLI too (same process group), so it ends the conversation rather than a reply.
     try:
@@ -645,7 +645,7 @@ def main() -> None:
                     stdin=sys.stdin,
                     stdout=sys.stdout,
                     stderr=sys.stderr,
-                    ears=Ears(KokoroSynthesizer(), _open_player, _open_listener, _follow_devices),
+                    ears=Ears(make_synthesizer(settings.voice.tts_engine), _open_player, _open_listener, _follow_devices),
                     headphones=args.headphones,
                     debug=args.debug,
                 )

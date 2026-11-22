@@ -408,11 +408,11 @@ async def test_remote_text_launch_transcribes_without_any_mac_audio_device(tmp_p
     monkeypatch.setattr(engines, 'load_engines', no_audio)
     from tests.fakes import FakeTts
     synthesizers: list[FakeTts] = []
-    def tts() -> FakeTts:
+    def tts(engine: str) -> FakeTts:
         fake = FakeTts()
         synthesizers.append(fake)
         return fake
-    monkeypatch.setattr(entry, 'KokoroSynthesizer', tts)
+    monkeypatch.setattr(entry, 'make_synthesizer', tts)
     config = replace(settings(tmp_path), remote=True, remote_port=0)
     with PairingStore(config.runtime_dir / 'events.sqlite3') as pairing:
         phone = pairing.exchange(pairing.create_code('https://mac.example.ts.net'), 'Phone', 'iphone')
@@ -900,7 +900,9 @@ async def test_interactive_terminal_echoes_remote_typing_once_and_preserves_loca
             super().__init__(**options)
             doors.append(self)
     monkeypatch.setattr(entry, 'Door', CaptureDoor)
-    monkeypatch.setattr(entry, 'KokoroSynthesizer', FakeTts)
+    def tts(engine: str) -> FakeTts:
+        return FakeTts()
+    monkeypatch.setattr(entry, 'make_synthesizer', tts)
     config = replace(settings(tmp_path), remote=True, remote_port=0)
     with PairingStore(config.runtime_dir / 'events.sqlite3') as pairing:
         phone = pairing.exchange(pairing.create_code('https://mac.example.ts.net'), 'Phone', 'iphone')

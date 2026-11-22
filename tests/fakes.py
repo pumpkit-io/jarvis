@@ -3,7 +3,7 @@
 import asyncio
 import re
 import threading
-from collections.abc import AsyncIterator, Callable, Iterable, Sequence
+from collections.abc import AsyncIterator, Callable, Generator, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import CoroutineType
@@ -659,13 +659,15 @@ async def until(condition: Any, timeout: float = 1.0) -> None:
 
 
 class FakeTts:
-    """Instant synthesis: a twentieth of a second per character, every sample 0.1."""
+    """Instant synthesis: a twentieth of a second per character, every sample 0.1, streamed in `pieces` pieces with
+    the sentence's words spread across them. Speaks Kokoro's voice names."""
 
     sample_rate = 24_000
 
-    def __init__(self, load_error: Exception | None = None, fail_on: str | None = None) -> None:
+    def __init__(self, load_error: Exception | None = None, fail_on: str | None = None, pieces: int = 1) -> None:
         self.load_error = load_error
         self.fail_on = fail_on
+        self.pieces = pieces
         self.calls: list[tuple[str, str]] = []
         # Set by a test to hold synthesis until it is cleared; the Hub runs synthesis off the event loop.
         self.hold = threading.Event()
@@ -681,6 +683,15 @@ class FakeTts:
         if text == self.fail_on:
             raise RuntimeError("synthesis failed")
         return np.full(len(text) * self.sample_rate // 20, 0.1, dtype=np.float32)
+
+    def voice_for(self, lang: Lang) -> str:
+        return {"en": "am_liam", "it": "im_nicola"}[lang]
+
+    def stream(self, text: str, voice: str) -> Generator[tuple[str, Samples]]:
+        samples, words = self.synthesize(text, voice), text.split()
+        for i in range(self.pieces):
+            yield (" ".join(words[len(words) * i // self.pieces : len(words) * (i + 1) // self.pieces]),
+                   samples[len(samples) * i // self.pieces : len(samples) * (i + 1) // self.pieces])
 
 
 class RecordingPlayer:

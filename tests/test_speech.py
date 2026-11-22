@@ -2,13 +2,15 @@
 
 import asyncio
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Generator
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from jarvis_hub.event_log import EventLog, EventOutput
 from jarvis_hub.hub import Hub
+from jarvis_hub.voice.language import Lang
 from jarvis_hub.voice.speech import Speech
 from tests.fakes import (
     AwaitInterrupt,
@@ -935,3 +937,60 @@ async def test_destination_wait_releases_after_failed_or_cancelled_synthesis(com
         waiting.cancel()
         await asyncio.gather(waiting, return_exceptions=True)
         await speech.close()
+
+
+async def test_a_streamed_sentence_plays_each_piece_as_a_clip_in_the_engines_voice(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    class Cloned(FakeTts):
+        def voice_for(self, lang: Lang) -> str:
+            return f"clone-{lang}"
+
+    player = RecordingPlayer(hold=True)
+    speech = Speech(Cloned(pieces=3), player, clock, metrics=metrics, notice=output.notice)
+    speech.start()
+    played = speech.begin("en", turn=1, heard_at=None)
+    speech.feed("The checks are all green. Ho aperto la pull request per il login.")
+    speech.end()
+    await until(lambda: len(player.texts) == 6)
+
+    assert player.texts == ["The", "checks are", "all green.", "Ho aperto", "la pull request", "per il login."]
+    assert player.voices == ["clone-en"] * 3 + ["clone-it"] * 3
+    player.finish(5)
+    assert not played()
+    player.finish()
+    await speech.idle()
+    assert played()
+    assert speech_rows(metrics)[0]["voice"] == "clone-it"
+    await speech.close()
+
+
+async def test_stopping_mid_sentence_drops_the_pieces_not_yet_synthesised(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, player: RecordingPlayer
+) -> None:
+    from jarvis_hub.voice.player import Samples
+
+    first, rest = threading.Event(), threading.Event()
+
+    class Slow(FakeTts):
+        def stream(self, text: str, voice: str) -> Generator[tuple[str, Samples]]:
+            yield "Half", np.full(2400, 0.1, dtype=np.float32)
+            if text == "Half a sentence.":
+                first.set()
+                rest.wait(timeout=5)
+            yield "a sentence.", np.full(2400, 0.1, dtype=np.float32)
+
+    speech = Speech(Slow(), player, clock, metrics=metrics, notice=output.notice)
+    speech.start()
+    await speech.idle()
+    played = speech.begin("en", turn=1, heard_at=None)
+    speech.feed("Half a sentence.")
+    speech.end()
+    await until(first.is_set)
+    speech.stop()
+    rest.set()
+    await speech.idle()
+
+    assert player.texts == ["Half"]
+    assert not played()
+    await speech.close()

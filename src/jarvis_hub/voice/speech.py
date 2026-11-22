@@ -1,7 +1,8 @@
 """Speech output: the Talker's streamed text becomes audio sentence by sentence, plus nonverbal cues.
 
 Synthesis runs on one thread of its own and never waits for playback, so sentence n+1 is synthesised while
-sentence n plays and the player starts each clip the moment the one before it ends.
+sentence n plays and the player starts each clip the moment the one before it ends. An engine may stream a sentence
+in pieces, each played as a clip of its own as soon as it is ready.
 """
 
 import asyncio
@@ -16,7 +17,7 @@ from uuid import uuid4
 
 import numpy as np
 
-from jarvis_hub.voice.language import Lang, detect_language, voice_for
+from jarvis_hub.voice.language import Lang, detect_language
 from jarvis_hub.voice.player import Clip, PlaybackReceipt, Player, RemotePlayer, Samples
 from jarvis_hub.voice.splitter import SentenceSplitter
 from jarvis_hub.voice.tts import Synthesizer
@@ -107,6 +108,8 @@ class _Reply:
     can_start: Callable[[], bool] | None = None
     splitter: SentenceSplitter = field(default_factory=SentenceSplitter)
     chunks: int = 0
+    # Chunks whose every piece reached the player.
+    spoken: int = 0
     first_chunk: float | None = None
     first_chunk_audio: float | None = None
     first_audio: float | None = None
@@ -389,7 +392,8 @@ class Speech:
         self._tts.load()
         # The first synthesis per voice is seconds slower than the rest, so it is paid here, not by the first reply.
         for lang, phrase in WARM_UP.items():
-            self._tts.synthesize(phrase, voice_for(lang))
+            for _ in self._tts.stream(phrase, self._tts.voice_for(lang)):
+                pass
         tone = chime(self._tts.sample_rate)
         for lang in ("en", "it"):
             self._cache["chime", lang] = Clip("", "chime", tone, self._tts.sample_rate)
@@ -425,7 +429,7 @@ class Speech:
 
     def _reply_played(self, reply: _Reply) -> bool:
         if not reply.played and reply.closed and not reply.stopped and not reply.failed and reply.chunks > 0:
-            reply.played = len(reply.receipts) == reply.chunks and all(receipt.completed for receipt in reply.receipts)
+            reply.played = reply.spoken == reply.chunks and all(receipt.completed for receipt in reply.receipts)
         return reply.played
 
     def _prune_replies(self) -> None:
@@ -457,12 +461,19 @@ class Speech:
                 if not self._reply_allowed(reply):
                     return
                 generation = self._generation
-                voice = voice_for(lang)
-                samples = await asyncio.get_running_loop().run_in_executor(
-                    self._thread, self._tts.synthesize, text, voice
-                )
-                if generation == self._generation and self._reply_allowed(reply):
-                    self._play(Clip(text, voice, samples, self._tts.sample_rate), reply, sentence=True)
+                voice = self._tts.voice_for(lang)
+                run = asyncio.get_running_loop().run_in_executor
+                pieces = await run(self._thread, self._tts.stream, text, voice)
+                try:
+                    while (piece := await run(self._thread, next, pieces, None)) is not None:
+                        if generation != self._generation or not self._reply_allowed(reply):
+                            return
+                        words, samples = piece
+                        self._play(Clip(words, voice, samples, self._tts.sample_rate), reply, sentence=True)
+                    reply.spoken += 1
+                finally:
+                    # Closed on the synthesis thread: the engine's cleanup may touch MLX.
+                    await run(self._thread, pieces.close)
             case _Cached(name, lang, reply, cue_generation):
                 if cue_generation is not None and cue_generation != self._local_cue_generation:
                     return
@@ -531,7 +542,7 @@ class Speech:
             "time_basis": "perf_counter",
             "first_meaningful_audio_ms": ms(reply.first_chunk_audio),
             "meaningful_audio_basis": "queue_estimate",
-            "voice": voice_for(reply.lang),
+            "voice": self._tts.voice_for(reply.lang),
             "chunks": reply.chunks,
             "first_chunk_ms": ms(reply.first_chunk),
             "first_audio_ms": ms(reply.first_audio),

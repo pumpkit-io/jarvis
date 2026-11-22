@@ -42,7 +42,7 @@ class VoiceSettings:
     wake_engine: Literal["openwakeword"] = "openwakeword"
     wake_threshold: float = 0.2
     stt_engine: Literal["parakeet"] = "parakeet"
-    tts_engine: Literal["kokoro"] = "kokoro"
+    tts_engine: Literal["qwen3", "kokoro"] = "qwen3"
     aec: Literal["webrtc", "off"] = "webrtc"
     vad_threshold: float = 0.5
     end_silence_ms: int = 500
@@ -130,7 +130,8 @@ def main_checkout(repo_dir: Path) -> Path:
 def load_settings(
     repo_dir: Path, environ: Mapping[str, str], *, ignore_voice: Callable[[str], None] | None = None
 ) -> Settings:
-    """With `ignore_voice` (text mode), voice settings stay at their defaults and a bad one is reported to it."""
+    """With `ignore_voice` (text mode), voice settings stay at their defaults and a bad one is reported to it, except
+    the TTS engine, which `--speak` and the iPhone still use."""
     repo_dir = repo_dir.resolve()
     main = main_checkout(repo_dir)
     env_file = main / ".env"
@@ -165,6 +166,9 @@ def load_settings(
                 return option
         raise ConfigError(f"{name}={value!r} is not one of {', '.join(allowed)}")
 
+    def tts_engine() -> Literal["qwen3", "kokoro"]:
+        return choice("JARVIS_TTS_ENGINE", "qwen3", ("qwen3", "kokoro"))
+
     def voice_settings() -> VoiceSettings:
         return VoiceSettings(
             follow_up_s=number("JARVIS_FOLLOWUP_SECONDS", 10.0, 0, 120, low_open=True),
@@ -173,7 +177,7 @@ def load_settings(
             wake_engine=choice("JARVIS_WAKE_ENGINE", "openwakeword", ("openwakeword",)),
             wake_threshold=number("JARVIS_WAKE_THRESHOLD", 0.2, 0, 1, low_open=True),
             stt_engine=choice("JARVIS_STT_ENGINE", "parakeet", ("parakeet",)),
-            tts_engine=choice("JARVIS_TTS_ENGINE", "kokoro", ("kokoro",)),
+            tts_engine=tts_engine(),
             aec=choice("JARVIS_AEC", "webrtc", ("webrtc", "off")),
             vad_threshold=number("JARVIS_VAD_THRESHOLD", 0.5, 0, 1, low_open=True),
             end_silence_ms=round(number("JARVIS_END_SILENCE_MS", 500, 0, 5000, low_open=True)),
@@ -202,7 +206,10 @@ def load_settings(
             voice_settings()
         except ConfigError as e:
             ignore_voice(str(e))
-        voice = VoiceSettings()
+        try:
+            voice = VoiceSettings(tts_engine=tts_engine())
+        except ConfigError:
+            voice = VoiceSettings()
 
     def fraction(name: str, default: float) -> float:
         raw = get(name, str(default))
