@@ -29,7 +29,6 @@ import Observation
     private let voiceStore: VoiceSettingStore?
     private var explicitSilence: Bool?
     private var voicePersistenceFailed = false
-    private var voiceChosenHere = false
     private var voiceRevision: UInt64 = 0
     private var history: HistoryStore?
     private var historyBefore: Int64?
@@ -151,10 +150,7 @@ import Observation
         case .silence(let silence, let pending, let revision):
             guard revision == voiceRevision, explicitSilence == nil || explicitSilence == silence else { return }
             voiceOn = !silence; voicePending = pending
-            if !pending { voiceChosenHere = false }
-            // Every reconnect re-sends the saved choice; only a change made now is worth a message.
-            voiceMessage = voicePersistenceFailed ? "Voice changed for this session, but could not be saved. Try again."
-                : pending && voiceChosenHere ? "Voice setting saved here. Waiting for the Mac to confirm." : nil
+            voiceMessage = voicePersistenceFailed ? "Voice changed for this session, but could not be saved. Try again." : nil
             if silence { silencePlayback() }
         case .replayStarted:
             tasksNeedRefresh = true; tasksReplaying = true
@@ -165,9 +161,6 @@ import Observation
             playback.stop(speechID: id, reportStopped: false)
         case .failure:
             if focusPending { focusMessage = "Focus is not confirmed. Waiting for the Mac to reconcile it." }
-            if voicePending && voiceChosenHere && !voicePersistenceFailed {
-                voiceMessage = "Voice setting isn't confirmed. It remains selected here; reconnect to reconcile it."
-            }
         default: break
         }
     }
@@ -329,7 +322,7 @@ import Observation
         let silence = !value, owner = generation
         voiceRevision &+= 1
         let revision = voiceRevision
-        voiceOn = value; explicitSilence = silence; voicePending = true; voiceChosenHere = true
+        voiceOn = value; explicitSilence = silence; voicePending = true
         if silence { silencePlayback() }
         voicePersistenceFailed = false
         do { try voiceStore?.save(silence, for: credentials) }
@@ -403,7 +396,6 @@ import Observation
         } catch { historyClearFailed = true }
         focusHere = false; focusPending = false; focusCommand = nil; focusMessage = nil
         voiceOn = true; explicitSilence = nil; voicePending = false; voiceMessage = nil; voicePersistenceFailed = false; voiceRevision = 0
-        voiceChosenHere = false
         do { try store.clear(); error = historyClearFailed ? .storage : nil } catch { self.error = .storage }
         tasksNeedRefresh = true; tasksReplaying = true
         conversation = ConversationProjection(); historyBefore = nil; hasOlderHistory = true; loadingHistory = false; historyMessage = nil; draft = ""; inputMessage = nil

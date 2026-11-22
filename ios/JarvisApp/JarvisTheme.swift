@@ -3,6 +3,7 @@ import SwiftUI
 struct JarvisTheme {
     let void = Color(hex: 0x05070C)
     let deep = Color(hex: 0x0E1420)
+    let rim = Color(hex: 0x1F2A3A)
     let frost = Color(hex: 0xE6EEF5)
     let haze = Color(hex: 0x7F8EA3)
     let cyan = Color(hex: 0x33E6FF)

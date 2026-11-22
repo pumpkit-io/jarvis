@@ -302,3 +302,17 @@ actor HeldPairing {
     #expect(await socket.sent.filter { $0.type == "take_focus" }.count == 1)
     await session.unpair()
 }
+
+@MainActor @Test func aVoiceChoiceTheMacHasntConfirmedShowsNoMessage() async throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = MemoryPairingStore(); store.record = try testPairingCredentials()
+    let session = AppSession(store: store, historyDirectory: directory,
+                             makeTransport: { _ in HubTransport(connect: { _ in throw URLError(.cannotConnectToHost) }) }, makePaths: { nil })
+    await session.launch()
+    await session.setVoiceOn(false)
+    try await Task.sleep(for: .milliseconds(300))
+    #expect(!session.voiceOn && session.voicePending)
+    #expect(session.voiceMessage == nil)
+    await session.unpair()
+}

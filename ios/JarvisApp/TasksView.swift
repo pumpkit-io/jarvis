@@ -84,12 +84,11 @@ struct WorkspaceView: View {
                         .accessibilityHidden(showingExpanded)
                     expansionControl(showingExpanded: showingExpanded)
                     ConversationView(session: session, showsInputBar: false)
-                        .mask(alignment: .top) {
-                            VStack(spacing: 0) {
-                                LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
-                                    .frame(height: showingExpanded ? 0 : 24)
-                                Rectangle()
-                            }
+                        .overlay(alignment: .top) {
+                            // An overlay rather than a mask, so the script can still scroll behind the composer.
+                            LinearGradient(colors: [theme.void, theme.void.opacity(0)], startPoint: .top, endPoint: .bottom)
+                                .frame(height: showingExpanded ? 0 : 24)
+                                .allowsHitTesting(false)
                         }
                 }
                 .animation(.easeInOut(duration: 0.25), value: showingExpanded)
