@@ -33,6 +33,7 @@ def talker_tools(
     authorize: ToolHandler,
     revoke_authorization: ToolHandler,
     recall: ToolHandler,
+    start_afresh: ToolHandler,
     resolve_scope: ToolHandler | None = None,
 ) -> tuple[HubTool, ...]:
     tools = (
@@ -75,8 +76,13 @@ def talker_tools(
         ),
         HubTool(
             "show",
-            "Put markdown on the User's screen, never spoken: lists, tables, plans, links, code.",
-            object_schema({"markdown": STRING}, ("markdown",)),
+            "Put markdown on the User's screen, never spoken: lists, tables, plans, links, code. When the User asks "
+            "what you remember about them, set memory=true instead: the Hub shows your Memory exactly as saved, or "
+            "says that nothing has been folded yet.",
+            object_schema({
+                "markdown": STRING,
+                "memory": {"type": "boolean", "description": "Show your Memory, the summary in <memory>, instead."},
+            }, ()),
             show,
         ),
         HubTool(
@@ -150,6 +156,16 @@ def talker_tools(
             "limit": {"type": "integer", "minimum": 1, "maximum": 10},
         }, ("query",)),
         recall,
+    ),)
+
+    tools += (HubTool(
+        "start_afresh",
+        "The User asks to start afresh: a clean slate for a new subject, in any words. Folds everything before "
+        "their current message into Memory in the background, with no confirmation; keep talking as normal, and "
+        "the new session takes over once Jarvis is quiet. Tasks, Approvals and permissions stay as they are. Not "
+        "for a plain change of topic, and not a way to forget: Memory keeps the gist.",
+        object_schema({}),
+        start_afresh,
     ),)
 
     if resolve_scope is not None:
