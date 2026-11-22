@@ -297,6 +297,7 @@ async def text_mode(
     """
     _guard_billing(environ, stderr)
     with EventLog(settings.runtime_dir / "events.sqlite3") as log, PairingStore(settings.runtime_dir / "events.sqlite3") as pairing:
+        log.start_backfill()
         interactive = stdin.isatty()
         terminal = TerminalOutput(stdout, stderr, prompt=interactive, show_log=settings.runtime_dir / "show.log")
         output = EventOutput(log, terminal)
@@ -374,6 +375,7 @@ async def voice_mode(
     """
     _guard_billing(environ, stderr)
     with EventLog(settings.runtime_dir / "events.sqlite3") as log, PairingStore(settings.runtime_dir / "events.sqlite3") as pairing:
+        log.start_backfill()
         terminal = TerminalOutput(stdout, stderr, prompt=stdin.isatty(), show_log=settings.runtime_dir / "show.log")
         output = EventOutput(log, terminal)
         terminal.on_notice = output.notice

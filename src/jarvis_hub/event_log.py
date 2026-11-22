@@ -3,14 +3,19 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import sqlite3
 import threading
 import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
+from html import escape
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
+
+from jarvis_hub.secret_patterns import redact
 
 if TYPE_CHECKING:
     from jarvis_hub.hub import Output
@@ -32,12 +37,144 @@ def _event(row: tuple[Any, ...]) -> Event:
     return Event(row[0], row[1], row[2], row[3] or None, json.loads(row[4]))
 
 
+RETENTION = 30 * 86400
+# Recall searches what the User said, Jarvis's finished replies, details shown on screen and Task reports.
+RECALLED = ("heard", "reply_end", "show", "task_report")
+SOURCES = {"heard": "user", "reply_end": "jarvis", "show": "screen", "task_report": "task"}
+SPEAKERS = {"user": ("heard",), "jarvis": ("reply_end", "show", "task_report")}
+# What followed each kind of match: a reply follows what the User said, the User's next line follows a reply.
+FOLLOWED_BY = {"heard": "reply_end", "reply_end": "heard", "show": "reply_end", "task_report": "reply_end"}
+RECALL_LIMIT = 10
+# About 2,000 tokens at the Conversation's starting ratio of 3.5 characters a token.
+RECALL_CHARS = 7000
+MATCH_CHARS = 500
+BACKFILL_PAUSE = 0.002
+FOLLOWED_CHARS = 160
+
+
+def _sql_words(row: str) -> str:
+    return (f"json_extract({row}.payload, '$.text') || "
+            f"COALESCE(char(10, 10) || json_extract({row}.payload, '$.details'), '')")
+
+
+def _words(payload: dict[str, Any]) -> str:
+    """The text `_sql_words` indexes, read back from a decoded payload."""
+    details = payload.get("details")
+    return str(payload.get("text") or "") + (f"\n\n{details}" if details else "")
+
+
+_RECALLED_SQL = ", ".join(f"'{kind}'" for kind in RECALLED)
+RECALL_SCHEMA = f"""
+    BEGIN IMMEDIATE;
+    CREATE VIRTUAL TABLE IF NOT EXISTS recall_index USING fts5(text, tokenize = 'porter unicode61 remove_diacritics 2');
+    CREATE TABLE IF NOT EXISTS recall_backfill (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), through INTEGER NOT NULL);
+    -- Events up to `through` predate the trigger and wait for the backfill.
+    INSERT OR IGNORE INTO recall_backfill VALUES (1, COALESCE((SELECT MAX(seq) FROM events), 0));
+    CREATE TRIGGER IF NOT EXISTS recall_add AFTER INSERT ON events
+        WHEN NEW.type IN ({_RECALLED_SQL}) AND json_extract(NEW.payload, '$.text') != ''
+        BEGIN INSERT INTO recall_index(rowid, text) VALUES (NEW.seq, {_sql_words("NEW")}); END;
+    CREATE TRIGGER IF NOT EXISTS recall_drop AFTER DELETE ON events
+        BEGIN DELETE FROM recall_index WHERE rowid = OLD.seq; END;
+    COMMIT;
+"""
+
+
+@dataclass(frozen=True)
+class Match:
+    time: float
+    source: str
+    text: str
+    task_id: str | None = None
+    followed: Match | None = None
+
+
+@dataclass(frozen=True)
+class Recall:
+    """One `recall` search: its matches oldest first, with secrets already removed."""
+
+    today: float
+    since: float
+    until: float | None
+    matches: tuple[Match, ...]
+    edge: Literal["retention", "reset"] | None
+    more: bool
+    indexing: bool
+
+    def render(self) -> str:
+        until = _stamp(self.until) if self.until is not None else "now"
+        lines = [f'<recall today="{_day(self.today)}" from="{_stamp(self.since)}" to="{until}">']
+        for match in self.matches:
+            task = f' task="{escape(match.task_id)}"' if match.task_id else ""
+            lines.append(f'<match at="{_stamp(match.time)}" from="{match.source}"{task}>')
+            lines.append(escape(match.text, quote=False))
+            if match.followed is not None:
+                lines.append(f'<followed from="{match.followed.source}">{escape(match.followed.text, quote=False)}</followed>')
+            lines.append("</match>")
+        if not self.matches:
+            lines.append("No matches.")
+        if self.edge == "retention":
+            lines.append(f"<edge>This search reached the edge of the 30 days the log keeps ({_stamp(self.since)}): "
+                         "anything older is only in Memory.</edge>")
+        elif self.edge == "reset":
+            lines.append(f"<edge>This search reached the last Reset context ({_stamp(self.since)}): "
+                         "recall ignores everything before it.</edge>")
+        if self.more:
+            lines.append("<more>More matched than shown: narrow the words or the dates.</more>")
+        if self.indexing:
+            lines.append("<indexing>Older events are still being indexed, so some may be missing: "
+                         "try again in a minute.</indexing>")
+        lines.append("</recall>")
+        return "\n".join(lines)
+
+
+def _day(at: float) -> str:
+    return datetime.fromtimestamp(at).astimezone().strftime("%Y-%m-%d %A")
+
+
+def _stamp(at: float) -> str:
+    return datetime.fromtimestamp(at).astimezone().strftime("%Y-%m-%d %H:%M %A")
+
+
+def fts_query(query: str) -> tuple[str, tuple[str, ...]]:
+    """An FTS5 query in which every word must appear and a double-quoted phrase as written, and the words searched.
+
+    Every part is quoted, so no word the User says is read as an FTS5 operator."""
+    parts: list[str] = []
+    terms: list[str] = []
+    for phrase, word in re.findall(r'"([^"]*)"?|([^\s"]+)', query):
+        tokens = re.findall(r"\w+", phrase or word)
+        if tokens:
+            parts.append('"' + " ".join(tokens) + '"')
+            terms += tokens
+    return " ".join(parts), tuple(terms)
+
+
+def _excerpt(text: str, terms: tuple[str, ...]) -> str:
+    """The redacted text, cut to `MATCH_CHARS` around its first matching word; redacting first never leaves half a secret."""
+    text = redact(text).strip()
+    if len(text) <= MATCH_CHARS:
+        return text
+    lowered = text.lower()
+    # Stemmed matches share a prefix with the word searched, so the first four letters find them.
+    found = [i for term in terms if (i := lowered.find(term.lower()[:4])) >= 0]
+    start = max(0, min(found, default=0) - MATCH_CHARS // 4)
+    cut = text[start:start + MATCH_CHARS]
+    return ("…" if start else "") + cut + ("…" if start + MATCH_CHARS < len(text) else "")
+
+
+def _line(text: str) -> str:
+    line = " ".join(redact(text).split())
+    return line if len(line) <= FOLLOWED_CHARS else line[:FOLLOWED_CHARS - 1] + "…"
+
+
 class EventLog:
     def __init__(self, path: Path, *, wall: Callable[[], float] = time.time) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._wall = wall
         self._lock = threading.Lock()
         self._subscriptions: dict[object, tuple[asyncio.AbstractEventLoop, Callable[[Event], None]]] = {}
+        self._closed = False
+        self._backfill: threading.Thread | None = None
         self._db = sqlite3.connect(path, check_same_thread=False)
         self._db.executescript("""
             CREATE TABLE IF NOT EXISTS events (
@@ -55,7 +192,9 @@ class EventLog:
             CREATE TABLE IF NOT EXISTS retention (
                 singleton INTEGER PRIMARY KEY CHECK(singleton = 1), pruned_through INTEGER NOT NULL);
             INSERT OR IGNORE INTO retention VALUES (1, 0);
+            CREATE TABLE IF NOT EXISTS context_reset (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), time REAL NOT NULL);
         """)
+        self._db.executescript(RECALL_SCHEMA)
         cutoff = wall() - 30 * 86400
         self._db.execute("UPDATE retention SET pruned_through = MAX(pruned_through, "
                          "COALESCE((SELECT MAX(seq) FROM events WHERE time < ?), 0)) WHERE singleton = 1", (cutoff,))
@@ -153,6 +292,68 @@ class EventLog:
                     return payload["text"], row[0] if row else "en"
             return None
 
+    @property
+    def reset_time(self) -> float | None:
+        with self._lock:
+            row = self._db.execute("SELECT time FROM context_reset WHERE singleton = 1").fetchone()
+            return row[0] if row else None
+
+    def set_reset_time(self, at: float) -> None:
+        """Recall ignores every event from before `at`, the time of the last Reset context."""
+        with self._lock, self._db:
+            self._db.execute("INSERT OR REPLACE INTO context_reset VALUES (1, ?)", (at,))
+
+    def search(self, query: str, *, start: float | None = None, end: float | None = None,
+               speaker: Literal["user", "jarvis"] | None = None, limit: int = RECALL_LIMIT) -> Recall:
+        """The best matches for `query` from `start` up to `end`, never older than 30 days or the last reset.
+
+        Raises ValueError for a query with no words."""
+        match, terms = fts_query(query)
+        if not match:
+            raise ValueError("The query needs at least one word.")
+        limit = max(1, min(limit, RECALL_LIMIT))
+        kinds = SPEAKERS[speaker] if speaker is not None else RECALLED
+        with self._lock:
+            now = self._wall()
+            floor = now - RETENTION
+            reset = self._db.execute("SELECT time FROM context_reset WHERE singleton = 1").fetchone()
+            edge: Literal["retention", "reset"] = "retention"
+            if reset is not None and reset[0] >= floor:
+                floor, edge = reset[0], "reset"
+            since = floor if start is None or start <= floor else start
+            rows = self._db.execute(
+                "SELECT e.seq, e.time, e.type, e.payload FROM recall_index JOIN events e ON e.seq = recall_index.rowid "
+                f"WHERE recall_index MATCH ? AND e.time >= ? AND (? IS NULL OR e.time < ?) "
+                f"AND e.type IN ({', '.join('?' * len(kinds))}) ORDER BY recall_index.rank, e.seq DESC LIMIT ?",
+                (match, since, end, end, *kinds, limit + 1)).fetchall()
+            matches: list[Match] = []
+            spent = 0
+            for seq, at, kind, encoded in sorted(rows[:limit], key=lambda row: row[0]):
+                payload = json.loads(encoded)
+                followed = self._followed(seq, kind, payload)
+                found = Match(at, SOURCES[kind], _excerpt(_words(payload), terms),
+                              payload.get("task_id") if kind == "task_report" else None, followed)
+                spent += len(found.text) + (len(followed.text) if followed else 0)
+                if spent > RECALL_CHARS:
+                    break
+                matches.append(found)
+            indexing = self._db.execute("SELECT through FROM recall_backfill WHERE singleton = 1").fetchone()[0] > 0
+        return Recall(now, since, end, tuple(matches), edge if since == floor else None,
+                      len(rows) > len(matches), indexing)
+
+    def _followed(self, seq: int, kind: str, payload: dict[str, Any]) -> Match | None:
+        after = FOLLOWED_BY[kind]
+        query = ("SELECT time, type, payload FROM events WHERE seq > ? AND type = ? AND json_extract(payload, '$.text') != '' "
+                 "{} ORDER BY seq LIMIT 1")
+        row = None
+        if kind == "heard" and payload.get("request_id"):
+            row = self._db.execute(query.format("AND json_extract(payload, '$.request_id') = ?"),
+                                   (seq, after, payload["request_id"])).fetchone()
+        row = row or self._db.execute(query.format(""), (seq, after)).fetchone()
+        if row is None:
+            return None
+        return Match(row[0], SOURCES[row[1]], _line(_words(json.loads(row[2]))))
+
     def reserve(self, client_id: str, command_id: str, kind: str,
                 payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
         encoded = json.dumps([kind, payload], ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -184,10 +385,47 @@ class EventLog:
             self._db.execute("UPDATE commands SET status = 'complete', result = ? WHERE client_id = ? AND id = ?",
                              (json.dumps(result, allow_nan=False), client_id, command_id))
 
+    def start_backfill(self, batch: int = 500) -> None:
+        """Index the events logged before recall existed, newest first, on a thread of its own.
+
+        Each batch holds the log only briefly, so the Hub starts and logs meanwhile; closing stops it, and the next
+        launch carries on where it stopped."""
+        self._backfill = threading.Thread(target=self._fill, args=(batch,), name="recall-backfill", daemon=True)
+        self._backfill.start()
+
+    def _fill(self, batch: int) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            with self._db:
+                self._db.execute("CREATE INDEX IF NOT EXISTS events_time ON events(time)")
+        while True:
+            # A pause between batches lets the Hub's own writes take the lock, which a waiting thread can miss.
+            time.sleep(BACKFILL_PAUSE)
+            with self._lock:
+                if self._closed:
+                    return
+                with self._db:
+                    (through,) = self._db.execute("SELECT through FROM recall_backfill WHERE singleton = 1").fetchone()
+                    if through == 0:
+                        return
+                    (low,) = self._db.execute("SELECT MIN(seq) FROM (SELECT seq FROM events WHERE seq <= ? "
+                                              "ORDER BY seq DESC LIMIT ?)", (through, batch)).fetchone()
+                    if low is not None:
+                        self._db.execute(
+                            f"INSERT INTO recall_index(rowid, text) SELECT seq, {_sql_words('events')} FROM events "
+                            f"WHERE seq BETWEEN ? AND ? AND type IN ({_RECALLED_SQL}) "
+                            "AND json_extract(payload, '$.text') != ''", (low, through))
+                    self._db.execute("UPDATE recall_backfill SET through = ? WHERE singleton = 1",
+                                     (low - 1 if low is not None else 0,))
+
     def close(self) -> None:
         with self._lock:
+            self._closed = True
             self._subscriptions.clear()
             self._db.close()
+        if self._backfill is not None and self._backfill is not threading.current_thread():
+            self._backfill.join()
 
     def __enter__(self) -> EventLog:
         return self
@@ -259,3 +497,8 @@ class EventOutput:
         with self._lock:
             self._append("show", {"reply_id": self._reply_id, "title": "Details", "text": markdown}, self._client_id)
             self.destination.show(markdown)
+
+    def task_report(self, task_id: str, spoken: str, details: str | None) -> None:
+        """Logged for `recall` only: the Announcement that tells it is the Talker's own words."""
+        with self._lock:
+            self._append("task_report", {"task_id": task_id, "text": spoken, "details": details}, None)
