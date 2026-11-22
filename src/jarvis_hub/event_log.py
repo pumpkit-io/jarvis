@@ -232,7 +232,8 @@ class EventLog:
             CREATE TABLE IF NOT EXISTS retention (
                 singleton INTEGER PRIMARY KEY CHECK(singleton = 1), pruned_through INTEGER NOT NULL);
             INSERT OR IGNORE INTO retention VALUES (1, 0);
-            CREATE TABLE IF NOT EXISTS context_reset (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), time REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS context_reset (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1), time REAL NOT NULL, reply_id TEXT);
         """)
         self._db.executescript(RECALL_SCHEMA)
         cutoff = wall() - RETENTION
@@ -338,13 +339,17 @@ class EventLog:
             return self._reset_time()
 
     def _reset_time(self) -> float | None:
-        row = self._db.execute("SELECT time FROM context_reset WHERE singleton = 1").fetchone()
-        return row[0] if row else None
+        return self._reset()[0]
 
-    def set_reset_time(self, at: float) -> None:
-        """Recall ignores every event from before `at`, the time of the last Reset context."""
+    def _reset(self) -> tuple[float | None, str | None]:
+        row = self._db.execute("SELECT time, reply_id FROM context_reset WHERE singleton = 1").fetchone()
+        return (row[0], row[1]) if row else (None, None)
+
+    def set_reset_time(self, at: float, *, reply_id: str | None = None) -> None:
+        """Recall ignores every event from before `at`, the time of the last Reset context, and the reply `reply_id`
+        that was under way then, since its turn began before it."""
         with self._lock, self._db:
-            self._db.execute("INSERT OR REPLACE INTO context_reset VALUES (1, ?)", (at,))
+            self._db.execute("INSERT OR REPLACE INTO context_reset VALUES (1, ?, ?)", (at, reply_id))
 
     def search(self, query: str, *, start: float | None = None, end: float | None = None,
                speaker: Literal["user", "jarvis"] | None = None, limit: int = RECALL_LIMIT) -> Recall:
@@ -359,7 +364,7 @@ class EventLog:
         with self._lock:
             now = self._wall()
             floor = now - RETENTION
-            reset = self._reset_time()
+            reset, dropped = self._reset()
             edge: Literal["retention", "reset"] = "retention"
             if reset is not None and reset >= floor:
                 floor, edge = reset, "reset"
@@ -367,14 +372,15 @@ class EventLog:
             rows = self._db.execute(
                 "SELECT e.seq, e.time, e.type, e.payload FROM recall_index JOIN events e ON e.seq = recall_index.rowid "
                 f"WHERE recall_index MATCH ? AND e.time >= ? AND (? IS NULL OR e.time < ?) "
+                f"AND (? IS NULL OR json_extract(e.payload, '$.reply_id') IS NOT ?) "
                 f"AND e.type IN ({', '.join('?' * len(kinds))}) ORDER BY recall_index.rank, e.seq DESC LIMIT ?",
-                (" ".join(phrases), since, end, end, *kinds, limit + 1)).fetchall()
+                (" ".join(phrases), since, end, end, dropped, dropped, *kinds, limit + 1)).fetchall()
             matches: list[tuple[int, Match]] = []
             spent = 0
             # Best and newest first, so the budget drops the weakest and oldest matches.
             for seq, at, kind, encoded in rows[:limit]:
                 payload = json.loads(encoded)
-                followed = self._followed(seq, at, kind, payload)
+                followed = self._followed(seq, at, kind, payload, dropped)
                 found = Match(at, SOURCES[kind], self._excerpts.cut(_words(payload), phrases),
                               payload.get("task_id") if kind == "task_report" else None, followed)
                 spent += sum(len(escape(shown.text, quote=False)) for shown in (found, followed) if shown)
@@ -385,7 +391,7 @@ class EventLog:
         shown = tuple(kept for _, kept in sorted(matches, key=lambda pair: pair[0]))
         return Recall(now, since, end, shown, edge if since == floor else None, len(rows) > len(matches), indexing)
 
-    def _followed(self, seq: int, at: float, kind: str, payload: dict[str, Any]) -> Match | None:
+    def _followed(self, seq: int, at: float, kind: str, payload: dict[str, Any], dropped: str | None) -> Match | None:
         """The reply to the same request, the reply a detail was shown with, the Announcement after a Task report, or
         the User's next line after a reply; None when it is not within `FOLLOWED_WITHIN`."""
         # `+time` keeps the window's end on the rowid order rather than the time index, so the scan stops there.
@@ -395,7 +401,7 @@ class EventLog:
             (seq, seq, at + FOLLOWED_WITHIN, sys.maxsize))
         for when, type, encoded in rows:
             event = json.loads(encoded)
-            if type == "reply_end" and not event.get("text"):
+            if type == "reply_end" and (not event.get("text") or (dropped is not None and event.get("reply_id") == dropped)):
                 continue
             if kind == "reply_end":
                 # The User's next line answers a reply only when no other reply came first.

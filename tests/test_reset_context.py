@@ -3,6 +3,7 @@ and Memory on both devices, while the 30-day log, Tasks and the screens stay as 
 
 import asyncio
 import json
+import sqlite3
 from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -10,17 +11,19 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
+import pytest
 
 from jarvis_hub.conversation import Conversation
 from jarvis_hub.door import Door
 from jarvis_hub.event_log import EventLog, EventOutput
-from jarvis_hub.hub import RESET_FAILED, Hub, Line
+from jarvis_hub.hub import Hub, Line
 from jarvis_hub.pairing import PairingResult, PairingStore
 from tests.fakes import (
     Fail,
     FakeBackend,
     FakeClock,
     Gate,
+    Limited,
     RecordingMetrics,
     RecordingOutput,
     StubGh,
@@ -33,6 +36,7 @@ from tests.fakes import (
 from tests.protocol_exchanges import SNAPSHOTS, command, connect, receive_conversation
 from tests.test_approvals import HEAD, ask_merge
 from tests.test_fold import SHORT, said, tokens
+from tests.test_start_afresh import AFRESH
 
 
 @dataclass
@@ -55,6 +59,11 @@ class Rig:
             if frame["type"] != "command_result":
                 self.frames.append(frame)
         return frame
+
+    async def reply_begun(self) -> None:
+        """Waits until the phone received the first words of a reply."""
+        while not any(f["type"] == "reply_delta" for f in self.frames):
+            self.frames.append(await receive_conversation(self.socket))
 
     async def hub_reply(self, accepted: dict[str, Any]) -> dict[str, Any]:
         """The reply_end to an accepted say_text, once the phone received it."""
@@ -161,11 +170,12 @@ async def test_after_a_reset_the_next_turn_on_the_iphone_and_the_mac_has_no_earl
 
 async def test_a_turn_in_flight_at_the_reset_finishes_on_screen_but_its_exchange_is_dropped(tmp_path: Path) -> None:
     release = asyncio.Event()
-    async with a_rig(tmp_path, [[Text("Noted"), Gate(release), Text(", sir.")], [Text("Hello, sir.")]]) as rig:
+    recall = [Tool("recall", {"query": "Noted sir"}), Text("Hello, sir.")]
+    async with a_rig(tmp_path, [[Text("Noted"), Gate(release), Text(", sir.")], recall]) as rig:
         accepted = await rig.send("say-1", "say_text", text="My sister is Giulia.")
-        while not any(f["type"] == "reply_delta" for f in rig.frames):
-            rig.frames.append(await receive_conversation(rig.socket))
+        await rig.reply_begun()
         old = rig.backend.all_sessions("talker")[0]
+        rig.clock.advance(1)
 
         assert (await rig.send("reset-1", "reset_context"))["ok"]
         release.set()
@@ -179,6 +189,9 @@ async def test_a_turn_in_flight_at_the_reset_finishes_on_screen_but_its_exchange
     saved.load()
     assert [said(e.message) for e in saved.entries] == ["Hello again."]
     assert rig.output.replies == ["Noted, sir.", "Hello, sir."]
+    # The reply ended after the reset, but its turn began before it.
+    [found] = tool_results(rig.backend, "recall")
+    assert found is not None and "No matches." in found
 
 
 async def test_a_reset_cancels_a_fold_whose_summary_is_being_written(tmp_path: Path) -> None:
@@ -297,8 +310,7 @@ async def test_a_line_waiting_when_the_reset_comes_goes_to_the_new_talker(tmp_pa
     release = asyncio.Event()
     async with a_rig(tmp_path, [[Text("Noted"), Gate(release), Text(", sir.")], [Text("Hello, sir.")]]) as rig:
         accepted = await rig.send("say-1", "say_text", text="My sister is Giulia.")
-        while not any(f["type"] == "reply_delta" for f in rig.frames):
-            rig.frames.append(await receive_conversation(rig.socket))
+        await rig.reply_begun()
         await rig.hub.admit_line(Line("Who is my sister?", rig.clock.now()))
 
         await rig.send("reset-1", "reset_context")
@@ -321,5 +333,117 @@ async def test_a_new_talker_that_cannot_start_after_the_reset_is_told_once_and_t
         await until(lambda: rig.backend.talker_opens == 3)
         await rig.hub_reply(await rig.send("say-2", "say_text", text="Again."))
 
-    assert rig.output.notices == [RESET_FAILED.format("CLI missing")]
+    [notice] = rig.output.notices
+    assert notice.startswith("Could not start a new Talker after the reset") and notice.endswith("CLI missing")
     assert rig.output.replies == ["One.", "Two."]
+    # The old session still remembers what the reset deleted, so nothing it says is saved.
+    saved = Conversation(tmp_path / "conversation.json")
+    saved.load()
+    assert saved.entries == ()
+
+
+async def test_a_new_talker_seeded_before_a_later_reset_is_never_swapped_in(tmp_path: Path) -> None:
+    seeding = asyncio.Event()
+    async with a_rig(tmp_path, [[Text("Hello, sir.")]], seed_reply=[Gate(seeding), Text("Ready.")]) as rig:
+        await rig.send("reset-1", "reset_context")
+        await until(lambda: len(rig.backend.all_sessions("talker")) == 2)
+        await rig.send("reset-2", "reset_context")
+        rig.backend.seed_reply = [Fail("overloaded")]
+        seeding.set()
+        await until(lambda: len(rig.backend.all_sessions("talker")) == 3)
+        await rig.hub_reply(await rig.send("say-1", "say_text", text="Hello."))
+
+    # The failed seed is tried again after the old session's turn.
+    launched, first, second = rig.backend.all_sessions("talker")[:3]
+    assert first.closed and len(first.received) == 1
+    assert second.closed and "Hello." in launched.received[-1]
+    [notice] = rig.output.notices
+    assert notice.startswith("Could not start a new Talker after the reset") and notice.endswith("overloaded")
+    saved = Conversation(tmp_path / "conversation.json")
+    saved.load()
+    assert saved.entries == ()
+
+
+async def test_a_new_talker_the_usage_limit_stopped_starts_when_the_limit_resets_and_takes_the_next_line(
+    tmp_path: Path
+) -> None:
+    async with a_rig(tmp_path, [[Text("Noted.")], [Text("Hello, sir.")]], seed_reply=[Limited(3600)]) as rig:
+        await rig.hub_reply(await rig.send("say-1", "say_text", text="My sister is Giulia."))
+        await rig.send("reset-1", "reset_context")
+        await until(lambda: len(rig.backend.all_sessions("talker")) == 2 and rig.backend.all_sessions("talker")[1].closed)
+        rig.backend.seed_reply = [Text("Ready.")]
+        rig.clock.advance(3600)
+        await until(lambda: len(rig.backend.all_sessions("talker")) == 3)
+        await rig.hub_reply(await rig.send("say-2", "say_text", text="Who is my sister?"))
+
+    old, _, fresh = rig.backend.all_sessions("talker")
+    assert len(old.received) == 2
+    assert "Who is my sister?" in fresh.received[1]
+    assert not any(n.startswith("Could not start a new Talker") for n in rig.output.notices)
+    saved = Conversation(tmp_path / "conversation.json")
+    saved.load()
+    assert [said(e.message) for e in saved.entries] == ["Who is my sister?"]
+
+
+async def test_a_reset_whose_time_could_not_be_stored_still_deletes_the_conversation_before_the_new_talker_reads_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    an_earlier_launch(tmp_path)
+
+    def broken(at: float, **_: Any) -> None:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    async with a_rig(tmp_path, [[Text("Hello, sir.")]]) as rig:
+        monkeypatch.setattr(rig.log, "set_reset_time", broken)
+        result = await rig.send("reset-1", "reset_context")
+        await until(lambda: len(rig.backend.all_sessions("talker")) == 2)
+        await rig.hub_reply(await rig.send("say-1", "say_text", text="Hello again."))
+
+    assert result["ok"] is False
+    assert not (tmp_path / "memory").exists() and not (tmp_path / "conversation.unreadable.json").exists()
+    seed = rig.backend.all_sessions("talker")[1].received[0]
+    assert not any(word in seed for word in ("Giulia", "Fido", "Rome"))
+    saved = Conversation(tmp_path / "conversation.json")
+    saved.load()
+    assert [said(e.message) for e in saved.entries] == ["Hello again."]
+
+
+async def test_a_ceiling_restart_seeding_when_the_reset_lands_is_never_swapped_in_or_told(tmp_path: Path) -> None:
+    seeding = asyncio.Event()
+    async with a_rig(tmp_path, [[Text("Noted."), tokens(300_000)], [Text("Hello, sir.")]],
+                     seed_reply=[Gate(seeding), Text("Ready.")]) as rig:
+        await rig.hub_reply(await rig.send("say-1", "say_text", text="My sister is Giulia."))
+        await until(lambda: len(rig.backend.all_sessions("talker")) == 2)
+
+        await rig.send("reset-1", "reset_context")
+        seeding.set()
+        await until(lambda: len(rig.backend.all_sessions("talker")) == 3)
+        await rig.hub_reply(await rig.send("say-2", "say_text", text="Hello again."))
+
+    _, restarted, fresh = rig.backend.all_sessions("talker")
+    assert restarted.received[0].startswith('<event source="hub" reason="restart"')
+    assert restarted.closed and len(restarted.received) == 1
+    assert fresh.received[0].startswith('<event source="hub" reason="reset"') and "Giulia" not in fresh.received[0]
+    assert "Hello again." in fresh.received[1]
+    assert rig.output.notices == []
+
+
+async def test_a_reset_cancels_a_start_afresh_without_its_failure_notice(tmp_path: Path) -> None:
+    late = asyncio.Event()
+    async with a_rig(tmp_path, [[Text("Noted.")], AFRESH, [Text("Hello, sir.")]],
+                     summaries=[[Gate(late), Text(a_summary("The User's sister is Giulia."))]]) as rig:
+        await rig.hub_reply(await rig.send("say-1", "say_text", text="My sister is Giulia."))
+        await rig.hub_reply(await rig.send("say-2", "say_text", text="Let's start afresh."))
+        await until(lambda: len(rig.backend.all_sessions("summariser")) == 1)
+
+        await rig.send("reset-1", "reset_context")
+        [summariser] = rig.backend.all_sessions("summariser")
+        await until(lambda: summariser.closed and len(rig.backend.all_sessions("talker")) == 2)
+        late.set()
+        await rig.hub_reply(await rig.send("say-3", "say_text", text="Hello again."))
+
+    assert rig.output.notices == []
+    assert not (tmp_path / "memory").exists()
+    assert "Giulia" not in rig.backend.all_sessions("talker")[1].received[0]
+    saved = json.loads((tmp_path / "conversation.json").read_text())
+    assert saved["active_summary"] is None and [said(e["message"]) for e in saved["entries"]] == ["Hello again."]
