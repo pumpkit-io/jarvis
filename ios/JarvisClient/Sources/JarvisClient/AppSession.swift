@@ -337,9 +337,17 @@ import Observation
             switch delivery {
             case .pending: break
             case .completed(let result): receive(.result(result))
-            case .absent: resetCommand = nil; contextReset = .notReset
+            case .absent:
+                resetCommand = nil
+                contextReset = Self.neverSent(error) ? .notReset : .unsure
             }
         }
+    }
+
+    /// Whether a send failed before writing anything; a failure once the write began may have reached the Hub.
+    private static func neverSent(_ error: any Error) -> Bool {
+        guard let error = error as? HubProtocolError else { return false }
+        return [.notConnected, .invalidFrame, .commandIDConflict].contains(error)
     }
 
     /// A reset's status line lasts until the User leaves Settings; one still waiting keeps its result for the next visit.

@@ -20,11 +20,14 @@ private func failure(_ code: String, answering id: String) -> String {
     "{\"version\":1,\"type\":\"command_result\",\"id\":\"\(id)\",\"ok\":false,\"error\":{\"code\":\"\(code)\",\"message\":\"x\",\"retry_after_seconds\":null}}"
 }
 
-@MainActor private func readySession(_ transport: FakeTransport) async throws -> AppSession {
+@MainActor private func readySession(
+    _ transport: FakeTransport,
+    sendCommand: @escaping @Sendable (HubClient, HubCommand) async throws -> Void = { try await $0.send($1) }
+) async throws -> AppSession {
     let store = MemoryPairingStore(); store.record = try testPairingCredentials()
     let session = AppSession(store: store, makeClient: { _ in
         HubClient(transport: HubTransport(connect: { await transport.connect($0) }), sleep: { _ in })
-    }, makePaths: { nil })
+    }, makePaths: { nil }, sendCommand: sendCommand)
     await session.launch()
     try await eventuallySession { await transport.socket(0) != nil }
     await transport.socket(0)?.ready()
@@ -70,7 +73,8 @@ private func failure(_ code: String, answering id: String) -> String {
 @MainActor @Test(arguments: [
     ("outcome_unknown", "Not sure the reset happened. Try again."),
     ("reset_failed", "Could not finish the reset on the Mac. Try again."),
-    ("invalid_payload", "Could not reach the Mac. Nothing was reset."),
+    ("invalid_payload", "The Mac refused the reset. Nothing was reset."),
+    ("unknown_command", "The Mac refused the reset. Nothing was reset."),
 ])
 func eachRefusalShowsItsStatusLineAndAllowsAnotherTry(code: String, line: String) async throws {
     let transport = FakeTransport()
@@ -93,17 +97,26 @@ func eachRefusalShowsItsStatusLineAndAllowsAnotherTry(code: String, line: String
     await session.resetContext()
     await socket.text(try fixtureFrame("refused_payload", answering: try await sentReset(socket).id))
     try await eventuallySession { session.contextReset != .resetting }
-    #expect(session.contextReset.statusLine == "Could not reach the Mac. Nothing was reset.")
+    #expect(session.contextReset.statusLine == "The Mac refused the reset. Nothing was reset.")
     await session.unpair()
 }
 
-@MainActor @Test func aFailedSendSaysNothingWasResetAndIsNeverQueuedOrSentAfterReconnecting() async throws {
+@MainActor @Test func aSendThatNeverStartedSaysTheMacWasNotReachedAndNothingWasReset() async throws {
+    let transport = FakeTransport()
+    let session = try await readySession(transport, sendCommand: { _, _ in throw HubProtocolError.notConnected })
+    await session.resetContext()
+    #expect(session.contextReset.statusLine == "Could not reach the Mac. Nothing was reset.")
+    #expect(session.canResetContext)
+    await session.unpair()
+}
+
+@MainActor @Test func aSendThatFailedWhileWritingIsUnsureAndIsNeverQueuedOrSentAfterReconnecting() async throws {
     let transport = FakeTransport()
     let session = try await readySession(transport)
     let first = try #require(await transport.socket(0))
     await first.failSend("reset_context")
     await session.resetContext()
-    #expect(session.contextReset.statusLine == "Could not reach the Mac. Nothing was reset.")
+    #expect(session.contextReset.statusLine == "Not sure the reset happened. Try again.")
     #expect(session.outbox?.items.isEmpty == true)
     #expect(await session.client?.pendingCommands.isEmpty == true)
 
@@ -112,7 +125,7 @@ func eachRefusalShowsItsStatusLineAndAllowsAnotherTry(code: String, line: String
     await second.ready(through: 1)
     try await eventuallySession { session.connection.canSend }
     #expect(await second.sent.allSatisfy { $0.type != "reset_context" })
-    #expect(session.contextReset.statusLine == "Could not reach the Mac. Nothing was reset.")
+    #expect(session.contextReset.statusLine == "Not sure the reset happened. Try again.")
     await session.unpair()
 }
 
