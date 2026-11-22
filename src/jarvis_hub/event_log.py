@@ -410,7 +410,7 @@ class EventLog:
         digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
         with self._lock, self._db:
             inserted = self._db.execute("INSERT OR IGNORE INTO commands VALUES (?, ?, ?, ?, 'reserved', NULL)",
-                             (client_id, command_id, kind if kind in {"say_text", "acknowledge", "set_presence", "talk_begin", "talk_cancel", "upload", "set_silence", "replay_speech"} else "unknown", digest))
+                             (client_id, command_id, kind if kind in {"say_text", "acknowledge", "set_presence", "talk_begin", "talk_cancel", "upload", "set_silence", "replay_speech", "reset_context"} else "unknown", digest))
             row = self._db.execute("SELECT digest, status, result FROM commands WHERE client_id = ? AND id = ?",
                                    (client_id, command_id)).fetchone()
             if row[0] != digest:
@@ -428,7 +428,7 @@ class EventLog:
                              (request_id, status, client_id, talk_id))
 
     def complete(self, client_id: str, command_id: str, result: dict[str, Any]) -> None:
-        safe_fields = {"request_id", "talk_id", "speech_id", "reply_id", "seq", "focus_client_id", "silence", "cancelled", "stopped", "can_show_text"}
+        safe_fields = {"request_id", "talk_id", "speech_id", "reply_id", "seq", "focus_client_id", "silence", "cancelled", "stopped", "can_show_text", "status"}
         if "result" in result and set(result["result"]) - safe_fields:
             raise ValueError("Lifetime command results may contain only identifiers and status")
         with self._lock, self._db:

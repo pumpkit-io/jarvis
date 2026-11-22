@@ -464,3 +464,33 @@ async def test_executable_talk_keeps_text_success_when_audio_is_late_or_missing(
             await door.close()
             await hub.close()
             await speech.close()
+
+
+async def test_reset_context_returns_only_its_status_and_the_next_line_reaches_a_talker_without_it(tmp_path: Path) -> None:
+    from tools.reference_client import ReferenceClient, pair
+
+    with PairingStore(tmp_path / 'pairing.db') as pairing, EventLog(tmp_path / 'events.db') as log:
+        backend = FakeBackend(FakeClock(), [[Text('Noted.')], [Text('Hello, sir.')]])
+        hub = make_hub(backend, EventOutput(log, RecordingOutput()), RecordingMetrics(),
+                       conversation_path=tmp_path / 'conversation.json')
+        door = Door(enabled=True, port=0, health=hub.health, pairing=pairing, hub=hub, log=log)
+        await hub.start()
+        await door.start()
+        credentials = tmp_path / 'client/credentials.json'
+        try:
+            await pair(credentials, f'http://127.0.0.1:{door.port}', pairing.create_code('https://mac.example.ts.net'), 'Reference')
+            async with ReferenceClient(credentials, tmp_path / 'clips', display=lambda _: None) as client:
+                await client.reply((await client.command('say_text', {'text': 'My sister is Giulia.'}))['request_id'])
+                assert await client.command('reset_context', {}, id='reset-1') == {'status': 'reset'}
+                assert await client.command('reset_context', {}, id='reset-1') == {'status': 'reset'}
+                reply = await client.reply((await client.command('say_text', {'text': 'Who is my sister?'}))['request_id'])
+                assert reply['payload']['text'] == 'Hello, sir.'
+        finally:
+            await door.close()
+            await hub.close()
+
+    old, fresh = backend.all_sessions('talker')
+    assert len(old.received) == 2
+    assert 'Giulia' not in fresh.received[0] and 'Who is my sister?' in fresh.received[1]
+    saved = json.loads((tmp_path / 'conversation.json').read_text())
+    assert ['Who is my sister?' in entry['message'] for entry in saved['entries']] == [True]

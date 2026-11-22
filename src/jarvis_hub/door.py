@@ -52,6 +52,8 @@ class Conversation(Protocol):
 
     async def admit_line(self, line: Line, *, allowed: Callable[[], bool] = lambda: True) -> str | None: ...
 
+    def reset_context(self) -> None: ...
+
 
 @dataclass(eq=False)
 class _Connection:
@@ -691,6 +693,15 @@ class Door:
                 else:
                     speech_id = self._hub.replay_speech(connection.client.id, reply_id, *reply)
                     result = {"ok": True, "result": {"speech_id": speech_id, "reply_id": reply_id}}
+            elif kind == "reset_context":
+                if payload:
+                    raise ValueError("reset_context requires an empty payload")
+                try:
+                    self._hub.reset_context()
+                except OSError:
+                    result = rejected("reset_failed", "Could not delete the saved conversation; try again")
+                else:
+                    result = {"ok": True, "result": {"status": "reset"}}
             elif kind == "acknowledge":
                 seq = sequence(payload.get("seq"))
                 if seq > self._log.high_water:

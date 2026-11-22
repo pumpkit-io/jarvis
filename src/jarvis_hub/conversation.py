@@ -4,6 +4,7 @@ The file holds the active summary's pointer and the entries since the last cut, 
 import contextlib
 import math
 import re
+import shutil
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -26,7 +27,7 @@ _RATIO_WEIGHT = 0.3
 
 Device = Literal["Mac", "iPhone"]
 EntryKind = Literal["user", "event"]
-SeedReason = Literal["launch", "restart", "fold"]
+SeedReason = Literal["launch", "restart", "fold", "reset"]
 
 
 @dataclass(frozen=True)
@@ -103,13 +104,19 @@ class Conversation:
     named by its version; the Conversation's file points at the active one."""
 
     def __init__(self, path: Path | None) -> None:
-        self._file = (SavedFile(path, VERSION, name="The saved conversation",
-                                fallback="Jarvis starts with an empty conversation", indent=None) if path is not None else None)
+        self._path = path
+        self._file = self._saved_file()
         self._summaries = path.parent / "memory" if path is not None else None
         self._entries: list[Entry] = []
         self._ratio = CHARS_PER_TOKEN
         self._active: int | None = None
         self._summary: str | None = None
+
+    def _saved_file(self) -> SavedFile | None:
+        if self._path is None:
+            return None
+        return SavedFile(self._path, VERSION, name="The saved conversation",
+                         fallback="Jarvis starts with an empty conversation", indent=None)
 
     @property
     def entries(self) -> tuple[Entry, ...]:
@@ -165,6 +172,19 @@ class Conversation:
         self._entries.append(entry)
         self._save()
         return entry
+
+    def reset(self) -> None:
+        """Forgets every entry and summary, and deletes their files, copies set aside as unreadable and every old
+        summary version included. OSError when one could not be deleted, with the Conversation empty all the same."""
+        self._entries, self._active, self._summary = [], None, None
+        if self._path is None or self._summaries is None:
+            return
+        for path in (self._path, *self._path.parent.glob(f"{self._path.stem}.unreadable*{self._path.suffix}")):
+            path.unlink(missing_ok=True)
+        # A file that could not be set aside blocked saving over it; with it gone, saving is safe again.
+        self._file = self._saved_file()
+        with contextlib.suppress(FileNotFoundError):
+            shutil.rmtree(self._summaries)
 
     def newest(self, tokens: int) -> list[Entry]:
         """The latest entries, oldest first, whose rendered text the current estimate puts within `tokens`."""
@@ -283,6 +303,10 @@ _OPENING: dict[SeedReason, str] = {
     "fold": (
         "You are a fresh session, started in the background to keep Jarvis fast, and the earlier Conversation now "
         "lives in your Memory. Below are that Memory and the latest exchanges, as the Hub saved them."
+    ),
+    "reset": (
+        "You are a fresh session: the User reset the context, so the earlier Conversation and its Memory were deleted "
+        "and you start without them. Below are the Hub's own records."
     ),
 }
 

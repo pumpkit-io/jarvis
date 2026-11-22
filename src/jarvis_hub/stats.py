@@ -11,7 +11,7 @@ from typing import Any, TypeGuard, TypeVar, cast
 
 ROLES = ("talker", "orchestrator", "subagent", "summariser")
 # Talker turns that read a hidden seed: nobody waits for their reply, so they stay out of the latency.
-HIDDEN = ("warm_up", "restart", "fold")
+HIDDEN = ("warm_up", "restart", "fold", "reset")
 # What `voice/bargein_log.py` writes as a Barge-in's decision.
 DECISIONS = ("resume", "stop", "wake", "overheard-stop", "ended")
 _USAGE = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens")

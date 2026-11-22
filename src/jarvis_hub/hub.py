@@ -239,7 +239,7 @@ class Line:
 # The Phase 0 definition, kept so Hub numbers compare with the spike's: the end of a delta counts too.
 _SENTENCE_END = re.compile(r"[.?!](\s|$)")
 
-TalkerKind = Literal["warm_up", "restart", "fold", "user", "event"]
+TalkerKind = Literal["warm_up", "restart", "fold", "reset", "user", "event"]
 
 # Turns a failed restart or Fold waits before trying again: each try costs a model call.
 RESTART_RETRY_AFTER = 5
@@ -255,6 +255,8 @@ ORCHESTRATOR_TIMEOUT = 600.0
 INTERRUPT_GRACE = 10.0
 RECALL_DATES = "from and to are dates such as 2026-11-15."
 AFRESH_FAILED = "Could not start afresh: Memory could not be written, so the conversation goes on as it was."
+RESET_FAILED = ("Could not start a new Talker after the reset, so the current one, which still remembers the earlier "
+                "conversation, goes on until the next try: {}")
 
 
 def user_message(text: str, lang: Lang, *, typed: bool = True, delayed: float | None = None) -> str:
@@ -567,6 +569,13 @@ class Hub:
         # The context the current Talker session last reported, for a Fold the Summariser's limit held until its reset.
         self._fold_tokens: int | None = None
         self._fold_started = asyncio.Event()
+        # Resets of the Conversation so far; a turn begun before the latest one is never saved.
+        self._resets = 0
+        # Whether the live Talker session began before the latest reset, so remembers what it deleted; and whether a
+        # new one is due, at the next quiet moment or before the next turn.
+        self._talker_stale = False
+        self._fresh_due = asyncio.Event()
+        self._fresh_failing = False
         # The language of the latest line read, and of the latest User turn the Talker took: replies follow it.
         self._read_lang: Lang = "en"
         self._lang: Lang = "en"
@@ -985,6 +994,23 @@ class Hub:
         if self._remote_spoken_owner == (request_id, 0):
             self._remote_spoken_owner = None
         self.set_client_talking(client_id, False)
+
+    def reset_context(self) -> None:
+        """Reset context (ADR 0028), by the Hub and no model: forgets the Conversation and Memory on every device and
+        stops any Fold, leaving the event log, Tasks, Authorizations and Approvals as they are. `recall` ignores
+        what came before, and a new Talker seeded with the Hub's records alone replaces the live one before its next
+        turn. OSError when a file could not be deleted; the reset still holds in memory."""
+        if self._closing:
+            raise ValueError("Hub is stopping")
+        self._cancel_fold()
+        self._end_failing_episode()
+        self._resets += 1
+        self._talker_stale = True
+        self._fresh_failing = False
+        self._fresh_due.set()
+        if self._output.log is not None:
+            self._output.log.set_reset_time(self._wall())
+        self._conversation.reset()
 
     def admit_spoken_revision(self, line: Line) -> None:
         if line.request_id is None:
@@ -1490,12 +1516,17 @@ class Hub:
         while True:
             if upcoming is None:
                 if (next_item := await self._next_input()) is None:
-                    await self._swap_in_fold()
+                    if self._fresh_ready():
+                        await self._start_fresh()
+                    elif self._fold_ready():
+                        await self._swap_in_fold()
                     continue
                 item = next_item
             else:
                 item, upcoming = upcoming, None
                 await self._talker_gate.before_next_turn()
+                if self._fresh_ready():
+                    await self._start_fresh()
             item = self._with_backlog(self._with_away(item))
             if item.news is not None:
                 held = self._scopes.held_tasks()
@@ -1591,6 +1622,9 @@ class Hub:
                 self._scopes.prune()
             upcoming = await self._restart_if_full(end.context)
             self._fold_if_due(end.context.tokens if end.context is not None else None)
+            if self._talker_stale:
+                # A new Talker that failed to start after a reset is tried again before the next turn.
+                self._fresh_due.set()
 
     async def _news_delivery_finished(self, delivery: _NewsDelivery) -> None:
         await self._speech.idle(stall_timeout=None)
@@ -1603,7 +1637,8 @@ class Hub:
 
     async def _next_input(self) -> _TalkerInput | None:
         """The User's next line first; in voice mode, news only once Jarvis is quiet (the announcement policy), or
-        on screen once the input has ended. None when a Fold's summary is ready and Jarvis is quiet, to swap it in.
+        on screen once the input has ended. None when a Fold's summary is ready and Jarvis is quiet, to swap it in, or
+        when a reset left a stale Talker, at once if a line or news waits, to replace it.
 
         From the `announce` claim to the turn's start nothing awaits, so a Wake word lands before the claim, which
         then fails, or after it, on the news turn.
@@ -1611,6 +1646,9 @@ class Hub:
         quiet = False
         while True:
             await self._talker_gate.before_next_turn()
+            if self._fresh_ready() and (not self._talker_inbox.empty() or self._news):
+                # After a reset no turn goes to the Talker that still remembers what it deleted.
+                return None
             if not self._talker_inbox.empty():
                 return self._talker_inbox.get_nowait()
             if self._news and (
@@ -1638,20 +1676,24 @@ class Hub:
                 return None
 
     async def _line_or_quiet(self) -> bool | Literal["swap"]:
-        """Waits for a User line, for news and Jarvis being quiet, or for a Fold ready to swap in; returns whether
-        Jarvis was quiet for news, or "swap"."""
+        """Waits for a User line, for news and Jarvis being quiet, or for a Fold or a new Talker after a reset ready to
+        swap in; returns whether Jarvis was quiet for news, or "swap"."""
         self._clients_updated.clear()
         line = asyncio.ensure_future(self._a_line())
         quiet = asyncio.ensure_future(self._news_and_quiet())
         changed = asyncio.ensure_future(self._clients_updated.wait())
         swap = asyncio.ensure_future(self._fold_and_quiet())
+        fresh = asyncio.ensure_future(self._fresh_and_quiet())
         try:
-            await asyncio.wait([line, quiet, changed, swap], return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait([line, quiet, changed, swap, fresh], return_when=asyncio.FIRST_COMPLETED)
         finally:
             line.cancel()
             quiet.cancel()
             changed.cancel()
             swap.cancel()
+            fresh.cancel()
+        if fresh.done() and not fresh.cancelled() and self._fresh_ready():
+            return "swap"
         if swap.done() and not swap.cancelled() and self._talker_inbox.empty() and self._fold_ready():
             return "swap"
         return quiet.done() and not quiet.cancelled() and not self._clients_updated.is_set()
@@ -1685,6 +1727,40 @@ class Hub:
             if self._fold is fold:
                 await asyncio.Event().wait()
         await self._focus_quiet()
+
+    async def _fresh_and_quiet(self) -> None:
+        """Returns once a reset left a stale Talker, the usage limit lets a new one read its seed, and Jarvis is quiet."""
+        await self._fresh_due.wait()
+        while self._limit.blocks("talker"):
+            self._talker_cleared.clear()
+            await self._talker_cleared.wait()
+        if self._closing:
+            await asyncio.Event().wait()
+        await self._focus_quiet()
+
+    def _fresh_ready(self) -> bool:
+        return self._fresh_due.is_set() and not self._limit.blocks("talker") and not self._closing
+
+    async def _start_fresh(self) -> None:
+        """Replaces the Talker after a reset with one that knows only the Hub's records: the Conversation since the
+        reset, empty unless an earlier try failed. A failure keeps the old session, with one notice per reset, until
+        the next try after its next turn."""
+        self._fresh_due.clear()
+        session = await self._seeded_talker("reset", self._conversation.entries, self._conversation.summary,
+                                            self._fresh_failed)
+        if session is None:
+            return
+        if self._closing:
+            with contextlib.suppress(Exception):
+                await session.close()
+            return
+        self._talker_stale = self._fresh_failing = False
+        await self._swap_talker(session)
+
+    def _fresh_failed(self, error: str) -> None:
+        if not self._fresh_failing:
+            self._output.notice(RESET_FAILED.format(error))
+        self._fresh_failing = True
 
     async def _focus_quiet(self) -> None:
         """Returns once no Client that can speak is talking or playing, and Jarvis is quiet on the Focus Client."""
@@ -1743,7 +1819,8 @@ class Hub:
         if self._restart_wait:
             self._restart_wait -= 1
             return None
-        if context is None or context.tokens < self._memory.ceiling or self._closing:
+        if context is None or context.tokens < self._memory.ceiling or self._closing or self._talker_stale:
+            # After a reset the new Talker replaces this one anyway, seeded with less.
             return None
         if self._fold is not None and self._fold.summary is not None:
             # A ready Fold swaps in at the next quiet moment, and keeps more than a restart would.
@@ -1767,8 +1844,8 @@ class Hub:
                                 f"{'the last summary and ' if summary else ''}the latest exchanges.")
         return None
 
-    async def _seeded_talker(self, reason: Literal["restart", "fold"], entries: Sequence[Entry], summary: str | None,
-                             failed: Callable[[str], None]) -> AgentSession | None:
+    async def _seeded_talker(self, reason: Literal["restart", "fold", "reset"], entries: Sequence[Entry],
+                             summary: str | None, failed: Callable[[str], None]) -> AgentSession | None:
         """A new Talker session that has read its hidden seed, or None once `failed` heard why it could not."""
         try:
             session = await self._open_talker()
@@ -2034,6 +2111,7 @@ class Hub:
         assert session is not None
         self._turn_count += 1
         turn = self._turn_count
+        resets = self._resets
         show = kind in ("user", "event")
         t0 = self._clock.now()
         shown, block = "", ""
@@ -2122,7 +2200,7 @@ class Hub:
         if end.outcome == "interrupted" and self._interrupted_turn != turn:
             end = TurnEnd("failed", end.usage, "the turn stopped without the Hub interrupting it")
         # A failed restart has its own notice, and a failed Fold none.
-        if end.outcome == "failed" and kind not in ("restart", "fold"):
+        if end.outcome == "failed" and kind not in ("restart", "fold", "reset"):
             self._model_available = False
             self._output.notice(f"Model unavailable: the Talker failed: {end.error}. Try a new request; check Claude sign-in or connection if it persists.")
         if (
@@ -2137,7 +2215,8 @@ class Hub:
             self._approvals.record_question(shown)
         self.publish_client_snapshots()
         self._measure(session, message, shown, tools, end)
-        if kind in ("user", "event") and (shown.strip() or end.outcome != "failed"):
+        # A reset during the turn dropped its exchange, so nothing from before the reset comes back.
+        if kind in ("user", "event") and (shown.strip() or end.outcome != "failed") and resets == self._resets:
             self._save_exchange(message, shown, tools=tools, client_id=destination_id, kind=kind, arrived=arrived)
         if delivery is not None and end.outcome == "completed":
             delivery.reply = shown
