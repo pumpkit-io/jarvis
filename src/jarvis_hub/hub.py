@@ -1843,7 +1843,8 @@ class Hub:
             # After a reset the new Talker replaces this one anyway, seeded with less.
             return None
         if self._fold is not None:
-            # A Fold under way keeps more than a restart would; two Summariser tries bound the wait, about 2 x 610 s.
+            # A Fold under way keeps more than a restart would; a running one takes at most two Summariser tries,
+            # each SUMMARISER_TIMEOUT + OPEN_GRACE, but a ready one held by a spoken scope or the limit can wait longer.
             if not self._fold_ready():
                 return None
             # Text mode is always quiet, so a ready one swaps in before the lines already waiting; in voice mode a line
