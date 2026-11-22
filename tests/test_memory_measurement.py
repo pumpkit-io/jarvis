@@ -1,22 +1,31 @@
 """The pure half of the opt-in Memory measurement (`test_real_memory_measurement.py`): no model is called here."""
 
+import os
+import subprocess
+import sys
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from claude_agent_sdk import RateLimitEvent, StreamEvent, SystemMessage
 from claude_agent_sdk.types import ModelUsage, RateLimitInfo
 
+from jarvis_hub import memory
+from jarvis_hub.agents.backend import TurnEnd
 from jarvis_hub.conversation import CHARS_PER_TOKEN
 from jarvis_hub.secret_patterns import find_secret
 
 from tests.memory_measurement import (
-    FACTS, Exchange, Results, Session, estimate_error, folded_conversation, log_of, made_up_conversation,
-    markdown_table, opted_in, recall_tool, survived_through,
+    DAY, FACTS, Exchange, Results, Session, Timed, estimate_error, fold, folded_conversation, log_of,
+    made_up_conversation, markdown_table, recall_tool, survived_through,
 )
+from tests.conftest import opted_in
 from tests.test_sdk_context import ScriptedClient, model_usage, result
 
+Outcome = Literal["completed", "interrupted", "failed", "limited"]
 START = 1_790_000_000.0
-DAY = 86400.0
+REPO = Path(__file__).resolve().parents[1]
 
 
 def text_delta(text: str) -> StreamEvent:
@@ -105,6 +114,45 @@ def test_a_right_answer_with_no_source_is_reported_as_neither() -> None:
     assert survived_through(PUPPY, summary="", recalled=[], reply="brunello?") == "neither"
 
 
+SUMMARY = "\n".join(f"# {name}\n- Something worth keeping." for name in memory.SECTIONS)
+
+
+def summariser_run(text: str, outcome: Outcome = "completed", error: str | None = None) -> Timed:
+    return Timed(100, 200, text, TurnEnd(outcome, error=error), ())
+
+
+def summariser(*runs: Timed) -> tuple[list[Timed], Callable[[], Awaitable[Timed]]]:
+    left = list(runs)
+
+    async def summarise() -> Timed:
+        return left.pop(0)
+    return left, summarise
+
+
+async def test_a_fold_tries_a_refused_summary_once_more_as_the_hub_does() -> None:
+    left, summarise = summariser(summariser_run("# Decisions\n- only one section"), summariser_run(f"{SUMMARY}\n"))
+
+    folded = await fold(summarise)
+
+    assert (folded.summary, len(folded.attempts), folded.refused, left) == (SUMMARY, 2, None, [])
+
+
+async def test_a_fold_whose_summariser_turn_did_not_complete_twice_commits_nothing() -> None:
+    _, summarise = summariser(summariser_run(SUMMARY, "interrupted"), summariser_run("", "failed", "HTTP 500"))
+
+    folded = await fold(summarise)
+
+    assert (folded.summary, len(folded.attempts), folded.refused) == (None, 2, "failed: HTTP 500")
+
+
+async def test_a_fold_stopped_by_the_usage_limit_is_not_tried_again() -> None:
+    left, summarise = summariser(summariser_run("", "limited"), summariser_run(SUMMARY))
+
+    folded = await fold(summarise)
+
+    assert (folded.summary, len(folded.attempts), folded.refused, len(left)) == (None, 1, "limited", 1)
+
+
 def test_a_results_table_is_markdown_with_readable_numbers() -> None:
     table = markdown_table(("Size", "Cache", "First delta ms", "Ratio", "Passed", "Error"),
                            [(40_000, "cold", 1834, 3.4567, True, None), (200_000, "warm", None, 2.0, False, "HTTP 500")])
@@ -134,15 +182,20 @@ def test_results_append_sections_under_one_heading(tmp_path: Path) -> None:
 
 
 def test_only_the_real_model_switch_opts_in() -> None:
-    assert opted_in({"JARVIS_REAL_MODEL_TESTS": "1"})
-    assert not opted_in({})
-    assert not opted_in({"JARVIS_REAL_MODEL_TESTS": "true"})
+    assert opted_in("real_model", {"JARVIS_REAL_MODEL_TESTS": "1"})
+    assert not opted_in("real_model", {})
+    assert not opted_in("real_model", {"JARVIS_REAL_MODEL_TESTS": "true"})
+    assert not opted_in("real_model", {"JARVIS_REAL_GITHUB_TESTS": "1"})
 
 
-def test_the_real_measurement_is_marked_real_model_so_it_is_skipped_by_default() -> None:
-    from tests import test_real_memory_measurement
+def test_the_real_measurement_is_skipped_without_the_switch() -> None:
+    environ = {k: v for k, v in os.environ.items() if k != "JARVIS_REAL_MODEL_TESTS"}
 
-    assert test_real_memory_measurement.pytestmark.name == "real_model"
+    run = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                          "tests/test_real_memory_measurement.py"], cwd=REPO, env=environ, capture_output=True,
+                         text=True, timeout=120)
+
+    assert run.returncode == 0 and "4 skipped" in run.stdout, run.stdout[-2000:]
 
 
 async def test_recall_over_the_made_up_log_finds_the_fact_from_the_first_block(tmp_path: Path) -> None:
@@ -156,6 +209,16 @@ async def test_recall_over_the_made_up_log_finds_the_fact_from_the_first_block(t
 
     assert "Brunello" in shown
     assert found == [shown, "from and to are dates such as 2026-11-15."]
+
+
+async def test_recall_over_the_made_up_log_refuses_what_the_hub_refuses(tmp_path: Path) -> None:
+    found: list[str] = []
+
+    with log_of(tmp_path / "events.sqlite3", [], START) as log:
+        await recall_tool(log, found)({"query": "puppy", "speaker": "screen"})
+        await recall_tool(log, found)({"query": "puppy", "limit": "3"})
+
+    assert found == ["speaker is user or jarvis.", "limit is a whole number from 1 to 10."]
 
 
 async def test_a_timed_turn_keeps_the_text_the_context_and_the_usage_limit_readings() -> None:

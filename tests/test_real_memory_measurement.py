@@ -3,13 +3,13 @@ Conversation, and whether a planted fact survives several Folds (#201). Run it o
 `docs/notes/talker-memory.md` says; results go to `.jarvis/measurements/`, ready to paste into those notes."""
 
 import json
-import math
 import os
 import shutil
 import time
 from collections.abc import AsyncGenerator, Iterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from functools import partial
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -26,9 +26,10 @@ from jarvis_hub.hub import user_message
 from jarvis_hub.talker import talker_spec, talker_tools
 from jarvis_hub.voice.language import Lang
 
+from tests.conftest import opted_in
 from tests.memory_measurement import (
-    FACTS, Exchange, Results, Session, Timed, estimate_error, folded_conversation, log_of, made_up_conversation,
-    markdown_table, opted_in, recall_tool, survived_through,
+    DAY, FACTS, Exchange, Results, Session, Timed, estimate, estimate_error, fold, folded_conversation, log_of,
+    made_up_conversation, markdown_table, recall_tool, refusal, survived_through,
 )
 
 pytestmark = pytest.mark.real_model
@@ -47,12 +48,11 @@ FOLDS = 4
 FOLD_BLOCK_TOKENS = 40_000
 TAIL_TOKENS = 10_000
 RATIO_TOKENS = 15_000
-DAY = 86400.0
 
 
 @pytest.fixture(autouse=True)
 def refuse_without_the_switch() -> None:
-    if not opted_in(os.environ):
+    if not opted_in("real_model", os.environ):
         pytest.fail("refused: this measurement spends the User's Max usage; it needs JARVIS_REAL_MODEL_TESTS=1")
     assert "ANTHROPIC_API_KEY" not in os.environ, "would bill the API, not the Max subscription"
 
@@ -134,7 +134,7 @@ async def test_the_fixed_prefix_and_the_chars_to_tokens_estimate_for_english_and
     results.add("Fixed prefix", markdown_table(
         ("Model", "Window", "Context of an empty seed", "Estimated from chars",
          *(f"Share of {size:,}" for size in SIZES)),
-        [(spec.model, window, empty.context, math.ceil(fixed_chars(spec) / CHARS_PER_TOKEN),
+        [(spec.model, window, empty.context, estimate(fixed_chars(spec)),
           *(f"{empty.context / size:.1%}" for size in SIZES))]))
     results.add("Chars-to-tokens estimate", markdown_table(
         ("Language", "Chars", "Tokens counted", "Chars per token", f"Error of {CHARS_PER_TOKEN} chars per token"),
@@ -146,7 +146,7 @@ async def test_first_reply_time_at_large_contexts_with_the_cache_cold_and_warm(
     settings: Settings, results: Results
 ) -> None:
     spec = talker(settings)
-    fixed = math.ceil(fixed_chars(spec) / CHARS_PER_TOKEN)
+    fixed = estimate(fixed_chars(spec))
     rows: list[tuple[object, ...]] = []
     readings: list[tuple[str, Timed]] = []
     for size in SIZES:
@@ -175,10 +175,6 @@ async def summarise(settings: Settings, previous: str | None, folded: Sequence[E
         return await s.turn(memory.summariser_message(previous, entries(folded), now=time.time()))
 
 
-def estimate(chars: int) -> int:
-    return math.ceil(chars / CHARS_PER_TOKEN)
-
-
 def facts_in(summary: str) -> str:
     return ", ".join(f.answer for f in FACTS if f.answer.lower() in summary.lower()) or "none"
 
@@ -193,7 +189,7 @@ async def test_the_summariser_on_a_long_conversation(settings: Settings, results
         ("Input (context reported)", "Duration ms", "Output tokens", "Estimated tokens", "Cap", "Checks",
          "Planted facts kept", "Outcome"),
         [(run.context, run.total_ms, run.end.usage.output_tokens, estimate(len(run.text)), memory.SUMMARY_TOKENS,
-          memory.problem(run.text, estimate) or "pass", f"{facts_in(run.text)} of {len(FACTS)}",
+          refusal(run) or "pass", f"{facts_in(run.text)} of {len(FACTS)}",
           run.end.outcome)]))
     results.add("Summariser: the summary", f"```markdown\n{run.text}\n```")
     results.add("Usage-limit readings: Summariser", limit_table([("summariser", run)]))
@@ -208,18 +204,19 @@ async def test_a_fact_from_three_folds_back_survives_through_the_summary_or_reca
                                        seed=run_seed())
     summary: str | None = None
     unfolded: list[Exchange] = []
+    committed = 0
     folds: list[tuple[object, ...]] = []
     readings: list[tuple[str, Timed]] = []
     for n, block in enumerate(blocks, start=1):
         unfolded += block
-        run = await summarise(settings, summary, unfolded)
-        refused = memory.problem(run.text, estimate) if run.end.outcome == "completed" else run.end.error
-        # As in the Hub, a refused summary leaves its exchanges for the next Fold.
-        if refused is None:
-            summary, unfolded = run.text, []
-        folds.append((n, len(block), run.total_ms, run.end.usage.output_tokens, refused or "pass",
-                      facts_in(summary or "")))
-        readings.append((f"fold {n}", run))
+        done = await fold(partial(summarise, settings, summary, list(unfolded)))
+        for attempt, run in enumerate(done.attempts, start=1):
+            folds.append((n, attempt, len(unfolded), run.total_ms, run.end.usage.output_tokens,
+                          refusal(run) or "pass", facts_in(run.text)))
+            readings.append((f"fold {n} attempt {attempt}", run))
+        # As in the Hub, a Fold with no summary taken leaves its exchanges for the next one.
+        if done.summary is not None:
+            summary, unfolded, committed = done.summary, [], committed + 1
     fact = FACTS[0]
     found: list[str] = []
     with log_of(tmp_path / "events.sqlite3", [e for block in (*blocks, tail) for e in block], now) as log:
@@ -227,12 +224,15 @@ async def test_a_fact_from_three_folds_back_survives_through_the_summary_or_reca
             seeded = await s.turn(seed(entries([*unfolded, *tail]), summary))
             asked = await s.turn(user_message(fact.question, fact.lang))
     survived = survived_through(fact, summary=summary or "", recalled=found, reply=asked.text)
+    # The first Fold taken folded the fact's block; each one taken after it summarised that summary again.
+    folds_since = committed - 1 if committed else None
     results.add("Memory quality: folds", markdown_table(
-        ("Fold", "Exchanges folded", "Duration ms", "Output tokens", "Checks", "Planted facts in the summary"), folds))
+        ("Fold", "Attempt", "Exchanges folded", "Duration ms", "Output tokens", "Checks",
+         "Planted facts in the summary"), folds))
     results.add("Memory quality: the question", markdown_table(
         ("Fact", "Folds since", "In the final summary", "recall calls", "recall found it", "Answer right",
          "Survived through"),
-        [(fact.answer, FOLDS - 1, fact.answer.lower() in (summary or "").lower(), len(found),
+        [(fact.answer, folds_since, fact.answer.lower() in (summary or "").lower(), len(found),
           any(fact.answer.lower() in r.lower() for r in found), survived != "lost", survived)])
         + f"\n\nAsked: {fact.question}\n\nReply: {asked.text}")
     results.add("Memory quality: the final summary", f"```markdown\n{summary or 'None: every Fold was refused.'}\n```")

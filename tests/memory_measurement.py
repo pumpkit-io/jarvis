@@ -1,27 +1,28 @@
 """Made-up Conversations, planted facts and result tables for the opt-in Memory measurement
 (`test_real_memory_measurement.py`, `docs/notes/talker-memory.md`). Nothing here opens a model session."""
 
+import math
 import random
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
 from claude_agent_sdk import ClaudeSDKClient, RateLimitEvent, ResultMessage, StreamEvent, SystemMessage
 from claude_agent_sdk.types import RateLimitInfo
 
+from jarvis_hub import memory
 from jarvis_hub.agents.backend import ToolHandler, TurnEnd
 from jarvis_hub.agents.sdk import binding, turn_end
 from jarvis_hub.conversation import CHARS_PER_TOKEN, Entry
-from jarvis_hub.event_log import RECALL_LIMIT, EventLog
-from jarvis_hub.hub import RECALL_DATES, user_message
+from jarvis_hub.event_log import EventLog, recall
+from jarvis_hub.hub import user_message
 from jarvis_hub.voice.language import Lang
 
 Language = Literal["en", "it", "mixed"]
 DAY = 86400.0
-OPT_IN = "JARVIS_REAL_MODEL_TESTS"
+STEP = 120.0
 
 
 @dataclass(frozen=True)
@@ -118,10 +119,10 @@ def _filler(rng: random.Random, lang: Lang) -> tuple[str, Lang, str]:
     return said, lang, reply[0].upper() + reply[1:]
 
 
-def made_up_conversation(tokens: int, *, language: Language, start: float, seed: int, facts: Sequence[Fact] = (),
-                         step: float = 120.0) -> list[Exchange]:
-    """Exchanges whose rendered entries come to about `tokens` at the Hub's starting estimate, one every `step`
-    seconds from `start`, with `facts` said in order at even intervals. The same seed gives the same Conversation."""
+def made_up_conversation(tokens: int, *, language: Language, start: float, seed: int,
+                         facts: Sequence[Fact] = ()) -> list[Exchange]:
+    """Exchanges whose rendered entries come to about `tokens` at the Hub's starting estimate, one every two minutes
+    from `start`, with `facts` said in order at even intervals. The same seed gives the same Conversation."""
     rng = random.Random(seed)
     planted = [Exchange(fact.statement, fact.lang, fact.reply, 0.0, 0.0) for fact in facts]
     chars = sum(len(e.entry().render()) for e in planted)
@@ -133,8 +134,7 @@ def made_up_conversation(tokens: int, *, language: Language, start: float, seed:
     gap = len(said) // (len(planted) + 1)
     for n, exchange in enumerate(planted, start=1):
         said.insert(n * gap + n - 1, exchange)
-    return [replace(e, at=start + i * step, ended=start + i * step + 20.0) for i, e in enumerate(said)]
-
+    return [replace(e, at=start + i * STEP, ended=start + i * STEP + 20.0) for i, e in enumerate(said)]
 
 
 def folded_conversation(folds: int, *, block_tokens: int, tail_tokens: int, now: float,
@@ -163,11 +163,6 @@ def survived_through(fact: Fact, *, summary: str, recalled: Sequence[str], reply
     if holds(summary):
         return "summary"
     return "recall" if any(holds(result) for result in recalled) else "neither"
-
-
-def opted_in(environ: Mapping[str, str]) -> bool:
-    """The switch every real-model test needs (`tests/conftest.py`): a run spends the User's Max usage."""
-    return environ.get(OPT_IN) == "1"
 
 
 def estimate_error(*, chars: int, tokens: int) -> float:
@@ -208,35 +203,11 @@ class Results:
 
 
 def recall_tool(log: EventLog, found: list[str]) -> ToolHandler:
-    """A copy of the Hub's `recall` handler on `log` that keeps each result, so the check can tell where an answer
-    came from."""
-    async def recall(args: dict[str, Any]) -> str:
-        found.append(_recall(log, args))
+    """The Hub's `recall` tool on `log`, keeping each result so the check can tell where an answer came from."""
+    async def handler(args: dict[str, Any]) -> str:
+        found.append(recall(log, args))
         return found[-1]
-    return recall
-
-
-def _recall(log: EventLog, args: dict[str, Any]) -> str:
-    try:
-        start, end = _day(args.get("from")), _day(args.get("to"), following=True)
-    except (ValueError, OverflowError):
-        return RECALL_DATES
-    wanted = args.get("speaker")
-    speaker: Literal["user", "jarvis"] | None = wanted if wanted in ("user", "jarvis") else None
-    limit = args.get("limit")
-    try:
-        found = log.search(str(args.get("query") or ""), start=start, end=end, speaker=speaker,
-                           limit=limit if isinstance(limit, int) else RECALL_LIMIT)
-    except ValueError as e:
-        return str(e)
-    return found.render()
-
-
-def _day(value: object, *, following: bool = False) -> float | None:
-    if not value:
-        return None
-    day = date.fromisoformat(str(value))
-    return datetime.combine(day + timedelta(days=1) if following else day, datetime.min.time()).timestamp()
+    return handler
 
 
 def log_of(path: Path, exchanges: Sequence[Exchange], now: float) -> EventLog:
@@ -306,3 +277,37 @@ class Session:
 
 def _ms(started: float) -> int:
     return round((time.perf_counter() - started) * 1000)
+
+
+@dataclass(frozen=True)
+class Fold:
+    """One Fold's Summariser attempts; `summary` is None when none was taken, `refused` says why the last was not."""
+
+    summary: str | None
+    attempts: tuple[Timed, ...]
+    refused: str | None
+
+
+async def fold(summarise: Callable[[], Awaitable[Timed]]) -> Fold:
+    """As `Hub._summarise`: an error or a refused summary is tried once more, a usage limit is not."""
+    attempts: list[Timed] = []
+    refused: str | None = None
+    for _ in (1, 2):
+        attempts.append(run := await summarise())
+        if (refused := refusal(run)) is None:
+            return Fold(run.text.strip(), tuple(attempts), None)
+        if run.end.outcome == "limited":
+            break
+    return Fold(None, tuple(attempts), refused)
+
+
+def refusal(run: Timed) -> str | None:
+    """Why the Hub would not take `run`'s reply as a summary, or None when it would."""
+    if run.end.outcome != "completed":
+        return f"{run.end.outcome}: {run.end.error}" if run.end.error else run.end.outcome
+    return memory.problem(run.text.strip(), estimate)
+
+
+def estimate(chars: int) -> int:
+    """The Hub's starting estimate, before any turn has calibrated it."""
+    return math.ceil(chars / CHARS_PER_TOKEN)

@@ -1,4 +1,5 @@
 import os
+from collections.abc import Mapping
 
 import pytest
 
@@ -10,9 +11,13 @@ OPT_IN = {
 }
 
 
+def opted_in(marker: str, environ: Mapping[str, str]) -> bool:
+    return environ.get(OPT_IN[marker][0]) == "1"
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     for marker, (variable, what) in OPT_IN.items():
-        if os.environ.get(variable) == "1":
+        if opted_in(marker, os.environ):
             continue
         skip = pytest.mark.skip(reason=f"{what}; set {variable}=1 to run")
         for item in items:

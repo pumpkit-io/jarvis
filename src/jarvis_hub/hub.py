@@ -14,7 +14,7 @@ import uuid
 from collections import deque
 from collections.abc import Mapping, AsyncIterator, Callable, Coroutine, Iterable, Sequence
 from dataclasses import asdict, dataclass, field, replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -54,7 +54,7 @@ from jarvis_hub.spoken import SpokenScopes
 from jarvis_hub.subagent_rules import connector_check
 from jarvis_hub.subagents import Subagent, SubagentSetup, Subagents, ended_event, kept_line, over_time_event
 from jarvis_hub.talker import talker_tools
-from jarvis_hub.event_log import RECALL_LIMIT, EventOutput
+from jarvis_hub.event_log import EventOutput, recall
 from jarvis_hub.tasks import Task, Tasks, no_task
 from jarvis_hub.voice.language import Lang, detect_language
 from jarvis_hub.voice.speech import ClipName
@@ -253,7 +253,6 @@ OPEN_GRACE = 10.0
 ORCHESTRATOR_TIMEOUT = 600.0
 # How long an interrupted turn has to end before the Hub gives up on its session.
 INTERRUPT_GRACE = 10.0
-RECALL_DATES = "from and to are dates such as 2026-11-15."
 AFRESH_FAILED = "Could not start afresh: Memory could not be written, so the conversation goes on as it was."
 RESET_FAILED = ("Could not start a new Talker after the reset, so the current one, which still remembers the earlier "
                 "conversation, answers until the next try, and none of it is saved: {}")
@@ -273,14 +272,6 @@ def delay_phrase(seconds: float | None) -> str | None:
         return None
     minutes = round(seconds / 60)
     return f"{minutes} minutes" if minutes < 120 else f"{round(minutes / 60)} hours"
-
-
-def _local_day(value: object, *, following: bool = False) -> float | None:
-    """The start of a YYYY-MM-DD day in local time, or of the day after it for the end of a range."""
-    if not value:
-        return None
-    day = date.fromisoformat(str(value))
-    return datetime.combine(day + timedelta(days=1) if following else day, datetime.min.time()).timestamp()
 
 
 def interrupted_message(spoken: str) -> str:
@@ -2865,29 +2856,9 @@ class Hub:
                 "session takes over once Jarvis is quiet. Answer the rest of the message as normal.")
 
     async def _recall(self, args: dict[str, Any]) -> str:
-        log = self._output.log
-        if log is None:
+        if (log := self._output.log) is None:
             return "Recall needs the event log, which this Hub does not keep."
-        try:
-            start = _local_day(args.get("from"))
-            end = _local_day(args.get("to"), following=True)
-        except (ValueError, OverflowError):
-            return RECALL_DATES
-        speaker = args.get("speaker") or None
-        if speaker not in (None, "user", "jarvis"):
-            return "speaker is user or jarvis."
-        limit = args.get("limit") or RECALL_LIMIT
-        if not isinstance(limit, int):
-            return f"limit is a whole number from 1 to {RECALL_LIMIT}."
-        try:
-            found = log.search(str(args.get("query") or ""), start=start, end=end, speaker=speaker, limit=limit)
-        except ValueError as e:
-            return str(e)
-        try:
-            return found.render()
-        except (ValueError, OverflowError, OSError):
-            # Only a date can fail to render: a `to` in year 1 ends before the first datetime.
-            return RECALL_DATES
+        return recall(log, args)
 
     async def _end_conversation(self, args: dict[str, Any]) -> str:
         # Text mode, a typed line in voice mode, or news has no listening of its own to stop: only acknowledged.

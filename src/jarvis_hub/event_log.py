@@ -12,7 +12,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from html import escape
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -45,6 +45,7 @@ RECALLED = ("heard", "reply_end", "show", "task_report")
 SOURCES = {"heard": "user", "reply_end": "jarvis", "show": "screen", "task_report": "task"}
 SPEAKERS = {"user": ("heard",), "jarvis": ("reply_end", "show", "task_report")}
 RECALL_LIMIT = 10
+RECALL_DATES = "from and to are dates such as 2026-11-15."
 # About 2,000 tokens at the Conversation's starting ratio of 3.5 characters a token.
 RECALL_CHARS = 7000
 MATCH_CHARS = 500
@@ -498,6 +499,38 @@ class EventLog:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+def recall(log: EventLog, args: dict[str, Any]) -> str:
+    """The Talker's `recall` tool: `args` as the model sent them, the answer or what to fix in them as text."""
+    try:
+        start = _local_day(args.get("from"))
+        end = _local_day(args.get("to"), following=True)
+    except (ValueError, OverflowError):
+        return RECALL_DATES
+    speaker = args.get("speaker") or None
+    if speaker not in (None, "user", "jarvis"):
+        return "speaker is user or jarvis."
+    limit = args.get("limit") or RECALL_LIMIT
+    if not isinstance(limit, int):
+        return f"limit is a whole number from 1 to {RECALL_LIMIT}."
+    try:
+        found = log.search(str(args.get("query") or ""), start=start, end=end, speaker=speaker, limit=limit)
+    except ValueError as e:
+        return str(e)
+    try:
+        return found.render()
+    except (ValueError, OverflowError, OSError):
+        # Only a date can fail to render: a `to` in year 1 ends before the first datetime.
+        return RECALL_DATES
+
+
+def _local_day(value: object, *, following: bool = False) -> float | None:
+    """The start of a YYYY-MM-DD day in local time, or of the day after it for the end of a range."""
+    if not value:
+        return None
+    day = date.fromisoformat(str(value))
+    return datetime.combine(day + timedelta(days=1) if following else day, datetime.min.time()).timestamp()
 
 
 class EventOutput:
