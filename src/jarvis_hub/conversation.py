@@ -216,7 +216,9 @@ class Conversation:
         self._prune(now)
 
     def _stamp_replaced(self, version: int, now: float) -> None:
-        """Records when `version` stopped being active. Should the commit's save fail, a later one stamps it anew."""
+        """Records when `version` stopped being active. The stamp is written before the commit's save, so a failed
+        save leaves it on a version the saved file still names active; pruning skips the active version, and a commit
+        that later replaces it stamps it again."""
         if self._summaries is None:
             return
         with contextlib.suppress(OSError, ValueError, UnreadableFile):

@@ -265,7 +265,7 @@ class FakeSession:
 
 class FakeBackend:
     """Plays one script per message, in order, per role; `warm_up` answers the seed the Talker starts with at launch
-    and `seed_reply` the seed a Talker started by a restart or a Fold starts with. Each summariser run takes the next of `summaries`, and
+    and `seed_reply` the seed a Talker started by a restart or a Fold starts with. Each Summariser run takes the next of `summaries`, and
     writes a valid summary once they run out.
 
     An Orchestrator with no script left ends its turn without a report.

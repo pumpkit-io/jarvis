@@ -1,4 +1,4 @@
-"""Memory (ADR 0028): the summariser session that folds the Conversation's older part into a summary, and the checks
+"""Memory (ADR 0028): the Summariser session that folds the Conversation's older part into a summary, and the checks
 a summary must pass before the Talker reads it."""
 
 import re
@@ -22,7 +22,7 @@ OVER_CAP = 1.2
 
 
 def summariser_spec(settings: Settings) -> SessionSpec:
-    """No tools and one model turn: the summariser only reads what the Hub sends and writes the summary."""
+    """No tools and one model turn: the Summariser only reads what the Hub sends and writes the summary."""
     return SessionSpec(
         role=ROLE,
         model=settings.memory.model,
@@ -35,8 +35,8 @@ def summariser_spec(settings: Settings) -> SessionSpec:
 
 
 def summariser_message(previous: str | None, entries: Sequence[Entry], *, now: float) -> str:
-    """The summariser's one message: the summary so far and the exchanges to fold into it, secrets already
-    removed so the summariser never reads them."""
+    """The Summariser's one message: the summary so far and the exchanges to fold into it, secrets already
+    removed so the Summariser never reads them."""
     # Redacted before rendering, which escapes the reply: a secret holding `&` would no longer match once escaped.
     exchanges = "\n".join(
         replace(entry, message=redact_markup(entry.message), reply=redact(entry.reply)).render() for entry in entries

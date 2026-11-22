@@ -32,8 +32,9 @@ def at(tokens: int) -> Context:
     return Context(tokens, WINDOW)
 
 
-# The default ceiling, and a context well below the Fold's trigger.
+# The default ceiling, which is past the Fold's trigger too.
 FULL = at(300_000)
+# A context well below the Fold's trigger.
 SMALL = at(30_000)
 
 

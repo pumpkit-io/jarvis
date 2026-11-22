@@ -93,7 +93,7 @@ The summary of the older part of the Conversation that the Talker reads before t
 _Avoid_: context, history, notes, profile
 
 **Fold**:
-The background step that writes a new Memory from the previous one and the exchanges before a cut, then gives the Talker a fresh start on that Memory and the Tail while Jarvis keeps talking.
+The background step that folds the exchanges before a cut into the Memory, which the Summariser writes anew from the previous one, then gives the Talker a fresh start on that Memory and the Tail while Jarvis keeps talking.
 _Avoid_: compaction, compact, summarisation, restart
 
 **Tail**:
