@@ -34,6 +34,8 @@ public enum HubClientUpdate: Sendable {
     case state(HubConnectionState), event(HubEvent), audio(HubEvent, Data), result(CommandResult)
     case failure(String), replayStarted, replay(ReplayComplete), speechConnectionEnded(String)
     case silence(Bool, pending: Bool, revision: UInt64)
+    /// A socket-bound command lost its socket before its result arrived; it will not be sent again.
+    case commandDropped(String)
 }
 
 public actor HubClient {
@@ -42,6 +44,8 @@ public actor HubClient {
     public private(set) var pendingCommands: [HubCommand] = []
     public private(set) var unansweredCommands: Set<String> = []
     public private(set) var results: [String: CommandResult] = [:]
+    /// Commands that a reconnect never resends: a reset arriving long after the User asked would surprise them.
+    static let socketBoundTypes: Set<String> = ["reset_context"]
     public nonisolated let updates: AsyncStream<HubClientUpdate>
     private let continuation: AsyncStream<HubClientUpdate>.Continuation
     private let transport: HubTransport
@@ -225,8 +229,16 @@ public actor HubClient {
             try await socket.send(pendingData[command.id] ?? data)
             if generation == owner { startRetryDeadline(command.id, owner: owner) }
         } catch {
+            if Self.socketBoundTypes.contains(command.type) { removePendingCommand(command.id) }
             if generation == owner { await socket.close() }
             throw error
+        }
+    }
+
+    private func dropSocketBoundCommands() {
+        for command in pendingCommands where Self.socketBoundTypes.contains(command.type) {
+            removePendingCommand(command.id)
+            continuation.yield(.commandDropped(command.id))
         }
     }
 
@@ -361,7 +373,7 @@ public actor HubClient {
         generation &+= 1
         let owner = generation
         task?.cancel(); task = nil
-        cancelRetries()
+        cancelRetries(); dropSocketBoundCommands()
         keepalive?.cancel(); keepalive = nil; waitingToRetry = false
         if let activeSpeechID { continuation.yield(.speechConnectionEnded(activeSpeechID)) }
         let old = socket; socket = nil; handover = false; displayReady = false; presenceID = nil; activeSpeechID = nil
@@ -501,7 +513,7 @@ public actor HubClient {
                 }
             } catch {
                 guard generation == owner else { await current?.close(); return }
-                cancelRetries()
+                cancelRetries(); dropSocketBoundCommands()
                 keepalive?.cancel(); keepalive = nil
                 if let activeSpeechID { continuation.yield(.speechConnectionEnded(activeSpeechID)) }
                 socket = nil; handover = false; displayReady = false; presenceID = nil; activeSpeechID = nil

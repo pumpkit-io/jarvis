@@ -11,6 +11,7 @@ actor FakeSocket: HubSocket {
     var holdClose = false
     var closeWaiter: CheckedContinuation<Void, Never>?
     var heldSendType: String?
+    var failingSendType: String?
     var sendWaiter: CheckedContinuation<Void, Never>?
     let autoPresence: Bool
     init(autoPresence: Bool = true) { self.autoPresence = autoPresence; (frames, input) = AsyncThrowingStream.makeStream() }
@@ -21,6 +22,7 @@ actor FakeSocket: HubSocket {
     }
     func send(_ data: Data) async throws {
         let command = try JSONDecoder().decode(HubCommand.self, from: data)
+        if command.type == failingSendType { throw URLError(.networkConnectionLost) }
         sent.append(command)
         rawSent.append(data)
         if command.type == heldSendType { await withCheckedContinuation { sendWaiter = $0 } }
@@ -44,6 +46,7 @@ actor FakeSocket: HubSocket {
     func blockClose() { holdClose = true }
     func releaseClose() { holdClose = false; closeWaiter?.resume(); closeWaiter = nil }
     func blockSend(_ type: String) { heldSendType = type }
+    func failSend(_ type: String) { failingSendType = type }
     func releaseSend(keepingBlocked: Bool = false) {
         if !keepingBlocked { heldSendType = nil }
         let waiter = sendWaiter; sendWaiter = nil; waiter?.resume()
