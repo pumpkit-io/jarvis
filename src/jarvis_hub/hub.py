@@ -1828,7 +1828,7 @@ class Hub:
         """Between turns, swap in a new Talker session once the context reaches the ceiling, which only Folds that
         keep failing let it reach, seeded with the active summary and the Tail (ADR 0028). The User is told once,
         then again only after a Fold succeeds. While a Fold is under way there is no restart, and a Fold
-        whose summary is ready swaps in at once.
+        whose summary is ready swaps in at the next quiet moment.
 
         Only this turn's context decides: an older reading may be stale. The new session reads the seed in the
         background like the launch warm-up, so a line typed meanwhile waits for it in the inbox. Whatever fails
@@ -1843,10 +1843,11 @@ class Hub:
             # After a reset the new Talker replaces this one anyway, seeded with less.
             return None
         if self._fold is not None:
-            # A Fold under way keeps more than a restart would; SUMMARISER_TIMEOUT bounds the wait.
+            # A Fold under way keeps more than a restart would; two Summariser tries bound the wait, about 2 x 610 s.
             if not self._fold_ready():
                 return None
-            # A ready one swaps in now, not after the lines already waiting, which would grow the context further.
+            # Text mode is always quiet, so a ready one swaps in before the lines already waiting; in voice mode a line
+            # that arrives before quiet is answered by the old session first.
             if (upcoming := await self._quiet_or_next()) is not None:
                 return upcoming
             if self._fold_ready():
