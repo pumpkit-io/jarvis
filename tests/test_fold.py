@@ -559,6 +559,22 @@ async def test_closing_the_hub_mid_fold_stops_the_summariser_and_saves_no_summar
     assert not (path.parent / "memory").exists()
 
 
+async def test_a_cancelled_summariser_run_is_its_own_metrics_entry(clock: FakeClock, path: Path) -> None:
+    never = asyncio.Event()
+    hub, backend, _, metrics = a_hub(clock, path, [[Text("One."), tokens(200_000)]], memory=SHORT,
+                                     summaries=[[Gate(never), Text(a_summary())]])
+
+    await hub.start()
+    await hub.run(lines(clock, "a"))
+    await until(lambda: len(backend.all_sessions("summariser")) == 1)
+    clock.advance(1.5)
+    await hub.close()
+
+    [run] = [r for r in metrics.records if r["role"] == "summariser"]
+    assert run["kind"] == "fold" and run["outcome"] == "cancelled" and run["attempt"] == 1
+    assert run["duration_ms"] == 1500 and run["folded"] == 1
+
+
 async def test_a_usage_limit_on_the_summariser_is_tracked_under_its_own_role_and_tells_the_user_nothing(
     clock: FakeClock, path: Path
 ) -> None:

@@ -1864,20 +1864,28 @@ class Hub:
         refuse is tried once more, a usage limit is not."""
         message = memory.summariser_message(previous, folded, now=self._wall())
         for attempt in (1, 2):
-            summary, end, duration_ms = await self._summariser_turn(message)
+            t0 = self._clock.now()
+
+            def record(end: TurnEnd, outcome: str | None = None, **fields: Any) -> None:
+                self._record(self._summariser_spec, "fold", end, [], outcome=outcome, attempt=attempt,
+                             folded=len(folded), duration_ms=round((self._clock.now() - t0) * 1000), **fields)
+
+            try:
+                summary, end = await self._summariser_turn(message)
+            except asyncio.CancelledError:
+                record(TurnEnd("interrupted"), "cancelled")
+                raise
             refused = memory.problem(summary, self._conversation.estimate) if end.outcome == "completed" else None
-            self._record(self._summariser_spec, "fold", end, [], outcome="refused" if refused else None,
-                         attempt=attempt, folded=len(folded), duration_ms=duration_ms,
-                         **({"problem": refused} if refused else {}), **({"error": end.error} if end.error else {}))
+            record(end, "refused" if refused else None,
+                   **({"problem": refused} if refused else {}), **({"error": end.error} if end.error else {}))
             if end.outcome == "completed" and refused is None:
                 return summary
             if end.outcome == "limited":
                 return None
         return None
 
-    async def _summariser_turn(self, message: str) -> tuple[str, TurnEnd, int]:
-        """One summariser session's reply to `message`, its end and how long it took in milliseconds."""
-        t0 = self._clock.now()
+    async def _summariser_turn(self, message: str) -> tuple[str, TurnEnd]:
+        """One Summariser session's reply to `message` and its end."""
         text, end = "", TurnEnd("failed", error="the session ended without a result")
         try:
             session = await self._open(self._summariser_spec)
@@ -1894,7 +1902,7 @@ class Hub:
                 with contextlib.suppress(Exception):
                     await session.close()
         self._limit.observe(SUMMARISER, end)
-        return text.strip(), end, round((self._clock.now() - t0) * 1000)
+        return text.strip(), end
 
     async def _swap_in_fold(self) -> None:
         """Seeds a new Talker with the ready summary and the entries after the cut, then commits and swaps it in. The
