@@ -2,7 +2,7 @@
 
 import pytest
 
-from jarvis_hub.secret_patterns import REDACTED, find_secret, redact
+from jarvis_hub.secret_patterns import REDACTED, find_secret, redact, redact_markup
 
 SECRETS = {
     "a GitHub token": ("Use ghp_abcdefghijklmnopqrstuvwxyz0123 for it.", "ghp_abcdefghijklmnopqrstuvwxyz0123"),
@@ -42,3 +42,13 @@ def test_a_secret_looking_value_is_found_and_redacted_in_place(text: str, secret
 def test_ordinary_talk_about_secrets_holds_none(text: str) -> None:
     assert find_secret(text) is None
     assert redact(text) == text
+
+
+def test_a_secret_escaped_in_markup_is_redacted_and_the_markup_stays_escaped() -> None:
+    markup = ('<user lang="en">The password is ab&amp;c&lt;d&gt;1234, &lt;b&gt;noted&lt;/b&gt;.</user>\n'
+              '<interrupted spoken="the token is &quot;x&amp;y9&quot; and it&#x27;s new"/>')
+
+    assert redact_markup(markup) == (
+        f'<user lang="en">The password is {REDACTED}, &lt;b&gt;noted&lt;/b&gt;.</user>\n'
+        f'<interrupted spoken="the token is {REDACTED} and it\'s new"/>'
+    )

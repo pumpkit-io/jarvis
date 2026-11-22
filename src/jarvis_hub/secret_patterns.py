@@ -6,6 +6,7 @@ the words before it stay readable.
 """
 
 import re
+from html import escape, unescape
 
 REDACTED = "[secret removed]"
 
@@ -50,6 +51,26 @@ def redact(text: str) -> str:
     for pattern in SECRET_PATTERNS:
         text = pattern.sub(_redacted, text)
     return text
+
+
+def redact_markup(markup: str) -> str:
+    """`redact` for markup escaped as the Hub's messages are: each text run and double-quoted attribute is redacted
+    unescaped, so an `&amp;` or `&lt;` inside a secret cannot hide it, then escaped again."""
+    return "".join(
+        _ATTRIBUTE.sub(lambda m: f'="{_redact_escaped(m.group(1), quote=True)}"', part) if i % 2
+        else _redact_escaped(part, quote=False)
+        for i, part in enumerate(_TAG.split(markup))
+    )
+
+
+_TAG = re.compile(r"(<[^<>]*>)")
+_ATTRIBUTE = re.compile(r'="([^"]*)"')
+
+
+def _redact_escaped(text: str, *, quote: bool) -> str:
+    redacted = escape(redact(unescape(text)), quote=False)
+    # Attributes escape only the double quote, so an apostrophe stays as written.
+    return redacted.replace('"', "&quot;") if quote else redacted
 
 
 def _secret(match: re.Match[str]) -> str:

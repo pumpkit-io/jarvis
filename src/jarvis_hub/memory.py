@@ -3,6 +3,7 @@ a summary must pass before the Talker reads it."""
 
 import re
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from datetime import datetime
 from html import escape
 
@@ -10,7 +11,7 @@ from jarvis_hub.agents.backend import SessionSpec
 from jarvis_hub.config import Settings
 from jarvis_hub.conversation import Entry
 from jarvis_hub.prompts import render
-from jarvis_hub.secret_patterns import find_secret, redact
+from jarvis_hub.secret_patterns import find_secret, redact, redact_markup
 
 ROLE = "summariser"
 # The headings `prompts/memory.md` asks for, in order.
@@ -36,7 +37,10 @@ def summariser_spec(settings: Settings) -> SessionSpec:
 def summariser_message(previous: str | None, entries: Sequence[Entry], *, now: float) -> str:
     """The summariser's one message: the summary so far and the exchanges to fold into it, secrets already
     removed so the summariser never reads them."""
-    exchanges = "\n".join(redact(entry.render()) for entry in entries)
+    # Redacted before rendering, which escapes the reply: a secret holding `&` would no longer match once escaped.
+    exchanges = "\n".join(
+        replace(entry, message=redact_markup(entry.message), reply=redact(entry.reply)).render() for entry in entries
+    )
     earlier = escape(redact(previous), quote=False) if previous else "None yet."
     return (
         f"<today>{datetime.fromtimestamp(now).astimezone().strftime('%Y-%m-%d')}</today>\n"
