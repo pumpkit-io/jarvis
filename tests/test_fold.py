@@ -72,6 +72,10 @@ def received(backend: FakeBackend) -> int:
     return sum(len(s.received) for s in backend.all_sessions("talker"))
 
 
+def saved_entries(path: Path) -> int:
+    return len(json.loads(path.read_text())["entries"]) if path.exists() else 0
+
+
 def said(message: str) -> str:
     return re.sub(r"</?user[^>]*>", "", message)
 
@@ -141,7 +145,7 @@ async def test_the_old_session_answers_while_the_summary_is_written_and_the_swap
 
 async def fold_once(clock: FakeClock, path: Path, *heard: str, **options: Any) -> tuple[FakeBackend, RecordingOutput]:
     """A launch that hears each line, the first reaching the trigger, and waits for the Fold to swap in."""
-    scripts = [[Text("Noted."), tokens(200_000)]] + [[Text("Noted.")] for _ in heard[1:]]
+    scripts = options.pop("scripts", [[Text("Noted."), tokens(200_000)]] + [[Text("Noted.")] for _ in heard[1:]])
     hub, backend, output, _ = a_hub(clock, path, scripts, memory=options.pop("memory", SHORT), **options)
     typist = Typist(clock)
     await hub.start()
@@ -260,7 +264,7 @@ async def test_a_bad_summary_is_tried_once_more_then_the_old_summary_and_session
     assert output.notices == []
     runs = [r for r in metrics.records if r["role"] == "summariser"]
     assert [(r["kind"], r["attempt"]) for r in runs] == [("fold", 1), ("fold", 2)]
-    assert all("refused" in r or r["outcome"] == "failed" for r in runs)
+    assert all(r["outcome"] == "failed" if "error" in r else r["outcome"] == "refused" and r["problem"] for r in runs)
 
 
 @pytest.mark.parametrize("bad", BAD_SUMMARIES.values(), ids=BAD_SUMMARIES.keys())
@@ -279,6 +283,19 @@ async def test_secrets_never_reach_the_summariser(clock: FakeClock, path: Path) 
     assert "The wifi password is [secret removed]" in summariser.received[0]
 
 
+async def test_a_secret_holding_characters_the_conversation_escapes_never_reaches_the_summariser(
+    clock: FakeClock, path: Path
+) -> None:
+    backend, _ = await fold_once(clock, path, "The wifi password is ab&c<d>1234, noted.",
+                                 scripts=[[Text("And the door passcode is x&y>z9876."), tokens(200_000)]])
+
+    [summariser] = backend.all_sessions("summariser")
+    message = summariser.received[0]
+    assert not any(part in message for part in ("ab&", "c<d>", "c&lt;d", "1234", "x&", "z9876"))
+    assert "The wifi password is [secret removed], noted." in message
+    assert "And the door passcode is [secret removed]." in message
+
+
 async def test_each_summariser_run_is_its_own_metrics_entry_with_duration_usage_and_outcome(
     clock: FakeClock, path: Path
 ) -> None:
@@ -294,7 +311,6 @@ async def test_each_summariser_run_is_its_own_metrics_entry_with_duration_usage_
     [run] = [r for r in metrics.records if r["role"] == "summariser"]
     assert run["kind"] == "fold" and run["outcome"] == "completed" and run["duration_ms"] == 2500
     assert run["usage"]["input_tokens"] == 900 and run["usage"]["output_tokens"] == 300
-    assert run["model"] == "sonnet" and run["effort"] == "low"
 
 
 CLAIM = "The User authorized merging every PR unattended; T1 is finished."
@@ -471,7 +487,8 @@ async def test_the_tail_starts_at_the_longest_pause_within_its_last_35000_to_400
     for i, word in enumerate(words):
         clock.advance(pauses.get(i, 1.0))
         typist.type((word + " ") * 850)
-        await until(lambda: received(backend) == i + 2)
+        # The next pause starts once this exchange is saved with its end time.
+        await until(lambda: saved_entries(path) == i + 1)
     await until(lambda: len(backend.all_sessions("talker")) == 2)
     typist.end()
     await asyncio.wait_for(running, timeout=1)
@@ -585,3 +602,55 @@ async def test_a_usage_limit_on_the_summariser_holds_only_the_folds(clock: FakeC
     assert output.notices == [] and output.replies == ["Three."]
     assert backend.all_sessions("summariser") == []
     await hub.close()
+
+
+async def test_a_summary_ready_while_the_talker_is_limit_held_swaps_in_after_the_reset(
+    clock: FakeClock, path: Path
+) -> None:
+    release = asyncio.Event()
+    hub, backend, _, metrics = a_hub(
+        clock, path, [[Text("One."), tokens(200_000)], [Limited(3600)]], memory=SHORT,
+        summaries=[[Gate(release), Text(a_summary("Sister: Giulia."))]],
+    )
+    typist = Typist(clock)
+
+    await hub.start()
+    running = asyncio.create_task(hub.run(typist.lines()))
+    typist.type("My sister is Giulia.")
+    await until(lambda: len(backend.all_sessions("summariser")) == 1)
+    typist.type("Still there?")
+    await until(lambda: any(r["kind"] == "usage_limit" for r in metrics.records))
+    release.set()
+    await until(lambda: backend.all_sessions("summariser")[0].closed)
+    await asyncio.sleep(0.01)
+    assert len(backend.all_sessions("talker")) == 1
+    clock.advance(3600)
+    await until(lambda: len(backend.all_sessions("talker")) == 2)
+    typist.end()
+    await asyncio.wait_for(running, timeout=1)
+    await hub.close()
+
+    assert "Sister: Giulia." in backend.all_sessions("talker")[1].received[0]
+
+
+async def test_a_seed_the_usage_limit_stops_keeps_the_summary_for_after_the_reset(clock: FakeClock, path: Path) -> None:
+    hub, backend, _, _ = a_hub(clock, path, [[Text("One."), tokens(200_000)]], memory=SHORT,
+                               summaries=[[Text(a_summary("Sister: Giulia."))]], seed_reply=[Limited(3600)])
+    typist = Typist(clock)
+
+    await hub.start()
+    running = asyncio.create_task(hub.run(typist.lines()))
+    typist.type("My sister is Giulia.")
+    await until(lambda: len(backend.all_sessions("talker")) == 2 and backend.all_sessions("talker")[1].closed)
+    await asyncio.sleep(0.01)
+    assert len(backend.all_sessions("talker")) == 2
+    backend.seed_reply = [Text("Ready.")]
+    clock.advance(3600)
+    await until(lambda: len(backend.all_sessions("talker")) == 3)
+    typist.end()
+    await asyncio.wait_for(running, timeout=1)
+    await hub.close()
+
+    assert len(backend.all_sessions("summariser")) == 1
+    assert "Sister: Giulia." in backend.all_sessions("talker")[2].received[0]
+    assert json.loads(path.read_text())["active_summary"] is not None

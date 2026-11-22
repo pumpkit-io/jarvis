@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from jarvis_hub.config import ConfigError, VoiceSettings, load_settings, parse_env
+from jarvis_hub.memory import summariser_spec
 
 
 @pytest.mark.parametrize(
@@ -235,9 +236,11 @@ def test_memory_settings_come_from_dotenv(checkout: Path) -> None:
         "JARVIS_MEMORY_FOLD_AT=120000\nJARVIS_MEMORY_TAIL=30000\nJARVIS_MEMORY_CEILING=180000\n"
         "JARVIS_MEMORY_MODEL=haiku\nJARVIS_MEMORY_EFFORT=medium\n"
     )
-    memory = load_settings(checkout, environ={}).memory
+    settings = load_settings(checkout, environ={})
+    memory = settings.memory
     assert (memory.fold_at, memory.tail, memory.ceiling) == (120_000, 30_000, 180_000)
-    assert (memory.model, memory.effort) == ("haiku", "medium")
+    spec = summariser_spec(settings)
+    assert (spec.role, spec.model, spec.effort) == ("summariser", "haiku", "medium")
 
 
 @pytest.mark.parametrize(

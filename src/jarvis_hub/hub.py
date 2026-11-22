@@ -327,8 +327,9 @@ class _Fold:
 
     folded: tuple[Entry, ...]
     running: "asyncio.Task[str | None]"
-    # The summary once it passed the checks.
+    # The summary once it passed the checks, and its saved version once a swap has kept it.
     summary: str | None = None
+    version: int | None = None
     # Set once the run has ended, whatever its outcome.
     ended: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -572,6 +573,8 @@ class Hub:
         # Set whenever a line or news is posted for the Talker.
         self._arrived = asyncio.Event()
         self._clients_updated = asyncio.Event()
+        # Set when the usage limit stops holding the Talker.
+        self._talker_cleared = asyncio.Event()
         # One queue, so the Orchestrator's single session takes one message at a time.
         self._orchestrator_inbox: asyncio.Queue[_OrchestratorInput] = asyncio.Queue()
         self._loops: list[asyncio.Task[None]] = []
@@ -1650,11 +1653,15 @@ class Hub:
 
     async def _fold_and_quiet(self) -> None:
         """Returns once a Fold's summary is ready to swap in and Jarvis is quiet. A spoken scope still unresolved
-        when the summary is ready holds the swap until after the next turn, which may resolve it."""
+        when the summary is ready holds the swap until after the next turn, which may resolve it; a usage limit on
+        the Talker, until it resets."""
         if (fold := self._fold) is None:
             await asyncio.Event().wait()
             return
         await fold.ended.wait()
+        while self._limit.blocks("talker"):
+            self._talker_cleared.clear()
+            await self._talker_cleared.wait()
         if not self._fold_ready():
             await asyncio.Event().wait()
         while self._focus_busy():
@@ -1666,7 +1673,9 @@ class Hub:
             await self._speech.idle(stall_timeout=None, destination=self._client_players.get(self.clients.focus))
 
     def _fold_ready(self) -> bool:
-        return self._fold is not None and self._fold.summary is not None and not self._scopes.pending()
+        # A held Talker takes no turn, so its new session could not read the seed.
+        return (self._fold is not None and self._fold.summary is not None and not self._scopes.pending()
+                and not self._limit.blocks("talker"))
 
     async def _quiet(self) -> None:
         """Returns once voice mode is quiet, or the input has ended."""
@@ -1857,9 +1866,9 @@ class Hub:
         for attempt in (1, 2):
             summary, end, duration_ms = await self._summariser_turn(message)
             refused = memory.problem(summary, self._conversation.estimate) if end.outcome == "completed" else None
-            self._record(self._summariser_spec, "fold", end, [], attempt=attempt, folded=len(folded),
-                         duration_ms=duration_ms, **({"refused": refused} if refused else {}),
-                         **({"error": end.error} if end.error else {}))
+            self._record(self._summariser_spec, "fold", end, [], outcome="refused" if refused else None,
+                         attempt=attempt, folded=len(folded), duration_ms=duration_ms,
+                         **({"problem": refused} if refused else {}), **({"error": end.error} if end.error else {}))
             if end.outcome == "completed" and refused is None:
                 return summary
             if end.outcome == "limited":
@@ -1894,14 +1903,17 @@ class Hub:
         assert fold is not None and fold.summary is not None
         tail = self._conversation.entries[len(fold.folded):]
         try:
-            version = self._conversation.keep_summary(fold.summary, made=self._wall())
+            if fold.version is None:
+                fold.version = self._conversation.keep_summary(fold.summary, made=self._wall())
         except (OSError, ValueError) as e:
             self._conversation_failed(e)
             self._fold_failed()
             return
+        version = fold.version
 
         def failed(_: str) -> None:
-            if self._fold is fold:
+            # A seed the usage limit stopped keeps the summary, to swap in once the limit resets.
+            if self._fold is fold and not self._limit.blocks("talker"):
                 self._fold_failed()
 
         session = await self._seeded_talker("fold", tail, fold.summary, failed)
@@ -2253,7 +2265,8 @@ class Hub:
             text = f"The Orchestrator failed on {task.id}: {reason}. Its Subagents keep working and still report."
         self._post_news("hub", text, task.id, backlog=backlog)
 
-    def _record(self, spec: SessionSpec, kind: str, end: TurnEnd, tools: list[str], **fields: Any) -> None:
+    def _record(self, spec: SessionSpec, kind: str, end: TurnEnd, tools: list[str], *, outcome: str | None = None,
+                **fields: Any) -> None:
         self._write(
             {
                 "kind": kind,
@@ -2262,7 +2275,7 @@ class Hub:
                 "effort": spec.effort,
                 **fields,
                 "tools": tools,
-                "outcome": end.outcome,
+                "outcome": outcome or end.outcome,
                 "usage": asdict(end.usage),
                 **({"resets_at": end.resets_at} if end.resets_at is not None else {}),
             }
@@ -2320,6 +2333,7 @@ class Hub:
             self._deferred.clear()
         if "talker" in roles:
             self._unpark()
+            self._talker_cleared.set()
         self._persist()
 
     def _limit_reset(self) -> None:
