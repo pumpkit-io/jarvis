@@ -175,16 +175,27 @@ class Conversation:
 
     def reset(self) -> None:
         """Forgets every entry and summary, and deletes their files, copies set aside as unreadable and every old
-        summary version included. OSError when one could not be deleted, with the Conversation empty all the same."""
+        summary version included. Tries every file, then raises one OSError for those it could not delete; the
+        Conversation is empty all the same."""
         self._entries, self._active, self._summary = [], None, None
-        if self._path is None or self._summaries is None:
+        if self._path is None or self._file is None or self._summaries is None:
             return
+        # What a file never set aside held is deleted now, so saving over it loses nothing.
+        self._file.unblock()
+        errors: list[OSError] = []
         for path in (self._path, *self._path.parent.glob(f"{self._path.stem}.unreadable*{self._path.suffix}")):
-            path.unlink(missing_ok=True)
-        # A file that could not be set aside blocked saving over it; with it gone, saving is safe again.
-        self._file = self._saved_file()
-        with contextlib.suppress(FileNotFoundError):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as e:
+                errors.append(e)
+        try:
             shutil.rmtree(self._summaries)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            errors.append(e)
+        if errors:
+            raise OSError("; ".join(map(str, errors))) from errors[0]
 
     def newest(self, tokens: int) -> list[Entry]:
         """The latest entries, oldest first, whose rendered text the current estimate puts within `tokens`."""

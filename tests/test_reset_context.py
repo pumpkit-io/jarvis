@@ -3,6 +3,7 @@ and Memory on both devices, while the 30-day log, Tasks and the screens stay as 
 
 import asyncio
 import json
+import os
 import sqlite3
 from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
@@ -18,6 +19,7 @@ from jarvis_hub.door import Door
 from jarvis_hub.event_log import EventLog, EventOutput
 from jarvis_hub.hub import Hub, Line
 from jarvis_hub.pairing import PairingResult, PairingStore
+from jarvis_hub.state import UnreadableFile
 from tests.fakes import (
     Fail,
     FakeBackend,
@@ -35,7 +37,7 @@ from tests.fakes import (
 )
 from tests.protocol_exchanges import SNAPSHOTS, command, connect, receive_conversation
 from tests.test_approvals import HEAD, ask_merge
-from tests.test_fold import SHORT, said, tokens
+from tests.test_fold import SHORT, Voice, said, tokens
 from tests.test_start_afresh import AFRESH
 
 
@@ -352,11 +354,13 @@ async def test_a_new_talker_seeded_before_a_later_reset_is_never_swapped_in(tmp_
         seeding.set()
         await until(lambda: len(rig.backend.all_sessions("talker")) == 3)
         await rig.hub_reply(await rig.send("say-1", "say_text", text="Hello."))
+        await until(lambda: len(rig.backend.all_sessions("talker")) == 4)
 
-    # The failed seed is tried again after the old session's turn.
-    launched, first, second = rig.backend.all_sessions("talker")[:3]
+    launched, first, second, retry = rig.backend.all_sessions("talker")
     assert first.closed and len(first.received) == 1
     assert second.closed and "Hello." in launched.received[-1]
+    # The failed seed is tried again after the old session's turn.
+    assert retry.received[0].startswith('<event source="hub" reason="reset"')
     [notice] = rig.output.notices
     assert notice.startswith("Could not start a new Talker after the reset") and notice.endswith("overloaded")
     saved = Conversation(tmp_path / "conversation.json")
@@ -408,6 +412,34 @@ async def test_a_reset_whose_time_could_not_be_stored_still_deletes_the_conversa
     assert [said(e.message) for e in saved.entries] == ["Hello again."]
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads and renames past file permissions")
+def test_a_reset_that_cannot_delete_one_file_deletes_the_others_and_saves_over_the_one_never_set_aside(
+    tmp_path: Path
+) -> None:
+    an_earlier_launch(tmp_path)
+    path = tmp_path / "conversation.json"
+    (tmp_path / "conversation.unreadable-2.json").mkdir()
+    conversation = Conversation(path)
+    path.chmod(0)
+    tmp_path.chmod(0o555)
+    try:
+        with pytest.raises(UnreadableFile, match="nothing will be saved over it"):
+            conversation.load()
+    finally:
+        tmp_path.chmod(0o755)
+        path.chmod(0o644)
+
+    with pytest.raises(OSError):
+        conversation.reset()
+    conversation.add("<user>Hello again.</user>", "Hello, sir.", tools=(), device="Mac", kind="user", at=990.0,
+                     ended=990.5)
+
+    assert not (tmp_path / "memory").exists() and not (tmp_path / "conversation.unreadable.json").exists()
+    saved = Conversation(path)
+    saved.load()
+    assert [said(e.message) for e in saved.entries] == ["Hello again."] and saved.summary is None
+
+
 async def test_a_ceiling_restart_seeding_when_the_reset_lands_is_never_swapped_in_or_told(tmp_path: Path) -> None:
     seeding = asyncio.Event()
     async with a_rig(tmp_path, [[Text("Noted."), tokens(300_000)], [Text("Hello, sir.")]],
@@ -423,6 +455,24 @@ async def test_a_ceiling_restart_seeding_when_the_reset_lands_is_never_swapped_i
     _, restarted, fresh = rig.backend.all_sessions("talker")
     assert restarted.received[0].startswith('<event source="hub" reason="restart"')
     assert restarted.closed and len(restarted.received) == 1
+    assert fresh.received[0].startswith('<event source="hub" reason="reset"') and "Giulia" not in fresh.received[0]
+    assert "Hello again." in fresh.received[1]
+    assert rig.output.notices == []
+
+
+async def test_a_ceiling_restart_waiting_for_a_quiet_voice_when_the_reset_lands_opens_no_session(
+    tmp_path: Path
+) -> None:
+    voice = Voice()
+    async with a_rig(tmp_path, [[Text("Noted."), tokens(300_000)], [Text("Hello, sir.")]], floor=voice) as rig:
+        await rig.hub_reply(await rig.send("say-1", "say_text", text="My sister is Giulia."))
+        await rig.send("reset-1", "reset_context")
+        voice.silent.set()
+        await until(lambda: any('reason="reset"' in s.received[0] for s in rig.backend.all_sessions("talker")
+                                if s.received))
+        await rig.hub_reply(await rig.send("say-2", "say_text", text="Hello again."))
+
+    _, fresh = rig.backend.all_sessions("talker")
     assert fresh.received[0].startswith('<event source="hub" reason="reset"') and "Giulia" not in fresh.received[0]
     assert "Hello again." in fresh.received[1]
     assert rig.output.notices == []

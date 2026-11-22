@@ -354,7 +354,7 @@ class _Fold:
 class _Resets:
     """Reset context's hold on the Talker until a session seeded after the latest reset is in (ADR 0028)."""
 
-    # Resets so far: a turn, or a seed, begun before the latest one is never saved or swapped in.
+    # Resets so far.
     count: int = 0
     # The live session began before the latest reset, so it remembers what the reset deleted.
     stale: bool = False
@@ -362,6 +362,11 @@ class _Resets:
     due: asyncio.Event = field(default_factory=asyncio.Event)
     # The User heard that the new session could not start.
     failing: bool = False
+
+    def mark(self) -> Callable[[], bool]:
+        """A check that holds until the next reset: a turn or seed begun before one is never saved or swapped in."""
+        count = self.count
+        return lambda: count == self.count
 
 
 @dataclass(frozen=True)
@@ -1752,21 +1757,22 @@ class Hub:
         return self._resets.due.is_set() and not self._limit.blocks("talker") and not self._closing
 
     async def _swap_in_reset(self) -> None:
-        """Swaps in a Talker seeded with the Hub's records alone. A seed the usage limit stopped waits for its reset,
-        and another failure leaves the old session answering until after its next turn, with one notice per reset."""
+        """Swaps in a Talker seeded with the Hub's records alone. A seed the usage limit stopped waits for the limit's
+        reset time, and another failure leaves the old session answering until after its next turn, with one notice
+        per reset."""
         while self._reset_ready():
-            count = self._resets.count
+            no_reset_since = self._resets.mark()
             self._resets.due.clear()
 
             def failed(error: str) -> None:
                 if self._limit.blocks("talker"):
                     self._resets.due.set()
-                elif count == self._resets.count and not self._resets.failing:
+                elif no_reset_since() and not self._resets.failing:
                     self._resets.failing = True
                     self._output.notice(RESET_FAILED.format(error))
 
             session = await self._seeded_talker("reset", self._conversation.entries, self._conversation.summary, failed)
-            if session is not None and (self._closing or count != self._resets.count):
+            if session is not None and (self._closing or not no_reset_since()):
                 # A reset during the seed deleted what this session read; the loop seeds another.
                 with contextlib.suppress(Exception):
                     await session.close()
@@ -1838,20 +1844,22 @@ class Hub:
         if self._fold is not None and self._fold.summary is not None:
             # A ready Fold swaps in at the next quiet moment, and keeps more than a restart would.
             return None
-        resets = self._resets.count
+        no_reset_since = self._resets.mark()
         if (upcoming := await self._quiet_or_next()) is not None:
             return upcoming
+        if not no_reset_since():
+            # A reset during the wait, or the seed below, has its own Talker on the way.
+            return None
         summary = self._conversation.summary
 
         def failed(error: str) -> None:
-            if resets == self._resets.count:
+            if no_reset_since():
                 self._restart_failed(error)
 
         session = await self._seeded_talker("restart", self._conversation.newest(self._memory.tail), summary, failed)
         if session is None:
             return None
-        if self._closing or resets != self._resets.count:
-            # A reset meanwhile has its own Talker on the way.
+        if self._closing or not no_reset_since():
             with contextlib.suppress(Exception):
                 await session.close()
             return None
@@ -2131,7 +2139,7 @@ class Hub:
         self._turn_count += 1
         turn = self._turn_count
         # A turn begun before a reset, or on a session from before it, may repeat what the reset deleted.
-        resets, saving = self._resets.count, not self._resets.stale
+        no_reset_since, saving = self._resets.mark(), not self._resets.stale
         show = kind in ("user", "event")
         t0 = self._clock.now()
         shown, block = "", ""
@@ -2219,7 +2227,8 @@ class Hub:
                 self._output.reply_end(text=shown, reason=reason)
         if end.outcome == "interrupted" and self._interrupted_turn != turn:
             end = TurnEnd("failed", end.usage, "the turn stopped without the Hub interrupting it")
-        # A failed seed has its own notice, or none.
+        # A failed seed's caller gives the notice: a restart or a reset its own, a start afresh its own, an automatic
+        # Fold none.
         if end.outcome == "failed" and kind not in ("restart", "fold", "reset"):
             self._model_available = False
             self._output.notice(f"Model unavailable: the Talker failed: {end.error}. Try a new request; check Claude sign-in or connection if it persists.")
@@ -2236,7 +2245,7 @@ class Hub:
         self.publish_client_snapshots()
         self._measure(session, message, shown, tools, end)
         if (kind in ("user", "event") and (shown.strip() or end.outcome != "failed")
-                and saving and resets == self._resets.count):
+                and saving and no_reset_since()):
             self._save_exchange(message, shown, tools=tools, client_id=destination_id, kind=kind, arrived=arrived)
         if delivery is not None and end.outcome == "completed":
             delivery.reply = shown

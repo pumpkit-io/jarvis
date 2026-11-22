@@ -336,12 +336,9 @@ class EventLog:
     @property
     def reset_time(self) -> float | None:
         with self._lock:
-            return self._reset_time()
+            return self._last_reset()[0]
 
-    def _reset_time(self) -> float | None:
-        return self._reset()[0]
-
-    def _reset(self) -> tuple[float | None, str | None]:
+    def _last_reset(self) -> tuple[float | None, str | None]:
         row = self._db.execute("SELECT time, reply_id FROM context_reset WHERE singleton = 1").fetchone()
         return (row[0], row[1]) if row else (None, None)
 
@@ -364,7 +361,7 @@ class EventLog:
         with self._lock:
             now = self._wall()
             floor = now - RETENTION
-            reset, dropped = self._reset()
+            reset, dropped = self._last_reset()
             edge: Literal["retention", "reset"] = "retention"
             if reset is not None and reset >= floor:
                 floor, edge = reset, "reset"
