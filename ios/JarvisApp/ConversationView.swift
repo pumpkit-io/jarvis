@@ -7,6 +7,7 @@ struct ConversationView: View {
     var typingChanged: (Bool) -> Void = { _ in }
     @ScaledMetric(relativeTo: .body) var scriptSize = 18
     @ScaledMetric(relativeTo: .subheadline) var controlSize = 15
+    @ScaledMetric(relativeTo: .caption) var stampSize = 12
     @State private var followsLatest = true
     @State private var isAtBottom = true
     @State private var detailsChanging = false
@@ -16,6 +17,9 @@ struct ConversationView: View {
     @State private var olderHistoryVisible = false
     @State var expandedDetails: Set<String> = []
     private var theme: JarvisTheme { JarvisTheme() }
+
+    /// Messages, stamps, Play and Details use the system monospaced face.
+    private func mono(_ size: CGFloat) -> Font { .system(size: size, design: .monospaced) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -55,17 +59,8 @@ struct ConversationView: View {
                             .padding(.top, 24)
                             .modifier(ScriptColumn())
                     }
-                    ForEach(Array(session.conversation.rows.enumerated()), id: \.element.id) { index, row in
-                        VStack(alignment: .leading, spacing: 12) {
-                            if let date = gapDate(index) {
-                                Text(date, format: .dateTime.month(.abbreviated).day().hour().minute())
-                                    .font(.system(size: controlSize))
-                                    .foregroundStyle(theme.haze)
-                            }
-                            scriptRow(row)
-                        }
-                        .modifier(ScriptColumn())
-                        .id(row.id)
+                    ForEach(session.conversation.rows) { row in
+                        scriptRow(row).modifier(ScriptColumn()).id(row.id)
                     }
                     ForEach(session.outbox?.items ?? []) { item in
                         queued(item).modifier(ScriptColumn()).id("outbox:\(item.id)")
@@ -109,7 +104,7 @@ struct ConversationView: View {
 
     /// A message still on this phone, shown where the User's line will appear once Jarvis hears it.
     private func queued(_ item: OutboxItem) -> some View {
-        userBubble {
+        messageFrame(speaker: .user, date: item.recordedAt) {
             VStack(alignment: .leading, spacing: 8) {
                 switch item.content {
                 case .line(let text): Text(verbatim: text).textSelection(.enabled)
@@ -132,8 +127,27 @@ struct ConversationView: View {
                 .foregroundStyle(theme.haze)
             }
         }
-        .font(.system(size: controlSize))
+        .font(mono(controlSize))
         .accessibilityElement(children: .contain)
+    }
+
+    /// Places a message's date and time above it, and puts the User's line in its bubble.
+    @ViewBuilder private func messageFrame<Content: View>(speaker: ConversationRow.Speaker, date: Date?,
+                                                         @ViewBuilder content: () -> Content) -> some View {
+        let user = speaker == .user
+        VStack(alignment: user ? .trailing : .leading, spacing: 6) {
+            stamp(date)
+            if user { userBubble(content: content) } else { content() }
+        }
+        .frame(maxWidth: .infinity, alignment: user ? .trailing : .leading)
+    }
+
+    @ViewBuilder private func stamp(_ date: Date?) -> some View {
+        if let date {
+            Text(verbatim: MessageStamp(date).text)
+                .font(mono(stampSize))
+                .foregroundStyle(theme.haze)
+        }
     }
 
     private func userBubble<Content: View>(@ViewBuilder content: () -> Content) -> some View {
@@ -145,78 +159,87 @@ struct ConversationView: View {
             .frame(maxWidth: .infinity, alignment: .trailing)
     }
 
-    private func gapDate(_ index: Int) -> Date? {
-        let rows = session.conversation.rows
-        guard index > 0, let current = utcDate(rows[index].time),
-              let previous = utcDate(rows[index - 1].time), current.timeIntervalSince(previous) > 3600 else { return nil }
-        return current
-    }
-
-    private func scriptRow(_ row: ConversationRow) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if !row.text.isEmpty {
-                if row.speaker == .user {
-                    userBubble {
+    @ViewBuilder private func scriptRow(_ row: ConversationRow) -> some View {
+        if row.speaker == .user {
+            VStack(alignment: .leading, spacing: 12) {
+                if !row.text.isEmpty {
+                    messageFrame(speaker: .user, date: row.date) {
                         Text(verbatim: row.text)
-                            .font(.system(size: controlSize))
+                            .font(mono(controlSize))
                             .lineSpacing(2)
                             .textSelection(.enabled)
                     }
-                } else {
-                    Text(spokenText(row))
-                        .font(.system(size: scriptSize, design: .serif))
-                        .lineSpacing(5)
-                        .foregroundStyle(theme.frost)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
                 }
+                rowControls(row)
             }
-            if row.id.hasPrefix("reply:"), session.playback.missedReplies.contains(String(row.id.dropFirst(6))),
-               session.playback.replyID != String(row.id.dropFirst(6)) {
-                Button("Play") { Task { await session.replay(replyID: String(row.id.dropFirst(6))) } }
-                    .buttonStyle(.plain)
-                    .font(.system(size: controlSize))
-                    .foregroundStyle(theme.haze)
-                    .underline()
-                    .frame(minWidth: 44, minHeight: 44)
-                    .contentShape(Rectangle())
-                    .disabled(!session.voiceOn || !session.connection.canSend)
-                    .accessibilityLabel("Play reply")
-                if let message = session.replayMessages[String(row.id.dropFirst(6))] ?? session.playback.messages[String(row.id.dropFirst(6))] {
-                    Text(message).font(.system(size: controlSize)).foregroundStyle(theme.haze)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else if !row.text.isEmpty || showsPlay(row) || !row.details.isEmpty {
+            messageFrame(speaker: row.speaker, date: row.date) {
+                VStack(alignment: .leading, spacing: 12) {
+                    if !row.text.isEmpty {
+                        Text(spokenText(row))
+                            .font(mono(scriptSize))
+                            .lineSpacing(5)
+                            .foregroundStyle(theme.frost)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
+                    rowControls(row)
                 }
-            }
-            if !row.details.isEmpty {
-                DisclosureGroup(isExpanded: Binding(get: { expandedDetails.contains(row.id) }, set: { expanded in
-                    guard expanded != expandedDetails.contains(row.id) else { return }
-                    detailsRevision += 1
-                    let revision = detailsRevision
-                    detailsChanging = true
-                    followsLatest = false
-                    withAnimation(.default, completionCriteria: .removed) {
-                        if expanded { expandedDetails.insert(row.id) } else { expandedDetails.remove(row.id) }
-                    } completion: {
-                        guard revision == detailsRevision else { return }
-                        detailsChanging = false
-                        if scrollPhase == .idle { followsLatest = isAtBottom }
-                    }
-                })) {
-                    ForEach(row.details) { detail in
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(verbatim: detail.title).fontWeight(.semibold)
-                            Text(verbatim: detail.text).textSelection(.enabled)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 8)
-                    }
-                } label: { Text("Details").frame(minHeight: 44) }
-                .font(.system(size: controlSize))
-                .foregroundStyle(theme.haze)
-                .tint(theme.haze)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func showsPlay(_ row: ConversationRow) -> Bool {
+        row.id.hasPrefix("reply:") && session.playback.missedReplies.contains(String(row.id.dropFirst(6)))
+            && session.playback.replyID != String(row.id.dropFirst(6))
+    }
+
+    @ViewBuilder private func rowControls(_ row: ConversationRow) -> some View {
+        if showsPlay(row) {
+            Button("Play") { Task { await session.replay(replyID: String(row.id.dropFirst(6))) } }
+                .buttonStyle(.plain)
+                .font(mono(controlSize))
+                .foregroundStyle(theme.haze)
+                .underline()
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+                .disabled(!session.voiceOn || !session.connection.canSend)
+                .accessibilityLabel("Play reply")
+            if let message = session.replayMessages[String(row.id.dropFirst(6))] ?? session.playback.messages[String(row.id.dropFirst(6))] {
+                Text(message).font(mono(controlSize)).foregroundStyle(theme.haze)
+            }
+        }
+        if !row.details.isEmpty {
+            DisclosureGroup(isExpanded: Binding(get: { expandedDetails.contains(row.id) }, set: { expanded in
+                guard expanded != expandedDetails.contains(row.id) else { return }
+                detailsRevision += 1
+                let revision = detailsRevision
+                detailsChanging = true
+                followsLatest = false
+                withAnimation(.default, completionCriteria: .removed) {
+                    if expanded { expandedDetails.insert(row.id) } else { expandedDetails.remove(row.id) }
+                } completion: {
+                    guard revision == detailsRevision else { return }
+                    detailsChanging = false
+                    if scrollPhase == .idle { followsLatest = isAtBottom }
+                }
+            })) {
+                ForEach(row.details) { detail in
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(verbatim: detail.title).fontWeight(.semibold)
+                        Text(verbatim: detail.text).textSelection(.enabled)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 8)
+                }
+            } label: { Text("Details").frame(minHeight: 44) }
+            .font(mono(controlSize))
+            .foregroundStyle(theme.haze)
+            .tint(theme.haze)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     private func spokenText(_ row: ConversationRow) -> AttributedString {
