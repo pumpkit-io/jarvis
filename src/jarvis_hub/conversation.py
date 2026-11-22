@@ -117,8 +117,13 @@ class Conversation:
 
     @property
     def summary(self) -> str | None:
-        """The active summary, None before the first Fold."""
+        """The active summary, None before the first Fold or when its file could not be read."""
         return self._summary
+
+    @property
+    def summary_lost(self) -> bool:
+        """Whether a Fold made a summary active whose file could not be read."""
+        return self._active is not None and self._summary is None
 
     def load(self) -> None:
         """Reads the saved conversation, if any. A damaged one is moved aside and raises UnreadableFile, leaving
@@ -287,6 +292,7 @@ def seed_message(
     entries: Sequence[Entry],
     *,
     summary: str | None,
+    summary_lost: bool = False,
     open_tasks: str,
     authorizations: str,
     approvals: str,
@@ -295,7 +301,9 @@ def seed_message(
     """The hidden first message of a new Talker session. What never changes comes first, then the summary, which
     changes only at a Fold, and the Hub's live records last, so the CLI's prefix cache keeps as much as it can."""
     exchanges = "\n".join(entry.render() for entry in entries)
-    memory = escape(summary, quote=False) if summary else "None yet: nothing has been folded."
+    memory = (escape(summary, quote=False) if summary else
+              "None: the saved summary could not be read, so what came before these exchanges is missing."
+              if summary_lost else "None yet: nothing has been folded.")
     return (
         f'<event source="hub" reason="{reason}">\n'
         f"{_OPENING[reason]} This is context for you, not the User speaking: do not answer it. <memory> is your "

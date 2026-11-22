@@ -51,6 +51,19 @@ def test_totals_add_up_per_role() -> None:
     assert stats.first_sentence == [600, 800]
 
 
+def test_hidden_seed_turns_count_as_turns_but_not_toward_the_first_sentence_latency() -> None:
+    rows = [
+        row("talker", 5, first_sentence_ms=600),
+        row("talker", 4, kind="event", first_sentence_ms=700),
+        *(row("talker", 3, kind=kind, first_sentence_ms=9000) for kind in ("warm_up", "restart", "fold")),
+    ]
+
+    stats = summarise(rows)
+
+    assert stats.roles["talker"].turns == 5
+    assert stats.first_sentence == [600, 700]
+
+
 def test_rows_that_are_not_a_session_result_are_not_counted_as_turns() -> None:
     rows = [
         {"at": NOW.isoformat(), "kind": "voice", "from": "idle", "to": "listening"},
