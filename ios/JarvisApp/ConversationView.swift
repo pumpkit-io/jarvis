@@ -18,7 +18,7 @@ struct ConversationView: View {
     @State var expandedDetails: Set<String> = []
     private var theme: JarvisTheme { JarvisTheme() }
 
-    /// Every message, stamp and control in the script uses the system monospaced face.
+    /// Messages, stamps, Play and Details use the system monospaced face.
     private func mono(_ size: CGFloat) -> Font { .system(size: size, design: .monospaced) }
 
     var body: some View {
@@ -145,7 +145,7 @@ struct ConversationView: View {
     @ViewBuilder private func stamp(_ date: Date?) -> some View {
         if let date {
             Text(verbatim: MessageStamp(date).text)
-                .font(mono(stampSize)).monospacedDigit()
+                .font(mono(stampSize))
                 .foregroundStyle(theme.haze)
         }
     }
@@ -173,13 +173,14 @@ struct ConversationView: View {
                 rowControls(row)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
+        } else if !row.text.isEmpty || showsPlay(row) || !row.details.isEmpty {
             messageFrame(speaker: row.speaker, date: row.date) {
                 VStack(alignment: .leading, spacing: 12) {
                     if !row.text.isEmpty {
                         Text(spokenText(row))
                             .font(mono(scriptSize))
                             .lineSpacing(5)
+                            .foregroundStyle(theme.frost)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .textSelection(.enabled)
                     }
@@ -190,10 +191,13 @@ struct ConversationView: View {
         }
     }
 
-    /// Play and Details, which every look keeps with the same behaviour.
+    private func showsPlay(_ row: ConversationRow) -> Bool {
+        row.id.hasPrefix("reply:") && session.playback.missedReplies.contains(String(row.id.dropFirst(6)))
+            && session.playback.replyID != String(row.id.dropFirst(6))
+    }
+
     @ViewBuilder private func rowControls(_ row: ConversationRow) -> some View {
-        if row.id.hasPrefix("reply:"), session.playback.missedReplies.contains(String(row.id.dropFirst(6))),
-           session.playback.replyID != String(row.id.dropFirst(6)) {
+        if showsPlay(row) {
             Button("Play") { Task { await session.replay(replyID: String(row.id.dropFirst(6))) } }
                 .buttonStyle(.plain)
                 .font(mono(controlSize))
