@@ -84,6 +84,18 @@ _Avoid_: rate limit, quota, billing limit
 Everything the User and Jarvis have said to each other, as one ongoing sequence of exchanges shared by the Mac and the iPhone and continued across Hub restarts until the User resets it. Each exchange keeps the device it came from.
 _Avoid_: chat, session, thread, history
 
+**Memory**:
+The summary of the older part of the Conversation that the Talker reads before the Tail: standing facts and preferences, open threads and promises, the User's decisions and recent topics. It is what Jarvis remembers, never a source of permission, and it holds no Approvals, Task state or secrets.
+_Avoid_: context, history, notes, profile
+
+**Fold**:
+The background step that writes a new Memory from the previous one and the exchanges before a cut, then gives the Talker a fresh start on that Memory and the Tail while Jarvis keeps talking.
+_Avoid_: compaction, compact, summarisation, restart
+
+**Tail**:
+The newest part of the Conversation, kept word for word after a Fold, beginning at a pause between two exchanges.
+_Avoid_: recent messages, window, buffer
+
 **Wake word**:
 A phrase such as "Hey Jarvis", "Hi Jarvis", "Ehi Jarvis" or "Jarvis" that makes an idle Jarvis start listening. During playback it is evidence that speech addresses Jarvis, interpreted in context rather than treated as an unconditional Interruption.
 _Avoid_: hotword, trigger phrase
