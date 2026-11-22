@@ -104,6 +104,10 @@ _Avoid_: recent messages, window, buffer
 The User asking, in one sentence and with no confirmation, for a Fold of everything said before that sentence, so a new subject begins with only the Memory behind it. The sentence and everything after it stay word for word, Jarvis keeps talking while the Memory is written, and Tasks, Authorizations and Approvals are untouched.
 _Avoid_: reset, clear, new chat, forget
 
+**Reset context**:
+The User deleting the Conversation and its Memory on purpose, from the iPhone's Settings after a confirmation, for the Mac and the iPhone at once, carried out by the Hub with no model. The 30-day log, the transcript on both screens, Tasks, Authorizations and Approvals stay, and Recall reaches nothing from before it.
+_Avoid_: clear history, new chat, wipe, start afresh
+
 **Recall**:
 Jarvis looking up the exact words of the last 30 days when the User asks what was said: the User's lines, Jarvis's replies, details shown on screen and Task reports, found by word or phrase, with the date of each. It reaches nothing older than 30 days or from before the last reset, and it is a record of what was said, never of what a Task or a permission is now.
 _Avoid_: search, history lookup
