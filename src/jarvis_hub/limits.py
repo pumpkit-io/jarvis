@@ -2,7 +2,7 @@
 
 import asyncio
 import contextlib
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
@@ -101,7 +101,8 @@ class UsageLimit:
     limit, not of a role: once that it was reached, again when a hit moves the reset later than they were shown or makes
     it unknown, and that it reset only once a turn of a role the limit held completes after its hold cleared, since
     only then has work really resumed. A retry that is limited again is silent. A hit after an announced reset is
-    news again, since the User believes the limit is over. `on_hit` hears each hit and whether it brings news,
+    news again, since the User believes the limit is over. An `unseen` role's hold stops only that role: the User,
+    `active`, `wait_clear` and the reset never hear of it. `on_hit` hears each hit and whether it brings news,
     `on_clear` the roles whose hold ran out, `on_reset` that the reset is to be announced."""
 
     def __init__(
@@ -111,8 +112,10 @@ class UsageLimit:
         on_hit: Callable[[str, bool], None],
         on_clear: Callable[[frozenset[str]], None],
         on_reset: Callable[[], None],
+        unseen: frozenset[str] = frozenset(),
     ) -> None:
         self._clock = clock
+        self._unseen = unseen
         self._wall = wall
         self._on_hit = on_hit
         self._on_clear = on_clear
@@ -135,9 +138,12 @@ class UsageLimit:
         self._cleared.set()
         self._timer: asyncio.Task[None] | None = None
 
+    def _seen(self, roles: Iterable[str]) -> list[str]:
+        return [role for role in roles if role not in self._unseen]
+
     @property
     def active(self) -> bool:
-        return bool(self._until)
+        return bool(self._seen(self._until))
 
     @property
     def recovery_pending(self) -> bool:
@@ -151,18 +157,19 @@ class UsageLimit:
         """When the role comes back, or None when it is not stopped or the reset time was never known."""
         return None if role in self._guessed else self._until.get(role)
 
-    def _latest(self) -> float | None:
-        """When the last held role comes back, None when any held role's reset time is unknown."""
-        resets = [self.resets_at(role) for role in self._until]
-        return None if None in resets else max(r for r in resets if r is not None)
+    def latest(self) -> float | None:
+        """When the last held role the User sees comes back; None when none is held or any reset time is unknown."""
+        resets = [self.resets_at(role) for role in self._seen(self._until)]
+        return None if not resets or None in resets else max(r for r in resets if r is not None)
 
     def _latest_reported(self) -> float | None:
-        """Like `_latest`, but from the resets the hits reported, so a retry that backs off is not a later reset."""
-        resets = [None if r in self._guessed else self._reported.get(r, self._until[r]) for r in self._until]
+        """Like `latest`, but from the resets the hits reported, so a retry that backs off is not a later reset."""
+        held = self._seen(self._until)
+        resets = [None if r in self._guessed else self._reported.get(r, self._until[r]) for r in held]
         return None if None in resets else max(r for r in resets if r is not None)
 
     def _news(self) -> bool:
-        if not self._until:
+        if not self.active:
             return False
         if not self._told:
             return True
@@ -174,7 +181,7 @@ class UsageLimit:
 
     def tell(self) -> float | None:
         """The reset to tell the User, who now has heard it: the latest among the held roles. Only while active."""
-        self._told, self._told_reset = True, self._latest()
+        self._told, self._told_reset = True, self.latest()
         return self._told_reset
 
     def tell_news(self) -> Notice | None:
@@ -192,9 +199,9 @@ class UsageLimit:
         if end.outcome == "limited":
             self._hit(role, end.resets_at)
         elif end.outcome == "completed" and role not in self._until:
-            resumed = role in self._strikes
+            resumed = role in self._strikes and role not in self._unseen
             self._leave_episode([role])
-            if resumed and self._told and not self._until:
+            if resumed and self._told and not self.active:
                 self._told, self._told_reset = False, None
                 self._on_reset()
 
@@ -204,7 +211,7 @@ class UsageLimit:
         now = self._wall()
         stale = [r for r in self._strikes if r not in self._until and now - self._cleared_at.get(r, 0.0) >= STRIKE_TTL]
         self._leave_episode(stale)
-        if not self._until and not self._strikes:
+        if not self.active and not self._seen(self._strikes):
             # Nothing came back to complete: the hold the User heard of is long over, so the next limit is new.
             self._told, self._told_reset = False, None
 
@@ -228,7 +235,8 @@ class UsageLimit:
         else:
             self._reported[role] = resets_at
         self._until[role] = max(resets_at, floor)
-        self._cleared.clear()
+        if self.active:
+            self._cleared.clear()
         # Restarted so a role that comes back sooner than the one it is sleeping for is not kept waiting.
         if self._timer is not None:
             self._timer.cancel()
@@ -272,12 +280,13 @@ class UsageLimit:
             return
         self._until, self._guessed = dict(saved.until), set(saved.guessed)
         self._reported = dict(saved.reported)
-        self._cleared.clear()
+        if self.active:
+            self._cleared.clear()
         self._timer = asyncio.create_task(self._run())
 
     async def wait_clear(self, stop: asyncio.Event) -> None:
-        """Returns once no role is stopped, or `stop` is set."""
-        if not self._until:
+        """Returns once no role the User sees is stopped, or `stop` is set."""
+        if not self.active:
             return
         cleared = asyncio.create_task(self._cleared.wait())
         stopping = asyncio.create_task(stop.wait())
@@ -309,7 +318,7 @@ class UsageLimit:
                     self._reported.pop(role, None)
                     if role in self._strikes:
                         self._cleared_at[role] = now
-                if not self._until:
+                if not self.active:
                     self._cleared.set()
                 self._on_clear(back)
         finally:

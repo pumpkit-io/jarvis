@@ -265,7 +265,7 @@ class FakeSession:
 
 class FakeBackend:
     """Plays one script per message, in order, per role; `warm_up` answers the seed the Talker starts with at launch
-    and `seed_reply` the seed a restarted Talker starts with. Each summariser run takes the next of `summaries`, and
+    and `seed_reply` the seed a Talker started by a restart or a Fold starts with. Each summariser run takes the next of `summaries`, and
     writes a valid summary once they run out.
 
     An Orchestrator with no script left ends its turn without a report.
@@ -353,7 +353,7 @@ class FakeBackend:
             return self.summaries.pop(0) if self.summaries else (Text(a_summary()),)
         if message.startswith("<event source=\"hub\" reason=\"launch\""):
             return self.warm_up
-        if message.startswith("<event source=\"hub\" reason=\"restart\""):
+        if message.startswith(("<event source=\"hub\" reason=\"restart\"", "<event source=\"hub\" reason=\"fold\"")):
             return self.seed_reply
         return self.scripts.pop(0) if self.scripts else (Text("Very good, sir."),)
 

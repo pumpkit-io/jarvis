@@ -12,7 +12,7 @@ import re
 import time
 import uuid
 from collections import deque
-from collections.abc import Mapping, AsyncIterator, Callable, Coroutine, Iterable
+from collections.abc import Mapping, AsyncIterator, Callable, Coroutine, Iterable, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from html import escape
@@ -45,6 +45,7 @@ from jarvis_hub.conversation import (
     seed_message,
 )
 from jarvis_hub import memory
+from jarvis_hub.memory import ROLE as SUMMARISER
 from jarvis_hub.limits import SavedLimit, UsageLimit, reset_sentence, update_sentence
 from jarvis_hub.news import Leaf, News, backlog_message, fresh
 from jarvis_hub.orchestrator import orchestrator_tools
@@ -238,7 +239,7 @@ class Line:
 # The Phase 0 definition, kept so Hub numbers compare with the spike's: the end of a delta counts too.
 _SENTENCE_END = re.compile(r"[.?!](\s|$)")
 
-TalkerKind = Literal["warm_up", "restart", "user", "event"]
+TalkerKind = Literal["warm_up", "restart", "fold", "user", "event"]
 
 # Turns a failed restart or Fold waits before trying again: each try costs a model call.
 RESTART_RETRY_AFTER = 5
@@ -610,7 +611,9 @@ class Hub:
         self._interrupted: list[str] = []
         # The Orchestrator's messages from posting until their turn ends, saved so a restart loses none.
         self._unanswered: list[_OrchestratorInput] = []
-        self._limit = UsageLimit(clock, wall, self._limit_hit, self._limit_cleared, self._limit_reset)
+        # A Fold runs unseen, so a limit on the summariser holds only the next Fold.
+        self._limit = UsageLimit(clock, wall, self._limit_hit, self._limit_cleared, self._limit_reset,
+                                 unseen=frozenset({SUMMARISER}))
         # Held until the usage limit resets, each still counted in `_pending` so a text-mode run waits for it: the
         # Orchestrator's messages, which stay unanswered and so saved, and the news the limited Talker could not take.
         self._deferred: list[_OrchestratorInput] = []
@@ -651,8 +654,7 @@ class Hub:
         self._waits = Waits(setup=waits, clock=clock, on_watcher_end=self._watcher_ended, on_check=self._check_due)
 
     def health(self) -> dict[str, Any]:
-        resets = [self._limit.resets_at(role) for role in self._limit.dump()["until"]]
-        reset = max(value for value in resets if value is not None) if resets and None not in resets else None
+        reset = self._limit.latest()
         return {
             "version": 1,
             "ready": self._model_available and not self._closing,
@@ -1711,15 +1713,24 @@ class Hub:
             return None
         if (upcoming := await self._quiet_or_next()) is not None:
             return upcoming
-        old = self._talker
+        session = await self._seeded_talker("restart", self._conversation.newest(self._memory.tail),
+                                            self._conversation.summary, self._restart_failed)
+        if session is not None:
+            self._restart_failing = False
+            await self._swap_talker(session)
+        return None
+
+    async def _seeded_talker(self, reason: Literal["restart", "fold"], entries: Sequence[Entry], summary: str | None,
+                             failed: Callable[[str], None]) -> AgentSession | None:
+        """A new Talker session that has read its hidden seed, or None once `failed` heard why it could not."""
         try:
             session = await self._open_talker()
         except Exception as e:
-            self._restart_failed(str(e))
+            failed(str(e))
             return None
         try:
-            seed = self._seed("restart", self._conversation.newest(self._memory.tail), self._conversation.summary)
-            end = await self._turn(seed, kind="restart", arrived=self._clock.now(), session=session)
+            end = await self._turn(self._seed(reason, entries, summary), kind=reason, arrived=self._clock.now(),
+                                   session=session)
         except BaseException:
             with contextlib.suppress(Exception):
                 await session.close()
@@ -1727,15 +1738,17 @@ class Hub:
         if end.outcome != "completed":
             with contextlib.suppress(Exception):
                 await session.close()
-            self._restart_failed(end.error or end.outcome)
+            failed(end.error or end.outcome)
             return None
-        self._talker, self._restart_failing = session, False
+        return session
+
+    async def _swap_talker(self, session: AgentSession) -> None:
+        old, self._talker = self._talker, session
         if old is not None:
             with contextlib.suppress(Exception):
                 await old.close()
-        return None
 
-    def _seed(self, reason: SeedReason, entries: "list[Entry] | tuple[Entry, ...]", summary: str | None) -> str:
+    def _seed(self, reason: SeedReason, entries: Sequence[Entry], summary: str | None) -> str:
         """A new Talker's hidden first message: the summary and `entries`, then the Hub's own records."""
         now = self._clock.now()
         return seed_message(
@@ -1809,7 +1822,7 @@ class Hub:
             self._fold_wait -= 1
             return
         if (self._fold is not None or tokens is None or tokens < self._memory.fold_at or self._closing
-                or self._scopes.pending() or self._limit.blocks(memory.ROLE)):
+                or self._scopes.pending() or self._limit.blocks(SUMMARISER)):
             return
         if not (folded := self._conversation.foldable(self._memory.tail)):
             return
@@ -1871,13 +1884,12 @@ class Hub:
             finally:
                 with contextlib.suppress(Exception):
                     await session.close()
-        self._limit.observe(memory.ROLE, end)
+        self._limit.observe(SUMMARISER, end)
         return text.strip(), end, round((self._clock.now() - t0) * 1000)
 
     async def _swap_in_fold(self) -> None:
-        """Seeds a new Talker with the ready summary and every entry after the cut, then makes the summary active and
-        swaps the session in. The summary is saved as a new version first, so a crash before the Conversation's
-        save loses nothing; whatever fails leaves the old summary and session in place."""
+        """Seeds a new Talker with the ready summary and the entries after the cut, then commits and swaps it in. The
+        summary is saved as its own version first, so a crash before the commit loses nothing."""
         fold = self._fold
         assert fold is not None and fold.summary is not None
         tail = self._conversation.entries[len(fold.folded):]
@@ -1887,23 +1899,17 @@ class Hub:
             self._conversation_failed(e)
             self._fold_failed()
             return
-        try:
-            session = await self._open_talker()
-        except Exception:
-            self._fold_failed()
-            return
-        try:
-            end = await self._turn(self._seed("restart", tail, fold.summary), kind="restart",
-                                   arrived=self._clock.now(), session=session)
-        except BaseException:
-            with contextlib.suppress(Exception):
-                await session.close()
-            raise
-        if end.outcome != "completed" or self._fold is not fold:
-            with contextlib.suppress(Exception):
-                await session.close()
+
+        def failed(_: str) -> None:
             if self._fold is fold:
                 self._fold_failed()
+
+        session = await self._seeded_talker("fold", tail, fold.summary, failed)
+        if session is None:
+            return
+        if self._fold is not fold:
+            with contextlib.suppress(Exception):
+                await session.close()
             return
         self._fold = None
         try:
@@ -1912,10 +1918,7 @@ class Hub:
             self._conversation_failed(e)
         else:
             self._conversation_failing = False
-        old, self._talker = self._talker, session
-        if old is not None:
-            with contextlib.suppress(Exception):
-                await old.close()
+        await self._swap_talker(session)
 
     async def _turn(
         self,
@@ -2021,8 +2024,8 @@ class Hub:
                 self._output.reply_end(text=shown, reason=reason)
         if end.outcome == "interrupted" and self._interrupted_turn != turn:
             end = TurnEnd("failed", end.usage, "the turn stopped without the Hub interrupting it")
-        # A failed restart has its own notice.
-        if end.outcome == "failed" and kind != "restart":
+        # A failed restart has its own notice, and a failed Fold none.
+        if end.outcome == "failed" and kind not in ("restart", "fold"):
             self._model_available = False
             self._output.notice(f"Model unavailable: the Talker failed: {end.error}. Try a new request; check Claude sign-in or connection if it persists.")
         if (
@@ -2295,12 +2298,12 @@ class Hub:
 
     def _limit_hit(self, role: str, news: bool) -> None:
         self._write({"kind": "usage_limit", "role": role, "resets_at": self._limit.resets_at(role)})
-        self._drop_reset_news()
+        if role != SUMMARISER:
+            self._drop_reset_news()
         if role == "talker":
             self._model_available = False
         self._persist()
-        # A Fold runs unseen, so the User hears of the limit from the next turn it stops, not from the summariser.
-        if news and role != memory.ROLE:
+        if news:
             self._announce_limit_news()
 
     def _announce_limit_news(self) -> None:

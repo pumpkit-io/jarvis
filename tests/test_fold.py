@@ -104,7 +104,7 @@ async def test_the_old_session_answers_while_the_summary_is_written_and_the_swap
     clock: FakeClock, path: Path
 ) -> None:
     release = asyncio.Event()
-    hub, backend, output, _ = a_hub(
+    hub, backend, output, metrics = a_hub(
         clock, path, [[Text("One."), tokens(200_000)], [Text("Two.")], [Text("Three.")]], memory=SHORT,
         summaries=[[Gate(release), Text(a_summary("The User's sister is Giulia."))]],
     )
@@ -127,7 +127,9 @@ async def test_the_old_session_answers_while_the_summary_is_written_and_the_swap
 
     new = backend.all_sessions("talker")[1]
     seed = new.received[0]
-    assert seed.startswith('<event source="hub" reason="restart">')
+    assert seed.startswith('<event source="hub" reason="fold">') and "restarted" not in seed
+    assert [r["kind"] for r in metrics.records if r.get("role") == "talker"] == ["warm_up", "user", "user", "fold",
+                                                                                   "user"]
     assert "The User's sister is Giulia." in seed
     assert seed.index("<memory>") < seed.index("<conversation>")
     assert exchanges(seed) == ["Mid-fold line."]
@@ -196,6 +198,29 @@ async def test_each_summary_is_built_from_the_previous_one_and_the_entries_folde
     assert "Sister: Giulia." in second.split("</previous_summary>")[0]
     assert "My dog is Fido." in second and "My sister is Giulia." not in second
     assert "Dog: Fido." in backend.all_sessions("talker")[2].received[0]
+
+
+async def test_a_replaced_summary_is_kept_for_30_days_after_it_was_replaced(clock: FakeClock, path: Path) -> None:
+    day = 24 * 3600.0
+    hub, backend, _, _ = a_hub(clock, path, [[Text("Noted."), tokens(200_000)] for _ in range(4)], memory=SHORT)
+    typist = Typist(clock)
+
+    def kept() -> list[str]:
+        return sorted(p.name for p in (path.parent / "memory").glob("summary-*.json"))
+
+    await hub.start()
+    running = asyncio.create_task(hub.run(typist.lines()))
+    for fold, days in enumerate((0, 40, 29, 1)):
+        clock.advance(days * day)
+        typist.type(f"Line {fold}.")
+        await until(lambda: len(talkers := backend.all_sessions("talker")) == fold + 2 and talkers[fold].closed)
+        if fold == 2:
+            assert kept() == ["summary-1.json", "summary-2.json", "summary-3.json"]
+    typist.end()
+    await asyncio.wait_for(running, timeout=1)
+    await hub.close()
+
+    assert kept() == ["summary-2.json", "summary-3.json", "summary-4.json"]
 
 
 BAD_SUMMARIES = {
@@ -403,9 +428,11 @@ async def test_no_fold_starts_while_a_spoken_scope_is_unresolved(rig_for: MakeRi
     rig = await spoken_scope_rig(rig_for, tmp_path)
 
     await leave_a_scope_unresolved(rig)
-    assert rig.hub._scopes.pending() and rig.backend.all_sessions("summariser") == []
+    assert rig.backend.all_sessions("summariser") == []
     rig.typist.type("So?")
     await until(lambda: len(rig.backend.all_sessions("summariser")) == 1)
+    so = rig.backend.all_sessions("talker")[0].received[-1]
+    assert "So?" in so and "<pending_scope" in so
 
 
 async def test_the_swap_waits_for_the_spoken_scope_to_be_resolved(rig_for: MakeRig, tmp_path: Path) -> None:
@@ -530,3 +557,31 @@ async def test_a_usage_limit_on_the_summariser_is_tracked_under_its_own_role_and
     assert len(backend.all_sessions("talker")) == 1
     assert [r["role"] for r in metrics.records if r["kind"] == "usage_limit"] == ["summariser"]
     assert output.notices == []
+
+
+async def test_a_usage_limit_on_the_summariser_holds_only_the_folds(clock: FakeClock, path: Path) -> None:
+    state = path.with_name("state.json")
+    hub, _, _, metrics = a_hub(clock, path, [[Text("One."), tokens(200_000)], [Text("Two.")]], memory=SHORT,
+                               state_path=state, summaries=[[Limited(3600)]])
+    typist = Typist(clock)
+
+    await hub.start()
+    running = asyncio.create_task(hub.run(typist.lines()))
+    typist.type("a")
+    await until(lambda: any(r["kind"] == "usage_limit" for r in metrics.records))
+    typist.type("b")
+    typist.end()
+    await asyncio.wait_for(running, timeout=1)
+    assert hub.health()["usage_limit"] == {"limited": False, "resets_at": None}
+    await hub.close()
+
+    ready: list[bool] = []
+    hub, backend, output, _ = a_hub(clock, path, [[Text("Three."), tokens(200_000)]], memory=SHORT,
+                                    state_path=state, on_model_ready=lambda: ready.append(True))
+    await hub.start()
+    await hub.run(lines(clock, "c"))
+    await until(lambda: ready == [True])
+    assert hub.health()["usage_limit"]["limited"] is False
+    assert output.notices == [] and output.replies == ["Three."]
+    assert backend.all_sessions("summariser") == []
+    await hub.close()

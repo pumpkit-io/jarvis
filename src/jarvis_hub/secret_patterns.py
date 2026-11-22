@@ -1,7 +1,8 @@
 """What counts as a secret in text the Hub keeps or replays: Memory's summaries and `recall`'s results (ADR 0028).
 
-The patterns aim at values, not at talk about them: "I reset my password" holds no secret, "the password is
-h4ppy-days" does.
+The patterns aim at values, not at talk about them: "I reset my password" and "the token was re-issued" hold no
+secret, "the password is h4ppy-days" does. Where a pattern names its `secret` group, only that part is the secret and
+the words before it stay readable.
 """
 
 import re
@@ -22,13 +23,16 @@ SECRET_PATTERNS: tuple[re.Pattern[str], ...] = tuple(re.compile(pattern) for pat
     r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]{16,}=*",
     # A paired Client's token, as `pairing.py` issues it: its id, a dot, then the secret.
     r"\b[0-9a-f]{32}\.[A-Za-z0-9_-]{40,}",
+    # A random-looking run of 32 or more: upper and lower case and digits, which a commit hash never mixes.
+    r"\b(?=[\w-]*[A-Z])(?=[\w-]*[a-z])(?=[\w-]*\d)[A-Za-z0-9_-]{32,}",
     # A pairing code: six digits near the words that name one.
     r"(?i)\b(?:pairing|pair)\s+code\b\D{0,20}\b(?P<secret>\d{6})\b",
-    # Where a pattern names its `secret` group, only that part is the secret: the words before it stay readable.
-    # A password or key given as a value: quoted, or six or more characters with a digit or a symbol among them.
+    # A value given for a password or key: quoted, or eight or more characters with a digit or a symbol, never a
+    # setting's NAME_IN_CAPS, and without the sentence's closing punctuation.
     r"(?i)\b(?:password|passcode|passphrase|parola d'ordine|api[ _-]?key|secret|token)\b\s*"
     r"(?:[:=]|\bis\b|\bè\b|\bwas\b|\bera\b)\s*"
-    r"(?P<secret>\"[^\"\s]{4,}\"|'[^'\s]{4,}'|`[^`\s]{4,}`|(?=[^\s,;]{6,})[^\s,;]*?[\d@#$%^&*_+=/\\-][^\s,;]*)",
+    r"(?P<secret>\"[^\"\s]{4,}\"|'[^'\s]{4,}'|`[^`\s]{4,}`"
+    r"|(?-i:(?![A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b))(?=[^\s,;]*?[\d@#$%^&*_+=/\\~])[^\s,;]{7,}[^\s,;.!?:)])",
     r"(?i)\bpin\b\s*(?:[:=]|\bis\b|\bè\b|\bwas\b|\bera\b)\s*(?P<secret>\d{4,})",
 ))
 

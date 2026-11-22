@@ -14,7 +14,7 @@ from typing import Any, Literal, cast
 from jarvis_hub.state import SavedFile, UnreadableFile, one_of, write_atomically
 
 VERSION = 1
-# How long a summary that is no longer active is kept, for debugging, in seconds.
+# How long a summary is kept, for debugging, after another replaced it, in seconds.
 KEEP_SUMMARIES = 30 * 24 * 3600.0
 _SUMMARY_FILE = re.compile(r"summary-(\d+)\.json")
 # A starting point for mixed English and Italian; the Hub corrects it from the context sizes the CLI reports.
@@ -26,7 +26,7 @@ _RATIO_WEIGHT = 0.3
 
 Device = Literal["Mac", "iPhone"]
 EntryKind = Literal["user", "event"]
-SeedReason = Literal["launch", "restart"]
+SeedReason = Literal["launch", "restart", "fold"]
 
 
 @dataclass(frozen=True)
@@ -177,10 +177,8 @@ class Conversation:
         return self.estimate(len(self._summary or "") + sum(len(entry.render()) for entry in self._entries))
 
     def foldable(self, tail: int) -> tuple[Entry, ...]:
-        """The oldest entries, the ones a Fold now would summarise, leaving a Tail of about `tail` tokens: none when
-        everything fits in it. The cut falls between two exchanges, at the longest pause between one reply ending and
-        the next message arriving among the cuts that leave a Tail between seven eighths of `tail` and `tail`. With
-        no cut in that range the Tail is the longest that fits, or nothing when the newest exchange alone is longer."""
+        """The oldest entries, which a Fold now would summarise; none when everything fits in `tail` tokens. The cut
+        is the longest pause among those leaving a Tail of 7/8 `tail` to `tail`, else the longest Tail that fits."""
         chars = [len(entry.render()) for entry in self._entries]
         # The estimated Tail when the cut falls before entry i.
         after = [self.estimate(sum(chars[i:])) for i in range(len(chars) + 1)]
@@ -206,13 +204,25 @@ class Conversation:
     def commit(self, version: int, summary: str, folded: Sequence[Entry], *, now: float) -> None:
         """Makes a kept summary active and drops the entries it folded, in one save. `folded` must be the oldest
         entries, else ValueError. A failed save raises OSError or ValueError with the change kept in memory, like
-        `add`. Summaries no longer active are deleted KEEP_SUMMARIES after they were made."""
+        `add`. A replaced summary is deleted KEEP_SUMMARIES after it was replaced, one never made active after it
+        was made."""
         if len(folded) > len(self._entries) or any(a is not b for a, b in zip(folded, self._entries)):
             raise ValueError("the folded entries are no longer the oldest of the Conversation")
+        if self._active is not None:
+            self._stamp_replaced(self._active, now)
         self._entries = self._entries[len(folded):]
         self._active, self._summary = version, summary
         self._save()
         self._prune(now)
+
+    def _stamp_replaced(self, version: int, now: float) -> None:
+        """Records when `version` stopped being active. Should the commit's save fail, a later one stamps it anew."""
+        if self._summaries is None:
+            return
+        with contextlib.suppress(OSError, ValueError, UnreadableFile):
+            summary = self._summary_file(version)
+            if (saved := summary.load()) is not None:
+                summary.save({**saved, "replaced": now})
 
     def _prune(self, now: float) -> None:
         if self._summaries is None:
@@ -222,7 +232,7 @@ class Conversation:
                 continue
             with contextlib.suppress(OSError, ValueError, KeyError, TypeError, UnreadableFile):
                 saved = self._summary_file(int(match[1])).load()
-                if saved is not None and now - _number(saved["made"]) >= KEEP_SUMMARIES:
+                if saved is not None and now - _number(saved.get("replaced", saved["made"])) >= KEEP_SUMMARIES:
                     path.unlink()
 
     def _summary_path(self, version: int) -> Path:
@@ -262,6 +272,10 @@ _OPENING: dict[SeedReason, str] = {
     "restart": (
         "Your session was restarted to keep it fast, and what you said before it is gone. Below are your Memory of "
         "the Conversation and its latest exchanges, as the Hub saved them."
+    ),
+    "fold": (
+        "You are a fresh session, started in the background to keep Jarvis fast, and the earlier Conversation now "
+        "lives in your Memory. Below are that Memory and the latest exchanges, as the Hub saved them."
     ),
 }
 
