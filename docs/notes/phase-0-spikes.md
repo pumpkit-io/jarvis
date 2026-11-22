@@ -147,7 +147,7 @@ Scripts: `spikes/audio/` (`uv run <script>` from there). `make_synthetic.py` ren
 | Recording session | **Kit ready, waiting on the User.** `cd spikes/audio && uv run session.py`, about 44 minutes with the User (34 without the #4 baseline step, 41 without the optional headphones step), then about 78 minutes unattended: an hour of the room with a video playing, then the analysis. |
 | STT latency, partials, memory | **Measured.** `parakeet-mlx` is 2.5 to 6 times faster than VoiceMode's whisper.cpp small, 5.5 to 15 times faster than `mlx-whisper` turbo and 9.5 to 26 times faster than whisper.cpp turbo, and the only engine under 100 ms on 0.4 to 0.8 s partials. |
 | STT word error rate on the User's clips | **Waiting on the User.** Synthetic WER: parakeet 2.2 %, mlx-whisper turbo 2.2 %, whisper.cpp turbo 2.9 %, VoiceMode's small 7.6 %. Provisional leader: `parakeet-mlx`. |
-| TTS | **Chosen: `kokoro-mlx` in-process.** First audio 222 ms (EN) and 240 ms (IT) against 358 and 371 ms for VoiceMode's server; `am_liam` and `im_nicola` present in both; speed 1.0. Doesn't depend on the User's voice. |
+| TTS | **Chosen: `kokoro-mlx` in-process; since 2026-11-22 the fallback to Qwen3-TTS 0.6B 8-bit, streamed (ADR 0029, measured under `### TTS`).** First audio 222 ms (EN) and 240 ms (IT) against 358 and 371 ms for VoiceMode's server; `am_liam` and `im_nicola` present in both; speed 1.0. Doesn't depend on the User's voice. |
 | Echo cancellation | **Pipeline proven, acoustic run waiting on the User.** On digital echo the WebRTC APM takes VAD speech frames during Jarvis alone from 86.8 % to at most 0.5 % and detects 3 of 3 Barge-ins over the echo, against 1 of 3 on the raw mic. The Voice Processing I/O helper is built for the session. Headphones mode, with echo cancellation off, is scored by an optional session step. |
 | Wake word recall | **Waiting on the User.** Synthetic, at threshold 0.5: "Hey Jarvis" 10/10, "Hi Jarvis" 9/10, "Jarvis" 7/10, "Ehi Jarvis" 5/10. The last two are at risk. The session records 20 takes per phrasing, so 95 % is 19 of 20. |
 | Wake word false accepts per hour | **Measured on public audio: 0 per hour at threshold 0.5** over 11.5 h of English and Italian audiobooks; at 0.3, 5 false accepts, 0.43 per hour (all in the Italian book). The session adds 5 minutes of the room with a video playing while the User is there, and an unattended hour of it for the per-hour figure. |
@@ -188,6 +188,22 @@ The 12-word sentences in `corpus.py` (`TTS_SENTENCES`), speed 1.0, p50 of five r
 - Both voices exist in both engines; `kokoro-mlx` picks Italian G2P (espeak) from the `im_` prefix *(not in the results)*.
 - **VoiceMode's server restarts itself every 25 requests**: its launchd plist sets `UVICORN_LIMIT_MAX_REQUESTS=25` *(not in the results)*. The first request for each voice took 895 ms (EN) and 827 ms (IT), against 358 and 371 ms warm. In a Hub that sends one request per sentence, a restart would be a silent gap every few replies.
 - `misaki` downloads its spaCy model with `pip` into whatever virtualenv is active, and did so into another repo's venv during this spike (reverted). The Hub must declare `en-core-web-sm` as a dependency, as `spikes/audio/pyproject.toml` now does.
+
+#### Qwen3-TTS 0.6B Base, cloned voices (ADR 0029, 2026-11-22)
+
+`bench_qwen_tts.py` clones `assets/voice/jarvis-en.wav` and `jarvis-it.wav` with mlx-audio 0.6.7 and times finished audio per sentence, the way the Hub synthesised before streaming, against `kokoro-mlx` timed the same way. Five runs each, p50 (max). Short is "Good evening, sir."; one and two sentences are 12 to 18 words. Run on the M3 Pro with nothing else busy.
+
+| Engine | Short EN / IT | One sentence EN / IT | Two sentences EN / IT | Real-time factor | First streamed piece EN / IT |
+|---|---|---|---|---|---|
+| `kokoro-mlx` | 105 / 123 ms | 209 / 247 ms | 291 / 377 ms | | |
+| Qwen3 0.6B bf16 | 1,436 (1,445) / 1,515 (1,599) ms | 2,452 / 2,730 ms | 3,210 / 3,672 ms | 0.65 to 1.17 | 710 / 495 ms |
+| Qwen3 0.6B 8-bit | 1,113 (1,128) / 1,300 (1,401) ms | 1,856 / 2,226 ms | 2,414 / 2,849 ms | 0.48 to 0.88 | 367 / 419 ms |
+
+- Whole sentences miss the 600 ms bar with either checkpoint. Streaming in half-second pieces (`streaming_interval=0.5`) meets it with 8-bit, which the Hub now uses. `check_tts_setup.py` through the Hub's own streaming synthesizer: first piece 382 to 407 ms (one Italian run 674 ms), no piece late for playback in four probes.
+- The first call per voice takes 1.2 to 1.9 s, encoding the reference clip, which mlx-audio then caches per clip and transcript. Speech's warm-up pays it at load; loading and warming both voices took 7.2 s.
+- The voice holds across runs: cosine similarity of the speaker embeddings is 0.97 to 0.99 against the reference clip and 0.98 to 1.00 between runs, without a seed or a lower temperature.
+- Output is 24 kHz. Its RMS is about 2 dB above Kokoro's in both languages (EN -23.3 against -25.2 dB, IT -20.5 against -22.4 dB), so the Hub cuts it by a fixed 2 dB.
+- Both voices speak 15 to 18.5 characters a second, which sets how the Hub spreads a sentence's words across its pieces.
 
 ### Echo cancellation
 
@@ -260,8 +276,10 @@ Against VoiceMode's 1000 ms threshold today, v3.2 ends turns 413 ms sooner on av
 |---|---|---|
 | parakeet STT | 2.42 GB | 2.77 GB |
 | mlx-whisper STT | 2.78 GB | 3.10 GB |
+| parakeet STT, Qwen3 0.6B 8-bit TTS (2026-11-22) | 3.75 GB | 7.36 GB |
+| parakeet STT, Qwen3 0.6B bf16 TTS (2026-11-22) | 4.24 GB | 7.80 GB |
 
-Both are under the 4 GB (4096 MB) audio-stack budget on the 18 GB machine. Using VoiceMode's servers instead would add their own processes (0.74 GB for whisper small, 1.86 GB for turbo, 2.0 GB for Kokoro).
+Both Kokoro stacks and the 8-bit Qwen stack are under the 4 GB (4096 MB) audio-stack budget on the 18 GB machine; the bf16 Qwen stack is over it. Qwen's peaks are transient: right after its first sentences the 8-bit stack's footprint stood at 4.84 GB, then settled to 3.75 GB once the other engines loaded and synthesis repeated. Using VoiceMode's servers instead would add their own processes (0.74 GB for whisper small, 1.86 GB for turbo, 2.0 GB for Kokoro).
 
 `claude` is outside that budget and measured apart. `bench_claude_idle.py` starts three `claude` sessions (2.1.317) in a pty in a trusted repo with no hooks, lets them sit at the prompt for 60 s without sending one, so no model is called, and reads each process's footprint: 198, 198 and 199 MB, 0.59 GB for the three. That is the `claude` process alone; MCP servers it starts are separate processes and not counted. With the audio stack, that comes to 3.02 GB (parakeet) or 3.37 GB (mlx-whisper). For comparison, the six `claude` processes running during the memory benchmark, busy or idle, had a median footprint of 292.5 and 290.5 MB (`claude_processes_seen` in the memory results).
 

@@ -8,6 +8,8 @@ Each Talk is a new Spoken request, with none of the Mac's resumed-speech revisio
 
 The User decided this on 2026-11-18.
 
+Since ADR 0029, "Kokoro" here means whichever speech engine is configured. Qwen3-TTS sends each sentence as several clips, which the phone plays back to back like the sentences before them.
+
 ## Considered Options
 
 - On-device recognition and Apple's built-in voices. Rejected: the phone would get a different voice, different transcripts and a second copy of the speech logic, in exchange for less bandwidth.
