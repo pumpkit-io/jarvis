@@ -1,9 +1,9 @@
 import Foundation
 import Observation
 
-// Temporary: lets the User compare conversation fonts and looks. Remove with the Settings section that edits it.
+// Temporary: lets the User compare conversation fonts and looks. ios/README.md lists what to remove.
 
-/// The conversation's font and look. The font is an id from the app's font catalog.
+/// The font is an id from the app's font catalog.
 public struct ScriptStyle: Codable, Equatable, Sendable {
     public enum Look: String, Codable, CaseIterable, Sendable { case current, terminal, gutter }
 

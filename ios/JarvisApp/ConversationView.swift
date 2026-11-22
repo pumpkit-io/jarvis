@@ -8,7 +8,7 @@ struct ConversationView: View {
     @ScaledMetric(relativeTo: .body) var scriptSize = 18
     @ScaledMetric(relativeTo: .subheadline) var controlSize = 15
     @ScaledMetric(relativeTo: .caption) var stampSize = 12
-    @ScaledMetric(relativeTo: .caption) var gutterWidth = 56
+    @ScaledMetric(relativeTo: .caption) var gutterWidth = 60
     @Environment(ScriptStyleSetting.self) private var scriptStyle
     @State private var followsLatest = true
     @State private var isAtBottom = true
@@ -163,13 +163,15 @@ struct ConversationView: View {
                 VStack(alignment: .trailing, spacing: 2) {
                     if let date {
                         let stamp = MessageStamp(date)
-                        Text(verbatim: stamp.day).lineLimit(1).minimumScaleFactor(0.7)
-                        Text(verbatim: stamp.time).lineLimit(1).foregroundStyle(user ? theme.cyan : theme.haze)
+                        Text(verbatim: stamp.day)
+                        Text(verbatim: stamp.time).foregroundStyle(user ? theme.cyan : theme.haze)
                     }
                 }
                 .font(face.font(size: stampSize)).monospacedDigit()
                 .foregroundStyle(theme.haze)
-                .frame(width: gutterWidth, alignment: .trailing)
+                // A 12-hour time or another year's date outgrows the margin; widen that row rather than truncate.
+                .fixedSize()
+                .frame(minWidth: gutterWidth, alignment: .trailing)
                 .padding(.top, user ? 10 : 2)
                 if user {
                     content()
@@ -243,7 +245,7 @@ struct ConversationView: View {
         }
     }
 
-    /// Deliberate Play and Details, which every look keeps with the same behaviour.
+    /// Play and Details, which every look keeps with the same behaviour.
     @ViewBuilder private func rowControls(_ row: ConversationRow) -> some View {
         if row.id.hasPrefix("reply:"), session.playback.missedReplies.contains(String(row.id.dropFirst(6))),
            session.playback.replyID != String(row.id.dropFirst(6)) {
@@ -347,7 +349,7 @@ private struct TreeDisclosureStyle: DisclosureGroupStyle {
         VStack(alignment: .leading, spacing: 0) {
             Button { configuration.isExpanded.toggle() } label: {
                 HStack(spacing: 8) {
-                    Text(verbatim: configuration.isExpanded ? "▾" : "▸").foregroundStyle(theme.cyan)
+                    Text(verbatim: configuration.isExpanded ? "▾" : "▸").foregroundStyle(theme.cyan).accessibilityHidden(true)
                     configuration.label
                     Text(verbatim: "(\(count))")
                 }

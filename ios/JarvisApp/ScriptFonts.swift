@@ -1,8 +1,7 @@
 import JarvisClient
 import SwiftUI
 
-// Temporary: the fonts and looks the User can try in the conversation. Remove with ScriptStyle,
-// the Settings section, the Fonts folder and UIAppFonts in project.yml.
+// Temporary: the fonts and looks the User can try in the conversation. ios/README.md lists what to remove.
 
 struct ScriptFont: Identifiable {
     enum Face {

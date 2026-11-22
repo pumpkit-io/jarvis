@@ -44,7 +44,7 @@ struct SettingsView: View {
         }
     }
 
-    // Temporary: remove these sections with ScriptFonts.swift once the User has chosen.
+    // Temporary: ios/README.md lists what to remove once the User has chosen.
     @ViewBuilder private var scriptStyleChoices: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Conversation look (temporary)").foregroundStyle(theme.haze).accessibilityAddTraits(.isHeader)
