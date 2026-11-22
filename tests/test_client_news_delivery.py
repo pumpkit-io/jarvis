@@ -17,7 +17,7 @@ async def test_queued_terminal_news_checks_focus_at_consumption_and_preserves_us
     restart_open = asyncio.Event()
     first: list[Step] = [Tool("delegate", {"request": "Fix typo", "context": ""}), Gate(release), Text("Working, sir.")]
     if restart:
-        first.append(Context(100_000, 200_000))
+        first.append(Context(300_000, 1_000_000))
     backend = FakeBackend(clock, [first, [Text("Second request answered.")], [Text("Two held updates, sir.")]],
                           restart_open_gate=restart_open,
                           orchestrator=[[Gate(arrival), Tool("report", {"task_id": "T1", "spoken": "First"}),

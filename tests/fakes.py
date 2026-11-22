@@ -153,6 +153,16 @@ class ToolResult:
     result: str | None
 
 
+def a_summary(*facts: str) -> str:
+    """A summary that passes the Hub's checks, with `facts` as its standing facts."""
+    return (
+        "## Standing facts and preferences\n" + "".join(f"- {fact}\n" for fact in facts or ("None yet.",))
+        + "\n## Open threads and promises\n- None.\n"
+        + "\n## Decisions\n- None.\n"
+        + "\n## Recent topics\n- None.\n"
+    )
+
+
 class FakeSession:
     """Calls the Hub's tool handlers as the CLI would, after reporting the call."""
 
@@ -255,7 +265,8 @@ class FakeSession:
 
 class FakeBackend:
     """Plays one script per message, in order, per role; `warm_up` answers the seed the Talker starts with at launch
-    and `seed_reply` the seed a restarted Talker starts with.
+    and `seed_reply` the seed a restarted Talker starts with. Each summariser run takes the next of `summaries`, and
+    writes a valid summary once they run out.
 
     An Orchestrator with no script left ends its turn without a report.
     """
@@ -270,6 +281,7 @@ class FakeBackend:
         restart_open_gate: asyncio.Event | None = None,
         open_error: Exception | None = None,
         orchestrator: Iterable[Sequence[Step]] = (),
+        summaries: Iterable[Sequence[Step]] = (),
         orchestrator_open_error: Exception | None = None,
         interrupt_gate: asyncio.Event | None = None,
         interrupt_error: Exception | None = None,
@@ -281,6 +293,7 @@ class FakeBackend:
         self.clock = clock
         self.scripts = list(scripts)
         self.orchestrator_scripts = list(orchestrator)
+        self.summaries = list(summaries)
         self.warm_up = warm_up
         self.seed_reply = seed_reply
         self.restart_error = restart_error
@@ -336,6 +349,8 @@ class FakeBackend:
             return self.orchestrator_scripts.pop(0) if self.orchestrator_scripts else ()
         if role == "subagent":
             return self.subagent_scripts.get(message, (Text("Done."),))
+        if role == "summariser":
+            return self.summaries.pop(0) if self.summaries else (Text(a_summary()),)
         if message.startswith("<event source=\"hub\" reason=\"launch\""):
             return self.warm_up
         if message.startswith("<event source=\"hub\" reason=\"restart\""):
@@ -406,6 +421,10 @@ async def lines(clock: FakeClock, *texts: str) -> AsyncIterator[Line]:
 TALKER = SessionSpec(role="talker", model="sonnet", effort="low", thinking=False, system_prompt="You are Jarvis.", cwd=Path("/tmp"))
 ORCHESTRATOR = SessionSpec(
     role="orchestrator", model="sonnet", effort="medium", thinking=True, system_prompt="You orchestrate.", cwd=Path("/tmp")
+)
+SUMMARISER = SessionSpec(
+    role="summariser", model="sonnet", effort="low", thinking=False, system_prompt="You summarise.", cwd=Path("/tmp"),
+    max_turns=1,
 )
 
 
@@ -509,6 +528,7 @@ def make_hub(
     return Hub(
         talker=TALKER,
         orchestrator=ORCHESTRATOR,
+        summariser=SUMMARISER,
         backend=backend,
         clock=backend.clock,
         output=output,

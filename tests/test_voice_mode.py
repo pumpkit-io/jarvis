@@ -86,7 +86,7 @@ MakeRig = Callable[..., Awaitable[Rig]]
 async def rig_for() -> AsyncIterator[MakeRig]:
     rigs: list[tuple[Rig, asyncio.Task[None]]] = []
 
-    async def make(*scripts: list[Step], state_path: Path | None = None, recognition: Any = None, workspace: FakeWorkspace | None = None, subagent_session: Callable[[Subagent], SessionSpec] = subagent_spec, **backend_options: Any) -> Rig:
+    async def make(*scripts: list[Step], state_path: Path | None = None, recognition: Any = None, workspace: FakeWorkspace | None = None, subagent_session: Callable[[Subagent], SessionSpec] = subagent_spec, hub_options: dict[str, Any] | None = None, **backend_options: Any) -> Rig:
         clock = FakeClock()
         backend = FakeBackend(clock, list(scripts), **backend_options)
         audio, player, output, metrics = ScriptedAudio(clock), RecordingPlayer(), RecordingOutput(), RecordingMetrics()
@@ -106,6 +106,7 @@ async def rig_for() -> AsyncIterator[MakeRig]:
             on_stand_by=voice.stand_by,
             floor=voice,
             state_path=state_path,
+            **(hub_options or {}),
         )
         typist = Typist(clock)
         await hub.start()
@@ -352,7 +353,7 @@ async def test_capture_is_on_only_while_listening_for_a_turn(rig_for: MakeRig) -
     assert rig.audio.capturing == [True, False, True, False]
 
 
-FULL = Context(100_000, 200_000)
+FULL = Context(300_000, 1_000_000)
 
 
 def talker_kinds(rig: Rig) -> list[str]:

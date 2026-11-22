@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, TypeGuard, TypeVar, cast
 
-ROLES = ("talker", "orchestrator", "subagent")
+ROLES = ("talker", "orchestrator", "subagent", "summariser")
 # What `voice/bargein_log.py` writes as a Barge-in's decision.
 DECISIONS = ("resume", "stop", "wake", "overheard-stop", "ended")
 _USAGE = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens")
@@ -155,7 +155,9 @@ def render(stats: Stats, since: datetime | None, until: datetime | None) -> str:
         return none if when is None else when.astimezone().strftime("%Y-%m-%d %H:%M")
 
     out = [f"Jarvis usage from {stamp(since, 'the start')} to {stamp(until, 'now')}", ""]
-    table: list[tuple[str, ...]] = [("role", "turns", "input", "output", "cache read", "cache write", "duration")]
+    table: list[tuple[str, ...]] = [
+        ("role", "turns", "input", "output", "cache read", "cache write", "cache hit", "duration")
+    ]
     total = Totals()
     for role in ROLES:
         if (t := stats.roles.get(role)) is None:
@@ -191,8 +193,15 @@ def _cells(role: str, t: Totals) -> tuple[str, ...]:
         f"{t.output_tokens:,}",
         f"{t.cache_read_tokens:,}",
         f"{t.cache_creation_tokens:,}",
+        _hit_rate(t),
         _span(t.duration_ms),
     )
+
+
+def _hit_rate(t: Totals) -> str:
+    """The share of prompt tokens read from the cache: input, cache reads and cache writes are the whole prompt."""
+    prompt = t.input_tokens + t.cache_read_tokens + t.cache_creation_tokens
+    return "-" if not prompt else f"{round(100 * t.cache_read_tokens / prompt)}%"
 
 
 def _latency(role: str, metric: str, values: list[int]) -> tuple[str, ...]:

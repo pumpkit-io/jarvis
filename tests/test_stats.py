@@ -169,6 +169,29 @@ def test_the_report_has_a_row_per_role_a_total_and_latency_percentiles() -> None
     assert "$" not in text and "cost" not in text.lower()
 
 
+def test_the_summariser_has_its_own_row_and_every_row_shows_its_cache_hit_rate() -> None:
+    rows = [
+        row("talker", 5, usage=(10, 20, 30, 40)),
+        row("talker", 4, usage=(1, 2, 3, 4)),
+        row("summariser", 3, usage=(100, 50, 300, 100), kind="fold", duration_ms=40_000),
+        row("orchestrator", 2, usage=(0, 5, 0, 0)),
+    ]
+
+    text = render(summarise(rows), None, None)
+
+    lines = text.splitlines()
+    header = next(l for l in lines if l.startswith("role"))
+    assert header.split()[-3:] == ["cache", "hit", "duration"]
+    usage = lines[lines.index(header):lines.index("Latency (ms)")]
+    cells = {l.split()[0]: l.split() for l in usage if l.startswith(("talker", "summariser", "orchestrator", "total"))}
+    # Cache reads over every prompt token: input, cache reads and cache writes.
+    assert cells["talker"][1] == "2" and "38%" in cells["talker"]
+    assert cells["summariser"][1] == "1" and "60%" in cells["summariser"]
+    assert "-" in cells["orchestrator"]
+    assert "57%" in cells["total"]
+    assert any(l.split() == ["summariser", "turn", "duration", "1", "40,000", "40,000"] for l in lines)
+
+
 def barge(
     decision: str,
     minutes_ago: float = 5,
