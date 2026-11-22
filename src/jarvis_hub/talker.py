@@ -140,7 +140,7 @@ def talker_tools(
 
     tools += (HubTool(
         "recall",
-        "Search the last 30 days for exact wording when the User asks what they or you said, or for a detail your "
+        "Look up exact wording from the last 30 days when the User asks what they or you said, or for a detail your "
         "context and Memory lack: what the User said, your finished replies, details shown on screen and Task "
         "reports. Every word must appear; put a phrase in double quotes, and try fewer or other words when nothing "
         "matches. Returns up to 10 dated matches, oldest first, each with a line of what followed, with today's "

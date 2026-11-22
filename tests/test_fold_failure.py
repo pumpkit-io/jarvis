@@ -230,7 +230,7 @@ async def test_at_the_ceiling_a_ready_fold_swaps_in_before_a_line_already_waitin
     assert output.notices == []
 
 
-async def test_a_fold_that_succeeds_ends_the_failing_episode_so_a_later_ceiling_is_told_again(
+async def test_after_a_fold_succeeds_a_later_ceiling_restart_is_told_again(
     clock: FakeClock, path: Path
 ) -> None:
     waiting = [[Text(f"{i}.")] for i in range(FOLD_RETRY_AFTER - 2)]

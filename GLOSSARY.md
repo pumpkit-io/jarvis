@@ -109,7 +109,7 @@ The User deleting the Conversation and its Memory on purpose, from the iPhone's 
 _Avoid_: clear history, new chat, wipe, start afresh
 
 **Recall**:
-Jarvis looking up the exact words of the last 30 days when the User asks what was said: the User's lines, Jarvis's replies, details shown on screen and Task reports, found by word or phrase, with the date of each. It reaches nothing older than 30 days or from before the last reset, and it is a record of what was said, never of what a Task or a permission is now.
+Jarvis looking up the exact words of the last 30 days when the User asks what was said: the User's lines, Jarvis's replies, details shown on screen and Task reports, found by word or phrase, with the date of each. It reaches nothing older than 30 days or from before the last Reset context, and it is a record of what was said, never of what a Task or a permission is now.
 _Avoid_: search, history lookup
 
 **Wake word**:

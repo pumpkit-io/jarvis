@@ -254,6 +254,8 @@ OPEN_GRACE = 10.0
 ORCHESTRATOR_TIMEOUT = 600.0
 # How long an interrupted turn has to end before the Hub gives up on its session.
 INTERRUPT_GRACE = 10.0
+CEILING_RESTARTED = ("The conversation could not be folded into Memory, so the Talker restarted from {}the latest "
+                     "exchanges.")
 AFRESH_FAILED = "Could not start afresh: Memory could not be written, so the conversation goes on as it was."
 RESET_FAILED = ("Could not start a new Talker after the reset, so the current one, which still remembers the earlier "
                 "conversation, answers until the next try, and none of it is saved: {}")
@@ -589,8 +591,7 @@ class Hub:
         # Turns left before a failed restart is tried again, and whether the User has heard of the failure.
         self._restart_wait = 0
         self._restart_failing = False
-        # Whether the User heard that the ceiling restarted the Talker since the last Fold that succeeded: once per
-        # failing episode, the only time Memory shows (ADR 0028).
+        # Whether the User heard that the ceiling restarted the Talker since the last Fold that succeeded.
         self._ceiling_told = False
         self._orchestrator: AgentSession | None = None
         self._talker_inbox: asyncio.Queue[_TalkerInput] = asyncio.Queue()
@@ -1006,7 +1007,7 @@ class Hub:
         if self._closing:
             raise ValueError("Hub is stopping")
         self._cancel_fold()
-        self._end_failing_episode()
+        self._forget_fold_failures()
         self._fold_tokens = None
         self._restart_wait, self._restart_failing = 0, False
         self._resets.count += 1
@@ -1825,8 +1826,8 @@ class Hub:
 
     async def _restart_if_full(self, context: Context | None) -> _TalkerInput | None:
         """Between turns, swap in a new Talker session once the context reaches the ceiling, which only Folds that
-        keep failing let it reach, seeded with the active summary and the Tail (ADR 0028). The User is told once per
-        failing episode, which a Fold that succeeds ends. While a Fold is under way there is no restart, and a Fold
+        keep failing let it reach, seeded with the active summary and the Tail (ADR 0028). The User is told once,
+        then again only after a Fold succeeds. While a Fold is under way there is no restart, and a Fold
         whose summary is ready swaps in at once.
 
         Only this turn's context decides: an older reading may be stale. The new session reads the seed in the
@@ -1874,8 +1875,7 @@ class Hub:
         await self._swap_talker(session)
         if not self._ceiling_told:
             self._ceiling_told = True
-            self._output.notice("The conversation could not be folded into Memory, so the Talker restarted from "
-                                f"{'the last summary and ' if summary else ''}the latest exchanges.")
+            self._output.notice(CEILING_RESTARTED.format("the last summary and " if summary else ""))
         return None
 
     async def _seeded_talker(self, reason: Literal["restart", "fold", "reset"], entries: Sequence[Entry],
@@ -2120,10 +2120,10 @@ class Hub:
             self._conversation_failed(e)
         else:
             self._conversation_failing = False
-        self._end_failing_episode()
+        self._forget_fold_failures()
         await self._swap_talker(session)
 
-    def _end_failing_episode(self) -> None:
+    def _forget_fold_failures(self) -> None:
         """Folds work again: no failure's wait is left to count down, and a later ceiling is told again."""
         self._fold_wait = 0
         self._ceiling_told = False
