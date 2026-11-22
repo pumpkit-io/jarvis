@@ -35,37 +35,6 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         NSMicrophoneUsageDescription: Jarvis records only while you use the Talk key.
         NSCameraUsageDescription: Scan the pairing code shown by Jarvis on your Mac.
-        # Temporary: bundled conversation fonts for the font selector in Settings.
-        UIAppFonts:
-          - AnonymousPro-Bold.ttf
-          - AnonymousPro-Regular.ttf
-          - AtkinsonHyperlegibleMono-Variable.ttf
-          - CascadiaCode-Variable.ttf
-          - CommitMono-Bold.ttf
-          - CommitMono-Regular.ttf
-          - DejaVuSansMono-Bold.ttf
-          - DejaVuSansMono.ttf
-          - FiraCode-Variable.ttf
-          - GeistMono-Variable.ttf
-          - Hack-Bold.ttf
-          - Hack-Regular.ttf
-          - IBMPlexMono-Regular.ttf
-          - IBMPlexMono-SemiBold.ttf
-          - Inconsolata-Variable.ttf
-          - IntelOneMono-Bold.ttf
-          - IntelOneMono-Regular.ttf
-          - JetBrainsMono-Variable.ttf
-          - MartianMono-Variable.ttf
-          - RedHatMono-Variable.ttf
-          - RobotoMono-Variable.ttf
-          - ShareTechMono-Regular.ttf
-          - SourceCodePro-Variable.ttf
-          - SpaceMono-Bold.ttf
-          - SpaceMono-Regular.ttf
-          - UbuntuMono-Bold.ttf
-          - UbuntuMono-Regular.ttf
-          - VT323-Regular.ttf
-          - VictorMono-Variable.ttf
         UIBackgroundModes:
           - audio
 schemes:
