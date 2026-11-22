@@ -100,6 +100,10 @@ _Avoid_: compaction, compact, summarisation, restart
 The newest part of the Conversation, kept word for word after a Fold, beginning at a pause between two exchanges.
 _Avoid_: recent messages, window, buffer
 
+**Recall**:
+Jarvis looking up the exact words of the last 30 days when the User asks what was said: the User's lines, Jarvis's replies, details shown on screen and Task reports, found by word or phrase, with the date of each. It reaches nothing older than 30 days or from before the last reset, and it is a record of what was said, never of what a Task or a permission is now.
+_Avoid_: search, history lookup, memory
+
 **Wake word**:
 A phrase such as "Hey Jarvis", "Hi Jarvis", "Ehi Jarvis" or "Jarvis" that makes an idle Jarvis start listening. During playback it is evidence that speech addresses Jarvis, interpreted in context rather than treated as an unconditional Interruption.
 _Avoid_: hotword, trigger phrase
