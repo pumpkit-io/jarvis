@@ -483,6 +483,22 @@ async def test_an_unreadable_state_file_is_moved_aside_with_a_notice_and_the_hub
     assert json.loads(state.read_text())["version"] == 1
 
 
+async def test_a_state_file_that_cannot_be_read_is_moved_aside_before_the_next_save(clock: FakeClock, state: Path) -> None:
+    state.mkdir(parents=True)
+    output = RecordingOutput()
+    hub, _ = a_hub(clock, state, output)
+
+    await hub.start()
+    await hub.run(lines(clock, "Hello"))
+    await hub.close()
+
+    aside = state.with_name("state.unreadable.json")
+    [notice] = output.notices
+    assert notice.startswith(f"The state file {state} could not be read (")
+    assert notice.endswith(f"so nothing was restored; it was moved to {aside}.")
+    assert aside.is_dir() and json.loads(state.read_text())["version"] == 1
+
+
 async def interrupted_task(clock: FakeClock, state: Path, request: str = "How many PRs are open?") -> None:
     """A launch that leaves one Task open, its Orchestrator turn cut off by the close."""
     gate = asyncio.Event()

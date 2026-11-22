@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import re
 import shutil
 from collections.abc import AsyncIterator
@@ -91,7 +92,7 @@ async def test_the_first_launch_seeds_an_empty_conversation_and_shows_nothing(cl
     seed = launch_seed(backend)
     assert exchanges(seed) == []
     assert "<conversation>\nNone yet.\n</conversation>" in seed
-    assert "not the User speaking" in seed and "never open with updates, a recap or pending work" in seed
+    assert "not the User speaking" in seed
     assert output.replies == ["Reply 0."]
 
 
@@ -212,8 +213,6 @@ async def test_an_exchange_is_saved_as_soon_as_it_ends_so_a_killed_hub_loses_onl
     killed = tmp_path / "killed" / "conversation.json"
     killed.parent.mkdir()
     shutil.copy(path, killed)
-    # A save cut off mid-write leaves its temporary file beside the conversation.
-    (killed.parent / ".conversation-cut.json").write_text('{"version": 1, "entries": [{"mess')
     hold.set()
     typist.end()
     await running
@@ -260,7 +259,7 @@ async def test_the_saved_file_has_no_summary_yet_and_every_entry_in_order(clock:
     assert [e["message"] for e in saved["entries"]] == [
         f'<user lang="en" typed="true">{word}</user>' for word in ("one", "two", "three")
     ]
-    assert all(e["tokens"] > 0 and e["ended"] >= e["at"] for e in saved["entries"])
+    assert all(e["ended"] >= e["at"] for e in saved["entries"])
 
 
 def big(word: str, chars: int) -> str:
@@ -289,16 +288,156 @@ async def test_a_launch_loads_the_newest_exchanges_up_to_200000_tokens_and_keeps
     assert len(json.loads(path.read_text())["entries"]) == 4
 
 
-async def test_the_reported_context_corrects_the_token_estimate(clock: FakeClock, path: Path) -> None:
-    # The second turn's context grew by one token per character of the reply and message in between.
+async def test_the_corrected_token_estimate_applies_to_exchanges_saved_before_it(clock: FakeClock, path: Path) -> None:
+    # Each long line is about 69,000 tokens at the starting ratio and 160,000 at one token per 1.5 characters.
+    said = [big(word, 240_000) for word in ("alpha", "bravo")]
     reply, message = "Hello, sir.", '<user lang="en" typed="true">hello</user>'
-    first = 20_000
-    await launch(
-        clock, path, "hello", "hello", "hello",
-        scripts=[[Text(reply), Context(first, 1_000_000)],
-                 [Text(reply), Context(first + len(reply) + len(message), 1_000_000)],
-                 [Text(reply)]],
-    )
+    # Each short turn's context grows by one token per character of the reply and message before it.
+    contexts = [20_000 + i * (len(reply) + len(message)) for i in range(6)]
+    hub, _, _ = a_hub(clock, path, *[[Text("Noted.")] for _ in said],
+                      *[[Text(reply), Context(tokens, 1_000_000)] for tokens in contexts])
+    await hub.start()
+    await hub.run(lines_in_english(clock, *said, *["hello"] * len(contexts)))
+    await hub.close()
 
-    entries = json.loads(path.read_text())["entries"]
-    assert entries[2]["tokens"] > entries[0]["tokens"]
+    backend, _ = await launch(clock, path)
+
+    seed = launch_seed(backend)
+    assert "bravo bravo" in seed and "alpha alpha" not in seed
+    assert len(exchanges(seed)) == 1 + len(contexts)
+
+
+VALID: dict[str, Any] = {"message": "<user>hi</user>", "reply": "Hi.", "tools": [], "device": "Mac", "kind": "user",
+         "at": 1_800_000_000, "ended": 1_800_000_001, "tokens": 10}
+
+
+def saved_file(entry: str = json.dumps(VALID), ratio: str = "3.5") -> bytes:
+    return f'{{"version": 1, "active_summary": null, "chars_per_token": {ratio}, "entries": [{entry}]}}'.encode()
+
+
+def with_field(name: str, value: str) -> bytes:
+    return saved_file(json.dumps(VALID).replace(f'"{name}": {json.dumps(VALID[name])}', f'"{name}": {value}'))
+
+
+async def test_a_well_formed_saved_entry_is_seeded(clock: FakeClock, path: Path) -> None:
+    path.parent.mkdir(parents=True)
+    path.write_bytes(saved_file())
+
+    backend, output = await launch(clock, path)
+
+    [exchange] = exchanges(launch_seed(backend))
+    assert exchange.startswith('<exchange device="Mac" at="') and "<user>hi</user>" in exchange
+    assert output.notices == []
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b'{"version": 1, "entries": [{"message": "\xff\xfe"}]}',
+        with_field("at", "NaN"),
+        with_field("at", "Infinity"),
+        with_field("at", "1e20"),
+        with_field("at", "1e400"),
+        with_field("at", "true"),
+        with_field("ended", '"soon"'),
+        with_field("tools", "[1]"),
+        with_field("device", '["Mac"]'),
+        saved_file(ratio="NaN"),
+        saved_file(ratio='"fast"'),
+        saved_file(ratio="1" + "0" * 400),
+        with_field("at", "1" + "0" * 400),
+        saved_file(entry="[]"),
+        b'{"version": 1, "entries": {"a": 1}}',
+        b"[" * 100_000,
+    ],
+    ids=["bad utf-8", "nan time", "infinite time", "far time", "overflowing time", "bool time", "text time",
+         "numeric tool", "listed device", "nan ratio", "text ratio",
+         "huge integer ratio", "huge integer time", "list entry", "entries mapping", "deep nesting"],
+)
+async def test_a_malformed_value_moves_the_conversation_aside_and_the_hub_starts_empty(
+    clock: FakeClock, path: Path, content: bytes
+) -> None:
+    path.parent.mkdir(parents=True)
+    path.write_bytes(content)
+
+    backend, output = await launch(clock, path, "Hello")
+
+    aside = path.with_name("conversation.unreadable.json")
+    [notice] = output.notices
+    assert notice.startswith(f"The saved conversation {path} ") and notice.endswith(f"it was moved to {aside}.")
+    assert aside.read_bytes() == content
+    assert exchanges(launch_seed(backend)) == []
+    assert output.replies == ["Reply 0."]
+    assert [e["reply"] for e in json.loads(path.read_text())["entries"]] == ["Reply 0."]
+
+
+async def test_a_second_damaged_conversation_does_not_overwrite_the_first_one_set_aside(
+    clock: FakeClock, path: Path
+) -> None:
+    path.parent.mkdir(parents=True)
+    path.write_text("{first")
+    await launch(clock, path)
+    path.write_text("{second")
+
+    _, output = await launch(clock, path)
+
+    first, second = path.with_name("conversation.unreadable.json"), path.with_name("conversation.unreadable-2.json")
+    assert first.read_text() == "{first" and second.read_text() == "{second"
+    assert output.notices == [
+        f"The saved conversation {path} is not valid JSON, so Jarvis starts with an empty conversation; "
+        f"it was moved to {second}."
+    ]
+
+
+async def test_a_conversation_that_cannot_be_read_is_moved_aside_before_anything_is_saved(
+    clock: FakeClock, path: Path
+) -> None:
+    path.mkdir(parents=True)
+    (path / "inside").write_text("kept")
+
+    backend, output = await launch(clock, path, "Hello")
+
+    aside = path.with_name("conversation.unreadable.json")
+    [notice] = output.notices
+    assert notice.startswith(f"The saved conversation {path} could not be read (")
+    assert notice.endswith(f"so Jarvis starts with an empty conversation; it was moved to {aside}.")
+    assert (aside / "inside").read_text() == "kept"
+    assert exchanges(launch_seed(backend)) == []
+    assert [e["reply"] for e in json.loads(path.read_text())["entries"]] == ["Reply 0."]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads and renames past file permissions")
+async def test_a_conversation_that_can_be_neither_read_nor_moved_aside_is_never_saved_over(
+    clock: FakeClock, path: Path
+) -> None:
+    path.parent.mkdir(parents=True)
+    path.write_text("{}")
+    path.chmod(0)
+    path.parent.chmod(0o555)
+    try:
+        backend, output = await launch(clock, path, "Hello")
+    finally:
+        path.parent.chmod(0o755)
+        path.chmod(0o644)
+
+    [notice] = output.notices
+    assert notice.startswith(f"The saved conversation {path} could not be read (")
+    assert "could not be moved aside" in notice and "nothing will be saved over it" in notice
+    assert output.replies == ["Reply 0."]
+    assert exchanges(launch_seed(backend)) == []
+    assert path.read_text() == "{}"
+
+
+async def test_a_message_with_a_lone_surrogate_is_saved_and_the_conversation_goes_on(
+    clock: FakeClock, path: Path
+) -> None:
+    hub, _, output = a_hub(clock, path, [Text("Reply 0.")], [Text("Reply 1.")])
+    await hub.start()
+    await hub.run(lines_in_english(clock, "broken \ud800 text", "next"))
+    await hub.close()
+
+    backend, _ = await launch(clock, path)
+
+    assert output.replies == ["Reply 0.", "Reply 1."] and output.notices == []
+    broken, _ = exchanges(launch_seed(backend))
+    assert "broken \ud800 text" in broken

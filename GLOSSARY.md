@@ -81,7 +81,7 @@ _Avoid_: rate limit, quota, billing limit
 ### Conversation
 
 **Conversation**:
-The one thread of exchanges between the User and Jarvis, shared by the Mac and the iPhone and continued across Hub restarts until the User resets it. Each exchange keeps the device it came from.
+Everything the User and Jarvis have said to each other, as one ongoing sequence of exchanges shared by the Mac and the iPhone and continued across Hub restarts until the User resets it. Each exchange keeps the device it came from.
 _Avoid_: chat, session, thread, history
 
 **Wake word**:

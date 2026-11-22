@@ -36,11 +36,19 @@ from jarvis_hub.authorizations import Authorization, Authorizations
 from jarvis_hub.approvals import EXPIRES_AFTER, HUB_ACTIONS, Approval, Approvals, approval_event
 from jarvis_hub.clients import Client, Clients, TERMINAL
 from jarvis_hub.config import DEFAULT_TALKER_RESTART_AT
-from jarvis_hub.conversation import LAUNCH_TOKENS, RESTART_TOKENS, Conversation, Device, SeedReason, UnreadableConversation, seed_message
+from jarvis_hub.conversation import (
+    LAUNCH_TOKENS,
+    RESTART_TOKENS,
+    Conversation,
+    Device,
+    EntryKind,
+    SeedReason,
+    seed_message,
+)
 from jarvis_hub.limits import SavedLimit, UsageLimit, reset_sentence, update_sentence
 from jarvis_hub.news import Leaf, News, backlog_message, fresh
 from jarvis_hub.orchestrator import orchestrator_tools
-from jarvis_hub.state import Fields, StateFile, UnreadableState
+from jarvis_hub.state import Fields, StateFile, UnreadableFile
 from jarvis_hub.spoken import SpokenScopes
 from jarvis_hub.subagent_rules import connector_check
 from jarvis_hub.subagents import Subagent, SubagentSetup, Subagents, ended_event, kept_line, over_time_event
@@ -303,6 +311,15 @@ def task_message(task: Task, request: str, context: str, *, continues: bool) -> 
 
 
 @dataclass(frozen=True)
+class _ContextReading:
+    """A completed Talker turn's context size and reply length, the baseline for checking the next turn's growth."""
+
+    session: AgentSession
+    tokens: int
+    reply_chars: int
+
+
+@dataclass(frozen=True)
 class _TalkerInput:
     kind: TalkerKind
     arrived: float
@@ -509,8 +526,7 @@ class Hub:
         # Every exchange, saved so the next Talker session, in this launch or the next, continues it (ADR 0028).
         self._conversation = Conversation(conversation_path)
         self._conversation_failing = False
-        # The last completed turn's session, context size and reply length, while no tool call muddies the reading.
-        self._measured: tuple[AgentSession, int, int] | None = None
+        self._last_reading: _ContextReading | None = None
         # The language of the latest line read, and of the latest User turn the Talker took: replies follow it.
         self._read_lang: Lang = "en"
         self._lang: Lang = "en"
@@ -676,13 +692,12 @@ class Hub:
             self._client_snapshots[key] = payload
 
     async def start(self) -> None:
-        """Open the Talker and seed it with the saved Conversation in the background (ADRs 0006 and 0028); a line typed
-        meanwhile waits for it. What the last launch left pending is restored first, and the Orchestrator hears of it
-        in the background."""
+        """Restores what the last launch left pending, then seeds a new Talker with the saved Conversation in the
+        background (ADRs 0006 and 0028); a line typed meanwhile waits for it."""
         recovering = self._restore()
         try:
             self._conversation.load()
-        except UnreadableConversation as e:
+        except UnreadableFile as e:
             self._output.notice(str(e))
         self.publish_client_snapshots()
         self._loops = [asyncio.create_task(self._talk()), asyncio.create_task(self._orchestrate())]
@@ -1239,7 +1254,7 @@ class Hub:
         }
         try:
             self._state.save(data)
-        except OSError as e:
+        except (OSError, ValueError) as e:
             if not self._save_failing:
                 self._output.notice(f"Could not save the Hub's state, so a restart would lose it: {e}")
             self._save_failing = True
@@ -1282,7 +1297,7 @@ class Hub:
             return None
         try:
             data = self._state.load()
-        except UnreadableState as e:
+        except UnreadableFile as e:
             self._output.notice(str(e))
             return None
         if data is None:
@@ -1676,12 +1691,13 @@ class Hub:
         # The reference Client stands in for the iPhone in protocol tests.
         return "Mac" if client_id == TERMINAL else "iPhone"
 
-    def _keep(self, message: str, reply: str, *, tools: list[str], client_id: str, kind: TalkerKind, arrived: float) -> None:
+    def _save_exchange(self, message: str, reply: str, *, tools: list[str], client_id: str, kind: EntryKind,
+                       arrived: float) -> None:
         now, wall = self._clock.now(), self._wall()
         try:
-            self._conversation.add(message, reply, tools=tools, device=self._device(client_id),
-                                   kind="user" if kind == "user" else "event", at=wall - (now - arrived), ended=wall)
-        except OSError as e:
+            self._conversation.add(message, reply, tools=tools, device=self._device(client_id), kind=kind,
+                                   at=wall - (now - arrived), ended=wall)
+        except (OSError, ValueError) as e:
             if not self._conversation_failing:
                 self._output.notice(f"Could not save the conversation, so a restart would lose it: {e}")
             self._conversation_failing = True
@@ -1691,13 +1707,14 @@ class Hub:
     def _measure(self, session: AgentSession, message: str, shown: str, tools: list[str], end: TurnEnd) -> None:
         """Checks the token estimate against the context the CLI reports: between two tool-free turns of one session
         the context grows by the earlier reply and the later message."""
+        # Tool calls and their results enter the context too, so a turn with them would inflate the reading.
         if end.outcome != "completed" or tools or end.context is None:
-            self._measured = None
+            self._last_reading = None
             return
-        if self._measured is not None and self._measured[0] is session:
-            _, tokens, reply_chars = self._measured
-            self._conversation.calibrate(reply_chars + len(message), end.context.tokens - tokens)
-        self._measured = session, end.context.tokens, len(shown)
+        last = self._last_reading
+        if last is not None and last.session is session:
+            self._conversation.calibrate(last.reply_chars + len(message), end.context.tokens - last.tokens)
+        self._last_reading = _ContextReading(session, end.context.tokens, len(shown))
 
     async def _quiet_or_next(self) -> _TalkerInput | None:
         """Waits for voice mode to go quiet (or the input to end), unless the inbox's next item comes first; then
@@ -1840,8 +1857,8 @@ class Hub:
             self._approvals.record_question(shown)
         self.publish_client_snapshots()
         self._measure(session, message, shown, tools, end)
-        if show and (shown.strip() or end.outcome != "failed"):
-            self._keep(message, shown, tools=tools, client_id=destination_id, kind=kind, arrived=arrived)
+        if kind in ("user", "event") and (shown.strip() or end.outcome != "failed"):
+            self._save_exchange(message, shown, tools=tools, client_id=destination_id, kind=kind, arrived=arrived)
         if delivery is not None and end.outcome == "completed":
             delivery.reply = shown
 
