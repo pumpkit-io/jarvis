@@ -1,14 +1,16 @@
+import asyncio
 import io
 import sqlite3
 import time
 from collections.abc import Iterator
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from jarvis_hub.event_log import EventLog, EventOutput
-from tests.fakes import FakeBackend, FakeClock, RecordingMetrics, RecordingOutput, Text, Tool, lines, make_hub
+from jarvis_hub.event_log import FOLLOWED_CHARS, MATCH_CHARS, EventLog, EventOutput
+from tests.fakes import FakeBackend, FakeClock, Gate, RecordingMetrics, RecordingOutput, Text, Tool, lines, make_hub
 
 DAY = 86400.0
 # Sunday 22 November 2026, 12:00 UTC.
@@ -115,7 +117,7 @@ def test_a_date_range_keeps_only_its_matches_and_a_range_inside_the_log_reaches_
     assert [m.text for m in found.matches] == ["Orchard note 5."]
     assert found.edge is None
     assert "<edge>" not in found.render()
-    assert 'from="2026-11-16 12:00 Monday" to="2026-11-20 12:00 Friday"' in found.render()
+    assert 'from="2026-11-16 12:00 Monday" to="2026-11-20 11:59 Friday"' in found.render()
     assert everything.edge == "retention"
     assert ("<edge>This search reached the edge of the 30 days the log keeps (2026-10-23 12:00 Friday): "
             "anything older is only in Memory.</edge>") in everything.render()
@@ -135,8 +137,9 @@ def test_at_most_ten_matches_fit_in_about_two_thousand_tokens(tmp_path: Path) ->
     assert 0 < len(found.matches) <= 10
     assert found.more
     assert len(found.render()) <= 2000 * 4
-    assert all(len(match.text) <= 502 for match in found.matches)
-    assert all(match.followed is not None and len(match.followed.text) <= 160 for match in found.matches)
+    # An excerpt cut on both sides gains an ellipsis at each end.
+    assert all(len(match.text) <= MATCH_CHARS + len("……") for match in found.matches)
+    assert all(match.followed is not None and len(match.followed.text) <= FOLLOWED_CHARS for match in found.matches)
     assert [m.time for m in found.matches] == sorted(m.time for m in found.matches)
     assert len(three.matches) == 3 and three.more
     assert len(many.matches) <= 10
@@ -191,13 +194,13 @@ def test_secrets_in_results_are_redacted(tmp_path: Path) -> None:
     assert '<followed from="jarvis">The password is [secret removed], sir.</followed>' in shown
 
 
-def old_log(path: Path, events: int) -> None:
+def old_log(path: Path, events: int, *, at: float = NOW - DAY) -> None:
     """A log written before recall existed: the events table alone, with no index."""
     with sqlite3.connect(path) as db:
         db.execute("CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, time REAL NOT NULL, "
                    "type TEXT NOT NULL, client_id TEXT, payload TEXT NOT NULL)")
         db.executemany("INSERT INTO events(time, type, client_id, payload) VALUES (?, 'heard', 'terminal', ?)",
-                       [(NOW - DAY + n, f'{{"request_id": "r{n}", "text": "Old line {n} about the granary.", "spoken": true}}')
+                       [(at + n, f'{{"request_id": "r{n}", "text": "Old line {n} about the granary.", "spoken": true}}')
                         for n in range(events)])
     db.close()
 
@@ -245,6 +248,7 @@ async def test_the_talkers_recall_call_reaches_the_search_with_its_dates_and_spe
     backend = FakeBackend(FakeClock(), [[
         Tool("recall", {"query": "lighthouse", "from": "2026-11-18", "to": "2026-11-19", "speaker": "user", "limit": 5}),
         Tool("recall", {"query": "lighthouse", "from": "last Tuesday"}),
+        Tool("recall", {"query": "lighthouse", "to": "9999-12-31"}),
         Text("Under the blue mat, sir."),
     ]])
     with EventLog(tmp_path / "events.sqlite3", wall=wall) as log:
@@ -258,12 +262,12 @@ async def test_the_talkers_recall_call_reaches_the_search_with_its_dates_and_spe
         finally:
             await hub.close()
 
-    dated, undated = [result for result in backend.session("talker").tool_results if result.name == "recall"]
+    dated, undated, endless = [result for result in backend.session("talker").tool_results if result.name == "recall"]
     assert dated.result is not None
     assert "The lighthouse key goes under the blue mat." in dated.result
     assert "shed" not in dated.result and "closed today" not in dated.result
-    assert 'from="2026-11-18 00:00 Wednesday" to="2026-11-20 00:00 Friday"' in dated.result
-    assert undated.result == "from and to are dates such as 2026-11-15."
+    assert 'from="2026-11-18 00:00 Wednesday" to="2026-11-19 23:59 Thursday"' in dated.result
+    assert undated.result == endless.result == "from and to are dates such as 2026-11-15."
 
 
 async def test_a_task_report_is_logged_and_found_by_its_content(tmp_path: Path) -> None:
@@ -292,19 +296,113 @@ async def test_a_task_report_is_logged_and_found_by_its_content(tmp_path: Path) 
     assert report.followed is not None and report.followed.text == "The review is done, sir."
 
 
-async def test_text_mode_starts_the_backfill_when_it_opens_the_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_text_mode_indexes_an_existing_log_in_the_background_and_recall_finds_it(tmp_path: Path) -> None:
     from tests.test_text_mode import converse, settings
 
-    started: list[EventLog] = []
-    backfill = EventLog.start_backfill
-
-    def recorded(log: EventLog, batch: int = 500) -> None:
-        started.append(log)
-        backfill(log, batch)
-
-    monkeypatch.setattr(EventLog, "start_backfill", recorded)
     config = settings(tmp_path)
+    path = config.runtime_dir / "events.sqlite3"
+    path.parent.mkdir(parents=True)
+    old_log(path, 50, at=time.time() - 3600)
+    indexed = asyncio.Event()
 
-    await converse(FakeBackend(FakeClock(), [[Text("Evening, sir.")]]), io.StringIO("Evening\n"), config=config)
+    async def wait_for_the_backfill() -> None:
+        while True:
+            try:
+                with closing(sqlite3.connect(path)) as db:
+                    row = db.execute("SELECT through FROM recall_backfill").fetchone()
+            except sqlite3.OperationalError:
+                row = None
+            if row == (0,):
+                indexed.set()
+                return
+            await asyncio.sleep(0.01)
 
-    assert len(started) == 1
+    backend = FakeBackend(FakeClock(), [[Gate(indexed), Tool("recall", {"query": '"old line 7"'}), Text("Yes, sir.")]])
+    waiting = asyncio.create_task(wait_for_the_backfill())
+    try:
+        await converse(backend, io.StringIO("Did I mention the granary?\n"), config=config)
+    finally:
+        waiting.cancel()
+
+    [found] = [result for result in backend.session("talker").tool_results if result.name == "recall"]
+    assert found.result is not None and "Old line 7 about the granary." in found.result
+
+
+def test_a_line_jarvis_never_answered_is_not_paired_with_a_later_reply(tmp_path: Path) -> None:
+    wall = Wall()
+    with EventLog(tmp_path / "events.sqlite3", wall=wall) as log:
+        wall.now = NOW - 3 * DAY
+        log.append("heard", {"request_id": "errored", "text": "What about the pergola?", "spoken": True})
+        log.append("reply_end", {"reply_id": "p1", "request_id": "errored", "text": "", "reason": "error"})
+        log.append("heard", {"request_id": "unanswered", "text": "And the pergola paint?", "spoken": True})
+        exchange(log, wall, NOW - DAY, "Book the dentist.", "I can't book things, sir.")
+
+        found = log.search("pergola")
+
+    assert [(m.text, m.followed) for m in found.matches] == [
+        ("What about the pergola?", None), ("And the pergola paint?", None)]
+
+
+def test_a_reply_is_followed_only_by_the_users_next_line_in_the_same_exchange(tmp_path: Path) -> None:
+    wall = Wall()
+    with EventLog(tmp_path / "events.sqlite3", wall=wall) as log:
+        exchange(log, wall, NOW - 3 * DAY, "Tell me about the pergola.", "The pergola faces south, sir.")
+        exchange(log, wall, NOW - DAY, "Book the dentist.", "I can't book things, sir.")
+        exchange(log, wall, NOW - 2 * 3600, "Is the pergola stain dry?", "The pergola stain needs a day, sir.")
+        exchange(log, wall, NOW - 2 * 3600 + 60, "Thanks.", "My pleasure, sir.")
+
+        found = log.search("pergola", speaker="jarvis")
+
+    assert [(m.text, m.followed and m.followed.text) for m in found.matches] == [
+        ("The pergola faces south, sir.", None), ("The pergola stain needs a day, sir.", "Thanks.")]
+
+
+def test_shown_details_are_followed_by_the_reply_they_were_shown_with(tmp_path: Path) -> None:
+    wall = Wall()
+    with EventLog(tmp_path / "events.sqlite3", wall=wall) as log:
+        log.append("reply_end", {"reply_id": "other", "request_id": "r0", "text": "Unrelated, sir.", "reason": "complete"})
+        log.append("show", {"reply_id": "p1", "title": "Details", "text": "| pergola | 3 m |"})
+        log.append("reply_end", {"reply_id": "early", "request_id": "r1", "text": "A reply to something else.", "reason": "complete"})
+        log.append("reply_end", {"reply_id": "p1", "request_id": "r2", "text": "The pergola is three metres, sir.", "reason": "complete"})
+
+        [shown] = log.search("pergola", speaker="jarvis").matches[:1]
+
+    assert shown.followed is not None and shown.followed.text == "The pergola is three metres, sir."
+
+
+def test_a_task_report_is_followed_by_the_announcement_not_a_reply_to_the_user(tmp_path: Path) -> None:
+    wall = Wall()
+    with EventLog(tmp_path / "events.sqlite3", wall=wall) as log:
+        log.append("task_report", {"task_id": "T2", "text": "The pergola PR is open.", "details": None})
+        log.append("reply_end", {"reply_id": "p1", "request_id": "r1", "text": "Dinner is at eight, sir.", "reason": "complete"})
+        log.append("reply_end", {"reply_id": "p2", "request_id": None, "text": "Sir, the pergola PR is open.", "reason": "complete"})
+
+        [report] = log.search("pergola PR", speaker="jarvis").matches[:1]
+
+    assert report.followed is not None and report.followed.text == "Sir, the pergola PR is open."
+
+
+def test_when_the_budget_runs_out_the_newest_matches_are_kept(tmp_path: Path) -> None:
+    wall = Wall()
+    with EventLog(tmp_path / "events.sqlite3", wall=wall) as log:
+        for days in range(10, 0, -1):
+            # Every `&` is five characters once escaped, so ten of these overrun about 2,000 tokens.
+            exchange(log, wall, NOW - days * DAY, f"Meadow note {days}: " + "R&D " * 100, "Noted.")
+
+        found = log.search("meadow")
+
+    assert 0 < len(found.matches) < 10
+    assert found.more
+    assert len(found.render()) <= 2000 * 4
+    assert found.matches[-1].text.startswith("Meadow note 1:")
+    assert [m.time for m in found.matches] == sorted(m.time for m in found.matches)
+
+
+def test_a_long_match_is_cut_around_the_word_even_when_its_accents_differ(tmp_path: Path) -> None:
+    wall = Wall()
+    with EventLog(tmp_path / "events.sqlite3", wall=wall) as log:
+        exchange(log, wall, NOW - DAY, "We walked along the river. " * 40 + "Then we stopped at the Café Rosé.", "Lovely, sir.")
+
+        [match] = log.search("cafe rose", speaker="user").matches
+
+    assert match.text.startswith("…") and match.text.endswith("Then we stopped at the Café Rosé.")

@@ -2664,7 +2664,7 @@ class Hub:
         try:
             start = _local_day(args.get("from"))
             end = _local_day(args.get("to"), following=True)
-        except ValueError:
+        except (ValueError, OverflowError):
             return "from and to are dates such as 2026-11-15."
         speaker = args.get("speaker") or None
         if speaker not in (None, "user", "jarvis"):

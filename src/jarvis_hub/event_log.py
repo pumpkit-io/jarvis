@@ -5,8 +5,10 @@ import hashlib
 import json
 import re
 import sqlite3
+import sys
 import threading
 import time
+import unicodedata
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -42,14 +44,14 @@ RETENTION = 30 * 86400
 RECALLED = ("heard", "reply_end", "show", "task_report")
 SOURCES = {"heard": "user", "reply_end": "jarvis", "show": "screen", "task_report": "task"}
 SPEAKERS = {"user": ("heard",), "jarvis": ("reply_end", "show", "task_report")}
-# What followed each kind of match: a reply follows what the User said, the User's next line follows a reply.
-FOLLOWED_BY = {"heard": "reply_end", "reply_end": "heard", "show": "reply_end", "task_report": "reply_end"}
 RECALL_LIMIT = 10
 # About 2,000 tokens at the Conversation's starting ratio of 3.5 characters a token.
 RECALL_CHARS = 7000
 MATCH_CHARS = 500
 BACKFILL_PAUSE = 0.002
 FOLLOWED_CHARS = 160
+# What followed a match is looked for only this long after it, which also bounds the scan.
+FOLLOWED_WITHIN = 10 * 60
 
 
 def _sql_words(row: str) -> str:
@@ -101,7 +103,8 @@ class Recall:
     indexing: bool
 
     def render(self) -> str:
-        until = _stamp(self.until) if self.until is not None else "now"
+        # The end is exclusive, so its last minute is the last one searched.
+        until = _stamp(self.until - 1) if self.until is not None else "now"
         lines = [f'<recall today="{_day(self.today)}" from="{_stamp(self.since)}" to="{until}">']
         for match in self.matches:
             task = f' task="{escape(match.task_id)}"' if match.task_id else ""
@@ -136,9 +139,9 @@ def _stamp(at: float) -> str:
 
 
 def fts_query(query: str) -> tuple[str, tuple[str, ...]]:
-    """An FTS5 query in which every word must appear and a double-quoted phrase as written, and the words searched.
+    """The FTS5 query and the words it searches: every word must appear, a double-quoted phrase as written.
 
-    Every part is quoted, so no word the User says is read as an FTS5 operator."""
+    Every part is quoted, so no word is read as an FTS5 operator."""
     parts: list[str] = []
     terms: list[str] = []
     for phrase, word in re.findall(r'"([^"]*)"?|([^\s"]+)', query):
@@ -149,14 +152,27 @@ def fts_query(query: str) -> tuple[str, tuple[str, ...]]:
     return " ".join(parts), tuple(terms)
 
 
+def _folded(text: str) -> tuple[str, list[int]]:
+    """`text` lowercased and without accents, as the index reads it, and the position in `text` of each character."""
+    chars: list[str] = []
+    origins: list[int] = []
+    for i, char in enumerate(text):
+        for plain in unicodedata.normalize("NFKD", char.lower()):
+            if not unicodedata.combining(plain):
+                chars.append(plain)
+                origins.append(i)
+    return "".join(chars), origins
+
+
 def _excerpt(text: str, terms: tuple[str, ...]) -> str:
     """The redacted text, cut to `MATCH_CHARS` around its first matching word; redacting first never leaves half a secret."""
     text = redact(text).strip()
     if len(text) <= MATCH_CHARS:
         return text
-    lowered = text.lower()
+    folded, origins = _folded(text)
     # Stemmed matches share a prefix with the word searched, so the first four letters find them.
-    found = [i for term in terms if (i := lowered.find(term.lower()[:4])) >= 0]
+    found = [origins[hit.start()] for term in terms
+             if (hit := re.search(r"\b" + re.escape(_folded(term)[0][:4]), folded))]
     start = max(0, min(found, default=0) - MATCH_CHARS // 4)
     cut = text[start:start + MATCH_CHARS]
     return ("…" if start else "") + cut + ("…" if start + MATCH_CHARS < len(text) else "")
@@ -165,6 +181,15 @@ def _excerpt(text: str, terms: tuple[str, ...]) -> str:
 def _line(text: str) -> str:
     line = " ".join(redact(text).split())
     return line if len(line) <= FOLLOWED_CHARS else line[:FOLLOWED_CHARS - 1] + "…"
+
+
+def _answers(kind: str, match: dict[str, Any], reply: dict[str, Any]) -> bool:
+    if kind == "heard":
+        return match.get("request_id") is not None and reply.get("request_id") == match["request_id"]
+    if kind == "show":
+        return match.get("reply_id") is not None and reply.get("reply_id") == match["reply_id"]
+    # A Task report is told by the next Announcement, the one reply to no request.
+    return reply.get("request_id") is None
 
 
 class EventLog:
@@ -195,7 +220,7 @@ class EventLog:
             CREATE TABLE IF NOT EXISTS context_reset (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), time REAL NOT NULL);
         """)
         self._db.executescript(RECALL_SCHEMA)
-        cutoff = wall() - 30 * 86400
+        cutoff = wall() - RETENTION
         self._db.execute("UPDATE retention SET pruned_through = MAX(pruned_through, "
                          "COALESCE((SELECT MAX(seq) FROM events WHERE time < ?), 0)) WHERE singleton = 1", (cutoff,))
         self._db.execute("DELETE FROM events WHERE time < ?", (cutoff,))
@@ -284,7 +309,7 @@ class EventLog:
     def retained_reply(self, reply_id: str) -> tuple[str, str] | None:
         with self._lock:
             rows = self._db.execute("SELECT payload FROM events WHERE type = 'reply_end' AND time >= ? ORDER BY seq DESC",
-                                    (self._wall() - 30 * 86400,)).fetchall()
+                                    (self._wall() - RETENTION,)).fetchall()
             for (encoded,) in rows:
                 payload = json.loads(encoded)
                 if payload.get("reply_id") == reply_id:
@@ -295,8 +320,11 @@ class EventLog:
     @property
     def reset_time(self) -> float | None:
         with self._lock:
-            row = self._db.execute("SELECT time FROM context_reset WHERE singleton = 1").fetchone()
-            return row[0] if row else None
+            return self._reset_time()
+
+    def _reset_time(self) -> float | None:
+        row = self._db.execute("SELECT time FROM context_reset WHERE singleton = 1").fetchone()
+        return row[0] if row else None
 
     def set_reset_time(self, at: float) -> None:
         """Recall ignores every event from before `at`, the time of the last Reset context."""
@@ -316,43 +344,50 @@ class EventLog:
         with self._lock:
             now = self._wall()
             floor = now - RETENTION
-            reset = self._db.execute("SELECT time FROM context_reset WHERE singleton = 1").fetchone()
+            reset = self._reset_time()
             edge: Literal["retention", "reset"] = "retention"
-            if reset is not None and reset[0] >= floor:
-                floor, edge = reset[0], "reset"
+            if reset is not None and reset >= floor:
+                floor, edge = reset, "reset"
             since = floor if start is None or start <= floor else start
             rows = self._db.execute(
                 "SELECT e.seq, e.time, e.type, e.payload FROM recall_index JOIN events e ON e.seq = recall_index.rowid "
                 f"WHERE recall_index MATCH ? AND e.time >= ? AND (? IS NULL OR e.time < ?) "
                 f"AND e.type IN ({', '.join('?' * len(kinds))}) ORDER BY recall_index.rank, e.seq DESC LIMIT ?",
                 (match, since, end, end, *kinds, limit + 1)).fetchall()
-            matches: list[Match] = []
+            matches: list[tuple[int, Match]] = []
             spent = 0
-            for seq, at, kind, encoded in sorted(rows[:limit], key=lambda row: row[0]):
+            # Best and newest first, so the budget drops the weakest and oldest matches.
+            for seq, at, kind, encoded in rows[:limit]:
                 payload = json.loads(encoded)
-                followed = self._followed(seq, kind, payload)
+                followed = self._followed(seq, at, kind, payload)
                 found = Match(at, SOURCES[kind], _excerpt(_words(payload), terms),
                               payload.get("task_id") if kind == "task_report" else None, followed)
-                spent += len(found.text) + (len(followed.text) if followed else 0)
+                spent += sum(len(escape(shown.text, quote=False)) for shown in (found, followed) if shown)
                 if spent > RECALL_CHARS:
                     break
-                matches.append(found)
+                matches.append((seq, found))
             indexing = self._db.execute("SELECT through FROM recall_backfill WHERE singleton = 1").fetchone()[0] > 0
-        return Recall(now, since, end, tuple(matches), edge if since == floor else None,
-                      len(rows) > len(matches), indexing)
+        shown = tuple(kept for _, kept in sorted(matches, key=lambda pair: pair[0]))
+        return Recall(now, since, end, shown, edge if since == floor else None, len(rows) > len(matches), indexing)
 
-    def _followed(self, seq: int, kind: str, payload: dict[str, Any]) -> Match | None:
-        after = FOLLOWED_BY[kind]
-        query = ("SELECT time, type, payload FROM events WHERE seq > ? AND type = ? AND json_extract(payload, '$.text') != '' "
-                 "{} ORDER BY seq LIMIT 1")
-        row = None
-        if kind == "heard" and payload.get("request_id"):
-            row = self._db.execute(query.format("AND json_extract(payload, '$.request_id') = ?"),
-                                   (seq, after, payload["request_id"])).fetchone()
-        row = row or self._db.execute(query.format(""), (seq, after)).fetchone()
-        if row is None:
-            return None
-        return Match(row[0], SOURCES[row[1]], _line(_words(json.loads(row[2]))))
+    def _followed(self, seq: int, at: float, kind: str, payload: dict[str, Any]) -> Match | None:
+        """The reply to the same request, the reply a detail was shown with, the Announcement after a Task report, or
+        the User's next line after a reply; None when it is not within `FOLLOWED_WITHIN`."""
+        # `+time` keeps the window's end on the rowid order rather than the time index, so the scan stops there.
+        rows = self._db.execute(
+            "SELECT time, type, payload FROM events WHERE seq > ? AND type IN ('heard', 'reply_end') AND seq < "
+            "COALESCE((SELECT seq FROM events WHERE seq > ? AND +time > ? ORDER BY seq LIMIT 1), ?) ORDER BY seq",
+            (seq, seq, at + FOLLOWED_WITHIN, sys.maxsize))
+        for when, type, encoded in rows:
+            event = json.loads(encoded)
+            if type == "reply_end" and not event.get("text"):
+                continue
+            if kind == "reply_end":
+                # The User's next line answers a reply only when no other reply came first.
+                return Match(when, "user", _line(_words(event))) if type == "heard" else None
+            if type == "reply_end" and _answers(kind, payload, event):
+                return Match(when, "jarvis", _line(_words(event)))
+        return None
 
     def reserve(self, client_id: str, command_id: str, kind: str,
                 payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
@@ -386,10 +421,9 @@ class EventLog:
                              (json.dumps(result, allow_nan=False), client_id, command_id))
 
     def start_backfill(self, batch: int = 500) -> None:
-        """Index the events logged before recall existed, newest first, on a thread of its own.
+        """Index the events logged before recall existed, newest first, in short batches on a thread of its own.
 
-        Each batch holds the log only briefly, so the Hub starts and logs meanwhile; closing stops it, and the next
-        launch carries on where it stopped."""
+        Closing stops it; the next launch carries on."""
         self._backfill = threading.Thread(target=self._fill, args=(batch,), name="recall-backfill", daemon=True)
         self._backfill.start()
 
