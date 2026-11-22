@@ -323,7 +323,7 @@ class _ContextReading:
 
 @dataclass
 class _Fold:
-    """A Fold under way: the entries it summarises, fixed when it starts, and the summariser's run."""
+    """A Fold under way: the entries it summarises, fixed when it starts, and the Summariser's run."""
 
     folded: tuple[Entry, ...]
     running: "asyncio.Task[str | None]"
@@ -614,7 +614,7 @@ class Hub:
         self._interrupted: list[str] = []
         # The Orchestrator's messages from posting until their turn ends, saved so a restart loses none.
         self._unanswered: list[_OrchestratorInput] = []
-        # A Fold runs unseen, so a limit on the summariser holds only the next Fold.
+        # A Fold runs unseen, so a limit on the Summariser holds only the next Fold.
         self._limit = UsageLimit(clock, wall, self._limit_hit, self._limit_cleared, self._limit_reset,
                                  unseen=frozenset({SUMMARISER}))
         # Held until the usage limit resets, each still counted in `_pending` so a text-mode run waits for it: the
@@ -1643,13 +1643,7 @@ class Hub:
         while not self._news:
             self._arrived.clear()
             await self._arrived.wait()
-        while self._focus_busy():
-            self._clients_updated.clear()
-            await self._clients_updated.wait()
-        if self.clients.focus == TERMINAL and self._floor is not None:
-            await self._quiet()
-        elif self._client_can_speak(self.clients.focus):
-            await self._speech.idle(stall_timeout=None, destination=self._client_players.get(self.clients.focus))
+        await self._focus_quiet()
 
     async def _fold_and_quiet(self) -> None:
         """Returns once a Fold's summary is ready to swap in and Jarvis is quiet. A spoken scope still unresolved
@@ -1664,6 +1658,10 @@ class Hub:
             await self._talker_cleared.wait()
         if not self._fold_ready():
             await asyncio.Event().wait()
+        await self._focus_quiet()
+
+    async def _focus_quiet(self) -> None:
+        """Returns once no Client that can speak is talking or playing, and Jarvis is quiet on the Focus Client."""
         while self._focus_busy():
             self._clients_updated.clear()
             await self._clients_updated.wait()
@@ -1673,9 +1671,9 @@ class Hub:
             await self._speech.idle(stall_timeout=None, destination=self._client_players.get(self.clients.focus))
 
     def _fold_ready(self) -> bool:
-        # A held Talker takes no turn, so its new session could not read the seed.
+        # A held Talker takes no turn, so its new session could not read the seed. A closing Hub opens no session.
         return (self._fold is not None and self._fold.summary is not None and not self._scopes.pending()
-                and not self._limit.blocks("talker"))
+                and not self._limit.blocks("talker") and not self._closing)
 
     async def _quiet(self) -> None:
         """Returns once voice mode is quiet, or the input has ended."""
@@ -1825,7 +1823,7 @@ class Hub:
 
     def _fold_if_due(self, tokens: int | None) -> None:
         """Starts a Fold once the Talker's context reaches the trigger, unless one is under way, a failed one still
-        waits out its turns, a spoken scope is unresolved or the usage limit holds the summariser. The cut is fixed
+        waits out its turns, a spoken scope is unresolved or the usage limit holds the Summariser. The cut is fixed
         now, so whatever is said meanwhile stays in the Tail."""
         if self._fold_wait:
             self._fold_wait -= 1
@@ -1927,7 +1925,7 @@ class Hub:
         session = await self._seeded_talker("fold", tail, fold.summary, failed)
         if session is None:
             return
-        if self._fold is not fold:
+        if self._fold is not fold or self._closing:
             with contextlib.suppress(Exception):
                 await session.close()
             return

@@ -1,4 +1,4 @@
-"""The Fold through the Hub: a summariser session writes Memory in the background, and the Hub swaps in a Talker
+"""The Fold through the Hub: a Summariser session writes Memory in the background, and the Hub swaps in a Talker
 seeded with it and the Tail once Jarvis is quiet."""
 
 import asyncio
@@ -557,6 +557,72 @@ async def test_closing_the_hub_mid_fold_stops_the_summariser_and_saves_no_summar
     assert backend.all_sessions("summariser")[0].closed
     assert json.loads(path.read_text())["active_summary"] is None
     assert not (path.parent / "memory").exists()
+
+
+def a_hub_closing_slowly(clock: FakeClock, path: Path, **options: Any) -> tuple[Hub, FakeBackend, asyncio.Event]:
+    """A Hub whose Subagent is slow to close, so close() reaches the Fold only once the returned event is set."""
+    brief = "Look at pumpkit's open PRs."
+    spawn = Tool("spawn_subagent", {"repo": "pumpkit", "title": "Open PRs", "brief": brief, "model": "sonnet",
+                                    "effort": "medium", "writes": False})
+    hub, backend, _, _ = a_hub(
+        clock, path, [[Text("On it."), Tool("delegate", {"request": "Check the open PRs"}), tokens(200_000)]],
+        memory=SHORT, orchestrator=[[spawn]], subagents={brief: [AwaitInterrupt()]}, **options,
+    )
+    backend.subagent_close_gate = asyncio.Event()
+    return hub, backend, backend.subagent_close_gate
+
+
+async def test_a_summary_ready_while_the_hub_closes_opens_no_new_talker(clock: FakeClock, path: Path) -> None:
+    release = asyncio.Event()
+    hub, backend, subagent_closed = a_hub_closing_slowly(clock, path,
+                                                         summaries=[[Gate(release), Text(a_summary())]])
+    typist = Typist(clock)
+
+    await hub.start()
+    running = asyncio.create_task(hub.run(typist.lines()))
+    try:
+        typist.type("Check the open PRs")
+        await until(lambda: backend.all_sessions("subagent") and backend.all_sessions("summariser"))
+        typist.end()
+        closing = asyncio.create_task(hub.close())
+        await asyncio.sleep(0.01)
+        release.set()
+        await until(lambda: backend.all_sessions("summariser")[0].closed)
+        await asyncio.sleep(0.05)
+        talkers = len(backend.all_sessions("talker"))
+    finally:
+        subagent_closed.set()
+    await asyncio.wait_for(closing, timeout=1)
+    await asyncio.wait_for(running, timeout=1)
+
+    assert talkers == 1
+    assert json.loads(path.read_text())["active_summary"] is None
+
+
+async def test_a_seed_read_while_the_hub_closes_is_never_swapped_in(clock: FakeClock, path: Path) -> None:
+    seeded = asyncio.Event()
+    hub, backend, subagent_closed = a_hub_closing_slowly(clock, path, seed_reply=[Gate(seeded), Text("Ready.")])
+    typist = Typist(clock)
+
+    await hub.start()
+    running = asyncio.create_task(hub.run(typist.lines()))
+    try:
+        typist.type("Check the open PRs")
+        await until(lambda: backend.all_sessions("subagent") and len(backend.all_sessions("talker")) == 2)
+        typist.end()
+        closing = asyncio.create_task(hub.close())
+        await asyncio.sleep(0.01)
+        seeded.set()
+        await until(lambda: backend.all_sessions("talker")[1].closed)
+        await asyncio.sleep(0.05)
+        old_open = not backend.all_sessions("talker")[0].closed
+    finally:
+        subagent_closed.set()
+    await asyncio.wait_for(closing, timeout=1)
+    await asyncio.wait_for(running, timeout=1)
+
+    assert old_open
+    assert json.loads(path.read_text())["active_summary"] is None
 
 
 async def test_a_cancelled_summariser_run_is_its_own_metrics_entry(clock: FakeClock, path: Path) -> None:
