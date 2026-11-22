@@ -32,7 +32,7 @@ class RoleModel:
 
 @dataclass(frozen=True)
 class MemorySettings:
-    """The Fold's sizes in tokens and the summariser's model (ADR 0028)."""
+    """The Fold's sizes in tokens and the Summariser's model (ADR 0028)."""
 
     # The Talker's context, as the CLI reports it, at which a Fold starts.
     fold_at: int = 200_000
@@ -226,8 +226,11 @@ def load_settings(
         fold_at = count("JARVIS_MEMORY_FOLD_AT", MemorySettings.fold_at)
         tail = count("JARVIS_MEMORY_TAIL", MemorySettings.tail)
         ceiling = count("JARVIS_MEMORY_CEILING", MemorySettings.ceiling)
-        if tail >= fold_at:
-            raise ConfigError(f"JARVIS_MEMORY_TAIL={tail} must be below JARVIS_MEMORY_FOLD_AT={fold_at}")
+        if tail > fold_at // 2:
+            raise ConfigError(
+                f"JARVIS_MEMORY_TAIL={tail} must be at most half of JARVIS_MEMORY_FOLD_AT={fold_at}, or each Fold "
+                "leaves the context close to the trigger and the next one starts at once"
+            )
         if ceiling <= fold_at:
             raise ConfigError(f"JARVIS_MEMORY_CEILING={ceiling} must be above JARVIS_MEMORY_FOLD_AT={fold_at}")
         return MemorySettings(fold_at, tail, ceiling, model=get("JARVIS_MEMORY_MODEL", MemorySettings.model),

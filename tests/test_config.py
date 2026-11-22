@@ -251,15 +251,22 @@ def test_memory_settings_come_from_dotenv(checkout: Path) -> None:
         ("JARVIS_MEMORY_CEILING=1.5", "JARVIS_MEMORY_CEILING"),
         ("JARVIS_MEMORY_EFFORT=extreme", "JARVIS_MEMORY_EFFORT"),
         ("JARVIS_MEMORY_TAIL=200000", "JARVIS_MEMORY_TAIL"),
+        ("JARVIS_MEMORY_TAIL=190000", "JARVIS_MEMORY_TAIL"),
+        ("JARVIS_MEMORY_TAIL=100001", "JARVIS_MEMORY_TAIL"),
         ("JARVIS_MEMORY_CEILING=150000", "JARVIS_MEMORY_CEILING"),
     ],
     ids=["zero trigger", "not a number", "not whole", "unknown effort", "tail as big as the trigger",
-         "ceiling below the trigger"],
+         "tail nearly as big as the trigger", "tail over half the trigger", "ceiling below the trigger"],
 )
 def test_a_bad_memory_setting_is_refused(checkout: Path, text: str, name: str) -> None:
     (checkout / ".env").write_text(text + "\n")
     with pytest.raises(ConfigError, match=name):
         load_settings(checkout, environ={})
+
+
+def test_a_tail_of_half_the_trigger_is_accepted(checkout: Path) -> None:
+    (checkout / ".env").write_text("JARVIS_MEMORY_TAIL=100000\n")
+    assert load_settings(checkout, environ={}).memory.tail == 100_000
 
 
 def test_subagent_limits_default_to_max_effort_and_three_at_once(checkout: Path) -> None:
