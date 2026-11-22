@@ -9,7 +9,6 @@ import time
 from collections.abc import AsyncGenerator, Iterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from functools import partial
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -118,8 +117,14 @@ async def test_the_fixed_prefix_and_the_chars_to_tokens_estimate_for_english_and
     spec = talker(settings)
     async with session(spec) as s:
         empty = await s.turn(seed([], None))
+    limits(results, "Usage-limit readings: fixed prefix", "empty seed", empty)
     assert empty.context is not None, empty.end
-    rows: list[tuple[object, ...]] = []
+    window = empty.end.context.window if empty.end.context else None
+    results.row("Fixed prefix",
+                ("Model", "Window", "Context of an empty seed", "Estimated from chars",
+                 *(f"Share of {size:,}" for size in SIZES)),
+                (spec.model, window, empty.context, estimate(fixed_chars(spec)),
+                 *(f"{empty.context / size:.1%}" for size in SIZES)))
     for language in ("en", "it"):
         made_up = entries(made_up_conversation(RATIO_TOKENS, language=language, start=time.time() - 2 * DAY,
                                                seed=run_seed()))
@@ -129,17 +134,10 @@ async def test_the_fixed_prefix_and_the_chars_to_tokens_estimate_for_english_and
         # The seed with no exchanges says "None yet." where these exchanges go.
         chars = len("\n".join(e.render() for e in made_up)) - len("None yet.")
         tokens = seeded.context - empty.context
-        rows.append((language, chars, tokens, chars / tokens, f"{estimate_error(chars=chars, tokens=tokens):+.1%}"))
-    window = empty.end.context.window if empty.end.context else None
-    results.add("Fixed prefix", markdown_table(
-        ("Model", "Window", "Context of an empty seed", "Estimated from chars",
-         *(f"Share of {size:,}" for size in SIZES)),
-        [(spec.model, window, empty.context, estimate(fixed_chars(spec)),
-          *(f"{empty.context / size:.1%}" for size in SIZES))]))
-    results.add("Chars-to-tokens estimate", markdown_table(
-        ("Language", "Chars", "Tokens counted", "Chars per token", f"Error of {CHARS_PER_TOKEN} chars per token"),
-        rows))
-    results.add("Usage-limit readings: fixed prefix", limit_table([("empty seed", empty)]))
+        results.row("Chars-to-tokens estimate",
+                    ("Language", "Chars", "Tokens counted", "Chars per token",
+                     f"Error of {CHARS_PER_TOKEN} chars per token"),
+                    (language, chars, tokens, chars / tokens, f"{estimate_error(chars=chars, tokens=tokens):+.1%}"))
 
 
 async def test_first_reply_time_at_large_contexts_with_the_cache_cold_and_warm(
@@ -147,27 +145,27 @@ async def test_first_reply_time_at_large_contexts_with_the_cache_cold_and_warm(
 ) -> None:
     spec = talker(settings)
     fixed = estimate(fixed_chars(spec))
-    rows: list[tuple[object, ...]] = []
-    readings: list[tuple[str, Timed]] = []
+    outcomes: list[str] = []
+
+    def measured(size: int, cache: str, timed: Timed) -> None:
+        outcome = timed.end.outcome if timed.end.outcome == "completed" else f"{timed.end.outcome}: {timed.end.error}"
+        outcomes.append(outcome)
+        results.row("First reply",
+                    ("Size", "Context reported", "Cache", "First text ms", "Reply ms", "Input", "Cache read",
+                     "Cache write", "Output", "Outcome"),
+                    (size, timed.context, cache, timed.first_text_ms, timed.total_ms, *timed.usage_cells(), outcome))
+        limits(results, "Usage-limit readings: first reply", f"{size:,} {cache}", timed)
+
     for size in SIZES:
         made_up = entries(made_up_conversation(size - fixed, language="mixed", start=time.time() - 3 * DAY,
                                                seed=run_seed() + size))
         async with session(spec) as s:
-            turns = [("cold", await s.turn(seed(made_up, None)))]
+            measured(size, "cold", last := await s.turn(seed(made_up, None)))
             for line, lang in WARM_LINES:
-                if turns[-1][1].end.outcome != "completed":
+                if last.end.outcome != "completed":
                     break
-                turns.append(("warm", await s.turn(user_message(line, lang))))
-        for cache, timed in turns:
-            rows.append((size, timed.context, cache, timed.first_text_ms, timed.total_ms, *timed.usage_cells(),
-                         timed.end.outcome if timed.end.outcome == "completed" else f"{timed.end.outcome}: "
-                         f"{timed.end.error}"))
-            readings.append((f"{size:,} {cache}", timed))
-    results.add("First reply", markdown_table(
-        ("Size", "Context reported", "Cache", "First text ms", "Reply ms", "Input", "Cache read", "Cache write",
-         "Output", "Outcome"), rows))
-    results.add("Usage-limit readings: first reply", limit_table(readings))
-    assert all(row[-1] == "completed" for row in rows), rows
+                measured(size, "warm", last := await s.turn(user_message(line, lang)))
+    assert all(outcome == "completed" for outcome in outcomes), outcomes
 
 
 async def summarise(settings: Settings, previous: str | None, folded: Sequence[Exchange]) -> Timed:
@@ -185,14 +183,13 @@ async def test_the_summariser_on_a_long_conversation(settings: Settings, results
 
     run = await summarise(settings, None, made_up)
 
-    results.add("Summariser", markdown_table(
-        ("Input (context reported)", "Duration ms", "Output tokens", "Estimated tokens", "Cap", "Checks",
-         "Planted facts kept", "Outcome"),
-        [(run.context, run.total_ms, run.end.usage.output_tokens, estimate(len(run.text)), memory.SUMMARY_TOKENS,
-          refusal(run) or "pass", f"{facts_in(run.text)} of {len(FACTS)}",
-          run.end.outcome)]))
+    results.row("Summariser",
+                ("Input (context reported)", "Duration ms", "Output tokens", "Estimated tokens", "Cap", "Checks",
+                 "Planted facts kept", "Outcome"),
+                (run.context, run.total_ms, run.end.usage.output_tokens, estimate(len(run.text)), memory.SUMMARY_TOKENS,
+                 refusal(run) or "pass", f"{facts_in(run.text)} of {len(FACTS)}", run.end.outcome))
     results.add("Summariser: the summary", f"```markdown\n{run.text}\n```")
-    results.add("Usage-limit readings: Summariser", limit_table([("summariser", run)]))
+    limits(results, "Usage-limit readings: Summariser", "summariser", run)
     assert run.end.outcome == "completed", run.end
 
 
@@ -205,44 +202,53 @@ async def test_a_fact_from_three_folds_back_survives_through_the_summary_or_reca
     summary: str | None = None
     unfolded: list[Exchange] = []
     committed = 0
-    folds: list[tuple[object, ...]] = []
-    readings: list[tuple[str, Timed]] = []
+    readings = "Usage-limit readings: Memory quality"
     for n, block in enumerate(blocks, start=1):
         unfolded += block
-        done = await fold(partial(summarise, settings, summary, list(unfolded)))
-        for attempt, run in enumerate(done.attempts, start=1):
-            folds.append((n, attempt, len(unfolded), run.total_ms, run.end.usage.output_tokens,
-                          refusal(run) or "pass", facts_in(run.text)))
-            readings.append((f"fold {n} attempt {attempt}", run))
+        tries: list[Timed] = []
+
+        async def summarised() -> Timed:
+            run = await summarise(settings, summary, list(unfolded))
+            tries.append(run)
+            results.row("Memory quality: folds",
+                        ("Fold", "Attempt", "Exchanges folded", "Duration ms", "Output tokens", "Checks",
+                         "Planted facts in the summary"),
+                        (n, len(tries), len(unfolded), run.total_ms, run.end.usage.output_tokens,
+                         refusal(run) or "pass", facts_in(run.text)))
+            limits(results, readings, f"fold {n} attempt {len(tries)}", run)
+            return run
+
+        done = await fold(summarised)
         # As in the Hub, a Fold with no summary taken leaves its exchanges for the next one.
         if done.summary is not None:
             summary, unfolded, committed = done.summary, [], committed + 1
+    results.add("Memory quality: the final summary", f"```markdown\n{summary or 'None: every Fold was refused.'}\n```")
     fact = FACTS[0]
     found: list[str] = []
     with log_of(tmp_path / "events.sqlite3", [e for block in (*blocks, tail) for e in block], now) as log:
         async with session(talker(settings, recall_tool(log, found))) as s:
             seeded = await s.turn(seed(entries([*unfolded, *tail]), summary))
+            limits(results, readings, "seed", seeded)
+            # Only the question's recall calls count: the seed asks for one word, so any call during it is noise.
+            found.clear()
             asked = await s.turn(user_message(fact.question, fact.lang))
+            limits(results, readings, "question", asked)
     survived = survived_through(fact, summary=summary or "", recalled=found, reply=asked.text)
     # The first Fold taken folded the fact's block; each one taken after it summarised that summary again.
     folds_since = committed - 1 if committed else None
-    results.add("Memory quality: folds", markdown_table(
-        ("Fold", "Attempt", "Exchanges folded", "Duration ms", "Output tokens", "Checks",
-         "Planted facts in the summary"), folds))
     results.add("Memory quality: the question", markdown_table(
         ("Fact", "Folds since", "In the final summary", "recall calls", "recall found it", "Answer right",
          "Survived through"),
         [(fact.answer, folds_since, fact.answer.lower() in (summary or "").lower(), len(found),
           any(fact.answer.lower() in r.lower() for r in found), survived != "lost", survived)])
         + f"\n\nAsked: {fact.question}\n\nReply: {asked.text}")
-    results.add("Memory quality: the final summary", f"```markdown\n{summary or 'None: every Fold was refused.'}\n```")
-    results.add("Usage-limit readings: Memory quality", limit_table([*readings, ("seed", seeded), ("question", asked)]))
     assert seeded.end.outcome == asked.end.outcome == "completed", (seeded.end, asked.end)
 
 
-def limit_table(turns: Sequence[tuple[str, Timed]]) -> str:
-    """What the CLI said about the usage-limit windows during each turn, to read how cache reads count."""
-    rows = [(step, info.rate_limit_type, info.status, info.utilization) for step, timed in turns
-            for info in timed.limits]
-    return markdown_table(("Turn", "Window", "Status", "Utilization"), rows) if rows else (
-        "The CLI reported no usage-limit window during these turns.")
+def limits(results: Results, title: str, step: str, timed: Timed) -> None:
+    """What the CLI said about the usage-limit windows during the turn `step`, to read how cache reads count."""
+    header = ("Turn", "Window", "Status", "Utilization")
+    for info in timed.limits:
+        results.row(title, header, (step, info.rate_limit_type, info.status, info.utilization))
+    if not timed.limits:
+        results.row(title, header, (step, "none reported", None, None))

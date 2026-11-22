@@ -188,18 +188,33 @@ def markdown_table(header: Sequence[str], rows: Sequence[Sequence[object]]) -> s
 
 
 class Results:
-    """A run's results as Markdown, one section per measurement, ready to paste into `docs/notes/talker-memory.md`."""
+    """A run's results as Markdown, one section per measurement, ready to paste into `docs/notes/talker-memory.md`.
+    The file is rewritten after every row, so a run that stops halfway keeps what it already paid for."""
 
     def __init__(self, path: Path, *, stamp: str) -> None:
         self.path = path
         self._stamp = stamp
+        # Each section's text, or a table's header and rows so far, in the order the sections began.
+        self._sections: dict[str, str | tuple[Sequence[str], list[Sequence[object]]]] = {}
 
     def add(self, title: str, body: str) -> None:
+        self._sections[title] = body
+        self._write()
+
+    def row(self, title: str, header: Sequence[str], cells: Sequence[object]) -> None:
+        """Adds a row to the table `title`, which begins with `header` the first time."""
+        section = self._sections.setdefault(title, (header, []))
+        assert not isinstance(section, str), title
+        section[1].append(cells)
+        self._write()
+
+    def _write(self) -> None:
+        parts = [f"# Talker Memory measurement, {self._stamp}\n\n"]
+        for title, section in self._sections.items():
+            body = section if isinstance(section, str) else markdown_table(*section)
+            parts.append(f"## {title}\n\n{body}\n\n")
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as out:
-            if out.tell() == 0:
-                out.write(f"# Talker Memory measurement, {self._stamp}\n\n")
-            out.write(f"## {title}\n\n{body}\n\n")
+        self.path.write_text("".join(parts), encoding="utf-8")
 
 
 def recall_tool(log: EventLog, found: list[str]) -> ToolHandler:
