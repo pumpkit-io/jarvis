@@ -61,9 +61,7 @@ struct ConversationView: View {
                             .modifier(ScriptColumn())
                     }
                     ForEach(session.conversation.rows) { row in
-                        scriptRow(row)
-                            .modifier(ScriptColumn())
-                        .id(row.id)
+                        scriptRow(row).modifier(ScriptColumn()).id(row.id)
                     }
                     ForEach(session.outbox?.items ?? []) { item in
                         queued(item).modifier(ScriptColumn()).id("outbox:\(item.id)")
