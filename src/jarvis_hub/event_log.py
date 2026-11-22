@@ -3,12 +3,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import sys
 import threading
 import time
-import unicodedata
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -49,6 +49,9 @@ RECALL_LIMIT = 10
 RECALL_CHARS = 7000
 MATCH_CHARS = 500
 BACKFILL_PAUSE = 0.002
+# A batch that fails, as when another process holds the database locked, is retried this many seconds later.
+BACKFILL_RETRY = 30.0
+BACKFILL_ATTEMPTS = 3
 FOLLOWED_CHARS = 160
 # What followed a match is looked for only this long after it, which also bounds the scan.
 FOLLOWED_WITHIN = 10 * 60
@@ -65,15 +68,23 @@ def _words(payload: dict[str, Any]) -> str:
     return str(payload.get("text") or "") + (f"\n\n{details}" if details else "")
 
 
-_RECALLED_SQL = ", ".join(f"'{kind}'" for kind in RECALLED)
+TOKENIZE = "porter unicode61 remove_diacritics 2"
+
+
+def _indexed_sql(row: str) -> str:
+    """Which events the index holds: the recalled kinds, with text."""
+    recalled = ", ".join(f"'{kind}'" for kind in RECALLED)
+    return f"{row}.type IN ({recalled}) AND json_extract({row}.payload, '$.text') != ''"
+
+
 RECALL_SCHEMA = f"""
     BEGIN IMMEDIATE;
-    CREATE VIRTUAL TABLE IF NOT EXISTS recall_index USING fts5(text, tokenize = 'porter unicode61 remove_diacritics 2');
+    CREATE VIRTUAL TABLE IF NOT EXISTS recall_index USING fts5(text, tokenize = '{TOKENIZE}');
     CREATE TABLE IF NOT EXISTS recall_backfill (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), through INTEGER NOT NULL);
     -- Events up to `through` predate the trigger and wait for the backfill.
     INSERT OR IGNORE INTO recall_backfill VALUES (1, COALESCE((SELECT MAX(seq) FROM events), 0));
     CREATE TRIGGER IF NOT EXISTS recall_add AFTER INSERT ON events
-        WHEN NEW.type IN ({_RECALLED_SQL}) AND json_extract(NEW.payload, '$.text') != ''
+        WHEN {_indexed_sql("NEW")}
         BEGIN INSERT INTO recall_index(rowid, text) VALUES (NEW.seq, {_sql_words("NEW")}); END;
     CREATE TRIGGER IF NOT EXISTS recall_drop AFTER DELETE ON events
         BEGIN DELETE FROM recall_index WHERE rowid = OLD.seq; END;
@@ -138,44 +149,46 @@ def _stamp(at: float) -> str:
     return datetime.fromtimestamp(at).astimezone().strftime("%Y-%m-%d %H:%M %A")
 
 
-def fts_query(query: str) -> tuple[str, tuple[str, ...]]:
-    """The FTS5 query and the words it searches: every word must appear, a double-quoted phrase as written.
+def fts_query(query: str) -> tuple[str, ...]:
+    """The FTS5 phrases of `query`; every one must appear, a double-quoted phrase as written.
 
     Every part is quoted, so no word is read as an FTS5 operator."""
     parts: list[str] = []
-    terms: list[str] = []
     for phrase, word in re.findall(r'"([^"]*)"?|([^\s"]+)', query):
         tokens = re.findall(r"\w+", phrase or word)
         if tokens:
             parts.append('"' + " ".join(tokens) + '"')
-            terms += tokens
-    return " ".join(parts), tuple(terms)
+    return tuple(parts)
 
 
-def _folded(text: str) -> tuple[str, list[int]]:
-    """`text` lowercased and without accents, as the index reads it, and the position in `text` of each character."""
-    chars: list[str] = []
-    origins: list[int] = []
-    for i, char in enumerate(text):
-        for plain in unicodedata.normalize("NFKD", char.lower()):
-            if not unicodedata.combining(plain):
-                chars.append(plain)
-                origins.append(i)
-    return "".join(chars), origins
+class _Excerpts:
+    """Cuts long matches around a word the index would match, found by a scratch index with the same tokenizer."""
 
+    def __init__(self) -> None:
+        self._db = sqlite3.connect(":memory:", check_same_thread=False, isolation_level=None)
+        self._db.execute(f"CREATE VIRTUAL TABLE excerpt USING fts5(text, tokenize = '{TOKENIZE}')")
 
-def _excerpt(text: str, terms: tuple[str, ...]) -> str:
-    """The redacted text, cut to `MATCH_CHARS` around its first matching word; redacting first never leaves half a secret."""
-    text = redact(text).strip()
-    if len(text) <= MATCH_CHARS:
-        return text
-    folded, origins = _folded(text)
-    # Stemmed matches share a prefix with the word searched, so the first four letters find them.
-    found = [origins[hit.start()] for term in terms
-             if (hit := re.search(r"\b" + re.escape(_folded(term)[0][:4]), folded))]
-    start = max(0, min(found, default=0) - MATCH_CHARS // 4)
-    cut = text[start:start + MATCH_CHARS]
-    return ("…" if start else "") + cut + ("…" if start + MATCH_CHARS < len(text) else "")
+    def cut(self, text: str, phrases: tuple[str, ...]) -> str:
+        """The redacted text, cut to `MATCH_CHARS` around its first matching phrase.
+
+        Redacting first never leaves half a secret; a text whose only match was a secret is cut from its start."""
+        text = redact(text).strip()
+        if len(text) <= MATCH_CHARS:
+            return text
+        self._db.execute("INSERT INTO excerpt(rowid, text) VALUES (1, ?)", (text,))
+        try:
+            row = self._db.execute("SELECT highlight(excerpt, 0, char(1), '') FROM excerpt WHERE excerpt MATCH ?",
+                                   (" OR ".join(phrases),)).fetchone()
+        finally:
+            self._db.execute("DELETE FROM excerpt")
+        # The highlight first differs from the text where its first marker went in.
+        hit = len(os.path.commonprefix([text, row[0]])) if row else 0
+        start = max(0, hit - MATCH_CHARS // 4)
+        cut = text[start:start + MATCH_CHARS]
+        return ("…" if start else "") + cut + ("…" if start + MATCH_CHARS < len(text) else "")
+
+    def close(self) -> None:
+        self._db.close()
 
 
 def _line(text: str) -> str:
@@ -200,6 +213,8 @@ class EventLog:
         self._subscriptions: dict[object, tuple[asyncio.AbstractEventLoop, Callable[[Event], None]]] = {}
         self._closed = False
         self._backfill: threading.Thread | None = None
+        self._stopping = threading.Event()
+        self._excerpts = _Excerpts()
         self._db = sqlite3.connect(path, check_same_thread=False)
         self._db.executescript("""
             CREATE TABLE IF NOT EXISTS events (
@@ -336,8 +351,8 @@ class EventLog:
         """The best matches for `query` from `start` up to `end`, never older than 30 days or the last reset.
 
         Raises ValueError for a query with no words."""
-        match, terms = fts_query(query)
-        if not match:
+        phrases = fts_query(query)
+        if not phrases:
             raise ValueError("The query needs at least one word.")
         limit = max(1, min(limit, RECALL_LIMIT))
         kinds = SPEAKERS[speaker] if speaker is not None else RECALLED
@@ -353,14 +368,14 @@ class EventLog:
                 "SELECT e.seq, e.time, e.type, e.payload FROM recall_index JOIN events e ON e.seq = recall_index.rowid "
                 f"WHERE recall_index MATCH ? AND e.time >= ? AND (? IS NULL OR e.time < ?) "
                 f"AND e.type IN ({', '.join('?' * len(kinds))}) ORDER BY recall_index.rank, e.seq DESC LIMIT ?",
-                (match, since, end, end, *kinds, limit + 1)).fetchall()
+                (" ".join(phrases), since, end, end, *kinds, limit + 1)).fetchall()
             matches: list[tuple[int, Match]] = []
             spent = 0
             # Best and newest first, so the budget drops the weakest and oldest matches.
             for seq, at, kind, encoded in rows[:limit]:
                 payload = json.loads(encoded)
                 followed = self._followed(seq, at, kind, payload)
-                found = Match(at, SOURCES[kind], _excerpt(_words(payload), terms),
+                found = Match(at, SOURCES[kind], self._excerpts.cut(_words(payload), phrases),
                               payload.get("task_id") if kind == "task_report" else None, followed)
                 spent += sum(len(escape(shown.text, quote=False)) for shown in (found, followed) if shown)
                 if spent > RECALL_CHARS:
@@ -420,14 +435,27 @@ class EventLog:
             self._db.execute("UPDATE commands SET status = 'complete', result = ? WHERE client_id = ? AND id = ?",
                              (json.dumps(result, allow_nan=False), client_id, command_id))
 
-    def start_backfill(self, batch: int = 500) -> None:
+    def start_backfill(self, *, record: Callable[[dict[str, Any]], None], batch: int = 500) -> None:
         """Index the events logged before recall existed, newest first, in short batches on a thread of its own.
 
-        Closing stops it; the next launch carries on."""
-        self._backfill = threading.Thread(target=self._fill, args=(batch,), name="recall-backfill", daemon=True)
+        A failed batch is undone, recorded and retried, `BACKFILL_ATTEMPTS` times at most. Closing or giving up stops
+        it, and the next launch carries on."""
+        self._backfill = threading.Thread(target=self._fill, args=(record, batch), name="recall-backfill", daemon=True)
         self._backfill.start()
 
-    def _fill(self, batch: int) -> None:
+    def _fill(self, record: Callable[[dict[str, Any]], None], batch: int) -> None:
+        for attempt in range(1, BACKFILL_ATTEMPTS + 1):
+            try:
+                self._fill_batches(batch)
+                return
+            except sqlite3.Error as e:
+                again = attempt < BACKFILL_ATTEMPTS
+                record({"kind": "recall_backfill", "error": f"{type(e).__name__}: {e}", "attempt": attempt,
+                        "next": "retry" if again else "next launch"})
+                if not again or self._stopping.wait(BACKFILL_RETRY):
+                    return
+
+    def _fill_batches(self, batch: int) -> None:
         with self._lock:
             if self._closed:
                 return
@@ -448,16 +476,17 @@ class EventLog:
                     if low is not None:
                         self._db.execute(
                             f"INSERT INTO recall_index(rowid, text) SELECT seq, {_sql_words('events')} FROM events "
-                            f"WHERE seq BETWEEN ? AND ? AND type IN ({_RECALLED_SQL}) "
-                            "AND json_extract(payload, '$.text') != ''", (low, through))
+                            f"WHERE seq BETWEEN ? AND ? AND {_indexed_sql('events')}", (low, through))
                     self._db.execute("UPDATE recall_backfill SET through = ? WHERE singleton = 1",
                                      (low - 1 if low is not None else 0,))
 
     def close(self) -> None:
+        self._stopping.set()
         with self._lock:
             self._closed = True
             self._subscriptions.clear()
             self._db.close()
+            self._excerpts.close()
         if self._backfill is not None and self._backfill is not threading.current_thread():
             self._backfill.join()
 

@@ -297,12 +297,12 @@ async def text_mode(
     """
     _guard_billing(environ, stderr)
     with EventLog(settings.runtime_dir / "events.sqlite3") as log, PairingStore(settings.runtime_dir / "events.sqlite3") as pairing:
-        log.start_backfill()
         interactive = stdin.isatty()
         terminal = TerminalOutput(stdout, stderr, prompt=interactive, show_log=settings.runtime_dir / "show.log")
         output = EventOutput(log, terminal)
         terminal.on_notice = output.notice
         metrics = JsonlMetrics(settings.runtime_dir / "metrics.jsonl")
+        log.start_backfill(record=metrics.record)
         speech = None
         if voice is not None:
             try:
@@ -375,11 +375,11 @@ async def voice_mode(
     """
     _guard_billing(environ, stderr)
     with EventLog(settings.runtime_dir / "events.sqlite3") as log, PairingStore(settings.runtime_dir / "events.sqlite3") as pairing:
-        log.start_backfill()
         terminal = TerminalOutput(stdout, stderr, prompt=stdin.isatty(), show_log=settings.runtime_dir / "show.log")
         output = EventOutput(log, terminal)
         terminal.on_notice = output.notice
         metrics = JsonlMetrics(settings.runtime_dir / "metrics.jsonl")
+        log.start_backfill(record=metrics.record)
         voice = settings.voice
         choice = EngineChoice(aec="off" if headphones else voice.aec, wake=voice.wake_engine, stt=voice.stt_engine)
         clips = ClipStore(settings.runtime_dir / "clips", clip_settings(voice))

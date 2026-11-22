@@ -2,14 +2,17 @@ import asyncio
 import io
 import sqlite3
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import closing
 from datetime import datetime, timezone
+from html import escape
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from jarvis_hub.event_log import FOLLOWED_CHARS, MATCH_CHARS, EventLog, EventOutput
+from jarvis_hub import event_log
+from jarvis_hub.event_log import FOLLOWED_CHARS, MATCH_CHARS, RECALL_CHARS, EventLog, EventOutput, Recall
 from tests.fakes import FakeBackend, FakeClock, Gate, RecordingMetrics, RecordingOutput, Text, Tool, lines, make_hub
 
 DAY = 86400.0
@@ -40,6 +43,12 @@ def exchange(log: EventLog, wall: Wall, at: float, said: str, replied: str) -> N
     log.append("reply_delta", {"reply_id": f"p{at}", "request_id": f"r{at}", "text": replied})
     log.append("reply_end", {"reply_id": f"p{at}", "request_id": f"r{at}", "text": replied, "reason": "complete"})
     wall.now = NOW
+
+
+def shown_chars(found: Recall) -> int:
+    """The text a search shows, escaped as the Talker reads it: what the budget of about 2,000 tokens counts."""
+    shown = [m.text for m in found.matches] + [m.followed.text for m in found.matches if m.followed]
+    return sum(len(escape(text, quote=False)) for text in shown)
 
 
 def test_recall_finds_what_the_user_said_dated_with_what_followed(tmp_path: Path) -> None:
@@ -136,7 +145,7 @@ def test_at_most_ten_matches_fit_in_about_two_thousand_tokens(tmp_path: Path) ->
 
     assert 0 < len(found.matches) <= 10
     assert found.more
-    assert len(found.render()) <= 2000 * 4
+    assert shown_chars(found) <= RECALL_CHARS
     # An excerpt cut on both sides gains an ellipsis at each end.
     assert all(len(match.text) <= MATCH_CHARS + len("……") for match in found.matches)
     assert all(match.followed is not None and len(match.followed.text) <= FOLLOWED_CHARS for match in found.matches)
@@ -210,7 +219,7 @@ def test_a_large_existing_log_is_indexed_in_the_background_while_new_events_are_
     old_log(path, 3000)
     wall = Wall()
     with EventLog(path, wall=wall) as log:
-        log.start_backfill(batch=20)
+        log.start_backfill(record=RecordingMetrics().record, batch=20)
         log.append("heard", {"request_id": "new", "text": "A new line about the granary roof.", "spoken": True})
 
         early = log.search('"granary roof"')
@@ -231,10 +240,10 @@ def test_a_backfill_stopped_by_closing_resumes_at_the_next_launch(tmp_path: Path
     old_log(path, 3000)
     wall = Wall()
     with EventLog(path, wall=wall) as log:
-        log.start_backfill(batch=20)
+        log.start_backfill(record=RecordingMetrics().record, batch=20)
     with EventLog(path, wall=wall) as log:
         assert log.search("granary").indexing
-        log.start_backfill()
+        log.start_backfill(record=RecordingMetrics().record)
         deadline = time.monotonic() + 30
         while log.search("granary").indexing:
             assert time.monotonic() < deadline
@@ -249,6 +258,8 @@ async def test_the_talkers_recall_call_reaches_the_search_with_its_dates_and_spe
         Tool("recall", {"query": "lighthouse", "from": "2026-11-18", "to": "2026-11-19", "speaker": "user", "limit": 5}),
         Tool("recall", {"query": "lighthouse", "from": "last Tuesday"}),
         Tool("recall", {"query": "lighthouse", "to": "9999-12-31"}),
+        Tool("recall", {"query": "lighthouse", "to": "0001-01-01"}),
+        Tool("recall", {"query": "lighthouse", "from": "0001-01-01"}),
         Text("Under the blue mat, sir."),
     ]])
     with EventLog(tmp_path / "events.sqlite3", wall=wall) as log:
@@ -262,12 +273,14 @@ async def test_the_talkers_recall_call_reaches_the_search_with_its_dates_and_spe
         finally:
             await hub.close()
 
-    dated, undated, endless = [result for result in backend.session("talker").tool_results if result.name == "recall"]
+    dated, undated, endless, ancient, since_ancient = [
+        result for result in backend.session("talker").tool_results if result.name == "recall"]
     assert dated.result is not None
     assert "The lighthouse key goes under the blue mat." in dated.result
     assert "shed" not in dated.result and "closed today" not in dated.result
     assert 'from="2026-11-18 00:00 Wednesday" to="2026-11-19 23:59 Thursday"' in dated.result
-    assert undated.result == endless.result == "from and to are dates such as 2026-11-15."
+    assert {undated.result, endless.result, ancient.result, since_ancient.result} == {
+        "from and to are dates such as 2026-11-15."}
 
 
 async def test_a_task_report_is_logged_and_found_by_its_content(tmp_path: Path) -> None:
@@ -393,7 +406,7 @@ def test_when_the_budget_runs_out_the_newest_matches_are_kept(tmp_path: Path) ->
 
     assert 0 < len(found.matches) < 10
     assert found.more
-    assert len(found.render()) <= 2000 * 4
+    assert shown_chars(found) <= RECALL_CHARS
     assert found.matches[-1].text.startswith("Meadow note 1:")
     assert [m.time for m in found.matches] == sorted(m.time for m in found.matches)
 
@@ -406,3 +419,92 @@ def test_a_long_match_is_cut_around_the_word_even_when_its_accents_differ(tmp_pa
         [match] = log.search("cafe rose", speaker="user").matches
 
     assert match.text.startswith("…") and match.text.endswith("Then we stopped at the Café Rosé.")
+
+
+@pytest.mark.parametrize(("said", "query", "word"), [
+    ("the build runs nightly", "running", "runs"),
+    ("the crème brûlée was burnt", "creme brulee", "crème brûlée"),
+    ("the creme brulee was burnt", "Crème Brûlée", "creme brulee"),
+])
+def test_a_long_match_is_cut_around_any_word_the_index_matched(tmp_path: Path, said: str, query: str, word: str) -> None:
+    wall = Wall()
+    filler = "We walked along the river and talked about the weather. " * 14
+    with EventLog(tmp_path / "events.sqlite3", wall=wall) as log:
+        exchange(log, wall, NOW - DAY, f"{filler}Then {said}. {filler}", "Noted, sir.")
+
+        [match] = log.search(query, speaker="user").matches
+
+    assert match.text.startswith("…") and match.text.endswith("…")
+    assert word in match.text
+
+
+def failing_backfill(path: Path, *, fail: bool = True) -> None:
+    """Make every backfill batch fail, or succeed again, as a locked database would."""
+    with closing(sqlite3.connect(path, isolation_level=None)) as db:
+        if fail:
+            db.execute("CREATE TRIGGER fail BEFORE UPDATE ON recall_backfill "
+                       "BEGIN SELECT RAISE(ABORT, 'database is locked'); END")
+        else:
+            db.execute("DROP TRIGGER fail")
+
+
+def wait_for(condition: Callable[[], object]) -> None:
+    deadline = time.monotonic() + 30
+    while not condition():
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+
+def test_a_failed_backfill_batch_is_logged_and_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(event_log, "BACKFILL_RETRY", 0.5)
+    path = tmp_path / "events.sqlite3"
+    old_log(path, 100)
+    rows: list[dict[str, Any]] = []
+    with EventLog(path, wall=Wall()) as log:
+        failing_backfill(path)
+        log.start_backfill(record=rows.append, batch=20)
+        wait_for(lambda: rows)
+        failing_backfill(path, fail=False)
+
+        wait_for(lambda: not log.search("granary").indexing)
+        assert [m.text for m in log.search('"old line 0"').matches] == ["Old line 0 about the granary."]
+
+    assert rows[0] == {"kind": "recall_backfill", "error": "IntegrityError: database is locked", "attempt": 1,
+                       "next": "retry"}
+
+
+def test_a_backfill_that_keeps_failing_stops_and_the_next_launch_carries_on(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(event_log, "BACKFILL_RETRY", 0.01)
+    path = tmp_path / "events.sqlite3"
+    old_log(path, 100)
+    rows: list[dict[str, Any]] = []
+    with EventLog(path, wall=Wall()) as log:
+        failing_backfill(path)
+        log.start_backfill(record=rows.append, batch=20)
+        wait_for(lambda: rows and rows[-1]["next"] == "next launch")
+        assert log.search("granary").indexing
+    assert [row["attempt"] for row in rows] == [1, 2, 3]
+
+    failing_backfill(path, fail=False)
+    with EventLog(path, wall=Wall()) as log:
+        log.start_backfill(record=rows.append, batch=20)
+        wait_for(lambda: not log.search("granary").indexing)
+        assert len(log.search("granary").matches) == 10
+    assert len(rows) == 3
+
+
+def test_closing_ends_a_backfill_waiting_to_retry(tmp_path: Path) -> None:
+    path = tmp_path / "events.sqlite3"
+    old_log(path, 100)
+    rows: list[dict[str, Any]] = []
+    log = EventLog(path, wall=Wall())
+    failing_backfill(path)
+    log.start_backfill(record=rows.append, batch=20)
+    wait_for(lambda: rows)
+
+    began = time.monotonic()
+    log.close()
+
+    assert time.monotonic() - began < 5
+    assert len(rows) == 1

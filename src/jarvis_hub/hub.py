@@ -251,6 +251,7 @@ OPEN_GRACE = 10.0
 ORCHESTRATOR_TIMEOUT = 600.0
 # How long an interrupted turn has to end before the Hub gives up on its session.
 INTERRUPT_GRACE = 10.0
+RECALL_DATES = "from and to are dates such as 2026-11-15."
 
 
 def user_message(text: str, lang: Lang, *, typed: bool = True, delayed: float | None = None) -> str:
@@ -2665,7 +2666,7 @@ class Hub:
             start = _local_day(args.get("from"))
             end = _local_day(args.get("to"), following=True)
         except (ValueError, OverflowError):
-            return "from and to are dates such as 2026-11-15."
+            return RECALL_DATES
         speaker = args.get("speaker") or None
         if speaker not in (None, "user", "jarvis"):
             return "speaker is user or jarvis."
@@ -2673,9 +2674,14 @@ class Hub:
         if not isinstance(limit, int):
             return f"limit is a whole number from 1 to {RECALL_LIMIT}."
         try:
-            return log.search(str(args.get("query") or ""), start=start, end=end, speaker=speaker, limit=limit).render()
+            found = log.search(str(args.get("query") or ""), start=start, end=end, speaker=speaker, limit=limit)
         except ValueError as e:
             return str(e)
+        try:
+            return found.render()
+        except (ValueError, OverflowError, OSError):
+            # Only a date can fail to render: a `to` in year 1 ends before the first datetime.
+            return RECALL_DATES
 
     async def _end_conversation(self, args: dict[str, Any]) -> str:
         # Text mode, a typed line in voice mode, or news has no listening of its own to stop: only acknowledged.
