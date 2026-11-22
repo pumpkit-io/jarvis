@@ -9,6 +9,7 @@ import contextlib
 import json
 import platform
 import re
+import sqlite3
 import time
 import uuid
 from collections import deque
@@ -1000,8 +1001,8 @@ class Hub:
         self.set_client_talking(client_id, False)
 
     def reset_context(self) -> None:
-        """Reset context (ADR 0028), by the Hub and no model. Raises when a file could not be deleted or the reset time
-        stored; the reset holds in memory all the same."""
+        """Reset context (ADR 0028), by the Hub and no model. Raises OSError when a file could not be deleted, and
+        otherwise sqlite3.Error when the reset time could not be stored; the reset holds in memory all the same."""
         if self._closing:
             raise ValueError("Hub is stopping")
         self._cancel_fold()
@@ -1011,12 +1012,18 @@ class Hub:
         self._resets.count += 1
         self._resets.stale, self._resets.failing = True, False
         self._resets.due.set()
+        log, at, reply_id = self._output.log, self._wall(), self._output.reply_id
         # The Conversation empties in memory before anything here can fail, so no new seed carries what came before.
         try:
             self._conversation.reset()
-        finally:
-            if self._output.log is not None:
-                self._output.log.set_reset_time(self._wall(), reply_id=self._output.reply_id)
+        except OSError:
+            # The delete's failure is the one reported; the retry it asks for stores the reset time again.
+            if log is not None:
+                with contextlib.suppress(sqlite3.Error):
+                    log.set_reset_time(at, reply_id=reply_id)
+            raise
+        if log is not None:
+            log.set_reset_time(at, reply_id=reply_id)
 
     def admit_spoken_revision(self, line: Line) -> None:
         if line.request_id is None:
@@ -1626,8 +1633,9 @@ class Hub:
                 if parked:
                     self._persist()
                 self._scopes.prune()
-            upcoming = await self._restart_if_full(end.context)
+            # The Fold goes first: the ceiling restarts the Talker only when no Fold is under way.
             self._fold_if_due(end.context.tokens if end.context is not None else None)
+            upcoming = await self._restart_if_full(end.context)
             if self._resets.stale:
                 # A new Talker that failed to start after a reset is tried again before the next turn.
                 self._resets.due.set()
@@ -1818,7 +1826,8 @@ class Hub:
     async def _restart_if_full(self, context: Context | None) -> _TalkerInput | None:
         """Between turns, swap in a new Talker session once the context reaches the ceiling, which only Folds that
         keep failing let it reach, seeded with the active summary and the Tail (ADR 0028). The User is told once per
-        failing episode, which a Fold that succeeds ends.
+        failing episode, which a Fold that succeeds ends. While a Fold is under way there is no restart, and a Fold
+        whose summary is ready swaps in at once.
 
         Only this turn's context decides: an older reading may be stale. The new session reads the seed in the
         background like the launch warm-up, so a line typed meanwhile waits for it in the inbox. Whatever fails
@@ -1832,8 +1841,15 @@ class Hub:
         if context is None or context.tokens < self._memory.ceiling or self._closing or self._resets.stale:
             # After a reset the new Talker replaces this one anyway, seeded with less.
             return None
-        if self._fold is not None and self._fold.summary is not None:
-            # A ready Fold swaps in at the next quiet moment, and keeps more than a restart would.
+        if self._fold is not None:
+            # A Fold under way keeps more than a restart would; SUMMARISER_TIMEOUT bounds the wait.
+            if not self._fold_ready():
+                return None
+            # A ready one swaps in now, not after the lines already waiting, which would grow the context further.
+            if (upcoming := await self._quiet_or_next()) is not None:
+                return upcoming
+            if self._fold_ready():
+                await self._swap_in_fold()
             return None
         no_reset_since = self._resets.mark()
         if (upcoming := await self._quiet_or_next()) is not None:

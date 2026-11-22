@@ -412,6 +412,35 @@ async def test_a_reset_whose_time_could_not_be_stored_still_deletes_the_conversa
     assert [said(e.message) for e in saved.entries] == ["Hello again."]
 
 
+async def test_a_reset_that_cannot_delete_a_file_is_reset_failed_and_still_stores_its_time(tmp_path: Path) -> None:
+    an_earlier_launch(tmp_path)
+    (tmp_path / "conversation.unreadable-2.json").mkdir()
+
+    async with a_rig(tmp_path, [[Text("Hello, sir.")]]) as rig:
+        result = await rig.send("reset-1", "reset_context")
+        stored = rig.log.reset_time
+
+    assert result["ok"] is False and result["error"]["code"] == "reset_failed"
+    assert stored is not None
+    assert not (tmp_path / "memory").exists() and not (tmp_path / "conversation.json").exists()
+
+
+async def test_a_reset_that_can_neither_delete_a_file_nor_store_its_time_is_reset_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    an_earlier_launch(tmp_path)
+    (tmp_path / "conversation.unreadable-2.json").mkdir()
+
+    def broken(at: float, **_: Any) -> None:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    async with a_rig(tmp_path, [[Text("Hello, sir.")]]) as rig:
+        monkeypatch.setattr(rig.log, "set_reset_time", broken)
+        result = await rig.send("reset-1", "reset_context")
+
+    assert result["ok"] is False and result["error"]["code"] == "reset_failed"
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads and renames past file permissions")
 def test_a_reset_that_cannot_delete_one_file_deletes_the_others_and_saves_over_the_one_never_set_aside(
     tmp_path: Path
