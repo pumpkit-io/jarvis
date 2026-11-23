@@ -944,6 +944,8 @@ async def test_stale_vad_start_cannot_take_ownership_of_replacement_listening() 
             capture.capture(on, owner=owner)
         def barge_in(self, since: float | None) -> None:
             capture.barge_in(since)
+        def close(self) -> None:
+            capture.close()
         async def events(self) -> AsyncIterator[InputEvent]:
             async def forward() -> None:
                 async for event in capture.events():

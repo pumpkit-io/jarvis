@@ -15,6 +15,7 @@ from jarvis_hub.config import RoleModel, Settings, VoiceSettings
 from jarvis_hub.main import Ears, timing, voice_mode
 from jarvis_hub.voice.engines import EngineChoice
 from jarvis_hub.voice.input import Listening
+from jarvis_hub.voice.language import Lang
 from jarvis_hub.voice.player import Samples
 from tests.fakes import FakeBackend, FakeClock, FakeSession, FakeTts, RecordingPlayer, ScriptedAudio, Text, until
 
@@ -36,6 +37,7 @@ class ScriptedMicrophone(ScriptedAudio):
         super().__init__(clock)
         self.started = self.closed = False
         self.ready = threading.Event()
+        self.record: Callable[[dict[str, Any]], None] = lambda row: None
 
     def start(self) -> None:
         self.started = True
@@ -46,6 +48,11 @@ class ScriptedMicrophone(ScriptedAudio):
 
     def reference(self, samples: Samples, rate: int) -> None:
         pass
+
+    def say(self, text: str, lang: Lang | None = None, *, limited: bool = False) -> None:
+        """Records the turn as Capture does, then reports it."""
+        self.record({"kind": "turn", "text": text})
+        super().say(text, lang, limited=limited)
 
 
 def settings(tmp_path: Path, voice: VoiceSettings = VoiceSettings()) -> Settings:
@@ -89,6 +96,7 @@ async def test_voice_mode_wakes_hears_answers_aloud_and_idles(tmp_path: Path, co
         choice: EngineChoice, listening: Listening, record: Any, notice: Any, clips: Any
     ) -> ScriptedMicrophone:
         chosen.append((choice, listening))
+        microphone.record = record
         return microphone
 
     def open_player(rate: int, on_played: Callable[[Samples, int], None]) -> RecordingPlayer:
@@ -139,6 +147,7 @@ async def test_voice_mode_wakes_hears_answers_aloud_and_idles(tmp_path: Path, co
         assert cancelled.is_set()
     rows = [json.loads(line) for line in (config.runtime_dir / "metrics.jsonl").read_text().splitlines()]
     assert [r["to"] for r in rows if r["kind"] == "voice"] == ["listening", "thinking", "speaking", "follow_up", "idle"]
+    assert {r["client"] for r in rows if r["kind"] in ("voice", "turn")} == {"terminal"}
 
 
 def test_the_barge_in_windows_reach_the_voice_state_machine() -> None:

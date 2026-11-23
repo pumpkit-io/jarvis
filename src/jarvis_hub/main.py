@@ -27,6 +27,7 @@ from jarvis_hub.door import Door
 from jarvis_hub.pairing import PairingStore, https_origin
 from jarvis_hub.agents.backend import AgentBackend, SessionSpec
 from jarvis_hub.agents.sdk import SdkBackend
+from jarvis_hub.clients import TERMINAL
 from jarvis_hub.config import ConfigError, Settings, VoiceSettings, load_settings
 from jarvis_hub.hub import Clock, Hub, Line, Metrics, Output
 from jarvis_hub.memory import summariser_spec
@@ -43,7 +44,7 @@ from jarvis_hub.voice.speech import Speech, SpeechClock
 from jarvis_hub.voice.transcription import TranscriptionService
 from jarvis_hub.voice.state import Timing
 from jarvis_hub.voice.tts import Synthesizer, make_synthesizer
-from jarvis_hub.voice.voice_mode import AudioInput, VoiceMode, merge
+from jarvis_hub.voice.voice_mode import AudioInput, VoiceMode, client_rows, merge
 from jarvis_hub.waits import WaitSetup
 from jarvis_hub.workspace import default_workspace
 
@@ -384,10 +385,11 @@ async def voice_mode(
         choice = EngineChoice(aec="off" if headphones else voice.aec, wake=voice.wake_engine, stt=voice.stt_engine)
         clips = ClipStore(settings.runtime_dir / "clips", clip_settings(voice))
         transcription = TranscriptionService() if settings.remote or ears.open_listener is _open_listener else None
+        record = client_rows(metrics.record, TERMINAL)
         try:
-            listener = (_open_listener(choice, listening(voice), metrics.record, output.notice, clips, transcription=transcription)
+            listener = (_open_listener(choice, listening(voice), record, output.notice, clips, transcription=transcription)
                         if ears.open_listener is _open_listener else
-                        ears.open_listener(choice, listening(voice), metrics.record, output.notice, clips))
+                        ears.open_listener(choice, listening(voice), record, output.notice, clips))
         except BaseException:
             if transcription is not None:
                 transcription.close()
@@ -461,7 +463,6 @@ async def voice_mode(
                     await hub.close()
             finally:
                 try:
-                    listener.close()
                     await conversation.close()
                 finally:
                     if transcription is not None:
