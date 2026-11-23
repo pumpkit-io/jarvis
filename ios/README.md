@@ -131,6 +131,14 @@ Public package tests cover restart through the production factory, offline choic
 
 Waiting on User: installed-iPhone Voice off mid-sentence, AirPods/current-route behavior, physical session release, offline relaunch, VoiceOver, Dynamic Type, safe areas and signed launch. Host renders, fake audio tests and SDK linking do not establish those device results. No live Hub, model, device or account action was used.
 
+## Live mode
+
+The ear button at the right of the top bar turns Live mode on and off. It is off at every launch and never saved. Turning it on asks for the microphone if needed, then sends `set_live` with a fresh command id; capture starts only once the Hub answers `{"on": true}`, because the Hub closes a socket that sends audio before that. `LiveModeController` owns the state, the request and the stream, and `AppSession.liveMode` exposes it to the view.
+
+`NativeLiveCaptureSource` runs an `AVAudioEngine` with voice processing on the input node, in a `playAndRecord` session that allows Bluetooth hands-free routes. While it runs, `SpeechPlayer` plays in that same session rather than switching it to `playback`. The tap converts to 16 kHz mono PCM16LE and cuts it into binary messages of whole 10 ms frames, at most 100 ms each. `HubClient.sendAudio` sends them only on the socket the Hub turned Live mode on for and drops them otherwise; they never go to the Outbox. Turning Live mode off stops capture, lets the last frame go and then sends `set_live` off.
+
+Package tests use a fake capture source, socket, permission gate and sleeper, and feed real PCM to the native tap handler. Waiting on the device: whether voice processing cancels Jarvis's reply from the speaker well enough for the Mac's Barge-in judge, given the speech player runs its own engine; the permission prompt's text; the orange microphone indicator; Bluetooth and AirPods routes; turning Live mode on while a reply is playing; VoiceOver reading the button and the on message; the message's fade and Reduce Motion.
+
 ## Settings
 
 Open Settings from the top-bar icon. Talk always uses hold, slide-up lock and slide-left discard; there is no gesture setting. Leaving the Talk control cancels an active hold or locked recording without sending, while leaving after send keeps the admitted Outbox item.

@@ -190,6 +190,7 @@ struct WorkspaceTopBar: View {
                 connectionButton(showsLabel: true)
                 Spacer(minLength: 0)
                 tasksLink
+                liveModeButton
             }
             VStack(spacing: 0) {
                 HStack(spacing: 12) {
@@ -198,6 +199,7 @@ struct WorkspaceTopBar: View {
                     connectionButton(showsLabel: false)
                     Spacer(minLength: 0)
                     tasksLink
+                    liveModeButton
                 }
                 if let label = session.shownConnection.indicator.label {
                     Text(label).multilineTextAlignment(.center)
@@ -268,6 +270,23 @@ struct WorkspaceTopBar: View {
         }
         .accessibilityLabel("Tasks")
         .accessibilityValue("\(session.openTasks.count) open")
+        .fixedSize()
+    }
+
+    /// Off is Haze like the other top bar icons; on reuses the app's one active treatment, Void on a Cyan circle.
+    private var liveModeButton: some View {
+        let on = session.liveMode.isOn
+        return Button { Task { await session.liveMode.toggle() } } label: {
+            Image(systemName: "ear")
+                .foregroundStyle(on ? theme.void : theme.haze)
+                .frame(width: controlSize * 2.2, height: controlSize * 2.2)
+                .background { if on { Circle().fill(theme.cyan) } }
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel("Live mode")
+        .accessibilityValue(on ? "On" : "Off")
+        .accessibilityHint("Listen for “Jarvis” on this iPhone")
         .fixedSize()
     }
 
