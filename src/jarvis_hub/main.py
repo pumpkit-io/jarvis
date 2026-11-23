@@ -320,6 +320,7 @@ async def text_mode(
             tts = voice.tts if voice is not None else make_synthesizer(settings.voice.tts_engine)
             floor = VoiceMode(audio=None, tts=tts, player=player if player is not None else NoLocalPlayer(),
                                      clock=clock, timing=timing(settings.voice), metrics=metrics, notice=output.notice,
+                                     ready_sound=local_speech,
                                      wake_refractory_s=listening(settings.voice).wake_refractory_s)
             speech = floor.speech
         elif player is not None and voice is not None:

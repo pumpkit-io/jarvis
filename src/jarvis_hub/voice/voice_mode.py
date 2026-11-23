@@ -250,6 +250,7 @@ class VoiceMode:
         debug: bool = False,
         recognition: RelationAssessment | None = None,
         ready_when: Callable[[], Awaitable[None]] | None = None,
+        ready_sound: bool = True,
         wake_refractory_s: float = 2.0,
     ) -> None:
         # One input per listening Client; `audio` is the Mac's.
@@ -269,6 +270,7 @@ class VoiceMode:
         self._views: dict[str, str] = {}
         # What else must be ready, beyond the voice, before the ready sound says Jarvis can take a request.
         self._ready_when = ready_when
+        self._ready_sound = ready_sound
         self._readying: asyncio.Task[None] | None = None
         self._player = player
         self._clock = clock
@@ -331,6 +333,8 @@ class VoiceMode:
 
     def _ready(self) -> None:
         self._notice("Speech ready.")
+        if not self._ready_sound:
+            return
         if self._ready_when is None:
             self._speech.say("ready", "en")
             return

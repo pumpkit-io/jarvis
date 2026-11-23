@@ -53,9 +53,9 @@ async def test_text_launch_hears_a_live_phone_and_replies_there_without_opening_
     with PairingStore(config.runtime_dir / 'events.sqlite3') as pairing:
         phone = pairing.exchange(pairing.create_code('https://mac.example.ts.net'), 'Phone', 'iphone')
     backend = FakeBackend(clock, [[Text('From your phone.')]])
-    stdin, stdout = HeldStdin(), io.StringIO()
+    stdin, stdout, stderr = HeldStdin(), io.StringIO(), io.StringIO()
     running = asyncio.create_task(entry.text_mode(settings=config, environ={}, backend=backend, clock=clock,
-        stdin=stdin, stdout=stdout, stderr=io.StringIO()))
+        stdin=stdin, stdout=stdout, stderr=stderr))
     try:
         await until(lambda: bool(doors and doors[0].port))
         async with aiohttp.ClientSession() as session, connect(session, doors[0], phone.token) as socket:
@@ -92,6 +92,7 @@ async def test_text_launch_hears_a_live_phone_and_replies_there_without_opening_
                 reader.cancel()
                 await asyncio.gather(reader, return_exceptions=True)
             assert clips == ['From your phone.']
+            assert 'Could not speak' not in stderr.getvalue()
             assert any('Open a PR' in m for m in backend.session('talker').received)
             assert any(r['kind'] == 'capture' and r.get('client') == phone.client.id for r in metrics.records)
     finally:
@@ -125,6 +126,7 @@ async def test_remote_text_speak_still_announces_news_on_the_mac_without_a_micro
         stdin=stdin, stdout=io.StringIO(), stderr=io.StringIO(), voice=entry.Mouth(FakeTts(), speaker)))
     try:
         await until(lambda: 'Working.' in player.texts)
+        assert 'ready' in player.voices
         arrival.set()
         await until(lambda: 'The fix is ready.' in player.texts)
         assert 'chime' not in player.voices and 'closing' not in player.voices
