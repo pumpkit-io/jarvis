@@ -171,6 +171,21 @@ async def test_reports_interrupt_heard_text_and_private_routing(tmp_path: Path) 
             assert not any(e.type.startswith('speech_') for e in log.after(0))
 
 
+async def test_stopping_the_last_clip_before_its_report_frees_the_mac_microphone(tmp_path: Path) -> None:
+    async with remote_rig(tmp_path) as (session, door, hub, _log, _backend, phones, _pairing):
+        async with connect(session, door, phones[0].token) as one:
+            await foreground(one)
+            await hub.admit_line(Line('First', 0, typed=False, client_id=phones[0].client.id))
+            frames = await through(one, 'speech_end')
+            stream = next(f['payload']['speech_id'] for f in frames if f['type'] == 'speech_begin')
+            assert hub.clients.remote_activity
+            assert (await control(one, 'stop', 'interrupt', speech_id=stream, last_clip_index=1))['ok']
+            assert not hub.clients.remote_activity
+            await hub.admit_line(Line('Continue', 0, typed=False, client_id=phones[0].client.id))
+            after = await through(one, 'speech_begin')
+            assert not any(f['type'] == 'speech_stop' for f in after)
+
+
 async def test_replacement_and_revocation_retire_only_the_owned_speech(tmp_path: Path) -> None:
     async with remote_rig(tmp_path) as (session, door, hub, log, _backend, phones, pairing):
         async with connect(session, door, phones[0].token) as original:

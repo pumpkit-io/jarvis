@@ -406,6 +406,26 @@ async def test_standing_by_from_the_phone_stops_the_reply_there_and_closes_there
         assert rig.speaker.voices == ["ready"]
 
 
+async def test_the_request_after_standing_by_on_the_phone_is_not_marked_interrupted(tmp_path: Path) -> None:
+    told = asyncio.Event()
+    replies: list[list[Step]] = [[Text("Certainly, sir. "), Gate(told), Tool("stand_by")], [Text("Second.")]]
+    async with live_phone(tmp_path, replies) as (rig, phone):
+        await phone.wake()
+        await phone.ask()
+        await until(lambda: phone.states()[-1:] == ["speaking"])
+        told.set()
+        await until(lambda: phone.streams()[-1:] == [("closing", [""])])
+        # Past the Wake word's refractory time.
+        await phone.stream(20)
+
+        await phone.wake()
+        await phone.ask()
+
+        talker = rig.backend.session("talker")
+        await until(lambda: len(talker.received) >= 2 and "Open a PR" in talker.received[-1])
+        assert "<interrupted" not in talker.received[-1]
+
+
 async def test_a_farewell_on_the_phone_ends_without_a_follow_up_window(tmp_path: Path) -> None:
     async with live_phone(tmp_path, [[Text("Until tomorrow, sir."), Tool("end_conversation")]]) as (rig, phone):
         await phone.wake()

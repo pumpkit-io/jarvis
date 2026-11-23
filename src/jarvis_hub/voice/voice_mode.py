@@ -397,8 +397,8 @@ class VoiceMode:
         audio.close()
 
     def _end_exchange(self, client: str) -> None:
-        """`client`'s exchange lost its input: its reply stops there, and with no closing sound, since nothing is
-        left there to hear it, the voice idles until a Wake word elsewhere."""
+        """`client`'s exchange lost its input. Stops its reply there without a closing sound; the voice idles until a
+        Wake word elsewhere."""
         self._exchange = TERMINAL
         if self._voice.state == "idle":
             return

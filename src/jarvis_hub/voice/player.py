@@ -391,6 +391,8 @@ class RemotePlayer:
             # A stream ended and heard to its last clip has nothing left to stop, and the Client may play another.
             if not (self._ended and self._finished == len(self._clips) - 1):
                 self._transport.stop(self._speech_id)
+            elif idle := getattr(self._transport, "idle", None):
+                idle(self._speech_id)
 
     def played(self) -> str:
         return " ".join(text for text, _, _ in self._clips[:self._finished + 1] if text)
