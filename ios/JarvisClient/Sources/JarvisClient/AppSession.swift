@@ -73,8 +73,9 @@ import Observation
     }
 
     private func interruptSpeech() async {
-        let speechID = playback.speechID ?? self.speechID
-        let finished = max(lastCompletedClip, playback.lastFinishedIndex)
+        // A cue is not speech the Hub can interrupt; it only stops here.
+        let speechID = playback.playingCue ? self.speechID : playback.speechID ?? self.speechID
+        let finished = playback.playingCue ? lastCompletedClip : max(lastCompletedClip, playback.lastFinishedIndex)
         playback.stop(reportStopped: false); stopPlayback()
         guard let speechID, let client else { return }
         self.speechID = nil; talk.speaking = false
@@ -123,13 +124,16 @@ import Observation
                 focusHere = status.focus_client_id == credentials?.clientID
             }
         case .speechBegin:
-            if voiceOn, let id = event.string("speech_id"), let reply = event.string("reply_id"), foreground {
+            guard foreground, let id = event.string("speech_id") else { break }
+            // A cue is how a locked phone tells the User it heard the Wake word or stopped listening, so Silence keeps it.
+            if event.string("cue") != nil { playback.begin(speechID: id, replyID: nil) }
+            else if voiceOn, let reply = event.string("reply_id") {
                 playback.begin(speechID: id, replyID: reply)
                 speechID = id; lastCompletedClip = -1
             }
         case .speechEnd:
-            if let id = event.string("speech_id"), let reply = event.string("reply_id"), let last = event.integer("last_clip_index") {
-                playback.end(speechID: id, replyID: reply, lastIndex: last)
+            if let id = event.string("speech_id"), let last = event.integer("last_clip_index") {
+                playback.end(speechID: id, replyID: event.string("reply_id"), lastIndex: last)
             }
         case .speechStop:
             if let id = event.string("speech_id") { playback.stop(speechID: id, reportStopped: false) }
@@ -140,6 +144,7 @@ import Observation
         case .replyEnd:
             if streamingReply?.id == event.string("reply_id") { streamingReply = nil }
             if let reply = event.string("reply_id"), playback.replyID != reply { playback.markMissed(replyID: reply) }
+        case .voiceState: liveMode.receive(voiceState: event)
         default: break
         }
     }
@@ -147,11 +152,11 @@ import Observation
     private func receiveControl(_ update: HubClientUpdate) {
         switch update {
         case .audio(let event, let pcm):
-            if voiceOn, foreground || backgroundSpeechID == playback.speechID && playback.activeSpeechID != nil,
-               let id = event.string("speech_id"), let reply = event.string("reply_id"),
-               let index = event.integer("index"), let text = event.string("text") {
-                playback.append(speechID: id, replyID: reply, index: index, text: text, pcm: pcm)
-                talk.speaking = playback.playingSpeechID != nil
+            let cue = event.string("cue") != nil
+            if voiceOn || cue, foreground || backgroundSpeechID == playback.speechID && playback.activeSpeechID != nil,
+               let id = event.string("speech_id"), let index = event.integer("index"), let text = event.string("text") {
+                playback.append(speechID: id, replyID: event.string("reply_id"), index: index, text: text, pcm: pcm)
+                if !cue { talk.speaking = playback.playingSpeechID != nil }
             }
         case .result(let result):
             if focusCommand?.id == result.id {
@@ -242,8 +247,12 @@ import Observation
         self.noticeSleep = noticeSleep
         self.orbNow = orbNow; self.orbSleep = orbSleep
         self.stopPlayback = stopPlayback
+        self.talk.microphoneHeld = { [weak liveMode = self.liveMode] in liveMode?.talkHoldsMicrophone($0) }
         self.playback.configure(report: { [weak self] command in
             guard let self, let client = self.client else { return }
+            if command.payload["state"] == .string("started"), command.payload["speech_id"] == self.speechID.map(JSONValue.string) {
+                self.talk.speaking = true
+            }
             self.playbackRevision &+= 1
             let previous = self.playbackDelivery
             self.playbackDelivery = Task {
@@ -284,10 +293,15 @@ import Observation
     }
 
     private func sampleOrb() {
+        let live = liveMode.isOn ? liveMode.voiceState : nil
         if talk.state == .recording {
             orb.update(speaker: .user, target: OrbModel.loudness(rms: talk.level))
-        } else if playback.playingSpeechID != nil {
+        } else if live == .listening || live == .followUp {
+            orb.update(speaker: .user, target: OrbModel.loudness(rms: liveMode.level))
+        } else if playback.playingSpeechID != nil && !playback.playingCue || live == .speaking {
             orb.update(speaker: .jarvis, target: OrbModel.loudness(rms: playback.level))
+        } else if live != nil {
+            orb.update(speaker: .idle, target: 0)
         } else if !voiceOn, let reply = streamingReply {
             let time = max(0, orbNow() - reply.started)
             let target = abs(sin(7 * time) * sin(2.3 * time)) * (0.6 + 0.4 * abs(sin(0.9 * time)))
@@ -389,7 +403,12 @@ import Observation
         await client.setSilence(silence, revision: revision)
     }
 
-    public func silencePlayback() { playback.stop(reportStopped: false); stopPlayback(); talk.speaking = false }
+    /// Silence stops speech only; a cue playing goes on.
+    public func silencePlayback() {
+        let cue = playback.playingCue
+        playback.silence()
+        if !cue { stopPlayback(); talk.speaking = false }
+    }
 
     public func replay(replyID: String) async {
         guard voiceOn, connection.canSend, let client else { return }

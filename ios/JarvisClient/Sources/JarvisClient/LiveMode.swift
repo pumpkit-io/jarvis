@@ -31,14 +31,21 @@ import Observation
 /// Live mode on this iPhone: the Mac listens for the Wake word on the microphone audio streamed to it.
 /// Off at every launch and never saved.
 @MainActor @Observable public final class LiveModeController {
+    /// The Hub's voice floor as this iPhone sees it; every other Live mode iPhone sees `idle`.
+    public enum VoiceState: String, Sendable { case idle, listening, thinking, speaking, followUp = "follow_up" }
     public static let onMessage = "Live mode on. Say “Jarvis” to talk."
     public static let textModeMessage = "Live mode needs Jarvis in voice mode on the Mac."
     static let offlineMessage = "Couldn't reach the Mac. Not changed."
     static let microphoneFailedMessage = "The microphone couldn't start. Try again."
     public private(set) var isOn = false
     public private(set) var message: String?
+    public private(set) var voiceState = VoiceState.idle
+    /// RMS of the last frame streamed, for the orb; read every frame, so it is not observed.
+    @ObservationIgnored public private(set) var level = 0.0
     private var request: HubCommand?
     private var busy = false
+    /// A Talk holds the microphone from its press until it is sent or discarded.
+    private var talking = false
     private let capture: any LiveCaptureSource
     private let permission: @MainActor () async -> Bool
     private let sleep: @Sendable (Double) async throws -> Void
@@ -71,13 +78,28 @@ import Observation
     public func receive(_ result: CommandResult) {
         guard let request, result.id == request.id else { return }
         self.request = nil
-        if result.ok, result.result?["on"] == .bool(true) { startStreaming() }
-        else if result.error?.code == "voice_unavailable" { show(Self.textModeMessage) }
+        if result.ok, result.result?["on"] == .bool(true) {
+            isOn = true
+            if startCapture() { show(Self.onMessage, for: 2.5) }
+        } else if result.error?.code == "voice_unavailable" { show(Self.textModeMessage) }
+        else if !result.ok { show(Self.offlineMessage) }
+    }
+
+    public func receive(voiceState event: HubEvent) {
+        guard isOn, let payload = try? event.decodePayload(VoiceStatePayload.self) else { return }
+        voiceState = VoiceState(rawValue: payload.state) ?? .idle
     }
 
     public func dropped(commandID: String) {
         guard request?.id == commandID else { return }
         request = nil; show(Self.offlineMessage)
+    }
+
+    /// Pauses streaming while a Talk holds the microphone and resumes it once the Talk is sent or discarded.
+    public func talkHoldsMicrophone(_ held: Bool) {
+        guard talking != held else { return }
+        talking = held
+        if held { pauseCapture() } else { _ = startCapture() }
     }
 
     private func turnOn() async {
@@ -95,31 +117,41 @@ import Observation
     }
 
     private func turnOff() async {
-        isOn = false; show(nil)
-        await stopStreaming()
+        isOn = false; voiceState = .idle; show(nil)
+        pauseCapture()
         // The Hub closes the socket on audio after Live mode is off, so the last frame goes before this command.
+        await streaming?.value
         try? await send(HubCommand(type: "set_live", payload: ["on": .bool(false)]))
     }
 
-    private func startStreaming() {
+    /// Answers false when the microphone wouldn't start, which turns Live mode off.
+    private func startCapture() -> Bool {
+        guard isOn, !talking, frames == nil else { return true }
         // Newest frames win if the socket falls behind: late audio would only distort the Mac's turn timing.
         let (stream, continuation) = AsyncStream<Data>.makeStream(bufferingPolicy: .bufferingNewest(10))
         do { try capture.start { continuation.yield($0) } }
         catch {
-            continuation.finish(); show(Self.microphoneFailedMessage)
+            continuation.finish(); isOn = false; voiceState = .idle; show(Self.microphoneFailedMessage)
             Task { try? await send(HubCommand(type: "set_live", payload: ["on": .bool(false)])) }
-            return
+            return false
         }
-        frames = continuation; isOn = true
-        let sendAudio = sendAudio
-        streaming = Task { for await frame in stream { await sendAudio(frame) } }
-        show(Self.onMessage, for: 2.5)
+        frames = continuation
+        let sendAudio = sendAudio, previous = streaming
+        streaming = Task { [weak self] in
+            // A paused stream may still be sending its last frame; this one goes after it.
+            await previous?.value
+            for await frame in stream {
+                self?.level = pcm16Level(frame)
+                await sendAudio(frame)
+            }
+        }
+        return true
     }
 
-    private func stopStreaming() async {
+    /// Frames captured but not yet sent are dropped: the Talk or the end of Live mode replaces them.
+    private func pauseCapture() {
         capture.stop(); frames?.finish(); frames = nil
-        let streaming = streaming; self.streaming = nil
-        streaming?.cancel(); await streaming?.value
+        streaming?.cancel(); level = 0
     }
 
     private func show(_ text: String?, for seconds: Double? = nil) {

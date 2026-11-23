@@ -37,7 +37,11 @@ public enum TalkWaveform {
 
 /// Records a Talk and hands it to the Outbox. Nothing here waits on the connection.
 @MainActor @Observable public final class TalkController {
-    public private(set) var state: TalkState = .idle
+    public private(set) var state: TalkState = .idle {
+        didSet { if capturing != Self.capturing(oldValue) { microphoneHeld(capturing) } }
+    }
+    /// Told true at a press, before the microphone opens, and false once the Talk is sent or discarded.
+    @ObservationIgnored public var microphoneHeld: @MainActor (Bool) -> Void = { _ in }
     public private(set) var elapsed = 0
     public private(set) var talkID: String?
     public private(set) var microphoneRefused = false
@@ -85,7 +89,8 @@ public enum TalkWaveform {
     /// Live mode asks for the same microphone, so its answer drives this permission message too.
     public func microphonePermission(granted: Bool) { microphoneRefused = !granted }
     public var canPress: Bool { state != .authorizing && state != .recording && state != .paused }
-    private var capturing: Bool { state == .authorizing || state == .recording || state == .paused }
+    private var capturing: Bool { Self.capturing(state) }
+    private static func capturing(_ state: TalkState) -> Bool { state == .authorizing || state == .recording || state == .paused }
     /// Audio shorter than 0.3 seconds is a slip of the finger, not something said.
     static let shortestBytes = TalkAudio.bytesPerSecond * 3 / 10
     private let recorder: any TalkRecorder

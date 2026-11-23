@@ -155,10 +155,15 @@ public struct SpeechStop: Decodable, Equatable, Sendable {
     public let reason: String
 }
 
+/// A state this release doesn't know reads as `idle`, so a newer Hub cannot close the connection with one.
+public struct VoiceStatePayload: Decodable, Equatable, Sendable {
+    public let state: String
+}
+
 public struct HubEvent: Codable, Equatable, Sendable {
     public enum Kind: Equatable, Sendable {
         case heard, replyDelta, replyEnd, notice, show, taskSnapshot, pendingApproval, status
-        case speechBegin, speechClip, speechEnd, speechStop, unknown(String)
+        case speechBegin, speechClip, speechEnd, speechStop, voiceState, unknown(String)
     }
     public let seq: Int64
     public let time: String
@@ -180,6 +185,7 @@ public struct HubEvent: Codable, Equatable, Sendable {
         case "speech_clip": .speechClip
         case "speech_end": .speechEnd
         case "speech_stop": .speechStop
+        case "voice_state": .voiceState
         default: .unknown(type)
         }
     }
@@ -239,6 +245,7 @@ public enum HubFrame: Equatable, Sendable {
             case .speechClip: _ = try event.decodePayload(SpeechClip.self)
             case .speechEnd: _ = try event.decodePayload(SpeechEnd.self)
             case .speechStop: _ = try event.decodePayload(SpeechStop.self)
+            case .voiceState: _ = try event.decodePayload(VoiceStatePayload.self)
             case .status:
                 let status = try event.decodePayload(HubStatus.self)
                 if let time = status.usage_limit.resets_at, utcDate(time) == nil { throw HubProtocolError.invalidTime }
