@@ -418,6 +418,7 @@ async def voice_mode(
             player=player,
             clock=clock,
             timing=timing(voice),
+            wake_refractory_s=listening(voice).wake_refractory_s,
             metrics=metrics,
             notice=output.notice,
             debug=debug,

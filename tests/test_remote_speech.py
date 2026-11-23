@@ -90,7 +90,7 @@ async def remote_rig(tmp_path: Path, backend: FakeBackend | None = None, voice: 
         output = EventOutput(log, RecordingOutput())
         speech = voice.speech if voice is not None else Speech(tts or FakeTts(), local or RecordingPlayer(), clock, metrics=metrics, notice=output.notice)
         backend = backend or FakeBackend(clock, [[Text('First sentence. Second sentence.')], [Text('New reply.')], [Text('Third reply.')]])
-        hub = make_hub(backend, output, metrics, speech=speech, floor=voice,
+        hub = make_hub(backend, output, metrics, speech=speech, floor=voice, speak_typed=voice is None,
                        on_stand_by=voice.stand_by if voice is not None else None,
                        on_end_conversation=voice.end_conversation if voice is not None else None)
         adapter = DelayedAdmission(hub)

@@ -26,7 +26,7 @@ from jarvis_hub.voice.engines import NoEchoCancellation
 from jarvis_hub.voice.input import Engines, Listening
 from jarvis_hub.voice.player import Samples
 from jarvis_hub.voice.live import LiveInputs
-from jarvis_hub.voice.state import Timing
+from jarvis_hub.voice.state import SpokenWake, Timing
 from jarvis_hub.voice.voice_mode import VoiceMode
 from tests.fakes import (
     FakeBackend, FakeClock, FakeTts, RecordingMetrics, Gate, RecordingPlayer, ScriptedAudio, Set, Step, Text, Tool, until,
@@ -60,7 +60,7 @@ class Rig:
     threads: list[threading.Thread] = field(default_factory=lambda: [])
 
     def requests(self) -> list[str]:
-        return [m for s in self.backend.all_sessions("talker") for m in s.received if m.startswith("<user")]
+        return [m for s in self.backend.all_sessions("talker") for m in s.received if "<user " in m]
 
     def rows(self, kind: str) -> list[dict[str, Any]]:
         return [r for r in self.metrics.records if r["kind"] == kind and r.get("client") == self.phones[0].client.id]
@@ -72,12 +72,14 @@ class Rig:
 @asynccontextmanager
 async def live_rig(tmp_path: Path, replies: list[list[Step]] | None = None,
                    orchestrator: list[list[Step]] | None = None, words: dict[int, str] | None = None,
-                   transcription: BufferTranscriber | None = None) -> AsyncGenerator[Rig]:
+                   transcription: BufferTranscriber | None = None,
+                   listening: Listening = Listening()) -> AsyncGenerator[Rig]:
     """`words` has the phone's STT say each word whose marker samples the audio holds, in place of "Open a PR"."""
     clock, metrics, notices = FakeClock(), RecordingMetrics(), list[str]()
     mac, speaker = ScriptedAudio(clock), RecordingPlayer()
     voice = VoiceMode(audio=mac, tts=FakeTts(), player=speaker, clock=clock, metrics=metrics,
-                      notice=lambda text: None, timing=Timing(6, 4, 6, .5, tail_s=0))
+                      notice=lambda text: None, timing=Timing(6, 4, 6, .5, tail_s=0),
+                      wake_refractory_s=listening.wake_refractory_s)
     threads: list[threading.Thread] = []
 
     def load() -> Engines:
@@ -86,7 +88,7 @@ async def live_rig(tmp_path: Path, replies: list[list[Step]] | None = None,
                        stt=ScriptedStt(words=words or {}), gate=Everyone())
 
     def live(floor: VoiceMode) -> LiveInputs:
-        return LiveInputs(floor, load, Listening(), metrics.record, notices.append, clock=clock.now)
+        return LiveInputs(floor, load, listening, metrics.record, notices.append, clock=clock.now)
 
     backend = FakeBackend(clock, replies or [[Text("Opened.")], [Text("Second.")]], orchestrator=orchestrator or [])
     async with remote_rig(tmp_path, backend=backend, voice=voice, live=live, transcription=transcription) as (session, door, hub, _log, _backend, phones, pairing):
@@ -333,8 +335,9 @@ class Phone:
 async def live_phone(tmp_path: Path, replies: list[list[Step]] | None = None,
                      orchestrator: list[list[Step]] | None = None,
                      words: dict[int, str] | None = None,
-                     transcription: BufferTranscriber | None = None) -> AsyncGenerator[tuple[Rig, Phone]]:
-    async with live_rig(tmp_path, replies, orchestrator, words, transcription) as rig, connect(rig.session, rig.door, rig.phones[0].token) as socket:
+                     transcription: BufferTranscriber | None = None,
+                     listening: Listening = Listening()) -> AsyncGenerator[tuple[Rig, Phone]]:
+    async with live_rig(tmp_path, replies, orchestrator, words, transcription, listening) as rig, connect(rig.session, rig.door, rig.phones[0].token) as socket:
         await foreground(socket)
         phone = Phone(rig, socket, rig.phones[0].client.id)
         try:
@@ -953,9 +956,48 @@ async def test_a_talks_reply_on_a_live_phone_gets_no_follow_up_window(tmp_path: 
         assert phone.states() == ["idle"]
 
 
-async def test_a_wake_word_on_the_phone_stops_its_talks_reply_and_listens_there(tmp_path: Path) -> None:
+async def test_a_talk_on_another_phone_mutes_both_live_inputs_until_it_is_discarded(tmp_path: Path) -> None:
+    async with live_phone(tmp_path) as (rig, first), connect(rig.session, rig.door, rig.phones[1].token) as socket:
+        await foreground(socket)
+        second = Phone(rig, socket, rig.phones[1].client.id)
+        try:
+            await second.live_on()
+            await first.wake()
+            talk_id = uuid.uuid4().hex
+            assert (await second.command("talk_begin", talk_id=talk_id))["ok"]
+            await until(lambda: first.states()[-1] == "idle")
+
+            # A locked Talk has the same Hub lifetime as a held one, through send or discard.
+            await first.stream(1000)
+            rig.mac.wake()
+            for phone in (first, second):
+                await phone.socket.send_bytes(pcm(8, WAKE))
+                await phone.ask()
+            await asyncio.sleep(.05)
+
+            assert rig.requests() == []
+            assert first.states() == ["idle", "listening", "idle"]
+            assert second.states() == ["idle"]
+            assert second.streams() == []
+            assert rig.speaker.voices == ["ready"]
+            assert (await second.command("talk_cancel", talk_id=talk_id))["ok"]
+            await first.wake()
+            await first.ask()
+            await until(lambda: first.ended() == 1)
+            assert len(rig.requests()) == 1 and "Open a PR" in rig.requests()[0]
+        finally:
+            second.close()
+
+
+@pytest.mark.parametrize("previous_mac_wake", [False, True])
+async def test_a_wake_word_on_the_phone_stops_its_talks_reply_and_listens_there(
+    tmp_path: Path, previous_mac_wake: bool,
+) -> None:
     replies: list[list[Step]] = [[Text("First sentence. Second sentence.")], [Text("Opened.")]]
     async with live_phone(tmp_path, replies, transcription=TalkTranscriber()) as (rig, phone):
+        if previous_mac_wake:
+            rig.mac.wake()
+            await until(lambda: rig.voice.state == "listening")
         await talk(phone, rig)
         await until(lambda: phone.ended() == 1 and rig.hub.clients.remote_activity)
         rig.mac.wake()
@@ -965,9 +1007,102 @@ async def test_a_wake_word_on_the_phone_stops_its_talks_reply_and_listens_there(
         await until(lambda: any(frame["type"] == "speech_stop" for frame in phone.frames))
         await until(lambda: phone.streams()[-1:] == [("chime", [""])])
         assert phone.states() == ["idle", "listening"]
-        assert rig.speaker.voices == ["ready"]
+        assert rig.speaker.voices == (["ready", "chime"] if previous_mac_wake else ["ready"])
         await phone.ask()
-        print("DBG", rig.requests(), phone.states(), phone.streams())
         await until(lambda: len(rig.requests()) == 2 and "Open a PR" in rig.requests()[-1])
         await until(lambda: phone.ended() == 2)
         assert [stream[0] for stream in phone.streams()] == ["reply", "chime", "reply"]
+
+
+@pytest.mark.parametrize("refractory,delay,takes_over", [(.2, .2, True), (.75, .74, False), (.75, .75, True),
+                                                       (3.0, 2.5, False), (3.0, 3.0, True)])
+async def test_the_other_input_takes_over_at_the_configured_refractory_boundary(
+    tmp_path: Path, refractory: float, delay: float, takes_over: bool,
+) -> None:
+    async with live_phone(tmp_path, listening=Listening(wake_refractory_s=refractory)) as (rig, phone):
+        await phone.wake()
+        woke_at = rig.rows("voice")[-1]["event_at"]
+        rig.clock.advance(woke_at + delay - rig.clock.now())
+
+        rig.mac.wake()
+        rig.mac.say("Status of the Mac")
+        await phone.ask()
+
+        await until(lambda: len(rig.requests()) == 1)
+        if takes_over:
+            assert "Status of the Mac" in rig.requests()[0]
+            await until(lambda: "Opened." in rig.speaker.texts)
+            assert phone.states()[-1] == "idle"
+        else:
+            assert "Open a PR" in rig.requests()[0]
+            await until(lambda: phone.ended() == 1)
+            assert rig.speaker.voices == ["ready"]
+
+
+async def test_a_wake_word_on_the_phone_replaces_the_macs_in_progress_capture(tmp_path: Path) -> None:
+    async with live_phone(tmp_path) as (rig, phone):
+        rig.mac.wake()
+        await until(lambda: rig.voice.state == "listening")
+        await phone.stream(250)
+        rig.mac.speech()
+        await asyncio.sleep(.05)
+
+        await phone.wake()
+
+        await until(lambda: phone.streams() == [("chime", [""])])
+        rig.mac.say("Abandoned on the Mac")
+        await phone.ask()
+        await until(lambda: phone.ended() == 1)
+        assert len(rig.requests()) == 1 and "Open a PR" in rig.requests()[0]
+        assert rig.speaker.voices == ["ready", "chime"]
+
+
+async def test_a_spoken_stop_phrase_on_the_other_input_closes_without_an_opening_chime(tmp_path: Path) -> None:
+    async with live_phone(tmp_path) as (rig, phone):
+        await phone.wake()
+        await phone.ask()
+        await until(lambda: phone.ended() == 1)
+        await phone.stream(250)
+
+        rig.mac.emit(SpokenWake("that's all", "en", rig.clock.now(), rig.clock.now() - .5))
+
+        await until(lambda: "closing" in rig.speaker.voices)
+        await until(lambda: any(frame["type"] == "speech_stop" for frame in phone.frames))
+        await asyncio.sleep(.05)
+        assert rig.speaker.voices == ["ready", "closing"]
+        assert phone.states()[-1] == "idle"
+        assert len(rig.requests()) == 1
+
+
+@pytest.mark.parametrize("source", ["phone", "terminal"])
+@pytest.mark.parametrize("stage", ["listening", "capturing", "speaking"])
+async def test_typing_during_a_phone_exchange_idles_the_voice_and_replies_only_as_text(
+    tmp_path: Path, source: str, stage: str,
+) -> None:
+    replies: list[list[Step]] = [[Text("Typed answer.")]]
+    if stage == "speaking":
+        replies.insert(0, [Text("Live answer.")])
+    async with live_phone(tmp_path, replies) as (rig, phone):
+        await phone.wake()
+        if stage == "capturing":
+            await phone.stream(100, SPEECH)
+            await until(lambda: sum(row["frames"] for row in rig.rows("capture")) >= 100)
+        elif stage == "speaking":
+            await phone.ask()
+            await until(lambda: phone.ended() == 1)
+        before = phone.ended()
+
+        if source == "phone":
+            assert (await phone.command("say_text", text="Type quietly"))["ok"]
+        else:
+            await rig.hub.admit_line(Line("Type quietly", rig.clock.now(), typed=True))
+
+        await until(lambda: any(frame["type"] == "reply_end" and frame["payload"].get("text") == "Typed answer."
+                                for frame in phone.frames))
+        await until(lambda: phone.states()[-1] == "idle")
+        await phone.ask()
+        await asyncio.sleep(.05)
+        assert phone.ended() == before
+        assert rig.speaker.voices == ["ready"]
+        assert len(rig.requests()) == (2 if stage == "speaking" else 1)
+        assert 'typed="true">Type quietly</user>' in rig.requests()[-1]

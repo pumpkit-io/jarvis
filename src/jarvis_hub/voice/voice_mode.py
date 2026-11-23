@@ -535,7 +535,7 @@ class VoiceMode:
                         continue
                 elif event.client != self._exchange and not wake:
                     continue
-                if wake and self._same_phrase(event.client, event.event):
+                if isinstance(event.event, (WakeWord, SpokenWake)) and self._same_phrase(event.client, event.event):
                     continue
                 client = event.client
                 event = event.event
@@ -635,8 +635,9 @@ class VoiceMode:
             self._owned = replace(self._owned, semantic_start=start)
 
     def typed_input(self) -> None:
-        if self._owned is None and self._voice.in_turn and self._voice.state in CAPTURING:
+        if self._exchange == TERMINAL and self._owned is None and self._voice.in_turn and self._voice.state in CAPTURING:
             return
+        self._wake = None
         if (cues := self._cues.get(self._exchange)) is not None:
             self._speech.drop_cues(cues)
         before = self._voice.state
@@ -649,10 +650,11 @@ class VoiceMode:
     def remote_activity(self, active: bool, *, hearing: Collection[str] = ()) -> None:
         """Another Client's Talk or speech holds the voice: the floor resets and every input is muted, except the
         Live mode Clients in `hearing`, whose input listens for a Wake word that stops that speech."""
-        heard = frozenset(hearing) if active else frozenset()
+        heard: frozenset[str] = frozenset(hearing) if active else frozenset()
         if (active, heard) == (self._remote_active, self._hearing):
             return
         self._remote_active, self._hearing = active, heard
+        self._wake = None
         self._microphone_generation += 1
         for client, audio in self._inputs.items():
             if (suppress := getattr(audio, "suppress", None)) is not None:
@@ -782,14 +784,19 @@ class VoiceMode:
         before, woke_at = before_voice.state, before_voice.woke_at
         if isinstance(event, (ReplyAudio, ReplyDone)) and event.owner is not None and not self.owns(event.owner):
             return []
-        self._voice, actions = step(before_voice, event, self._timing)
+        takeover = client is not None and client != self._exchange and isinstance(event, (WakeWord, SpokenWake))
+        # Cross-input duplicates were filtered already; the old input's capture and echo guard cannot veto a takeover.
+        current = replace(before_voice, in_turn=False, chime_until=0) if takeover else before_voice
+        self._voice, actions = step(current, event, self._timing)
         if client is not None and self._voice.woke_at != woke_at and isinstance(event, (WakeWord, SpokenWake)):
-            if client != self._exchange and not any(isinstance(action, Chime) for action in actions):
+            if takeover and not any(isinstance(action, Interrupt) for action in actions):
+                actions = [Interrupt(), *actions]
+            if takeover and self._voice.state != "idle" and not any(isinstance(action, Chime) for action in actions):
                 # Listening moves to the input that heard this Wake word, so the chime says so there.
                 actions = [*actions, Chime()]
             self._exchange = client
             self._wake = (client, *_phrase(event))
-        if isinstance(event, (WakeWord, SpokenWake)) and not before_voice.in_turn and event.at >= before_voice.chime_until:
+        if isinstance(event, (WakeWord, SpokenWake)) and not current.in_turn and event.at >= current.chime_until:
             self._retire()
         if any(isinstance(action, SendTurn) for action in actions):
             heard = next(action for action in actions if isinstance(action, SendTurn))
