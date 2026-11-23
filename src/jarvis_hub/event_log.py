@@ -351,7 +351,7 @@ class EventLog:
 
     def search(self, query: str, *, start: float | None = None, end: float | None = None,
                speaker: Literal["user", "jarvis"] | None = None, limit: int = RECALL_LIMIT) -> Recall:
-        """The best matches for `query` from `start` up to `end`, never older than 30 days or the last reset.
+        """The best matches for `query` from `start` up to `end`, never older than 30 days or the last Reset context.
 
         Raises ValueError for a query with no words."""
         phrases = fts_query(query)

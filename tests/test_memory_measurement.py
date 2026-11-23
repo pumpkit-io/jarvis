@@ -181,6 +181,25 @@ def test_results_append_sections_under_one_heading(tmp_path: Path) -> None:
     )
 
 
+def test_results_keep_each_row_on_disk_as_it_comes_in_its_own_section(tmp_path: Path) -> None:
+    results = Results(tmp_path / "out" / "run.md", stamp="2026-11-22 10:00")
+
+    results.row("First reply", ("Size", "Cache"), (40_000, "cold"))
+    first = results.path.read_text()
+    results.row("Usage-limit readings", ("Turn",), ("cold",))
+    results.row("First reply", ("Size", "Cache"), (40_000, "warm"))
+
+    assert first == (
+        "# Talker Memory measurement, 2026-11-22 10:00\n\n"
+        "## First reply\n\n| Size | Cache |\n| --- | --- |\n| 40,000 | cold |\n\n"
+    )
+    assert results.path.read_text() == (
+        "# Talker Memory measurement, 2026-11-22 10:00\n\n"
+        "## First reply\n\n| Size | Cache |\n| --- | --- |\n| 40,000 | cold |\n| 40,000 | warm |\n\n"
+        "## Usage-limit readings\n\n| Turn |\n| --- |\n| cold |\n\n"
+    )
+
+
 def test_only_the_real_model_switch_opts_in() -> None:
     assert opted_in("real_model", {"JARVIS_REAL_MODEL_TESTS": "1"})
     assert not opted_in("real_model", {})

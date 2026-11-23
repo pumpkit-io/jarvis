@@ -2,13 +2,12 @@
 reach, seeded with Memory, the Tail of the saved Conversation and the Hub's own records."""
 
 import asyncio
-from collections.abc import AsyncIterator
 
 import pytest
 
 from jarvis_hub.agents.backend import Context
 from jarvis_hub.config import MemorySettings
-from jarvis_hub.hub import RESTART_RETRY_AFTER, Line
+from jarvis_hub.hub import RESTART_RETRY_AFTER
 from tests.fakes import (
     Fail,
     FakeBackend,
@@ -205,16 +204,22 @@ async def test_the_seed_holds_the_newest_exchanges_up_to_40000_tokens(
     # Each line is about 16,000 tokens at 3.5 characters a token, so the newest two fit and three do not.
     words = ["alpha", "bravo", "charlie", "delta"]
     said = [(word + " ") * (56_000 // (len(word) + 1)) for word in words]
-    scripts = [[Text("Noted.")] for _ in range(3)] + [[Text("Noted."), FULL], [Text("after.")]]
-    backend = FakeBackend(clock, scripts)
+    # The Fold starts and fails a turn before the ceiling, so no two readings calibrate the estimate in between.
+    scripts = [[Text("Noted.")], [Text("Noted.")], [Text("Noted."), at(200_000)], [Text("Noted.")], [Text("Full."), FULL]]
+    backend = FakeBackend(clock, scripts, summaries=[[Fail("overloaded")], [Fail("overloaded")]])
     hub = make_hub(backend, output, metrics)
-
-    async def inputs() -> AsyncIterator[Line]:
-        for text in [*said, "last"]:
-            yield Line(text, clock.now(), lang="en")
+    typist = Typist(clock)
 
     await hub.start()
-    await hub.run(inputs())
+    running = asyncio.create_task(hub.run(typist.lines()))
+    for text in said:
+        typist.type(text)
+    await until(lambda: len(backend.all_sessions("summariser")) == 2
+                and all(s.closed for s in backend.all_sessions("summariser")))
+    typist.type("last")
+    await until(lambda: len(backend.all_sessions("talker")) == 2)
+    typist.end()
+    await asyncio.wait_for(running, timeout=1)
     await hub.close()
 
     seed = backend.all_sessions("talker")[1].received[0]

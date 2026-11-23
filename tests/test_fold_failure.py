@@ -176,15 +176,71 @@ async def test_at_the_ceiling_with_folds_still_failing_the_talker_restarts_from_
     assert output.replies == ["One.", "Two.", "Three.", "Four.", "Five.", "Six."]
 
 
-async def test_a_fold_that_succeeds_ends_the_failing_episode_so_a_later_ceiling_is_told_again(
+async def test_at_the_ceiling_a_fold_still_running_is_waited_for_with_no_restart_and_no_notice(
+    clock: FakeClock, path: Path
+) -> None:
+    release = asyncio.Event()
+    hub, backend, output, _ = a_hub(
+        clock, path, [[Text("One."), tokens(200_000)], [Text("Two."), tokens(200_001)]],
+        memory=MemorySettings(fold_at=200_000, tail=10, ceiling=200_001),
+        summaries=[[Gate(release), Text(a_summary("Sister: Giulia."))]],
+    )
+    typist = Typist(clock)
+
+    await hub.start()
+    running = asyncio.create_task(hub.run(typist.lines()))
+    await say(typist, backend, "My sister is Giulia.")
+    await until(lambda: len(backend.all_sessions("summariser")) == 1)
+    await say(typist, backend, "Line two.")
+    assert len(backend.all_sessions("talker")) == 1
+    release.set()
+    await until(lambda: len(backend.all_sessions("talker")) == 2)
+    typist.end()
+    await asyncio.wait_for(running, timeout=1)
+    await hub.close()
+
+    assert backend.all_sessions("talker")[1].received[0].startswith('<event source="hub" reason="fold">')
+    assert output.notices == []
+
+
+async def test_at_the_ceiling_a_ready_fold_swaps_in_before_a_line_already_waiting(clock: FakeClock, path: Path) -> None:
+    second = asyncio.Event()
+    hub, backend, output, _ = a_hub(
+        clock, path, [[Text("One."), tokens(200_000)], [Gate(second), Text("Two."), tokens(300_000)], [Text("Three.")]],
+        memory=SHORT, summaries=[[Text(a_summary("Sister: Giulia."))]],
+    )
+    typist = Typist(clock)
+
+    await hub.start()
+    running = asyncio.create_task(hub.run(typist.lines()))
+    typist.type("My sister is Giulia.")
+    typist.type("Line two.")
+    await until(lambda: backend.all_sessions("summariser") and backend.all_sessions("summariser")[0].closed)
+    typist.type("Line three.")
+    await asyncio.sleep(0.01)
+    second.set()
+    await until(lambda: len(output.replies) == 3)
+    typist.end()
+    await asyncio.wait_for(running, timeout=1)
+    await hub.close()
+
+    fold_talker = backend.all_sessions("talker")[1]
+    assert fold_talker.received[0].startswith('<event source="hub" reason="fold">')
+    assert any("Line three." in m for m in fold_talker.received[1:])
+    assert output.notices == []
+
+
+async def test_after_a_fold_succeeds_a_later_ceiling_restart_is_told_again(
     clock: FakeClock, path: Path
 ) -> None:
     waiting = [[Text(f"{i}.")] for i in range(FOLD_RETRY_AFTER - 2)]
     hub, backend, output, _ = a_hub(
         clock, path,
         [[Text("One.")], [Text("Two.")], [Text("Three."), tokens(200_000)], [Text("Full."), tokens(300_000)],
-         *waiting, [Text("Fold."), tokens(200_000)], [Text("Full again."), tokens(300_000)]],
-        memory=ONE_EXCHANGE, summaries=[[Fail("overloaded")], [Fail("overloaded")], [Text(a_summary("Dog: Fido."))]],
+         *waiting, [Text("Fold."), tokens(200_000)], [Text("Again."), tokens(200_000)],
+         [Text("Full again."), tokens(300_000)]],
+        memory=ONE_EXCHANGE, summaries=[[Fail("overloaded")], [Fail("overloaded")], [Text(a_summary("Dog: Fido."))],
+                                        [Fail("overloaded")], [Fail("overloaded")]],
     )
     typist = Typist(clock)
 
@@ -201,6 +257,9 @@ async def test_a_fold_that_succeeds_ends_the_failing_episode_so_a_later_ceiling_
         await say(typist, backend, f"Waiting {i}.")
     await say(typist, backend, "Fold now.")
     await until(lambda: len(backend.all_sessions("talker")) == 3)
+    await say(typist, backend, "Line again.")
+    await until(lambda: len(backend.all_sessions("summariser")) == 5
+                and all(s.closed for s in backend.all_sessions("summariser")))
     await say(typist, backend, "Line last.")
     await until(lambda: len(output.notices) == 2)
     typist.end()

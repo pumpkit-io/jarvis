@@ -9,6 +9,7 @@ import contextlib
 import json
 import platform
 import re
+import sqlite3
 import time
 import uuid
 from collections import deque
@@ -253,6 +254,8 @@ OPEN_GRACE = 10.0
 ORCHESTRATOR_TIMEOUT = 600.0
 # How long an interrupted turn has to end before the Hub gives up on its session.
 INTERRUPT_GRACE = 10.0
+CEILING_RESTARTED = ("The conversation could not be folded into Memory, so the Talker restarted from {}the latest "
+                     "exchanges.")
 AFRESH_FAILED = "Could not start afresh: Memory could not be written, so the conversation goes on as it was."
 RESET_FAILED = ("Could not start a new Talker after the reset, so the current one, which still remembers the earlier "
                 "conversation, answers until the next try, and none of it is saved: {}")
@@ -588,8 +591,7 @@ class Hub:
         # Turns left before a failed restart is tried again, and whether the User has heard of the failure.
         self._restart_wait = 0
         self._restart_failing = False
-        # Whether the User heard that the ceiling restarted the Talker since the last Fold that succeeded: once per
-        # failing episode, the only time Memory shows (ADR 0028).
+        # Whether the User heard that the ceiling restarted the Talker since the last Fold that succeeded.
         self._ceiling_told = False
         self._orchestrator: AgentSession | None = None
         self._talker_inbox: asyncio.Queue[_TalkerInput] = asyncio.Queue()
@@ -1000,23 +1002,29 @@ class Hub:
         self.set_client_talking(client_id, False)
 
     def reset_context(self) -> None:
-        """Reset context (ADR 0028), by the Hub and no model. Raises when a file could not be deleted or the reset time
-        stored; the reset holds in memory all the same."""
+        """Reset context (ADR 0028), by the Hub and no model. Raises OSError when a file could not be deleted, and
+        otherwise sqlite3.Error when the reset time could not be stored; the reset holds in memory all the same."""
         if self._closing:
             raise ValueError("Hub is stopping")
         self._cancel_fold()
-        self._end_failing_episode()
+        self._forget_fold_failures()
         self._fold_tokens = None
         self._restart_wait, self._restart_failing = 0, False
         self._resets.count += 1
         self._resets.stale, self._resets.failing = True, False
         self._resets.due.set()
+        log, at, reply_id = self._output.log, self._wall(), self._output.reply_id
         # The Conversation empties in memory before anything here can fail, so no new seed carries what came before.
         try:
             self._conversation.reset()
-        finally:
-            if self._output.log is not None:
-                self._output.log.set_reset_time(self._wall(), reply_id=self._output.reply_id)
+        except OSError:
+            # The delete's failure is the one reported; the retry it asks for stores the reset time again.
+            if log is not None:
+                with contextlib.suppress(sqlite3.Error):
+                    log.set_reset_time(at, reply_id=reply_id)
+            raise
+        if log is not None:
+            log.set_reset_time(at, reply_id=reply_id)
 
     def admit_spoken_revision(self, line: Line) -> None:
         if line.request_id is None:
@@ -1626,8 +1634,9 @@ class Hub:
                 if parked:
                     self._persist()
                 self._scopes.prune()
-            upcoming = await self._restart_if_full(end.context)
+            # The Fold goes first: the ceiling restarts the Talker only when no Fold is under way.
             self._fold_if_due(end.context.tokens if end.context is not None else None)
+            upcoming = await self._restart_if_full(end.context)
             if self._resets.stale:
                 # A new Talker that failed to start after a reset is tried again before the next turn.
                 self._resets.due.set()
@@ -1817,8 +1826,9 @@ class Hub:
 
     async def _restart_if_full(self, context: Context | None) -> _TalkerInput | None:
         """Between turns, swap in a new Talker session once the context reaches the ceiling, which only Folds that
-        keep failing let it reach, seeded with the active summary and the Tail (ADR 0028). The User is told once per
-        failing episode, which a Fold that succeeds ends.
+        keep failing let it reach, seeded with the active summary and the Tail (ADR 0028). The User is told once,
+        then again only after a Fold succeeds. While a Fold is under way there is no restart, and a Fold
+        whose summary is ready swaps in at the next quiet moment.
 
         Only this turn's context decides: an older reading may be stale. The new session reads the seed in the
         background like the launch warm-up, so a line typed meanwhile waits for it in the inbox. Whatever fails
@@ -1832,8 +1842,17 @@ class Hub:
         if context is None or context.tokens < self._memory.ceiling or self._closing or self._resets.stale:
             # After a reset the new Talker replaces this one anyway, seeded with less.
             return None
-        if self._fold is not None and self._fold.summary is not None:
-            # A ready Fold swaps in at the next quiet moment, and keeps more than a restart would.
+        if self._fold is not None:
+            # A Fold under way keeps more than a restart would; a running one takes at most two Summariser tries,
+            # each SUMMARISER_TIMEOUT + OPEN_GRACE, but a ready one held by a spoken scope or the limit can wait longer.
+            if not self._fold_ready():
+                return None
+            # Text mode is always quiet, so a ready one swaps in before the lines already waiting; in voice mode a line
+            # that arrives before quiet is answered by the old session first.
+            if (upcoming := await self._quiet_or_next()) is not None:
+                return upcoming
+            if self._fold_ready():
+                await self._swap_in_fold()
             return None
         no_reset_since = self._resets.mark()
         if (upcoming := await self._quiet_or_next()) is not None:
@@ -1858,8 +1877,7 @@ class Hub:
         await self._swap_talker(session)
         if not self._ceiling_told:
             self._ceiling_told = True
-            self._output.notice("The conversation could not be folded into Memory, so the Talker restarted from "
-                                f"{'the last summary and ' if summary else ''}the latest exchanges.")
+            self._output.notice(CEILING_RESTARTED.format("the last summary and " if summary else ""))
         return None
 
     async def _seeded_talker(self, reason: Literal["restart", "fold", "reset"], entries: Sequence[Entry],
@@ -2104,10 +2122,10 @@ class Hub:
             self._conversation_failed(e)
         else:
             self._conversation_failing = False
-        self._end_failing_episode()
+        self._forget_fold_failures()
         await self._swap_talker(session)
 
-    def _end_failing_episode(self) -> None:
+    def _forget_fold_failures(self) -> None:
         """Folds work again: no failure's wait is left to count down, and a later ceiling is told again."""
         self._fold_wait = 0
         self._ceiling_told = False
