@@ -706,12 +706,7 @@ class Door:
                 player = connection.player
                 if not isinstance(speech_id, str) or type(index) is not int or player is None:
                     raise ValueError("Unknown speech")
-                if kind == "playback_report" and connection.cues is not None and connection.cues.owns(speech_id):
-                    if (set(payload) != {"speech_id", "clip_index", "state"}
-                            or payload.get("state") not in ("started", "finished", "stopped")):
-                        raise ValueError("Invalid report")
-                    result = {"ok": True, "result": {}}
-                elif kind == "interrupt":
+                if kind == "interrupt":
                     if set(payload) != {"speech_id", "last_clip_index"} or not player.heard_through(speech_id, index):
                         raise ValueError("Unknown speech")
                     await self._hub.interrupt_client(connection.client.id)
@@ -720,13 +715,14 @@ class Door:
                     state = payload.get("state")
                     if set(payload) != {"speech_id", "clip_index", "state"} or state not in ("started", "finished", "stopped"):
                         raise ValueError("Invalid report")
-                    if state == "stopped":
-                        if not player.accepts(speech_id, index):
+                    if connection.cues is None or not connection.cues.owns(speech_id):
+                        if state == "stopped":
+                            if not player.accepts(speech_id, index):
+                                raise ValueError("Unknown speech")
+                            await self._hub.interrupt_client(connection.client.id)
+                        elif not player.report(speech_id, index, state):
                             raise ValueError("Unknown speech")
-                        await self._hub.interrupt_client(connection.client.id)
-                    elif not player.report(speech_id, index, state):
-                        raise ValueError("Unknown speech")
-                    self._hub.set_client_playing(connection.client.id, player.pending() > 0)
+                        self._hub.set_client_playing(connection.client.id, player.pending() > 0)
                     result = {"ok": True, "result": {}}
             elif kind == "say_text":
                 text = payload.get("text")

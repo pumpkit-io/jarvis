@@ -441,6 +441,27 @@ async def test_under_silence_the_reply_is_text_and_the_chime_and_closing_sound_s
         assert phone.states() == ["idle", "listening", "thinking", "follow_up", "idle"]
 
 
+@pytest.mark.parametrize("phase", ["thinking", "speaking"])
+async def test_silence_turned_on_mid_reply_opens_the_follow_up_window_when_the_text_ends(
+    tmp_path: Path, phase: str,
+) -> None:
+    told = asyncio.Event()
+    before: list[Step] = [Text("Certainly, sir. ")] if phase == "speaking" else []
+    async with live_phone(tmp_path, [[*before, Gate(told), Text("Done.")]]) as (rig, phone):
+        await phone.wake()
+        await phone.ask()
+        await until(lambda: phone.states()[-1:] == [phase] and len(rig.requests()) == 1)
+
+        assert (await phone.command("set_silence", silence=True))["ok"]
+        told.set()
+
+        await until(lambda: any(frame["type"] == "reply_end" for frame in phone.frames))
+        await until(lambda: phone.states()[-1] == "follow_up")
+        rig.clock.advance(6)
+        await until(lambda: phone.states()[-1] == "idle")
+        await until(lambda: phone.streams()[-1:] == [("closing", [""])])
+
+
 async def test_voice_state_follows_set_live_and_another_live_phone_sees_only_idle(tmp_path: Path) -> None:
     async with live_rig(tmp_path) as rig, connect(rig.session, rig.door, rig.phones[0].token) as one, \
             connect(rig.session, rig.door, rig.phones[1].token) as two:
