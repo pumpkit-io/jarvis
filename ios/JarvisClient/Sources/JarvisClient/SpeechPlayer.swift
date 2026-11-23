@@ -39,18 +39,21 @@ import Observation
     public func configure(report: @escaping @MainActor (HubCommand) -> Void, drained: @escaping @MainActor (String) -> Void) {
         self.report = report; self.drained = drained
     }
-    public func begin(speechID: String, replyID: String) {
+    /// True while a Live mode cue, the chime or the closing sound, plays instead of a reply.
+    public var playingCue: Bool { speechID != nil && replyID == nil }
+    /// A nil `replyID` begins a cue stream: it plays and reports like a reply but marks no reply heard or missed.
+    public func begin(speechID: String, replyID: String?) {
         stop(reportStopped: false)
         generation &+= 1
         self.speechID = speechID; self.replyID = replyID
         nextIndex = 0; lastFinishedIndex = -1; completedSentences = []; finishedCallbacks = []; ended = false
-        missedReplies.insert(replyID); messages[replyID] = nil
+        if let replyID { missedReplies.insert(replyID); messages[replyID] = nil }
     }
-    public func append(speechID: String, replyID: String, index: Int64, text: String, pcm: Data) {
+    public func append(speechID: String, replyID: String?, index: Int64, text: String, pcm: Data) {
         guard self.speechID == speechID, self.replyID == replyID, !ended,
               index == nextIndex, pcm.count % 2 == 0 else { return }
         guard !pcm.isEmpty else {
-            messages[replyID] = "No audio arrived for this reply. Tap Play to try again."
+            if let replyID { messages[replyID] = "No audio arrived for this reply. Tap Play to try again." }
             stop(); return
         }
         nextIndex += 1; watchdog?.cancel(); watchdog = nil
@@ -65,10 +68,13 @@ import Observation
             }
             activeSpeechID = speechID
             if queue.count == 1 { sentence = clip.text; emit("started", index: clip.index) }
-        } catch { messages[replyID] = "Could not play this reply. Tap Play to try again."; stop() }
+        } catch {
+            if let replyID { messages[replyID] = "Could not play this reply. Tap Play to try again." }
+            stop()
+        }
     }
 
-    public func end(speechID: String, replyID: String, lastIndex: Int64) {
+    public func end(speechID: String, replyID: String?, lastIndex: Int64) {
         guard self.speechID == speechID, self.replyID == replyID, lastIndex == nextIndex - 1 else { return }
         ended = true; watchdog?.cancel(); watchdog = nil
         if sentence == nil && queue.isEmpty { finish() }

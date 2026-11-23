@@ -20,21 +20,38 @@ import Testing
 }
 
 @MainActor private final class LiveRig {
-    let socket = FakeSocket(), capture = FakeLiveCapture(), sleeper = FakeSleeper()
+    let socket = FakeSocket(), capture = FakeLiveCapture(), sleeper = FakeSleeper(), orbFrames = FakeSleeper()
+    /// Plays whatever the Live mode capture doesn't, as `NativeSpeechOutput` does in the app.
+    let standard = FakeSpeechOutput()
     var permissionRequests = 0
     var allowed = true
     let session: AppSession
+    let recorder = FakeTalkRecorder()
 
     init() throws {
         let store = MemoryPairingStore(); store.record = try testPairingCredentials()
-        let socket = socket, capture = capture, sleeper = sleeper
+        let socket = socket, capture = capture, sleeper = sleeper, orbFrames = orbFrames
         var rig: LiveRig?
         let live = LiveModeController(capture: capture, permission: {
             rig?.permissionRequests += 1; return rig?.allowed ?? false
         }, sleep: { try await sleeper.sleep($0) })
+        let player = SpeechPlayer(session: SpeechSession(), output: LiveSpeechRoute(standard: standard, capture: capture))
         session = AppSession(store: store, makeClient: { _ in HubClient(transport: HubTransport(connect: { _ in socket })) },
-                             makePaths: { nil }, liveMode: live)
+                             makePaths: { nil }, talk: TalkController(recorder: recorder, permission: { true }),
+                             playback: player, liveMode: live, orbSleep: { try await orbFrames.sleep($0) })
         rig = self
+    }
+
+    /// Lets one orb frame run and waits for the orb to show `speaker`.
+    func orbShows(_ speaker: OrbModel.Speaker) async throws {
+        try await eventuallySession { await orbFrames.pending == 1 }
+        await orbFrames.advance()
+        try await eventuallySession { await orbFrames.pending == 1 && session.orb.speaker == speaker }
+    }
+
+    func voiceState(_ seq: Int, _ state: String) async throws {
+        await socket.text(event(seq, "voice_state", #"{"state":"\#(state)"}"#))
+        try await eventuallySession { session.liveMode.voiceState.rawValue == state }
     }
 
     func connect() async throws {
@@ -58,6 +75,40 @@ import Testing
 }
 
 private let tenMilliseconds = Data(repeating: 7, count: 320)
+/// 10 ms at a quarter of full scale: the level of someone speaking close to the phone.
+private let speech = Data((0..<160).flatMap { _ in [UInt8(0x00), 0x20] })
+
+@MainActor @Test func eachVoiceStateSelectsTheOrbSourceTheSpecNames() async throws {
+    let rig = try LiveRig()
+    try await rig.connect()
+    try await rig.turnOn()
+    rig.capture.emit(speech)
+    try await eventuallySession { await rig.socket.binarySent.count == 1 }
+
+    try await rig.voiceState(2, "listening")
+    try await rig.orbShows(.user)
+    #expect(rig.session.orb.level > 0.3)
+
+    try await rig.voiceState(3, "thinking")
+    try await rig.orbShows(.idle)
+
+    try await rig.voiceState(4, "speaking")
+    await rig.socket.text(event(5, "speech_begin", #"{"speech_id":"s","reply_id":"r","sample_rate":24000,"channels":1,"sample_width":2}"#))
+    await rig.socket.text(event(6, "speech_clip", #"{"speech_id":"s","reply_id":"r","index":0,"text":"Done.","byte_length":2}"#))
+    rig.socket.input.yield(.binary(Data([0, 64])))
+    try await eventuallySession { rig.capture.speech.bytes.count == 1 }
+    rig.capture.speech.level = 0.2
+    try await rig.orbShows(.jarvis)
+    #expect(rig.session.orb.level > 0.3)
+    await rig.socket.text(event(7, "speech_end", #"{"speech_id":"s","reply_id":"r","last_clip_index":0}"#))
+    rig.capture.speech.callbacks[0]()
+
+    try await rig.voiceState(8, "follow_up")
+    try await rig.orbShows(.user)
+    try await rig.voiceState(9, "idle")
+    try await rig.orbShows(.idle)
+    await rig.session.unpair()
+}
 
 @MainActor @Test func whileLiveModeCapturesRepliesPlayThroughTheCaptureEngine() async throws {
     let rig = try LiveRig()
@@ -94,6 +145,70 @@ private let tenMilliseconds = Data(repeating: 7, count: 320)
     #expect(rig.capture.speech.bytes == [Data([1, 0]), Data([2, 0])] && standard.bytes.isEmpty)
     player.stop()
     #expect(rig.capture.speech.stops == 1 && standard.stops == 0)
+    await rig.session.unpair()
+}
+
+@MainActor @Test(arguments: ["send", "discard"])
+func aTalkPausesLiveFramesFromItsPressUntilItIsSentOrDiscarded(ending: String) async throws {
+    let rig = try LiveRig()
+    try await rig.connect()
+    try await rig.turnOn()
+    rig.capture.emit(tenMilliseconds)
+    try await eventuallySession { await rig.socket.binarySent.count == 1 }
+
+    await rig.session.talk.press()
+    #expect(rig.session.talk.state == .recording && rig.recorder.active)
+    #expect(!rig.capture.active && rig.session.liveMode.isOn)
+    rig.capture.emit(tenMilliseconds)
+    try await Task.sleep(for: .milliseconds(20))
+    #expect(await rig.socket.binarySent.count == 1)
+
+    if ending == "send" { await rig.session.talk.send() } else { await rig.session.talk.discard() }
+    #expect(rig.capture.active && rig.capture.starts == 2)
+    rig.capture.emit(Data(repeating: 9, count: 320))
+    try await eventuallySession { await rig.socket.binarySent.count == 2 }
+    #expect(await rig.socket.binarySent.last == Data(repeating: 9, count: 320))
+    await rig.session.unpair()
+}
+
+@MainActor @Test func liveModeTurnedOffDuringATalkStaysOffAfterIt() async throws {
+    let rig = try LiveRig()
+    try await rig.connect()
+    try await rig.turnOn()
+    await rig.session.talk.press()
+    await rig.session.liveMode.toggle()
+    await rig.session.talk.send()
+    #expect(!rig.session.liveMode.isOn && !rig.capture.active && rig.capture.starts == 1)
+    #expect(await rig.setLiveCommands().map(\.payload) == [["on": .bool(true)], ["on": .bool(false)]])
+    await rig.session.unpair()
+}
+
+@MainActor @Test func cuesPlayThroughTheLiveCaptureWhateverTheSilenceAndAreReported() async throws {
+    let rig = try LiveRig()
+    try await rig.connect()
+    try await rig.turnOn()
+    func cue(_ seq: Int, _ id: String, _ name: String, _ pcm: Data) async {
+        await rig.socket.text(event(seq, "speech_begin", #"{"speech_id":"\#(id)","cue":"\#(name)","sample_rate":24000,"channels":1,"sample_width":2}"#))
+        await rig.socket.text(event(seq + 1, "speech_clip", #"{"speech_id":"\#(id)","cue":"\#(name)","index":0,"text":"","byte_length":\#(pcm.count)}"#))
+        rig.socket.input.yield(.binary(pcm))
+        await rig.socket.text(event(seq + 2, "speech_end", #"{"speech_id":"\#(id)","cue":"\#(name)","last_clip_index":0}"#))
+    }
+    func reports(_ id: String) async -> [JSONValue?] {
+        await rig.socket.sent.filter { $0.type == "playback_report" && $0.payload["speech_id"] == .string(id) }.map { $0.payload["state"] }
+    }
+
+    await cue(2, "chime", "chime", Data([1, 0]))
+    try await eventuallySession { rig.capture.speech.bytes.count == 1 }
+    await rig.session.setVoiceOn(false)
+    #expect(rig.capture.speech.stops == 0 && !rig.session.talk.speaking)
+    rig.capture.speech.callbacks[0]()
+    try await eventuallySession { await reports("chime") == [.string("started"), .string("finished")] }
+
+    await cue(5, "closing", "closing", Data([2, 0]))
+    try await eventuallySession { rig.capture.speech.bytes.count == 2 }
+    #expect(rig.capture.speech.bytes == [Data([1, 0]), Data([2, 0])] && rig.standard.bytes.isEmpty)
+    rig.capture.speech.callbacks[1]()
+    try await eventuallySession { await reports("closing") == [.string("started"), .string("finished")] }
     await rig.session.unpair()
 }
 
@@ -163,6 +278,21 @@ private let tenMilliseconds = Data(repeating: 7, count: 320)
     try await eventuallySession { rig.session.liveMode.message != nil }
     #expect(rig.session.liveMode.message == "Live mode needs Jarvis in voice mode on the Mac.")
     #expect(!rig.session.liveMode.isOn && rig.capture.starts == 0)
+    await rig.session.unpair()
+}
+
+@MainActor @Test func anyOtherHubErrorLeavesLiveModeOffWithTheGenericFailure() async throws {
+    let rig = try LiveRig()
+    try await rig.connect()
+    await rig.session.liveMode.toggle()
+    try await eventuallySession { await rig.setLiveCommands().count == 1 }
+    await rig.answer(await rig.setLiveCommands()[0],
+                     #""ok":false,"error":{"code":"invalid_payload","message":"Live mode is only for an iPhone","retry_after_seconds":null}"#)
+    try await eventuallySession { rig.session.liveMode.message != nil }
+    #expect(rig.session.liveMode.message == "Couldn't reach the Mac. Not changed.")
+    #expect(!rig.session.liveMode.isOn && rig.capture.starts == 0)
+    await rig.session.liveMode.toggle()
+    try await eventuallySession { await rig.setLiveCommands().count == 2 }
     await rig.session.unpair()
 }
 
@@ -248,4 +378,63 @@ private struct LiveTapCall: @unchecked Sendable {
     let handler: AVAudioNodeTapBlock
     let pcm: AVAudioPCMBuffer
     func run() { handler(pcm, AVAudioTime(sampleTime: 0, atRate: pcm.format.sampleRate)) }
+}
+
+@MainActor @Test func pythonLiveModeFixtureReplaysThroughTheAppSession() async throws {
+    let url = try #require(Bundle.module.url(forResource: "client-v1", withExtension: "json", subdirectory: "Fixtures"))
+    let root = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+    let exchanges = try #require(root["exchanges"] as? [String: Any])
+    let live = try #require(exchanges["live_mode"] as? [String: Any])
+    let pairs = try #require(live["commands"] as? [[String: Any]])
+    let commands = try pairs.map { try JSONDecoder().decode(HubCommand.self, from: JSONSerialization.data(withJSONObject: $0["command"] as Any)) }
+    let uplink = try #require(live["uplink"] as? [[String: Any]]).map { Data(base64Encoded: $0["binary_base64"] as? String ?? "") }
+    let downlink = try #require(live["downlink"] as? [[String: Any]])
+    let rig = try LiveRig()
+    try await rig.connect()
+
+    let toggle = Task { await rig.session.liveMode.toggle() }
+    try await eventuallySession { await rig.setLiveCommands().count == 1 }
+    let on = await rig.setLiveCommands()[0]
+    #expect(on.payload == commands[0].payload)
+    var result = try #require(pairs[0]["result"] as? [String: Any]); result["id"] = on.id
+    await rig.socket.text(String(decoding: try JSONSerialization.data(withJSONObject: result), as: UTF8.self))
+    await toggle.value
+    try await eventuallySession { rig.session.liveMode.isOn && rig.capture.active }
+
+    for (sent, frame) in uplink.enumerated() {
+        rig.capture.emit(try #require(frame))
+        try await eventuallySession { await rig.socket.binarySent.count == sent + 1 }
+    }
+    #expect(await rig.socket.binarySent == uplink.compactMap { $0 })
+
+    var played: [Data] = []
+    for frame in downlink {
+        if let encoded = frame["binary_base64"] as? String {
+            played.append(try #require(Data(base64Encoded: encoded)))
+            rig.socket.input.yield(.binary(played.last!))
+            continue
+        }
+        rig.socket.input.yield(.text(try JSONSerialization.data(withJSONObject: frame)))
+        let payload = try #require(frame["payload"] as? [String: Any])
+        switch frame["type"] as? String {
+        case "voice_state":
+            try await eventuallySession { rig.session.liveMode.voiceState.rawValue == payload["state"] as? String }
+        case "speech_end":
+            // Each stream's one clip finishes before the next stream begins, as the phone would play it.
+            try await eventuallySession { rig.capture.speech.bytes.count == played.count }
+            rig.capture.speech.callbacks[played.count - 1]()
+            let finished = HubCommand(type: "playback_report", payload: [
+                "speech_id": .string(payload["speech_id"] as? String ?? ""), "clip_index": .integer(0), "state": .string("finished")])
+            try await eventuallySession { await rig.socket.sent.contains { $0.type == finished.type && $0.payload == finished.payload } }
+        default: break
+        }
+    }
+    #expect(played.count == 3)
+    #expect(rig.capture.speech.bytes == played && rig.standard.bytes.isEmpty)
+    #expect(await rig.socket.sent.contains { $0.type == "playback_report" && $0.payload == commands[1].payload })
+    #expect(rig.session.conversation.rows.contains { $0.text == "Opened." })
+
+    await rig.session.liveMode.toggle()
+    #expect(await rig.setLiveCommands().last?.payload == commands[2].payload)
+    await rig.session.unpair()
 }
