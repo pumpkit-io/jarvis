@@ -285,7 +285,7 @@ async def test_live_mode_hears_the_phone_through_its_own_engines_and_keeps_no_cl
     monkeypatch.setattr(entry, 'TranscriptionService', Transcription)
     monkeypatch.setattr(entry, 'Door', ListeningDoor)
     monkeypatch.setattr(engines, 'load_engines', load_engines)
-    config = replace(settings(tmp_path, VoiceSettings(audio_clips=True)), remote=True, remote_port=0)
+    config = replace(settings(tmp_path, VoiceSettings(audio_clips=True, wake_refractory_ms=4000)), remote=True, remote_port=0)
     with PairingStore(config.runtime_dir / 'events.sqlite3') as pairing:
         phone = pairing.exchange(pairing.create_code('https://mac.example.ts.net'), 'Phone', 'iphone')
     clock = FakeClock()
@@ -317,7 +317,11 @@ async def test_live_mode_hears_the_phone_through_its_own_engines_and_keeps_no_cl
             await until(lambda: any(r['kind'] == 'ears_loaded' and r.get('client') == phone.client.id
                                     for r in metric_rows()))
             await socket.send_bytes(pcm(8, WAKE))
-            await until(lambda: microphone.capturing[-1:] == [True])
+            await until(lambda: any(r['kind'] == 'voice' and r.get('client') == phone.client.id
+                                    and r['to'] == 'listening' for r in metric_rows()))
+            assert microphone.capturing[-1:] == [False]
+            clock.advance(2.5)
+            microphone.wake()
             for value, messages in ((SPEECH, 8), (0, 10)):
                 for i in range(messages):
                     clock.advance(0.1)
@@ -325,6 +329,7 @@ async def test_live_mode_hears_the_phone_through_its_own_engines_and_keeps_no_cl
                     # Answered after the Door has heard the audio sent before it.
                     await control(socket, f'sent-{value}-{i}', 'set_live', on=True)
             await until(lambda: any('Hello from the phone' in m for s in backend.all_sessions('talker') for m in s.received))
+            assert player.voices == ['ready']
     finally:
         stdin.done.set()
         await asyncio.wait_for(running, 5)
