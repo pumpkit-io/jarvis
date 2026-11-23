@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, TypeGuard, TypeVar, cast
 
 ROLES = ("talker", "orchestrator", "subagent", "summariser")
+# Talker turns that read a hidden seed: nobody waits for their reply, so they stay out of the latency.
+HIDDEN = ("warm_up", "restart", "fold")
 # What `voice/bargein_log.py` writes as a Barge-in's decision.
 DECISIONS = ("resume", "stop", "wake", "overheard-stop", "ended")
 _USAGE = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens")
@@ -118,7 +120,7 @@ def summarise(rows: Iterable[object], since: datetime | None = None, until: date
         totals.cache_creation_tokens += usage["cache_creation_tokens"]
         totals.duration_ms += duration
         totals.durations.append(duration)
-        if role == "talker" and _is_int(first := row.get("first_sentence_ms")):
+        if role == "talker" and row.get("kind") not in HIDDEN and _is_int(first := row.get("first_sentence_ms")):
             stats.first_sentence.append(first)
     return stats
 

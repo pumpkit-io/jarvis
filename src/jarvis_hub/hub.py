@@ -244,6 +244,8 @@ TalkerKind = Literal["warm_up", "restart", "fold", "user", "event"]
 # Turns a failed restart or Fold waits before trying again: each try costs a model call.
 RESTART_RETRY_AFTER = 5
 FOLD_RETRY_AFTER = 5
+# A Summariser run this long is stuck: its Fold fails, so a hung CLI cannot hold every later Fold.
+SUMMARISER_TIMEOUT = 600.0
 # How long a closing Hub lets a Talker open run on, so the session it opens can be closed and not left running.
 OPEN_GRACE = 10.0
 
@@ -556,8 +558,11 @@ class Hub:
         self._last_reading: _ContextReading | None = None
         # The Fold under way, from its start until its summary is swapped in or discarded; only the Talker sees it.
         self._fold: _Fold | None = None
-        # Turns left before a failed Fold is tried again.
+        # Turns left before a failed Fold is tried again, at the end of the last of them.
         self._fold_wait = 0
+        # The context the current Talker session last reported, for a Fold the Summariser's limit held until its reset.
+        self._fold_tokens: int | None = None
+        self._fold_started = asyncio.Event()
         # The language of the latest line read, and of the latest User turn the Talker took: replies follow it.
         self._read_lang: Lang = "en"
         self._lang: Lang = "en"
@@ -566,6 +571,9 @@ class Hub:
         # Turns left before a failed restart is tried again, and whether the User has heard of the failure.
         self._restart_wait = 0
         self._restart_failing = False
+        # Whether the User heard that the ceiling restarted the Talker since the last Fold that succeeded: once per
+        # failing episode, the only time Memory shows (ADR 0028).
+        self._ceiling_told = False
         self._orchestrator: AgentSession | None = None
         self._talker_inbox: asyncio.Queue[_TalkerInput] = asyncio.Queue()
         # Voice mode's news, in arrival order, for when Jarvis is quiet; text mode puts it in the inbox.
@@ -1658,16 +1666,20 @@ class Hub:
     async def _fold_and_quiet(self) -> None:
         """Returns once a Fold's summary is ready to swap in and Jarvis is quiet. A spoken scope still unresolved
         when the summary is ready holds the swap until after the next turn, which may resolve it; a usage limit on
-        the Talker, until it resets."""
-        if (fold := self._fold) is None:
-            await asyncio.Event().wait()
-            return
-        await fold.ended.wait()
-        while self._limit.blocks("talker"):
-            self._talker_cleared.clear()
-            await self._talker_cleared.wait()
-        if not self._fold_ready():
-            await asyncio.Event().wait()
+        the Talker, until it resets. A Fold that fails is waited past, since the Summariser's reset can start the
+        next one between turns."""
+        while True:
+            while (fold := self._fold) is None:
+                self._fold_started.clear()
+                await self._fold_started.wait()
+            await fold.ended.wait()
+            while self._limit.blocks("talker"):
+                self._talker_cleared.clear()
+                await self._talker_cleared.wait()
+            if self._fold_ready():
+                break
+            if self._fold is fold:
+                await asyncio.Event().wait()
         await self._focus_quiet()
 
     async def _focus_quiet(self) -> None:
@@ -1715,7 +1727,8 @@ class Hub:
 
     async def _restart_if_full(self, context: Context | None) -> _TalkerInput | None:
         """Between turns, swap in a new Talker session once the context reaches the ceiling, which only Folds that
-        keep failing let it reach, seeded with the active summary and the Tail (ADR 0028).
+        keep failing let it reach, seeded with the active summary and the Tail (ADR 0028). The User is told once per
+        failing episode, which a Fold that succeeds ends.
 
         Only this turn's context decides: an older reading may be stale. The new session reads the seed in the
         background like the launch warm-up, so a line typed meanwhile waits for it in the inbox. Whatever fails
@@ -1726,15 +1739,28 @@ class Hub:
         if self._restart_wait:
             self._restart_wait -= 1
             return None
-        if context is None or context.tokens < self._memory.ceiling:
+        if context is None or context.tokens < self._memory.ceiling or self._closing:
+            return None
+        if self._fold is not None and self._fold.summary is not None:
+            # A ready Fold swaps in at the next quiet moment, and keeps more than a restart would.
             return None
         if (upcoming := await self._quiet_or_next()) is not None:
             return upcoming
-        session = await self._seeded_talker("restart", self._conversation.newest(self._memory.tail),
-                                            self._conversation.summary, self._restart_failed)
-        if session is not None:
-            self._restart_failing = False
-            await self._swap_talker(session)
+        summary = self._conversation.summary
+        session = await self._seeded_talker("restart", self._conversation.newest(self._memory.tail), summary,
+                                            self._restart_failed)
+        if session is None:
+            return None
+        if self._closing:
+            with contextlib.suppress(Exception):
+                await session.close()
+            return None
+        self._restart_failing = False
+        await self._swap_talker(session)
+        if not self._ceiling_told:
+            self._ceiling_told = True
+            self._output.notice("The conversation could not be folded into Memory, so the Talker restarted from "
+                                f"{'the last summary and ' if summary else ''}the latest exchanges.")
         return None
 
     async def _seeded_talker(self, reason: Literal["restart", "fold"], entries: Sequence[Entry], summary: str | None,
@@ -1761,6 +1787,7 @@ class Hub:
 
     async def _swap_talker(self, session: AgentSession) -> None:
         old, self._talker = self._talker, session
+        self._fold_tokens = None
         if old is not None:
             with contextlib.suppress(Exception):
                 await old.close()
@@ -1772,6 +1799,7 @@ class Hub:
             reason,
             entries,
             summary=summary,
+            summary_lost=summary is None and self._conversation.summary_lost,
             open_tasks=self._tasks.open_status(now, self._task_lines),
             authorizations=self._authorizations.context(),
             approvals="\n".join(approval.line(now) for approval in self._approvals.pending()),
@@ -1832,13 +1860,21 @@ class Hub:
         self._restart_failing = True
 
     def _fold_if_due(self, tokens: int | None) -> None:
-        """Starts a Fold once the Talker's context reaches the trigger, unless one is under way, a failed one still
-        waits out its turns, a spoken scope is unresolved or the usage limit holds the Summariser. The cut is fixed
-        now, so whatever is said meanwhile stays in the Tail."""
+        """After a Talker turn whose context is `tokens`, starts a Fold once that reaches the trigger, unless a failed
+        one still waits out its turns."""
+        self._fold_tokens = tokens
         if self._fold_wait:
             self._fold_wait -= 1
-            return
-        if (self._fold is not None or tokens is None or tokens < self._memory.fold_at or self._closing
+            if self._fold_wait:
+                return
+        self._start_fold_if_due()
+
+    def _start_fold_if_due(self) -> None:
+        """Starts a Fold if the latest context reached the trigger, or the saved Conversation did, as it still does
+        after a ceiling restart, unless one is under way, a spoken scope is unresolved or the usage limit holds the
+        Summariser. The cut is fixed now, so whatever is said meanwhile stays in the Tail."""
+        tokens = max(self._fold_tokens or 0, self._conversation.tokens())
+        if (self._fold is not None or tokens < self._memory.fold_at or self._closing
                 or self._scopes.pending() or self._limit.blocks(SUMMARISER)):
             return
         if not (folded := self._conversation.foldable(self._memory.tail)):
@@ -1846,6 +1882,7 @@ class Hub:
         fold = _Fold(folded, asyncio.create_task(self._summarise(self._conversation.summary, folded)))
         fold.running.add_done_callback(lambda _: self._fold_ended(fold))
         self._fold = fold
+        self._fold_started.set()
 
     def _fold_ended(self, fold: _Fold) -> None:
         if self._fold is fold:
@@ -1879,10 +1916,14 @@ class Hub:
                              folded=len(folded), duration_ms=round((self._clock.now() - t0) * 1000), **fields)
 
             try:
-                summary, end = await self._summariser_turn(message)
+                ended = await self._summariser_within_time(message)
             except asyncio.CancelledError:
                 record(TurnEnd("interrupted"), "cancelled")
                 raise
+            if ended is None:
+                record(TurnEnd("failed"), "timeout", error=f"no reply within {SUMMARISER_TIMEOUT:g} s")
+                return None
+            summary, end = ended
             refused = memory.problem(summary, self._conversation.estimate) if end.outcome == "completed" else None
             record(end, "refused" if refused else None,
                    **({"problem": refused} if refused else {}), **({"error": end.error} if end.error else {}))
@@ -1891,6 +1932,20 @@ class Hub:
             if end.outcome == "limited":
                 return None
         return None
+
+    async def _summariser_within_time(self, message: str) -> tuple[str, TurnEnd] | None:
+        """The Summariser's reply and end, or None once it ran SUMMARISER_TIMEOUT on the Hub's clock and was stopped."""
+        turn = asyncio.ensure_future(self._summariser_turn(message))
+        timer = asyncio.ensure_future(self._clock.sleep(SUMMARISER_TIMEOUT))
+        try:
+            await asyncio.wait([turn, timer], return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            timer.cancel()
+            if not turn.done():
+                turn.cancel()
+                # Closing a hung session may hang too; the Fold is over either way.
+                await asyncio.wait([turn], timeout=OPEN_GRACE)
+        return turn.result() if turn.done() and not turn.cancelled() else None
 
     async def _summariser_turn(self, message: str) -> tuple[str, TurnEnd]:
         """One Summariser session's reply to `message` and its end."""
@@ -1946,7 +2001,13 @@ class Hub:
             self._conversation_failed(e)
         else:
             self._conversation_failing = False
+        self._end_failing_episode()
         await self._swap_talker(session)
+
+    def _end_failing_episode(self) -> None:
+        """Folds work again: a later failure waits no turns left over, and a later ceiling is told again."""
+        self._fold_wait = 0
+        self._ceiling_told = False
 
     async def _turn(
         self,
@@ -2350,6 +2411,10 @@ class Hub:
         if "talker" in roles:
             self._unpark()
             self._talker_cleared.set()
+        if SUMMARISER in roles:
+            # The hold, not a failure, kept the Fold back: it starts now, not after the turns a failure waits out.
+            self._fold_wait = 0
+            self._start_fold_if_due()
         self._persist()
 
     def _limit_reset(self) -> None:
