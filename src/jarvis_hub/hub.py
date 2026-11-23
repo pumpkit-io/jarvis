@@ -20,6 +20,7 @@ from html import escape
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from jarvis_hub.address import AddressGuard
 from jarvis_hub.agents.backend import (
     AgentBackend,
     AgentEvent,
@@ -2184,6 +2185,23 @@ class Hub:
         if delivery is not None:
             delivery.receipt = receipt
         self._replying = show
+        address = AddressGuard()
+
+        def emit(text: str) -> None:
+            nonlocal shown, block, after_block, first_sentence
+            if not text or turn in (self._interrupted_turn, self._silenced_turn):
+                return
+            if after_block and shown and not shown[-1].isspace() and not text[:1].isspace():
+                text = " " + text
+            after_block = False
+            shown += text
+            block += text
+            if first_sentence is None and _SENTENCE_END.search(block):
+                first_sentence = self._clock.now()
+            if show:
+                self._output.reply(text)
+            speech.feed(text)
+
         try:
             async for event in self._guarded(session.send(message)):
                 match event:
@@ -2192,17 +2210,9 @@ class Hub:
                             continue
                         if first_delta is None:
                             first_delta = self._clock.now()
-                        if after_block and shown and not shown[-1].isspace() and not text[:1].isspace():
-                            text = " " + text
-                        after_block = False
-                        shown += text
-                        block += text
-                        if first_sentence is None and _SENTENCE_END.search(block):
-                            first_sentence = self._clock.now()
-                        if show:
-                            self._output.reply(text)
-                        speech.feed(text)
+                        emit(address.feed(text))
                     case TextEnd():
+                        emit(address.end())
                         speech.block_end()
                         if first_sentence is None and block.strip():
                             first_sentence = self._clock.now()

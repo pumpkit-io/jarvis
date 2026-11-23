@@ -864,7 +864,7 @@ def talker_received(rig: Rig) -> list[str]:
 
 
 async def test_quiet_mode_holds_news_until_the_wake_word_which_opens_with_the_count(rig_for: MakeRig) -> None:
-    rig, arrivals = await quiet_rig(rig_for, [Text(AWAY), Text(" Main is green, sir.")])
+    rig, arrivals = await quiet_rig(rig_for, [Text(AWAY), Text(" Main is green.")])
     turns = len(talker_received(rig))
 
     for arrival in arrivals:
@@ -886,7 +886,7 @@ async def test_quiet_mode_holds_news_until_the_wake_word_which_opens_with_the_co
     assert talker_kinds(rig)[-1] == "user"
     [shown] = rig.output.shown
     assert "T1: The typo fix is up." in shown and "T2: The docs are merged." in shown
-    assert spoken(rig)[-1] == "Main is green, sir."
+    assert spoken(rig)[-1] == "Main is green."
     assert spoken(rig)[-2] == AWAY
 
 

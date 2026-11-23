@@ -212,6 +212,19 @@ async def test_text_blocks_around_a_tool_call_are_shown_apart(
     assert output.replies[0] == "Right away, sir. The task is underway."
 
 
+async def test_a_reply_says_sir_once_across_a_tool_call(
+    clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
+) -> None:
+    backend = FakeBackend(clock, [[Text("Very good, sir. I'll check it."), Tool("delegate", {"request": "x"}),
+                                   Text("Under way"), Text(", s"), Text("ir. I'll report shortly.")]])
+    hub = make_hub(backend, output, metrics)
+
+    await hub.start()
+    await hub.run(lines(clock, "Check the deploy"))
+
+    assert output.replies[0] == "Very good, sir. I'll check it. Under way. I'll report shortly."
+
+
 async def test_a_tool_call_before_any_text_is_recorded(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
 ) -> None:
