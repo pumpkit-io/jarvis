@@ -101,6 +101,8 @@ class _Reply:
     heard_at: float | None
     owner: tuple[str, int] | None = None
     player: Player | None = None
+    # The Client the reply speaks on, for its metrics rows.
+    client: str | None = None
     reply_id: str | None = None
     speech_id: str = field(default_factory=lambda: uuid4().hex)
     stream_started: bool = False
@@ -137,7 +139,10 @@ class _Cached:
     name: ClipName
     lang: Lang
     reply: _Reply | None = None
-    cue_generation: int | None = None
+    # A cue outside a reply plays only while its destination's cues have not been dropped since it was queued.
+    epoch: object | None = None
+    # Where a cue outside a reply plays; None for the Mac.
+    player: Player | None = None
 
 
 @dataclass(frozen=True)
@@ -185,7 +190,7 @@ class Speech:
         self._replay_turn = 0
         self._replays: dict[RemotePlayer, _Reply] = {}
         self._generation = 0
-        self._local_cue_generation = 0
+        self._cue_epochs: dict[Player, object] = {}
         self._worker: asyncio.Task[None] | None = None
         self._loading: asyncio.Future[None] | None = None
 
@@ -196,19 +201,26 @@ class Speech:
         self._loading = asyncio.get_running_loop().run_in_executor(self._thread, self._load)
         self._worker = asyncio.create_task(self._work(self._loading))
 
-    def say(self, name: ClipName, lang: Lang, *, in_reply: bool = False) -> None:
-        """Queue a nonverbal cue; `in_reply` associates its playback with the reply `begin` opened."""
+    def say(self, name: ClipName, lang: Lang, *, in_reply: bool = False, destination: Player | None = None) -> None:
+        """Queue a nonverbal cue; `in_reply` associates its playback with the reply `begin` opened, and
+        `destination` plays one outside a reply somewhere other than the Mac."""
         reply = self._reply if in_reply else None
         if in_reply and reply is None:
             return
-        generation = None
-        if reply is None:
-            generation = self._local_cue_generation
-        self._enqueue(_Cached(name, lang, reply, generation))
+        if reply is not None:
+            self._enqueue(_Cached(name, lang, reply))
+            return
+        epoch = self._cue_epochs.setdefault(destination if destination is not None else self._player, object())
+        self._enqueue(_Cached(name, lang, None, epoch, destination))
+
+    def drop_cues(self, destination: Player | None) -> None:
+        """Cues queued outside a reply for `destination`, or the Mac, are skipped; later ones play."""
+        self._cue_epochs.pop(destination if destination is not None else self._player, None)
 
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
               destination: Player | None = None, allowed: Callable[[], bool] | None = None,
-              can_start: Callable[[], bool] | None = None, reply_id: str | None = None) -> Callable[[], bool]:
+              can_start: Callable[[], bool] | None = None, reply_id: str | None = None,
+              client: str | None = None) -> Callable[[], bool]:
         """Bind a reply's destination and return a completion check unaffected by later replies.
         `can_start` gates only the first audio; `allowed` continues to guard an active reply."""
         self.start()
@@ -216,7 +228,8 @@ class Speech:
         if not any(p is player for p in self._players):
             self._players.append(player)
         self._last_player = player
-        self._reply = _Reply(turn, lang, self._clock.now(), heard_at, owner=owner, player=player, reply_id=reply_id, allowed=allowed, can_start=can_start)
+        self._reply = _Reply(turn, lang, self._clock.now(), heard_at, owner=owner, player=player, client=client,
+                             reply_id=reply_id, allowed=allowed, can_start=can_start)
         self._prune_replies()
         self._replies[turn] = self._reply
         reply = self._reply
@@ -277,7 +290,7 @@ class Speech:
             self._record({
                 "kind": "speech_stop", "turn": reply.turn, "request_at": reply.heard_at,
                 "request_id": reply.owner[0] if reply.owner is not None else None,
-                "revision": reply.owner[1] if reply.owner is not None else None,
+                "revision": reply.owner[1] if reply.owner is not None else None, "client": reply.client,
                 "stopped_at": self._clock.now(), "time_basis": "perf_counter",
                 "first_meaningful_audio_ms": None if reply.first_chunk_audio is None else round(
                     (reply.first_chunk_audio - (reply.heard_at if reply.heard_at is not None else reply.began)) * 1000
@@ -299,7 +312,7 @@ class Speech:
         """Stop this output and its playback waits until a new reply or local cue reactivates it."""
         player = destination if destination is not None else self._player
         if player is self._player:
-            self._local_cue_generation += 1
+            self.drop_cues(None)
         self._prune_replies()
         for reply in self._replies.values():
             if reply.player is player:
@@ -360,7 +373,9 @@ class Speech:
 
     def _destination(self, item: _Say | _Cached | _End) -> Player:
         reply = item.reply
-        return reply.player if reply is not None and reply.player is not None else self._player
+        if reply is not None and reply.player is not None:
+            return reply.player
+        return item.player if isinstance(item, _Cached) and item.player is not None else self._player
 
     def _enqueue(self, item: _Say | _Cached | _End) -> None:
         player = self._destination(item)
@@ -474,12 +489,12 @@ class Speech:
                 finally:
                     # Closed on the synthesis thread: the engine's cleanup may touch MLX.
                     await run(self._thread, pieces.close)
-            case _Cached(name, lang, reply, cue_generation):
-                if cue_generation is not None and cue_generation != self._local_cue_generation:
+            case _Cached(name, lang, reply, epoch, player):
+                if epoch is not None and epoch is not self._cue_epochs.get(player if player is not None else self._player):
                     return
                 if reply is not None and reply.stopped:
                     return
-                starts = self._play(self._cache[name, lang], reply, sentence=False)
+                starts = self._play(self._cache[name, lang], reply, sentence=False, player=player)
                 if name == "chime" and self._on_chime is not None:
                     self._on_chime(starts)
             case _End(reply):
@@ -487,9 +502,10 @@ class Speech:
                     reply.player.end_reply()
                 self._record_reply(reply)
 
-    def _play(self, clip: Clip, reply: _Reply | None, *, sentence: bool) -> float:
-        """Plays `clip` after what is queued; returns when it starts."""
-        player = reply.player if reply is not None and reply.player is not None else self._player
+    def _play(self, clip: Clip, reply: _Reply | None, *, sentence: bool, player: Player | None = None) -> float:
+        """Plays `clip` after what is queued; returns when it starts. A reply's clip plays on the reply's player,
+        any other on `player`, or the Mac when that is None."""
+        player = reply.player if reply is not None and reply.player is not None else player or self._player
         if reply is not None and not self._reply_allowed(reply):
             return self._clock.now()
         self._prune_replies()
@@ -499,7 +515,7 @@ class Speech:
         if reply is not None:
             reply.trailing_audio_s = 0.0
         starts = self._clock.now() + player.pending()
-        starts_reply = reply is not None and reply.first_audio is None
+        starts_reply = first = reply is not None and reply.first_audio is None
         if reply is not None:
             if reply.first_audio is None:
                 reply.first_audio = starts
@@ -518,7 +534,9 @@ class Speech:
         receipt = player.play(clip, starts_reply=starts_reply)
         if reply is not None and sentence and clip.seconds > 0:
             reply.receipts.append(receipt)
-        if starts_reply and reply is not None and player is self._player and self._on_reply_audio is not None:
+        # Off the Mac only a spoken turn's reply is reported, and the floor ignores any turn it does not own.
+        if (first and reply is not None and (player is self._player or reply.owner is not None)
+                and self._on_reply_audio is not None):
             self._on_reply_audio(reply.heard_at, reply.owner)
         return starts
 
@@ -538,6 +556,7 @@ class Speech:
             "request_at": reply.heard_at,
             "request_id": reply.owner[0] if reply.owner is not None else None,
             "revision": reply.owner[1] if reply.owner is not None else None,
+            "client": reply.client,
             "started_at": reply.began,
             "time_basis": "perf_counter",
             "first_meaningful_audio_ms": ms(reply.first_chunk_audio),

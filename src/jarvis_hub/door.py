@@ -6,15 +6,17 @@ import asyncio
 import hashlib
 import sqlite3
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol, cast
+from uuid import uuid4
 
 from aiohttp import WSMsgType, web
 import numpy as np
 
-from jarvis_hub.voice.player import Clip, Player, RemotePlayer
+from jarvis_hub.voice.player import REWIND_MS, Clip, PlaybackReceipt, Player, RemotePlayer
 
 from jarvis_hub.clients import Client, Clients
 from jarvis_hub.event_log import Event, EventLog
@@ -69,8 +71,16 @@ class _Connection:
     writer: asyncio.Task[None] | None = None
     closing: bool = False
     player: RemotePlayer | None = None
+    cues: _CuePlayer | None = None
     # Live mode belongs to the socket: None until it turns Live mode on.
     live: LiveInput | None = None
+    publish: Callable[[str, dict[str, Any], bytes | None], None] = lambda kind, payload, binary: None
+
+
+def _pcm(clip: Clip) -> bytes:
+    if clip.sample_rate != 24000:
+        raise ValueError("Remote speech requires 24000 Hz mono PCM")
+    return (np.clip(clip.samples, -1, 1) * 32767).astype("<i2").tobytes()
 
 
 class _SpeechTransport:
@@ -89,9 +99,7 @@ class _SpeechTransport:
         self.publish("speech_begin", {"speech_id": speech_id, "sample_rate": 24000, "channels": 1, "sample_width": 2})
 
     def send_clip(self, speech_id: str, index: int, clip: Clip) -> None:
-        if clip.sample_rate != 24000:
-            raise ValueError("Remote speech requires 24000 Hz mono PCM")
-        pcm = (np.clip(clip.samples, -1, 1) * 32767).astype("<i2").tobytes()
+        pcm = _pcm(clip)
         self.publish("speech_clip", {"speech_id": speech_id, "index": index, "text": clip.text, "byte_length": len(pcm)}, pcm)
         self._playing(True)
 
@@ -100,7 +108,52 @@ class _SpeechTransport:
 
     def stop(self, speech_id: str) -> None:
         self.publish("speech_stop", {"speech_id": speech_id, "reason": "silence" if self._silenced() else "interrupted"})
+        self.idle(speech_id)
+
+    def idle(self, speech_id: str) -> None:
         self._playing(False)
+
+
+class _CuePlayer:
+    """Plays a Live mode exchange's chime and closing sound on the phone, each a one-clip speech stream named by its
+    `cue`. Cues are not speech: they play under Silence, nothing stops them, and they are not remote activity."""
+
+    def __init__(self, publish: Callable[[str, dict[str, Any], bytes | None], None], speaker: RemotePlayer) -> None:
+        self._publish = publish
+        self._speaker = speaker
+        # Recent cue streams, whose playback reports the phone may still send.
+        self._streams: deque[str] = deque(maxlen=8)
+
+    def owns(self, speech_id: str) -> bool:
+        return speech_id in self._streams
+
+    def play(self, clip: Clip, *, starts_reply: bool = False) -> PlaybackReceipt:
+        pcm, cue = _pcm(clip), {"speech_id": uuid4().hex, "cue": clip.voice}
+        # The phone plays one stream at a time: one still open there would send it a clip or stop out of turn.
+        self._speaker.stop()
+        self._streams.append(cue["speech_id"])
+        self._publish("speech_begin", {**cue, "sample_rate": 24000, "channels": 1, "sample_width": 2}, None)
+        self._publish("speech_clip", {**cue, "index": 0, "text": clip.text, "byte_length": len(pcm)}, pcm)
+        self._publish("speech_end", {**cue, "last_clip_index": 0}, None)
+        return PlaybackReceipt(completed=True)
+
+    def pause(self) -> None:
+        pass
+
+    def resume(self, rewind_ms: int = REWIND_MS) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    def played(self) -> str:
+        return ""
+
+    def pending(self) -> float:
+        return 0.0
+
+    def close(self) -> None:
+        pass
 
 
 class Door:
@@ -322,6 +375,11 @@ class Door:
         live, connection.live = connection.live, None
         if live is not None:
             live.close()
+
+    @staticmethod
+    def _voice_state(connection: _Connection, state: str) -> None:
+        if connection.live is not None:
+            connection.publish("voice_state", {"state": state}, None)
 
     @staticmethod
     def _upload_response(command_id: str, result: dict[str, Any]) -> web.Response:
@@ -546,7 +604,9 @@ class Door:
                 client_state = self._hub.clients.get(client.id) if self._hub is not None else None
                 return client_state is not None and client_state.silence
 
+            connection.publish = publish
             connection.player = RemotePlayer(_SpeechTransport(publish, playing, silenced))
+            connection.cues = _CuePlayer(publish, connection.player)
             self._hub.attach_client(Client(client.id, "iphone" if client.kind == "iphone" else "reference", connected=True, can_show_text=False, can_speak=self._hub.speech_available,
                                            silence=self._log.silence(client.id)), player=connection.player)
             # Replay is queued before scheduled append notifications can run on this loop.
@@ -569,12 +629,15 @@ class Door:
                     await self._retire(connection, 1008)
                     break
                 if message.type == WSMsgType.TEXT:
+                    listening = connection.live
                     try:
                         body = json_object(message.data.encode("utf-8"))
                         result = await self._command(connection, body)
                     except (ValueError, RecursionError, UnicodeError):
                         result = self._command_error("invalid_payload", "Expected a valid command envelope")
                     self._enqueue(connection, result)
+                    if connection.live is not None and connection.live is not listening:
+                        self._voice_state(connection, connection.live.voice_state())
                 elif message.type == WSMsgType.BINARY:
                     data = cast(bytes, message.data)
                     if (connection.live is None or not data or len(data) > UPLINK_MAX_BYTES
@@ -655,13 +718,14 @@ class Door:
                     state = payload.get("state")
                     if set(payload) != {"speech_id", "clip_index", "state"} or state not in ("started", "finished", "stopped"):
                         raise ValueError("Invalid report")
-                    if state == "stopped":
-                        if not player.accepts(speech_id, index):
+                    if connection.cues is None or not connection.cues.owns(speech_id):
+                        if state == "stopped":
+                            if not player.accepts(speech_id, index):
+                                raise ValueError("Unknown speech")
+                            await self._hub.interrupt_client(connection.client.id)
+                        elif not player.report(speech_id, index, state):
                             raise ValueError("Unknown speech")
-                        await self._hub.interrupt_client(connection.client.id)
-                    elif not player.report(speech_id, index, state):
-                        raise ValueError("Unknown speech")
-                    self._hub.set_client_playing(connection.client.id, player.pending() > 0)
+                        self._hub.set_client_playing(connection.client.id, player.pending() > 0)
                     result = {"ok": True, "result": {}}
             elif kind == "say_text":
                 text = payload.get("text")
@@ -729,10 +793,15 @@ class Door:
                 if self._live is None:
                     result = rejected("voice_unavailable", "Live mode needs Jarvis in voice mode on the Mac")
                 else:
+                    if self._hub.clients.get(connection.client.id) is None:
+                        raise ValueError("Client is disconnected")
                     if not on:
                         self._stop_live(connection)
                     elif connection.live is None:
-                        connection.live = self._live.open(connection.client.id)
+                        assert connection.cues is not None
+                        connection.live = self._live.open(connection.client.id, cues=connection.cues,
+                                                          on_state=lambda state: self._voice_state(connection, state))
+                    self._hub.clients.set_live(connection.client.id, on)
                     result = {"ok": True, "result": {"on": on}}
             elif kind == "acknowledge":
                 seq = sequence(payload.get("seq"))

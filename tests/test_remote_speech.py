@@ -16,7 +16,7 @@ from jarvis_hub.voice.live import LiveInputs
 from jarvis_hub.voice.speech import Speech
 from jarvis_hub.voice.voice_mode import VoiceMode
 from jarvis_hub.voice.player import Samples
-from tests.fakes import FakeBackend, FakeClock, FakeTts, RecordingMetrics, RecordingOutput, RecordingPlayer, Text, make_hub, until
+from tests.fakes import FakeBackend, FakeClock, FakeTts, RecordingMetrics, RecordingOutput, RecordingPlayer, Text, Tool, make_hub, until
 from tests.protocol_exchanges import DelayedAdmission, command, connect, receive
 
 
@@ -89,7 +89,9 @@ async def remote_rig(tmp_path: Path, backend: FakeBackend | None = None, voice: 
         output = EventOutput(log, RecordingOutput())
         speech = voice.speech if voice is not None else Speech(tts or FakeTts(), local or RecordingPlayer(), clock, metrics=metrics, notice=output.notice)
         backend = backend or FakeBackend(clock, [[Text('First sentence. Second sentence.')], [Text('New reply.')], [Text('Third reply.')]])
-        hub = make_hub(backend, output, metrics, speech=speech, floor=voice)
+        hub = make_hub(backend, output, metrics, speech=speech, floor=voice,
+                       on_stand_by=voice.stand_by if voice is not None else None,
+                       on_end_conversation=voice.end_conversation if voice is not None else None)
         adapter = DelayedAdmission(hub)
         adapter.release.set()
         if focus_entered is not None:
@@ -167,6 +169,45 @@ async def test_reports_interrupt_heard_text_and_private_routing(tmp_path: Path) 
             await through(two, 'speech_end')
             assert '<interrupted spoken="First sentence."/>' in backend.session('talker').received[-1]
             assert not any(e.type.startswith('speech_') for e in log.after(0))
+
+
+async def test_a_talk_over_a_replay_carries_what_was_heard_after_a_reply_stood_by(tmp_path: Path) -> None:
+    backend = FakeBackend(FakeClock(), [[Text('First sentence. Second sentence.')],
+                                        [Text('Certainly. '), Tool('stand_by')], [Text('New reply.')]])
+    async with remote_rig(tmp_path, backend) as (session, door, hub, _log, backend, phones, _pairing):
+        async with connect(session, door, phones[0].token) as one:
+            await foreground(one)
+            await hub.admit_line(Line('First', 0, typed=False, client_id=phones[0].client.id))
+            frames = await through(one, 'speech_end')
+            reply = next(f['payload'] for f in frames if f['type'] == 'speech_begin')
+            for index in (0, 1):
+                await control(one, f'heard-{index}', 'playback_report', speech_id=reply['speech_id'],
+                              clip_index=index, state='finished')
+            await hub.admit_line(Line('On the Mac', 0, typed=False))
+            await until(lambda: len(backend.session('talker').tool_results) == 1)
+            replay = (await control(one, 'replay', 'replay_speech', reply_id=reply['reply_id']))['result']['speech_id']
+            await through(one, 'speech_end')
+            await control(one, 'replayed', 'playback_report', speech_id=replay, clip_index=0, state='finished')
+
+            await hub.admit_line(Line('Continue', 0, typed=False, client_id=phones[0].client.id))
+
+            await until(lambda: 'Continue' in backend.session('talker').received[-1])
+            assert '<interrupted spoken="First sentence."/>' in backend.session('talker').received[-1]
+
+
+async def test_stopping_the_last_clip_before_its_report_frees_the_mac_microphone(tmp_path: Path) -> None:
+    async with remote_rig(tmp_path) as (session, door, hub, _log, _backend, phones, _pairing):
+        async with connect(session, door, phones[0].token) as one:
+            await foreground(one)
+            await hub.admit_line(Line('First', 0, typed=False, client_id=phones[0].client.id))
+            frames = await through(one, 'speech_end')
+            stream = next(f['payload']['speech_id'] for f in frames if f['type'] == 'speech_begin')
+            assert hub.clients.remote_activity
+            assert (await control(one, 'stop', 'interrupt', speech_id=stream, last_clip_index=1))['ok']
+            assert not hub.clients.remote_activity
+            await hub.admit_line(Line('Continue', 0, typed=False, client_id=phones[0].client.id))
+            after = await through(one, 'speech_begin')
+            assert not any(f['type'] == 'speech_stop' for f in after)
 
 
 async def test_replacement_and_revocation_retire_only_the_owned_speech(tmp_path: Path) -> None:

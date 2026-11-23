@@ -138,7 +138,8 @@ class Speech(Protocol):
 
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
               destination: Player | None = None, allowed: Callable[[], bool] | None = None,
-              can_start: Callable[[], bool] | None = None, reply_id: str | None = None) -> Callable[[], bool] | None: ...
+              can_start: Callable[[], bool] | None = None, reply_id: str | None = None,
+              client: str | None = None) -> Callable[[], bool] | None: ...
 
     def replay(self, text: str, lang: Lang, *, destination: RemotePlayer, reply_id: str,
                allowed: Callable[[], bool]) -> str: ...
@@ -179,11 +180,16 @@ class Floor(Protocol):
         """Claims the voice for news if Jarvis is still idle, so a Wake word interrupts it; False if not idle."""
         ...
 
+    def text_reply(self, owner: tuple[str, int]) -> None:
+        """The reply to the floor's spoken turn `owner` was text only, and its text has ended."""
+        ...
+
 
 class _Silent:
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
               destination: Player | None = None, allowed: Callable[[], bool] | None = None,
-              can_start: Callable[[], bool] | None = None, reply_id: str | None = None) -> None:
+              can_start: Callable[[], bool] | None = None, reply_id: str | None = None,
+              client: str | None = None) -> None:
         pass
 
     def replay(self, text: str, lang: Lang, *, destination: RemotePlayer, reply_id: str,
@@ -808,6 +814,7 @@ class Hub:
         player = self._client_players.get(client_id)
         if not isinstance(player, RemotePlayer) or not self._client_can_speak(client_id):
             raise ValueError("Client cannot speak")
+        self.clients.begin_stream(client_id, floor=False)
         return self._speech.replay(text, "it" if lang == "it" else "en", destination=player, reply_id=reply_id,
                                    allowed=lambda: self._client_can_speak(client_id)
                                    and self._client_players.get(client_id) is player)
@@ -875,6 +882,11 @@ class Hub:
             self._settled.set()
         self._persist()
 
+    def _is_live(self, client_id: str) -> bool:
+        """Whether `client_id` is a phone in Live mode, whose voice is the voice floor's."""
+        client = self.clients.get(client_id)
+        return client is not None and client.live
+
     def _client_can_speak(self, client_id: str) -> bool:
         client = self.clients.get(client_id)
         return bool(client is not None and client.connected and client.can_speak and not client.silence
@@ -886,7 +898,8 @@ class Hub:
         if self.clients.focus == TERMINAL:
             return self.clients.remote_activity
         client = self.clients.get(self.clients.focus)
-        return bool(client is not None and (client.talking or client.playing))
+        # A Live mode Focus's exchange speech is the floor's, which _focus_quiet waits out as the floor's quiet.
+        return bool(client is not None and client.remote_activity)
 
     def _news_delivery_told(self, delivery: _NewsDelivery) -> bool:
         return delivery.reply is not None and (
@@ -915,6 +928,9 @@ class Hub:
             self._remote_interrupted = player.played()
         if client_id == self._speech_client_id:
             await self.interrupt()
+            if self._floor is not None and self._is_live(client_id):
+                # Stopped by hand, the voice floor's reply ends with no Follow-up window, as a typed line ends one.
+                self._floor.typed_input()
         elif (player := self._client_players.get(client_id)) is not None:
             self._speech.retire(player)
             self.set_client_playing(client_id, False)
@@ -925,7 +941,9 @@ class Hub:
         if self._news_delivery is not None and not self._news_delivery_told(self._news_delivery):
             self._hold_news_delivery(self._news_delivery)
         for client_id, player in self._client_players.items():
-            if client_id != TERMINAL and player.pending() > 0:
+            # The voice floor's own speech, on the Mac or a Live mode phone, reports its cut-off with its next turn.
+            if (client_id != TERMINAL and player.pending() > 0
+                    and not ((client := self.clients.get(client_id)) is not None and client.floor_speech)):
                 self._remote_interrupted = player.played()
                 break
         self._speech.stop()
@@ -967,9 +985,17 @@ class Hub:
         self._talker = self._orchestrator = None
 
     def _owns_spoken(self, owner: tuple[str, int], client_id: str) -> bool:
+        if self._floor is not None and self._floor.owns(owner):
+            return True
         if client_id != TERMINAL:
             return owner == self._remote_spoken_owner or owner in self._admitted_remote_owners
-        return self._floor is None or self._floor.owns(owner)
+        return self._floor is None
+
+    def _from_floor(self, line: Line) -> bool:
+        """Whether `line` is the voice floor's spoken turn, heard on the Mac or a Live mode phone, not a Talk."""
+        return (not line.typed and self._floor is not None
+                and (line.client_id == TERMINAL or line.request_id is not None
+                     and self._floor.owns((line.request_id, line.revision))))
 
     async def take_focus(self, client_id: str, *, allowed: Callable[[], bool] = lambda: True) -> None:
         async with self._admission_lock:
@@ -1035,7 +1061,7 @@ class Hub:
         self._persist_suspended = True
         try:
             scope = self._scopes.admit(line.request_id, line.revision, line.segments or (line.text,), line.arrived,
-                                       one_shot=line.client_id != TERMINAL)
+                                       one_shot=line.client_id != TERMINAL and not self._from_floor(line))
             for task_id in scope.task_ids:
                 task = self._tasks.get(task_id)
                 if task is not None:
@@ -1072,9 +1098,10 @@ class Hub:
             if line.client_id != TERMINAL or self._last_input_client != TERMINAL:
                 self._audio_generation += 1
             self._last_input_client = line.client_id
+            floor = self._from_floor(line)
             if line.typed or line.client_id == TERMINAL:
                 self._remote_spoken_owner = None
-            if line.client_id != TERMINAL:
+            if line.client_id != TERMINAL and not floor:
                 if self._floor is not None:
                     self._floor.typed_input()
                 await self.interrupt()
@@ -1121,7 +1148,7 @@ class Hub:
                                 audio_generation=self._audio_generation,
                                 spoken_owner=(line.request_id, line.revision)
                                 if not line.typed and line.request_id is not None else None)
-            if item.spoken_owner is not None and line.client_id != TERMINAL:
+            if item.spoken_owner is not None and line.client_id != TERMINAL and not floor:
                 self._admitted_remote_owners.add(item.spoken_owner)
                 if self._remote_spoken_owner == item.spoken_owner:
                     self._remote_spoken_owner = None
@@ -1787,7 +1814,7 @@ class Hub:
         while self._focus_busy():
             self._clients_updated.clear()
             await self._clients_updated.wait()
-        if self.clients.focus == TERMINAL and self._floor is not None:
+        if self._floor is not None and (self.clients.focus == TERMINAL or self._is_live(self.clients.focus)):
             await self._quiet()
         elif self._client_can_speak(self.clients.focus):
             await self._speech.idle(stall_timeout=None, destination=self._client_players.get(self.clients.focus))
@@ -2173,9 +2200,12 @@ class Hub:
         speech = self._speech if audible else _Silent()
         if audible:
             self._speech_client_id = destination_id
+            if destination_id != TERMINAL:
+                self.clients.begin_stream(destination_id, floor=owner is not None and self._floor is not None
+                                          and self._floor.owns(owner))
         player = self._client_players.get(destination_id)
         receipt = speech.begin(self._lang, reply_id=self._output.reply_id, turn=turn, heard_at=arrived if kind == "user" else None, owner=owner,
-                     destination=player,
+                     destination=player, client=destination_id,
                      allowed=lambda: (audio_generation is None or audio_generation == self._audio_generation)
                      and self._client_can_speak(destination_id)
                      and self._client_players.get(destination_id) is player
@@ -2236,6 +2266,9 @@ class Hub:
             self._turn_spoken = self._turn_answers_user = self._replying = False
             if self._interrupted_turn != turn:
                 speech.end()
+            if not audible and owner is not None and kind == "user" and self._floor is not None:
+                # The floor waits for its spoken turn's reply to end, which here was text only.
+                self._floor.text_reply(owner)
             if show:
                 # The language of the reply, not of the User's turn: a replay speaks it with that voice.
                 if self._output.log is not None and self._output.reply_id is not None:
@@ -2888,19 +2921,25 @@ class Hub:
             return "Recall needs the event log, which this Hub does not keep."
         return recall(log, args)
 
+    def _answers_floor(self) -> bool:
+        """Whether this turn answers the voice floor's spoken turn, on the Mac or a Live mode phone."""
+        owner = self._active_spoken_owner
+        return self._turn_answers_user and (self._user_client_id == TERMINAL or (
+            owner is not None and self._floor is not None and self._floor.owns(owner)))
+
     async def _end_conversation(self, args: dict[str, Any]) -> str:
-        # Text mode, a typed line in voice mode, or news has no listening of its own to stop: only acknowledged.
-        if self._on_end_conversation is not None and self._turn_answers_user and self._user_client_id == TERMINAL:
+        # Text mode, a typed line in voice mode, a Talk or news has no listening of its own to stop: only acknowledged.
+        if self._on_end_conversation is not None and self._answers_floor():
             self._on_end_conversation()
         return "The conversation ends after this reply."
 
     async def _stand_by(self, args: dict[str, Any]) -> str:
         self._silenced_turn = self._talker_gate.turn
-        if self._user_client_id != TERMINAL:
-            self._speech.stop()
         # Only a spoken User turn has listening to close; elsewhere the reply just stays silent.
-        if self._on_stand_by is not None and self._turn_answers_user and self._user_client_id == TERMINAL:
+        if self._on_stand_by is not None and self._answers_floor():
             self._on_stand_by()
+        elif self._user_client_id != TERMINAL:
+            self._speech.stop()
         return "Standing by in silence; add nothing."
 
     async def _quiet_mode_tool(self, args: dict[str, Any]) -> str:

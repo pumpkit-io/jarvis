@@ -5,13 +5,17 @@ from collections.abc import Callable
 from typing import Any, Protocol
 
 from jarvis_hub.voice.input import Capture, Engines, Listening, UplinkFrames
+from jarvis_hub.voice.player import Player
 from jarvis_hub.voice.voice_mode import AudioInput, client_rows
 
 
 class Floor(Protocol):
-    def add_input(self, client: str, audio: AudioInput) -> None: ...
+    def add_input(self, client: str, audio: AudioInput, *, cues: Player | None = None,
+                  on_state: Callable[[str], None] | None = None) -> None: ...
 
     def remove_input(self, client: str) -> None: ...
+
+    def voice_state(self, client: str) -> str: ...
 
 
 class LiveInput:
@@ -23,6 +27,9 @@ class LiveInput:
     def feed(self, pcm: bytes) -> None:
         """Hears whole 10 ms frames of 16 kHz mono PCM16, dropped while the engines load."""
         self._source.feed(pcm)
+
+    def voice_state(self) -> str:
+        return self._inputs.voice_state(self._client)
 
     def close(self) -> None:
         self._inputs.close(self._client, self._capture)
@@ -50,17 +57,21 @@ class LiveInputs:
         self._clock = clock
         self._open: dict[str, Capture] = {}
 
-    def open(self, client: str) -> LiveInput:
-        """Starts hearing `client`'s uplink, in place of any input an earlier socket of that Client left open."""
+    def open(self, client: str, *, cues: Player, on_state: Callable[[str], None]) -> LiveInput:
+        """Starts hearing `client`'s uplink, in place of any input an earlier socket of that Client left open. An
+        exchange opened there plays its chime and closing sound on `cues`; `on_state` hears its voice state change."""
         source = UplinkFrames(self._clock)
         capture = Capture(self._load, self._settings, client_rows(self._record, client), self._notice, source=source,
                           clock=self._clock, mac_notices=False)
         if self._open.pop(client, None) is not None:
             self._floor.remove_input(client)
-        self._floor.add_input(client, capture)
+        self._floor.add_input(client, capture, cues=cues, on_state=on_state)
         self._open[client] = capture
         capture.start()
         return LiveInput(self, client, source, capture)
+
+    def voice_state(self, client: str) -> str:
+        return self._floor.voice_state(client)
 
     def close(self, client: str, capture: Capture) -> None:
         if self._open.get(client) is capture:

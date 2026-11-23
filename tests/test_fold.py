@@ -399,6 +399,9 @@ class Voice:
     def announce(self) -> bool:
         return True
 
+    def text_reply(self, owner: tuple[str, int]) -> None:
+        pass
+
 
 async def test_the_swap_waits_for_a_quiet_voice(clock: FakeClock, path: Path) -> None:
     voice = Voice()

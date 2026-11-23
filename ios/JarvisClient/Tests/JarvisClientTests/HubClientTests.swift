@@ -623,6 +623,53 @@ func actualTransportOutcomesDetermineConnectionState(_ error: HubTransportError)
     await client.stop(); reader.cancel()
 }
 
+@Test func pythonLiveModeFixtureStreamsItsCuesAndReplyAndKeepsVoiceStateOutOfHistory() async throws {
+    let url = try #require(Bundle.module.url(forResource: "client-v1", withExtension: "json", subdirectory: "Fixtures"))
+    let root = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+    let exchanges = try #require(root["exchanges"] as? [String: Any])
+    let live = try #require(exchanges["live_mode"] as? [String: Any])
+    let frames = try #require(live["downlink"] as? [[String: Any]])
+    let transport = FakeTransport()
+    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }))
+    let captured = CapturedUpdates()
+    let reader = Task { for await update in client.updates { await captured.record(update) } }
+    await client.start()
+    try await eventually { await transport.socket(0) != nil }
+    let socket = try #require(await transport.socket(0))
+    await socket.ready()
+    try await eventually { await client.state == .ready }
+    for frame in frames {
+        if let encoded = frame["binary_base64"] as? String {
+            socket.input.yield(.binary(try #require(Data(base64Encoded: encoded))))
+        } else {
+            socket.input.yield(.text(try JSONSerialization.data(withJSONObject: frame)))
+        }
+    }
+    try await eventually { await captured.events.contains { $0.type == "speech_end" && $0.string("cue") == "closing" } }
+    #expect(await captured.clips.count == 3)
+    #expect(await socket.closed == false)
+    let states = await captured.events.filter { $0.type == "voice_state" }
+    #expect(states.map { $0.string("state") } == ["idle", "listening", "thinking", "speaking", "follow_up", "idle"])
+    #expect(states.allSatisfy { !$0.replayable })
+    await client.stop(); reader.cancel()
+}
+
+@Test(arguments: [#""reply_id":"r","cue":"chime","#, ""])
+func speechBeginNamesItsReplyOrItsCueAndNeverBoth(names: String) async throws {
+    let transport = FakeTransport()
+    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }))
+    await client.start()
+    try await eventually { await transport.socket(0) != nil }
+    let socket = try #require(await transport.socket(0))
+    await socket.ready(through: 0)
+    try await eventually { await client.state == .ready }
+    let cursor = await client.cursor
+    await socket.text(event(2, "speech_begin", #"{"speech_id":"s",\#(names)"sample_rate":24000,"channels":1,"sample_width":2}"#))
+    try await eventually { await socket.closed }
+    #expect(await client.cursor == cursor)
+    await client.stop()
+}
+
 @Test func speechDownlinkDoesNotInheritUploadDurationLimit() async throws {
     let transport = FakeTransport()
     let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }))
