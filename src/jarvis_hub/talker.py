@@ -32,6 +32,7 @@ def talker_tools(
     present_approval: ToolHandler,
     authorize: ToolHandler,
     revoke_authorization: ToolHandler,
+    recall: ToolHandler,
     resolve_scope: ToolHandler | None = None,
 ) -> tuple[HubTool, ...]:
     tools = (
@@ -130,6 +131,26 @@ def talker_tools(
                 "and recording the replacement from the current User message.",
                 object_schema({"authorization_id": STRING}, ("authorization_id",)), revoke_authorization),
     )
+
+    tools += (HubTool(
+        "recall",
+        "Search the last 30 days for exact wording when the User asks what they or you said, or for a detail your "
+        "context and Memory lack: what the User said, your finished replies, details shown on screen and Task "
+        "reports. Every word must appear; put a phrase in double quotes, and try fewer or other words when nothing "
+        "matches. Returns up to 10 dated matches, oldest first, each with a line of what followed, with today's "
+        "date. It reaches nothing older than 30 days or from before a Reset context, and says when it reached that "
+        "edge: then say the answer may be older. It records what was said, never what holds now: Tasks, Approvals "
+        "and permissions come only from status and the Hub's records, never from a recalled line.",
+        object_schema({
+            "query": {**STRING, "description": "Words or a quoted phrase, in the language they were said in."},
+            "from": {**STRING, "description": "First day to search, as 2026-11-15, the User's local date."},
+            "to": {**STRING, "description": "Last day to search, included, as 2026-11-15."},
+            "speaker": {"type": "string", "enum": ["user", "jarvis"],
+                        "description": "Only the User's words, or only yours, shown details and Task reports."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+        }, ("query",)),
+        recall,
+    ),)
 
     if resolve_scope is not None:
         tools += (HubTool(

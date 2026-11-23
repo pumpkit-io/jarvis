@@ -302,6 +302,7 @@ async def text_mode(
         output = EventOutput(log, terminal)
         terminal.on_notice = output.notice
         metrics = JsonlMetrics(settings.runtime_dir / "metrics.jsonl")
+        log.start_backfill(record=metrics.record)
         speech = None
         if voice is not None:
             try:
@@ -378,6 +379,7 @@ async def voice_mode(
         output = EventOutput(log, terminal)
         terminal.on_notice = output.notice
         metrics = JsonlMetrics(settings.runtime_dir / "metrics.jsonl")
+        log.start_backfill(record=metrics.record)
         voice = settings.voice
         choice = EngineChoice(aec="off" if headphones else voice.aec, wake=voice.wake_engine, stt=voice.stt_engine)
         clips = ClipStore(settings.runtime_dir / "clips", clip_settings(voice))
