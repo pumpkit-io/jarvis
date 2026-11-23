@@ -588,6 +588,48 @@ class Microphone:
             stream.close()
 
 
+# Arriving later than this after its frames were due means the stream paused, not network jitter.
+UPLINK_GAP_S = 0.5
+
+
+class UplinkFrames:
+    """An iPhone Client's microphone, fed with the 16 kHz mono PCM16 its socket uplinks.
+
+    Frames are stamped by sample count from an anchor, so jitter in arrival does not stretch or squeeze turns. The
+    anchor puts a message's last frame at its arrival time, on the first message and after each gap. Messages fed
+    while the source is closed are dropped.
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.perf_counter) -> None:
+        self._clock = clock
+        self._push: Push | None = None
+        self._anchor: float | None = None
+        self._samples = 0
+
+    def open(self, push: Push) -> None:
+        self._anchor = None
+        self._push = push
+
+    def close(self) -> None:
+        self._push = None
+
+    def feed(self, pcm: bytes) -> None:
+        """Pushes each whole 10 ms frame in `pcm`, signed 16-bit little-endian samples, on the caller's thread."""
+        push = self._push
+        if push is None:
+            return
+        samples = np.frombuffer(pcm, "<i2").astype(np.int16)
+        frames = len(samples) // FRAME
+        arrived = self._clock()
+        due = None if self._anchor is None else self._anchor + (self._samples + frames * FRAME) / SAMPLE_RATE
+        if due is None or arrived - due > UPLINK_GAP_S:
+            self._anchor, self._samples = arrived - frames * FRAME / SAMPLE_RATE, 0
+        assert self._anchor is not None
+        for i in range(frames):
+            self._samples += FRAME
+            push(samples[i * FRAME:(i + 1) * FRAME], self._anchor + self._samples / SAMPLE_RATE)
+
+
 @dataclass(frozen=True)
 class _Capture:
     on: bool

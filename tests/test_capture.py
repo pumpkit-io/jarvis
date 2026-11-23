@@ -12,9 +12,9 @@ import pytest
 
 from jarvis_hub.voice.clips import ClipSettings, ClipStore
 from jarvis_hub.voice.engines import NoEchoCancellation, ReferenceBuffer, WebRtcEchoCancellation
-from jarvis_hub.voice.input import Capture, Engines, Listening, Push
+from jarvis_hub.voice.input import Capture, Engines, Listening, Push, UplinkFrames
 from jarvis_hub.voice.player import Samples
-from jarvis_hub.voice.state import Heard
+from jarvis_hub.voice.state import Heard, WakeWord
 from tests.fakes import until
 from tests.test_input_pipeline import Everyone, LoudVad, MarkerWake, ScriptedStt, ScriptedTurn
 
@@ -1412,3 +1412,54 @@ async def test_remote_resume_forgets_streaming_detector_context_on_its_worker(de
         capture.close()
         collecting.cancel()
         await asyncio.gather(collecting, return_exceptions=True)
+
+
+def uplinked(frames: int, value: int = 0) -> bytes:
+    return np.full(frames * FRAME, value, "<i2").tobytes()
+
+
+async def wake_at(capture: Capture) -> float:
+    async with asyncio.timeout(1):
+        async for event in capture.events():
+            if isinstance(event, WakeWord):
+                return event.at
+    raise AssertionError("no Wake word")
+
+
+async def test_uplinked_frames_are_stamped_by_sample_count_until_a_gap_re_anchors_them() -> None:
+    now = [10.0]
+    source = UplinkFrames(clock=lambda: now[0])
+    capture = Capture(lambda: engines(CountingEcho()), Listening(min_speech_db=0), lambda row: None,
+                      lambda text: None, source=source, backlog_s=10)
+    capture.start()
+    try:
+        await until(capture.ready.is_set)
+        # The first message's last frame was captured as it arrived.
+        source.feed(uplinked(8))
+        # Late by network jitter only: its frames follow the first by sample count, not by arrival.
+        now[0] = 10.3
+        source.feed(uplinked(8, value=2000))
+        assert await wake_at(capture) == pytest.approx(10.08)
+        # A pause in the stream: the next frames are stamped from their own arrival.
+        now[0] = 20.0
+        source.feed(uplinked(8, value=2000))
+        assert await wake_at(capture) == pytest.approx(20.0)
+    finally:
+        capture.close()
+
+
+async def test_uplinked_frames_are_dropped_rather_than_queued_while_the_capture_thread_falls_behind() -> None:
+    notices, wake = list[str](), BlockingWake()
+    source = UplinkFrames(clock=lambda: 10.0)
+    capture = Capture(lambda: engines(CountingEcho(), wake), Listening(), lambda row: None, notices.append,
+                      source=source, backlog_s=0.5)
+    capture.start()
+    try:
+        await until(capture.ready.is_set)
+        for _ in range(50):
+            source.feed(uplinked(10, value=3))
+        await until(lambda: any("falling behind" in n for n in notices))
+        wake.release.set()
+        assert len([n for n in notices if "falling behind" in n]) == 1
+    finally:
+        capture.close()
