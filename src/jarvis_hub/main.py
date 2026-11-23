@@ -29,6 +29,7 @@ from jarvis_hub.agents.backend import AgentBackend, SessionSpec
 from jarvis_hub.agents.sdk import SdkBackend
 from jarvis_hub.config import ConfigError, Settings, VoiceSettings, load_settings
 from jarvis_hub.hub import Clock, Hub, Line, Metrics, Output
+from jarvis_hub.memory import summariser_spec
 from jarvis_hub.orchestrator import orchestrator_spec
 from jarvis_hub.subagents import Subagent, SubagentSetup, subagent_session
 from jarvis_hub.stats import parse_rows, parse_when, read_rows, render, render_bargein, render_voice_trace, summarise, summarise_bargein
@@ -271,7 +272,8 @@ def settings_hub(
         metrics=metrics,
         subagents=subagent_setup(settings),
         waits=WaitSetup(org=settings.org),
-        talker_restart_at=settings.talker_restart_at,
+        summariser=summariser_spec(settings),
+        memory=settings.memory,
         state_path=settings.runtime_dir / "state.json",
         conversation_path=settings.runtime_dir / "conversation.json",
         **options,

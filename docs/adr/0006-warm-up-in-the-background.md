@@ -1,6 +1,6 @@
 # The Talker warms up in the background at launch
 
-> ADR 0028 supersedes the restart seed below (the last six exchanges, no model summary) and, once the Fold lands, the restart threshold. The warm-up now carries the saved Conversation as its seed.
+> ADR 0028 supersedes the seed (the last six exchanges, no model summary) and the threshold of the restart in the last Consequence below. `JARVIS_TALKER_RESTART_AT` is gone: a Fold keeps the context small, and the restart runs only at `JARVIS_MEMORY_CEILING` tokens, seeded with Memory and the Tail. The warm-up now carries the saved Conversation as its seed.
 
 Spec story 1 asks Jarvis to start without any model call. The Hub makes one: at launch it opens the Talker session and sends a short `<event source="hub">` message whose reply is never shown, so the User's first turn finds the Talker's prompt in the cache. The warm-up runs in the background. The prompt appears at once, and a turn typed before the warm-up ends waits for it rather than going first, because one session takes one turn at a time and dropping a warm-up already sent would need an interrupt.
 
