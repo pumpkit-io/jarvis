@@ -20,6 +20,8 @@ class Client:
     live: bool = False
     # The stream last begun here is the voice floor's own exchange speech, which is not remote activity.
     floor_speech: bool = False
+    # The stream last begun here is the reply to a Talk.
+    talk_reply: bool = False
 
     @property
     def remote_activity(self) -> bool:
@@ -63,7 +65,7 @@ class Clients:
     def disconnect(self, client_id: str) -> None:
         client = self._clients[client_id]
         self._clients[client_id] = replace(client, connected=False, talking=False, playing=False, live=False,
-                                          floor_speech=False)
+                                          floor_speech=False, talk_reply=False)
         self._on_change()
 
     def take_focus(self, client_id: str) -> None:
@@ -84,17 +86,27 @@ class Clients:
         return any(client.id != TERMINAL and client.connected and client.remote_activity
                    for client in self._clients.values())
 
+    @property
+    def hearing(self) -> frozenset[str]:
+        """The Live mode phones playing their Talk's reply, whose live input still listens for the Wake word. A Talk
+        held anywhere mutes them all."""
+        phones = [client for client in self._clients.values() if client.id != TERMINAL and client.connected]
+        if any(client.talking for client in phones):
+            return frozenset()
+        return frozenset(client.id for client in phones if client.live and client.playing and client.talk_reply)
+
     def set_live(self, client_id: str, live: bool) -> None:
         client = self._clients[client_id]
         if client.live != live:
             self._clients[client_id] = replace(client, live=live)
             self._on_change()
 
-    def begin_stream(self, client_id: str, *, floor: bool) -> None:
-        """A speech stream begins on `client_id`; `floor` says it is the voice floor's own exchange speech."""
+    def begin_stream(self, client_id: str, *, floor: bool, talk_reply: bool = False) -> None:
+        """A speech stream begins on `client_id`; `floor` says it is the voice floor's own exchange speech, and
+        `talk_reply` that it answers a Talk."""
         client = self._clients[client_id]
-        if client.floor_speech != floor:
-            self._clients[client_id] = replace(client, floor_speech=floor)
+        if (client.floor_speech, client.talk_reply) != (floor, talk_reply):
+            self._clients[client_id] = replace(client, floor_speech=floor, talk_reply=talk_reply)
             self._on_change()
 
     def set_talking(self, client_id: str, talking: bool) -> None:

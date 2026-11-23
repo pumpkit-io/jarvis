@@ -7,7 +7,7 @@ machine knows when a reply starts and ends playing.
 import asyncio
 import contextlib
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 from uuid import uuid4
@@ -246,6 +246,7 @@ class VoiceMode:
         debug: bool = False,
         recognition: RelationAssessment | None = None,
         ready_when: Callable[[], Awaitable[None]] | None = None,
+        wake_refractory_s: float = 2.0,
     ) -> None:
         # One input per listening Client; `audio` is the Mac's.
         self._inputs: dict[str, AudioInput] = {TERMINAL: audio}
@@ -255,6 +256,9 @@ class VoiceMode:
         self._client = TERMINAL
         # The Client whose Wake word opened the exchange: its cues play there, and its turns reply there.
         self._exchange = TERMINAL
+        # That Wake word's Client and the span of its phrase, which another input may hear too.
+        self._wake: tuple[str, float, float] | None = None
+        self._wake_refractory_s = wake_refractory_s
         # Each listening phone's player for cues, and what it is told of the machine's state.
         self._cues: dict[str, Player] = {}
         self._watchers: dict[str, Callable[[str], None]] = {}
@@ -279,8 +283,12 @@ class VoiceMode:
         self._reply_finished: tuple[tuple[str, int], float] | None = None
         self._closed = False
         self._remote_active = False
+        # Live mode Clients whose own speech is the remote activity: their inputs still hear the Wake word.
+        self._hearing: frozenset[str] = frozenset()
         self._microphone_generation = 0
-        self._capture_setting: tuple[bool, int] | None = None
+        # What each input was last told to capture and from when to watch for Barge-ins.
+        self._capture_settings: dict[str, tuple[bool, int | None]] = {}
+        self._watching: dict[str, float | None] = {}
         self._origins: dict[int | None, tuple[str, bool | None]] = {}
         self._waiting: deque[_Fragment] = deque()
         self._retained: deque[_Fragment] = deque()
@@ -371,12 +379,10 @@ class VoiceMode:
         if on_state is not None:
             self._watchers[client] = on_state
             self._views[client] = self.voice_state(client)
-        if self._remote_active and (suppress := getattr(audio, "suppress", None)) is not None:
+        if self._muted(client) and (suppress := getattr(audio, "suppress", None)) is not None:
             suppress(True)
-        if self._capture_setting is not None:
-            audio.capture(self._capture_setting[0], owner=self._capture_setting[1])
-        if self._barge_in_from is not None:
-            audio.barge_in(self._barge_in_from)
+        self._sync_capture()
+        self._sync_barge_in()
         if self._running:
             self._listen_to(client, audio)
 
@@ -390,6 +396,8 @@ class VoiceMode:
             self._speech.drop_cues(cues)
         self._watchers.pop(client, None)
         self._views.pop(client, None)
+        self._capture_settings.pop(client, None)
+        self._watching.pop(client, None)
         if (task := self._listening.pop(client, None)) is not None:
             task.cancel()
         if client == self._exchange and client != TERMINAL:
@@ -400,6 +408,7 @@ class VoiceMode:
         """`client`'s exchange lost its input. Stops its reply there without a closing sound; the voice idles until a
         Wake word elsewhere."""
         self._exchange = TERMINAL
+        self._wake = None
         if self._voice.state == "idle":
             return
         self.speech.stop_on(client)
@@ -407,8 +416,7 @@ class VoiceMode:
         self._voice = Voice()
         self._retire()
         self._barge_in_from = None
-        for audio in self._inputs.values():
-            audio.barge_in(None)
+        self._sync_barge_in(forget=True)
         self._transition(before, "idle", EndConversation(self._clock.now()), client)
 
     def voice_state(self, client: str) -> str:
@@ -515,8 +523,19 @@ class VoiceMode:
             event = await self._next_event()
             client: str | None = None
             if isinstance(event, _MicrophoneEvent):
-                if (self._remote_active or event.generation != self._microphone_generation
-                        or self._inputs.get(event.client) is not event.source):
+                if event.generation != self._microphone_generation or self._inputs.get(event.client) is not event.source:
+                    continue
+                wake = isinstance(event.event, (WakeWord, SpokenWake))
+                if self._remote_active:
+                    if not wake or event.client not in self._hearing:
+                        continue
+                    # The Wake word stops the speech that holds the voice, which frees the floor for it.
+                    await self._act(Interrupt(), interrupt)
+                    if self._remote_active:
+                        continue
+                elif event.client != self._exchange and not wake:
+                    continue
+                if wake and self._same_phrase(event.client, event.event):
                     continue
                 client = event.client
                 event = event.event
@@ -627,28 +646,43 @@ class VoiceMode:
             self._transition(before, "idle", EndConversation(self._clock.now()))
         self._idle.set()
 
-    def remote_activity(self, active: bool) -> None:
-        if active == self._remote_active:
+    def remote_activity(self, active: bool, *, hearing: Collection[str] = ()) -> None:
+        """Another Client's Talk or speech holds the voice: the floor resets and every input is muted, except the
+        Live mode Clients in `hearing`, whose input listens for a Wake word that stops that speech."""
+        heard = frozenset(hearing) if active else frozenset()
+        if (active, heard) == (self._remote_active, self._hearing):
             return
-        self._remote_active = active
+        self._remote_active, self._hearing = active, heard
         self._microphone_generation += 1
-        for audio in self._inputs.values():
+        for client, audio in self._inputs.items():
             if (suppress := getattr(audio, "suppress", None)) is not None:
-                suppress(active)
+                suppress(self._muted(client))
         self._voice = Voice()
         self._retire()
         self._barge_in_from = None
-        for audio in self._inputs.values():
-            audio.barge_in(None)
+        self._sync_barge_in(forget=True)
         self._idle.set()
         self._publish_views()
 
+    def _muted(self, client: str) -> bool:
+        return self._remote_active and client not in self._hearing
+
     def _sync_capture(self) -> None:
-        setting = (not self._closed and not self._remote_active and (self._voice.state in CAPTURING or self._voice.state == "thinking"), self._epoch)
-        if setting != self._capture_setting:
-            self._capture_setting = setting
-            for audio in self._inputs.values():
+        on = not self._closed and not self._remote_active and (self._voice.state in CAPTURING or self._voice.state == "thinking")
+        for client, audio in self._inputs.items():
+            # Only the exchange's input makes turns; every other input listens for the Wake word alone.
+            setting = (on, self._epoch) if client == self._exchange else (False, None)
+            if self._capture_settings.get(client) != setting:
+                self._capture_settings[client] = setting
                 audio.capture(setting[0], owner=setting[1])
+
+    def _sync_barge_in(self, *, forget: bool = False) -> None:
+        """Watches the exchange's input alone for Barge-ins; `forget` drops any under way on every input."""
+        for client, audio in self._inputs.items():
+            since = self._barge_in_from if client == self._exchange else None
+            if forget or self._watching.get(client) != since:
+                self._watching[client] = since
+                audio.barge_in(since)
 
     def _applied(self, task: asyncio.Task[None]) -> None:
         self._applying.discard(task)
@@ -749,8 +783,12 @@ class VoiceMode:
         if isinstance(event, (ReplyAudio, ReplyDone)) and event.owner is not None and not self.owns(event.owner):
             return []
         self._voice, actions = step(before_voice, event, self._timing)
-        if client is not None and self._voice.woke_at != woke_at:
+        if client is not None and self._voice.woke_at != woke_at and isinstance(event, (WakeWord, SpokenWake)):
+            if client != self._exchange and not any(isinstance(action, Chime) for action in actions):
+                # Listening moves to the input that heard this Wake word, so the chime says so there.
+                actions = [*actions, Chime()]
             self._exchange = client
+            self._wake = (client, *_phrase(event))
         if isinstance(event, (WakeWord, SpokenWake)) and not before_voice.in_turn and event.at >= before_voice.chime_until:
             self._retire()
         if any(isinstance(action, SendTurn) for action in actions):
@@ -782,10 +820,8 @@ class VoiceMode:
             # A Wake word from another input moves the exchange there with no change of state.
             self._publish_views()
         # After capture: a turn that starts now keeps the speech of the Barge-in that stopped Jarvis.
-        if (since := barge_in_from(self._voice, self._timing)) != self._barge_in_from:
-            self._barge_in_from = since
-            for audio in self._inputs.values():
-                audio.barge_in(since)
+        self._barge_in_from = barge_in_from(self._voice, self._timing)
+        self._sync_barge_in()
         if self._voice.woke_at != woke_at:
             self._woke()
         return actions
@@ -855,11 +891,25 @@ class VoiceMode:
                     self._notice(f"Could not interrupt the reply: {type(e).__name__}: {e}")
 
 
+    def _same_phrase(self, client: str, event: WakeWord | SpokenWake) -> bool:
+        """Whether a Wake word on `client` is the one that opened the exchange, heard by another input as well."""
+        if self._wake is None or client == self._wake[0]:
+            return False
+        opened, (start, end) = self._wake, _phrase(event)
+        return start - opened[2] < self._wake_refractory_s and opened[1] - end < self._wake_refractory_s
+
     def _cue(self, name: ClipName) -> None:
         if self._exchange == TERMINAL:
             self._speech.say(name, "en")
         elif (player := self._cues.get(self._exchange)) is not None:
             self._speech.say(name, "en", destination=player)
+
+
+def _phrase(event: WakeWord | SpokenWake) -> tuple[float, float]:
+    """When the phrase that woke Jarvis began and ended, as far as the input knows."""
+    if isinstance(event, SpokenWake) and event.started_at is not None:
+        return event.started_at, event.at
+    return event.at, event.at
 
 
 async def merge(typed: AsyncIterator[Line], spoken: AsyncIterator[Line]) -> AsyncIterator[Line]:

@@ -833,7 +833,7 @@ class Hub:
 
     def _clients_changed(self) -> None:
         if self._floor is not None and (activity := getattr(self._floor, "remote_activity", None)) is not None:
-            activity(self.clients.remote_activity)
+            activity(self.clients.remote_activity, hearing=self.clients.hearing)
         self.publish_client_snapshots()
         # Adapters may attach before start restores the saved news.
         if not self._loops:
@@ -2201,8 +2201,9 @@ class Hub:
         if audible:
             self._speech_client_id = destination_id
             if destination_id != TERMINAL:
-                self.clients.begin_stream(destination_id, floor=owner is not None and self._floor is not None
-                                          and self._floor.owns(owner))
+                floor = owner is not None and self._floor is not None and self._floor.owns(owner)
+                # A phone's spoken line that is not the floor's is a Talk.
+                self.clients.begin_stream(destination_id, floor=floor, talk_reply=kind == "user" and not floor)
         player = self._client_players.get(destination_id)
         receipt = speech.begin(self._lang, reply_id=self._output.reply_id, turn=turn, heard_at=arrived if kind == "user" else None, owner=owner,
                      destination=player, client=destination_id,

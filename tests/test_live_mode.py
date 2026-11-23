@@ -21,8 +21,10 @@ from jarvis_hub.clients import TERMINAL
 from jarvis_hub.door import Door
 from jarvis_hub.hub import Hub, Line
 from jarvis_hub.pairing import PairingResult, PairingStore
+from jarvis_hub.uploads import BufferTranscriber
 from jarvis_hub.voice.engines import NoEchoCancellation
 from jarvis_hub.voice.input import Engines, Listening
+from jarvis_hub.voice.player import Samples
 from jarvis_hub.voice.live import LiveInputs
 from jarvis_hub.voice.state import Timing
 from jarvis_hub.voice.voice_mode import VoiceMode
@@ -69,7 +71,8 @@ class Rig:
 
 @asynccontextmanager
 async def live_rig(tmp_path: Path, replies: list[list[Step]] | None = None,
-                   orchestrator: list[list[Step]] | None = None, words: dict[int, str] | None = None) -> AsyncGenerator[Rig]:
+                   orchestrator: list[list[Step]] | None = None, words: dict[int, str] | None = None,
+                   transcription: BufferTranscriber | None = None) -> AsyncGenerator[Rig]:
     """`words` has the phone's STT say each word whose marker samples the audio holds, in place of "Open a PR"."""
     clock, metrics, notices = FakeClock(), RecordingMetrics(), list[str]()
     mac, speaker = ScriptedAudio(clock), RecordingPlayer()
@@ -86,7 +89,7 @@ async def live_rig(tmp_path: Path, replies: list[list[Step]] | None = None,
         return LiveInputs(floor, load, Listening(), metrics.record, notices.append, clock=clock.now)
 
     backend = FakeBackend(clock, replies or [[Text("Opened.")], [Text("Second.")]], orchestrator=orchestrator or [])
-    async with remote_rig(tmp_path, backend=backend, voice=voice, live=live) as (session, door, hub, _log, _backend, phones, pairing):
+    async with remote_rig(tmp_path, backend=backend, voice=voice, live=live, transcription=transcription) as (session, door, hub, _log, _backend, phones, pairing):
         running = asyncio.create_task(hub.run(voice.lines(hub.interrupt, hub.woke, hub.admit_spoken_revision)))
         try:
             await until(lambda: speaker.voices == ["ready"])
@@ -329,8 +332,9 @@ class Phone:
 @asynccontextmanager
 async def live_phone(tmp_path: Path, replies: list[list[Step]] | None = None,
                      orchestrator: list[list[Step]] | None = None,
-                     words: dict[int, str] | None = None) -> AsyncGenerator[tuple[Rig, Phone]]:
-    async with live_rig(tmp_path, replies, orchestrator, words) as rig, connect(rig.session, rig.door, rig.phones[0].token) as socket:
+                     words: dict[int, str] | None = None,
+                     transcription: BufferTranscriber | None = None) -> AsyncGenerator[tuple[Rig, Phone]]:
+    async with live_rig(tmp_path, replies, orchestrator, words, transcription) as rig, connect(rig.session, rig.door, rig.phones[0].token) as socket:
         await foreground(socket)
         phone = Phone(rig, socket, rig.phones[0].client.id)
         try:
@@ -552,14 +556,15 @@ async def test_a_wake_word_on_the_mac_while_the_phone_listens_moves_the_exchange
     async with live_phone(tmp_path) as (rig, phone):
         await phone.wake()
         await until(lambda: phone.states()[-1] == "listening")
-        # Past the chime, when a Wake word is no longer its echo.
-        rig.clock.advance(1)
+        # Past the Wake word's refractory time, when it is no longer the same phrase.
+        rig.clock.advance(3)
 
         rig.mac.wake()
 
         await until(lambda: phone.states()[-1] == "idle")
         assert rig.voice.state == "listening"
         assert rig.voice.voice_state(TERMINAL) == "listening"
+        assert rig.speaker.voices == ["ready", "chime"]
 
 
 async def test_a_second_exchange_on_the_phone_stops_no_stream_but_the_one_playing(tmp_path: Path) -> None:
@@ -775,3 +780,194 @@ async def test_a_cue_takes_playback_reports_of_a_known_state_only(tmp_path: Path
 
         assert finished["ok"]
         assert not bogus["ok"] and bogus["error"]["code"] == "invalid_payload"
+
+
+@pytest.mark.parametrize("first", ["mac", "phone"])
+async def test_the_wake_word_heard_on_the_mac_and_the_phone_opens_one_exchange_and_one_request(
+    tmp_path: Path, first: str,
+) -> None:
+    async with live_phone(tmp_path) as (rig, phone):
+        if first == "mac":
+            rig.mac.wake()
+            await until(lambda: rig.voice.state == "listening")
+        else:
+            await phone.wake()
+        # Past the chime's own guard, still within the Wake word's refractory time.
+        rig.clock.advance(1)
+
+        if first == "mac":
+            await phone.socket.send_bytes(pcm(8, WAKE))
+            await phone.stream(100)
+            await until(lambda: sum(r["frames"] for r in rig.rows("capture")) >= 100)
+            await asyncio.sleep(0.05)
+            rig.mac.say("Status of the Mac")
+        else:
+            rig.mac.wake()
+            await asyncio.sleep(0.05)
+            await phone.ask()
+
+        await until(lambda: len(rig.requests()) == 1)
+        await asyncio.sleep(0.05)
+        assert len(rig.requests()) == 1
+        chimes = [s for s in phone.streams() if s[0] == "chime"]
+        if first == "mac":
+            assert "Status of the Mac" in rig.requests()[0]
+            await until(lambda: "Opened." in rig.speaker.texts)
+            assert (rig.speaker.voices.count("chime"), chimes, phone.states()) == (1, [], ["idle"])
+        else:
+            assert "Open a PR" in rig.requests()[0]
+            await until(lambda: phone.ended() == 1)
+            assert (rig.speaker.voices, len(chimes)) == (["ready"], 1)
+            assert phone.states()[:3] == ["idle", "listening", "thinking"]
+
+
+async def test_speech_on_the_mac_is_not_captured_while_the_phone_holds_the_exchange(tmp_path: Path) -> None:
+    async with live_phone(tmp_path) as (rig, phone):
+        await phone.wake()
+
+        rig.mac.say("Status of the Mac")
+        await phone.ask()
+
+        await until(lambda: len(rig.requests()) == 1)
+        await asyncio.sleep(0.05)
+        assert len(rig.requests()) == 1 and "Open a PR" in rig.requests()[0]
+        assert rig.mac.capturing[-1] is False
+
+
+async def test_speech_on_the_phone_is_not_captured_while_the_mac_holds_the_exchange(tmp_path: Path) -> None:
+    async with live_phone(tmp_path) as (rig, phone):
+        rig.mac.wake()
+        await until(lambda: rig.voice.state == "listening")
+
+        await phone.ask()
+        rig.mac.say("Status of the Mac")
+
+        await until(lambda: len(rig.requests()) == 1)
+        await asyncio.sleep(0.05)
+        assert len(rig.requests()) == 1 and "Status of the Mac" in rig.requests()[0]
+        assert rig.rows("turn") == []
+        assert phone.states() == ["idle"]
+
+
+async def test_a_later_wake_word_on_the_mac_stops_the_reply_on_the_phone_and_takes_the_exchange(tmp_path: Path) -> None:
+    async with live_phone(tmp_path, [[Text("Opened.")], [Text("On the Mac.")]]) as (rig, phone):
+        await phone.wake()
+        await phone.ask()
+        await until(lambda: phone.ended() == 1 and phone.states()[-1] == "speaking")
+        # Past the Wake word's refractory time.
+        await phone.stream(250)
+
+        rig.mac.wake()
+
+        await until(lambda: any(frame["type"] == "speech_stop" for frame in phone.frames))
+        await until(lambda: rig.speaker.voices == ["ready", "chime"])
+        assert phone.states()[-1] == "idle"
+        rig.mac.say("Status of the Mac")
+        await until(lambda: "On the Mac." in rig.speaker.texts)
+        assert [stream[0] for stream in phone.streams()] == ["chime", "reply"]
+
+
+async def test_a_later_wake_word_on_the_phone_stops_the_reply_on_the_mac_and_chimes_there(tmp_path: Path) -> None:
+    async with live_phone(tmp_path, [[Text("On the Mac.")], [Text("Opened.")]]) as (rig, phone):
+        rig.speaker.hold = True
+        rig.mac.wake()
+        # Past the Wake word's refractory time, before the Mac's reply would be taken to have stalled.
+        await phone.stream(250)
+        rig.mac.say("Status of the Mac")
+        await until(lambda: rig.voice.state == "speaking")
+
+        await phone.wake()
+
+        await until(lambda: rig.speaker.events[-1:] == ["stop"])
+        await until(lambda: phone.streams() == [("chime", [""])])
+        assert rig.voice.voice_state(TERMINAL) == "idle"
+        await phone.ask()
+        await until(lambda: phone.ended() == 1)
+        assert phone.streams() == [("chime", [""]), ("reply", ["Opened."])]
+        assert "Opened." not in rig.speaker.texts
+
+
+async def test_a_later_wake_word_on_the_phone_while_the_mac_listens_chimes_on_the_phone(tmp_path: Path) -> None:
+    async with live_phone(tmp_path) as (rig, phone):
+        rig.mac.wake()
+        await until(lambda: rig.voice.state == "listening")
+        await phone.stream(250)
+
+        await phone.wake()
+
+        await until(lambda: phone.streams() == [("chime", [""])])
+        assert phone.states() == ["idle", "listening"]
+        assert rig.speaker.voices == ["ready", "chime"]
+
+
+class TalkTranscriber:
+    """Hears every Talk as the same request."""
+
+    async def transcribe_buffer(self, audio: Samples) -> str:
+        return "Status by Talk"
+
+
+async def talk(phone: Phone, rig: Rig) -> None:
+    """Holds the Talk key on the phone, then sends what it recorded."""
+    talk_id = uuid.uuid4().hex
+    assert (await phone.command("talk_begin", talk_id=talk_id))["ok"]
+    url = f"http://127.0.0.1:{rig.door.port}/v1/utterances/{talk_id}"
+    headers = {"Authorization": f"Bearer {rig.phones[0].token}", "Idempotency-Key": uuid.uuid4().hex,
+               "Content-Type": "application/octet-stream", "X-Jarvis-Audio-Format": "pcm_s16le_16000_mono"}
+    async with rig.session.post(url, headers=headers, data=pcm(10, 1000)) as response:
+        assert response.status == 200
+
+
+async def test_a_held_talk_mutes_every_live_input_and_resets_the_floor(tmp_path: Path) -> None:
+    async with live_phone(tmp_path) as (rig, phone):
+        await phone.wake()
+        talk_id = uuid.uuid4().hex
+
+        assert (await phone.command("talk_begin", talk_id=talk_id))["ok"]
+
+        await until(lambda: phone.states()[-1] == "idle")
+        await phone.stream(250)
+        rig.mac.wake()
+        await phone.socket.send_bytes(pcm(8, WAKE))
+        await phone.stream(100)
+        await asyncio.sleep(0.1)
+        assert rig.voice.state == "idle"
+        assert phone.states() == ["idle", "listening", "idle"]
+        assert rig.speaker.voices == ["ready"]
+
+        assert (await phone.command("talk_cancel", talk_id=talk_id))["ok"]
+        await mac_still_listens(rig, "Status of the Mac")
+
+
+async def test_a_talks_reply_on_a_live_phone_gets_no_follow_up_window(tmp_path: Path) -> None:
+    async with live_phone(tmp_path, transcription=TalkTranscriber()) as (rig, phone):
+        await talk(phone, rig)
+        await until(lambda: phone.ended() == 1)
+        await phone.played()
+        await until(lambda: not rig.hub.clients.remote_activity)
+
+        await phone.ask()
+
+        await asyncio.sleep(0.05)
+        assert len(rig.requests()) == 1 and "Status by Talk" in rig.requests()[0]
+        assert phone.states() == ["idle"]
+
+
+async def test_a_wake_word_on_the_phone_stops_its_talks_reply_and_listens_there(tmp_path: Path) -> None:
+    replies: list[list[Step]] = [[Text("First sentence. Second sentence.")], [Text("Opened.")]]
+    async with live_phone(tmp_path, replies, transcription=TalkTranscriber()) as (rig, phone):
+        await talk(phone, rig)
+        await until(lambda: phone.ended() == 1 and rig.hub.clients.remote_activity)
+        rig.mac.wake()
+
+        await phone.wake()
+
+        await until(lambda: any(frame["type"] == "speech_stop" for frame in phone.frames))
+        await until(lambda: phone.streams()[-1:] == [("chime", [""])])
+        assert phone.states() == ["idle", "listening"]
+        assert rig.speaker.voices == ["ready"]
+        await phone.ask()
+        print("DBG", rig.requests(), phone.states(), phone.streams())
+        await until(lambda: len(rig.requests()) == 2 and "Open a PR" in rig.requests()[-1])
+        await until(lambda: phone.ended() == 2)
+        assert [stream[0] for stream in phone.streams()] == ["reply", "chime", "reply"]
