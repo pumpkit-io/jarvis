@@ -157,7 +157,7 @@ The one Client that speaks Announcements: the Client the User last gave input to
 _Avoid_: active device, primary client
 
 **Silence**:
-A setting of one iPhone Client under which Jarvis speaks nothing on it, replies included, while text and work carry on. News shown on its open screen counts as told. It is neither Quiet mode, which holds Announcements on every Client, nor Stand by.
+A setting of one iPhone Client under which Jarvis speaks nothing on it, replies included, while text and work carry on. News shown on its open screen counts as told. In Live mode the chime and the closing sound still play on it, since they are cues rather than speech. It is neither Quiet mode, which holds Announcements on every Client, nor Stand by.
 _Avoid_: mute, do not disturb
 
 **Backlog**:
