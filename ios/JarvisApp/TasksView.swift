@@ -184,28 +184,23 @@ struct WorkspaceTopBar: View {
 
     var body: some View {
         ViewThatFits(in: .horizontal) {
-            HStack(spacing: 12) {
+            CenteredStatusLayout {
                 settingsLink
-                Spacer(minLength: 0)
-                connectionButton(showsLabel: true)
-                Spacer(minLength: 0)
-                tasksLink
-                liveModeButton
+                connectionButton
+                HStack(spacing: 12) {
+                    tasksLink
+                    liveModeButton
+                }
             }
             VStack(spacing: 0) {
                 HStack(spacing: 12) {
                     settingsLink
                     Spacer(minLength: 0)
-                    connectionButton(showsLabel: false)
-                    Spacer(minLength: 0)
                     tasksLink
                     liveModeButton
                 }
-                if let label = session.shownConnection.indicator.label {
-                    Text(label).multilineTextAlignment(.center)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityHidden(true)
-                }
+                connectionButton
+                    .frame(maxWidth: .infinity)
             }
         }
         .buttonStyle(.plain)
@@ -234,11 +229,14 @@ struct WorkspaceTopBar: View {
         .fixedSize()
     }
 
-    private func connectionButton(showsLabel: Bool) -> some View {
+    private var connectionButton: some View {
         Button { showingConnection = true } label: {
             HStack(spacing: 8) {
                 Circle().fill(connectionColor).frame(width: 8, height: 8)
-                if showsLabel, let label = session.shownConnection.indicator.label { Text(label) }
+                if let label = session.shownConnection.indicator.label {
+                    Text(label).multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .frame(minWidth: 44, minHeight: 44)
             .contentShape(Rectangle())
@@ -246,7 +244,6 @@ struct WorkspaceTopBar: View {
         .accessibilityLabel("Connection status")
         .accessibilityValue(session.shownConnection.message)
         .accessibilityHint("Show connection details")
-        .fixedSize()
     }
 
     private var tasksLink: some View {
@@ -276,7 +273,7 @@ struct WorkspaceTopBar: View {
     private var liveModeButton: some View {
         let on = session.liveMode.isOn
         return Button { Task { await session.liveMode.toggle() } } label: {
-            Image(systemName: "ear")
+            Image(systemName: "dot.radiowaves.left.and.right")
                 .foregroundStyle(on ? theme.void : theme.haze)
                 .frame(width: controlSize * 2.2, height: controlSize * 2.2)
                 .background(on ? theme.cyan : .clear, in: Circle())
@@ -295,5 +292,23 @@ struct WorkspaceTopBar: View {
         case .amber: theme.amber
         case .red: theme.signal
         }
+    }
+}
+
+private struct CenteredStatusLayout: Layout {
+    private let spacing: CGFloat = 12
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        let sideWidth = max(sizes[0].width, sizes[2].width)
+        let minimumWidth = sideWidth * 2 + sizes[1].width + spacing * 2
+        return CGSize(width: max(proposal.width ?? minimumWidth, minimumWidth),
+                      height: sizes.map(\.height).max() ?? 0)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews[0].place(at: CGPoint(x: bounds.minX, y: bounds.midY), anchor: .leading, proposal: .unspecified)
+        subviews[1].place(at: CGPoint(x: bounds.midX, y: bounds.midY), anchor: .center, proposal: .unspecified)
+        subviews[2].place(at: CGPoint(x: bounds.maxX, y: bounds.midY), anchor: .trailing, proposal: .unspecified)
     }
 }

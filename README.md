@@ -45,7 +45,7 @@ The launcher follows symlinks before entering its checkout. In a git worktree, c
 
 ```bash
 ./jarvis                         # voice mode, idle until the Wake word
-./jarvis --text                  # terminal conversation with no audio
+./jarvis --text                  # Mac microphone off; iPhone Live mode still works
 ./jarvis --headphones            # voice mode with echo cancellation off
 ./jarvis --debug                 # voice state transitions on screen
 ./jarvis --text --speak          # typed input with spoken replies
@@ -76,7 +76,7 @@ Ask for status or to cancel a Task by name. Quiet mode holds routine Announcemen
 
 The optional door stays off with `JARVIS_REMOTE=off` (the default). Set `JARVIS_REMOTE=on` and `JARVIS_REMOTE_PORT=8765` in `.env` to listen on `127.0.0.1`. Only that loopback address is accepted. Both text and voice mode own the listener; ending terminal input stops it and the Hub.
 
-With the door enabled, ordinary `./jarvis --text` accepts spoken phone requests and returns sentence audio to that phone. It lazily loads the configured speech engine and one Parakeet service without opening a Mac microphone or speaker. Terminal typing stays text-only unless `--speak` is selected. Phone playback reports determine what was heard; reconnecting restores text history without replaying audio.
+With the door enabled, ordinary `./jarvis --text` accepts both Talks and Live mode exchanges from the phone, and returns speech and cues to that phone. The Mac microphone stays off, so it cannot hear the same Wake word or take the exchange over. It loads the configured speech and listening engines when the phone enables Live mode, sharing one Parakeet service without opening a Mac microphone or speaker. Before Live mode is enabled, a Talk loads only the speech and transcription it needs. Terminal typing stays text-only unless `--speak` is selected. Phone playback reports determine what was heard; reconnecting restores text history without replaying audio.
 
 `GET /v1/health` returns protocol `version: 1`, model readiness, the Mac name and the Usage limit. It requires a device token under [protocol v1](docs/protocol/client-v1.md), following Spec #91's every-request authentication rule over #101's health exception. Unpaired and revoked tokens receive HTTP 401. The running Hub looks up each token in the durable device store on every request; CLI revocation takes effect on the next HTTP call. The health response exposes no paths, configuration or credentials.
 
@@ -132,7 +132,7 @@ This slice requires a terminal running `./jarvis` on a Mac that stays awake and 
 
 - `claude` missing or authentication fails: put the installed CLI on `PATH`, run `claude` to sign in with Max, then retry `./jarvis --text`. A billing warning means the Hub removed an inherited billing switch; remove it from your shell profile too.
 - Configuration error: check the named key against `.env.example`, including units and supported choices. Text mode ignores voice settings with a warning. Stats also runs without loading voice models.
-- No microphone or audio: check macOS permission for the terminal, the devices in the `Audio:` notice and the Hub's listening notice. Voice mode follows the macOS default input and output, so connecting headphones moves Jarvis onto them within a second and shows `Audio moved: …`. Use `--text` to continue without audio. With headphones, use `--headphones`.
+- No microphone or audio: check macOS permission for the terminal, the devices in the `Audio:` notice and the Hub's listening notice. Voice mode follows the macOS default input and output, so connecting headphones moves Jarvis onto them within a second and shows `Audio moved: …`. Use `--text` to continue without Mac audio. With headphones, use `--headphones`.
 - eSpeak reports missing `phontab` or a `/Users/runner/...` path: run `uv sync --locked --reinstall-package espeakng-loader` in this checkout. Jarvis uses the installed wheel's data and automatically copies it into a private short `/tmp/jarvis-espeak-*` directory when the checkout path exceeds the native limit. No Homebrew eSpeak, environment override or worktree symlink is required; the private copy lasts for the process. Check `/tmp` permissions/free space if preparation fails. Test both engines and both voices without playing audio or making conversational model calls with `uv run python spikes/audio/check_tts_setup.py [qwen3|kokoro]` (first use may download the models). It also reports how soon the first streamed piece is ready and whether any piece was late for playback. The standalone audio benchmarks use the same setup in their own environment, for example `uv run --project spikes/audio python spikes/audio/bench_qwen_tts.py`.
 - Voice loading takes too long: first downloads need network access. Check the model-loading error shown in the terminal. For a measured run, finish downloads first and stop other GPU-heavy processes; see the recording instructions in the spike notes.
 - Requests split at a thinking pause: the [endpoint evidence](docs/notes/endpoint-policy-evaluation.md) separates historical replay, the merged capture-queue fix and failed acoustic/text candidates. No replacement endpoint policy has passed the complete-thought gate; keep active defaults until independent runtime validation passes.

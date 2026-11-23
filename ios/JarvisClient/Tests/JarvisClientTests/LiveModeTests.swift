@@ -7,6 +7,7 @@ import Testing
     var starts = 0
     var active = false
     var fails = false
+    var onFailure: (@MainActor () -> Void)?
     let speech = FakeSpeechOutput()
     var speechOutput: (any SpeechOutput)? { active ? speech : nil }
     private var sink: (@Sendable (Data) -> Void)?
@@ -21,6 +22,8 @@ import Testing
 
 @MainActor private final class LiveRig {
     let socket = FakeSocket(), capture = FakeLiveCapture(), sleeper = FakeSleeper(), orbFrames = FakeSleeper()
+    let inactivity = FakeSleeper()
+    let clock = LiveInactivityClock()
     /// Plays whatever the Live mode capture doesn't, as `NativeSpeechOutput` does in the app.
     let standard = FakeSpeechOutput()
     var permissionRequests = 0
@@ -33,12 +36,15 @@ import Testing
     init() throws {
         let store = MemoryPairingStore(); store.record = try testPairingCredentials()
         let socket = socket, capture = capture, sleeper = sleeper, orbFrames = orbFrames
-        let transport = FakeTransport(first: socket), retry = retry
+        let transport = FakeTransport(first: socket), retry = retry, inactivity = inactivity, clock = clock
         self.transport = transport
         var rig: LiveRig?
         let live = LiveModeController(capture: capture, permission: {
             rig?.permissionRequests += 1; return rig?.allowed ?? false
-        }, sleep: { try await sleeper.sleep($0) })
+        }, sleep: { try await sleeper.sleep($0) }, now: { clock.now }, inactivitySleep: { duration in
+            let parts = duration.components
+            try await inactivity.sleep(Double(parts.seconds) + Double(parts.attoseconds) / 1e18)
+        })
         let player = SpeechPlayer(session: SpeechSession(), output: LiveSpeechRoute(standard: standard, capture: capture))
         session = AppSession(store: store, makeClient: { _ in
             HubClient(transport: HubTransport(connect: { await transport.connect($0) }), sleep: { try await retry.sleep($0) })
@@ -72,9 +78,10 @@ import Testing
     }
 
     func turnOn() async throws {
+        let count = await setLiveCommands().count
         let toggle = Task { await session.liveMode.toggle() }
-        try await eventuallySession { await setLiveCommands().count == 1 }
-        await answer(await setLiveCommands()[0], #""ok":true,"result":{"on":true}"#)
+        try await eventuallySession { await setLiveCommands().count == count + 1 }
+        await answer(await setLiveCommands()[count], #""ok":true,"result":{"on":true}"#)
         await toggle.value
         try await eventuallySession { session.liveMode.isOn }
     }
@@ -96,6 +103,209 @@ import Testing
 }
 
 private let tenMilliseconds = Data(repeating: 7, count: 320)
+
+@MainActor private final class LiveInactivityClock {
+    var now = ContinuousClock.now
+    func advance(_ seconds: Int) { now = now.advanced(by: .seconds(seconds)) }
+}
+
+@MainActor @Test func liveModeExpiresAtThirtyMinutesEvenBeforeASuspendedTimerResumes() async throws {
+    let rig = try LiveRig()
+    try await rig.connect()
+    try await rig.turnOn()
+    rig.clock.advance(1799)
+    await rig.session.setForeground(true)
+    #expect(rig.session.liveMode.isOn && rig.capture.active)
+    rig.clock.advance(1)
+    await rig.session.setForeground(true)
+    #expect(!rig.session.liveMode.isOn && !rig.capture.active)
+    await rig.session.unpair()
+}
+
+@MainActor @Test(arguments: [false, true])
+func liveInactivityTimerStopsLockedCaptureAndRetiresEvenAStalledSocket(stalled: Bool) async throws {
+    let rig = try LiveRig()
+    try await rig.connect()
+    try await rig.turnOn()
+    try await eventuallySession { await rig.inactivity.pending == 1 }
+    #expect(await rig.inactivity.waits == [1800])
+    if stalled {
+        await rig.socket.blockSend("binary")
+        rig.capture.emit(tenMilliseconds)
+        try await eventuallySession { await rig.socket.binarySent.count == 1 }
+    }
+    let departure = Task { await rig.session.setForeground(false) }
+    try await eventuallySession { await rig.socket.sent.contains { $0.payload["can_show_text"] == .bool(false) } }
+    let presence = try #require(await rig.socket.sent.last { $0.type == "set_presence" })
+    await rig.answer(presence, #""ok":true,"result":{"can_show_text":false}"#)
+    await departure.value
+    rig.clock.advance(1800)
+    await rig.inactivity.advance()
+    try await eventuallySession { !rig.session.liveMode.isOn && !rig.capture.active }
+    #expect(rig.session.liveMode.message == "Live mode turned off after 30 minutes of inactivity.")
+    do { try await eventuallySession { await rig.socket.closed } }
+    catch { await rig.socket.releaseSend(); await rig.session.unpair(); throw error }
+    await rig.socket.releaseSend()
+    await rig.session.unpair()
+}
+
+@MainActor @Test(arguments: ["wake", "request", "typed", "talk"])
+func phoneUserActivityStartsANewThirtyMinuteInterval(activity: String) async throws {
+    let rig = try LiveRig()
+    try await rig.connect()
+    try await rig.turnOn()
+    try await eventuallySession { await rig.inactivity.pending == 1 }
+    rig.clock.advance(1790)
+    switch activity {
+    case "wake": try await rig.voiceState(2, "listening")
+    case "request": try await rig.voiceState(2, "thinking")
+    case "typed":
+        rig.session.draft = "How is the task going?"
+        await rig.session.sendTypedLine()
+    default:
+        await rig.session.talk.press()
+        await rig.session.talk.discard()
+    }
+    try await eventuallySession {
+        let pending = await rig.inactivity.pending
+        return await rig.inactivity.waits.count >= 2 && pending == 1
+    }
+    rig.clock.advance(10)
+    await rig.inactivity.advance()
+    try await eventuallySession { await rig.inactivity.waits.last == 1790 }
+    #expect(rig.session.liveMode.isOn && rig.capture.active)
+    rig.clock.advance(1790)
+    await rig.inactivity.advance()
+    try await eventuallySession { !rig.session.liveMode.isOn && !rig.capture.active }
+    await rig.session.unpair()
+}
+
+@MainActor @Test(arguments: ["pcm", "idle", "announcement", "reconnect"])
+func backgroundAudioAndConnectionTrafficDoNotExtendLiveListening(traffic: String) async throws {
+    let rig = try LiveRig()
+    try await rig.connect()
+    try await rig.turnOn()
+    try await eventuallySession { await rig.inactivity.pending == 1 }
+    rig.clock.advance(1790)
+    switch traffic {
+    case "pcm":
+        rig.capture.emit(speech)
+        try await eventuallySession { await rig.socket.binarySent.count == 1 }
+    case "idle": try await rig.voiceState(2, "idle")
+    case "announcement": try await rig.voiceState(2, "speaking")
+    default:
+        await rig.socket.close()
+        try await eventuallySession { await rig.retry.pending == 1 }
+        await rig.retry.advance()
+        try await eventuallySession { await rig.transport.socket(1) != nil }
+        let next = try #require(await rig.transport.socket(1))
+        await next.ready(through: 1)
+        try await eventuallySession { await next.sent.contains { $0.type == "set_live" } }
+        let command = try #require(await next.sent.first { $0.type == "set_live" })
+        await next.text(#"{"version":1,"type":"command_result","id":"\#(command.id)","ok":true,"result":{"on":true}}"#)
+        try await eventuallySession { rig.session.connection.canSend }
+    }
+    rig.clock.advance(10)
+    await rig.inactivity.advance()
+    try await eventuallySession { !rig.session.liveMode.isOn && !rig.capture.active }
+    await rig.session.unpair()
+}
+
+@MainActor @Test(arguments: [false, true])
+func offlineLiveListeningStillExpires(background: Bool) async throws {
+    let rig = try LiveRig()
+    await rig.session.launch()
+    await rig.session.liveMode.toggle()
+    #expect(rig.session.liveMode.isOn && rig.capture.active)
+    try await eventuallySession { await rig.inactivity.pending == 1 }
+    if background { await rig.session.setForeground(false) }
+    rig.clock.advance(1800)
+    await rig.inactivity.advance()
+    try await eventuallySession { !rig.session.liveMode.isOn && !rig.capture.active }
+    if background { try await eventuallySession { await rig.session.client?.state == .suspended } }
+    await rig.session.unpair()
+}
+
+@MainActor @Test func anExpiredInterruptionCannotRestartTheMicrophone() async throws {
+    let rig = try LiveRig()
+    try await rig.connect()
+    try await rig.turnOn()
+    rig.session.audioInterrupted(true)
+    #expect(!rig.capture.active && rig.session.liveMode.isOn)
+    rig.clock.advance(1800)
+    rig.session.audioInterrupted(false)
+    #expect(!rig.session.liveMode.isOn && !rig.capture.active && rig.capture.starts == 1)
+    await rig.session.unpair()
+}
+
+@MainActor @Test(arguments: ["off", "unpair"])
+func endingLiveModeCancelsItsInactivityTimer(ending: String) async throws {
+    let rig = try LiveRig()
+    try await rig.connect()
+    try await rig.turnOn()
+    try await eventuallySession { await rig.inactivity.pending == 1 }
+    if ending == "off" { await rig.session.liveMode.toggle() } else { await rig.session.unpair() }
+    try await eventuallySession { await rig.inactivity.pending == 0 }
+    rig.clock.advance(1800)
+    await rig.inactivity.advance()
+    #expect(!rig.session.liveMode.isOn && rig.session.liveMode.message == nil)
+    await rig.session.unpair()
+}
+
+@MainActor @Test func expiryCleanupCannotTurnOffAFreshlyEnabledLiveSession() async throws {
+    let rig = try LiveRig()
+    try await rig.connect()
+    try await rig.turnOn()
+    try await eventuallySession { await rig.inactivity.pending == 1 }
+    await rig.socket.blockSend("binary")
+    rig.capture.emit(tenMilliseconds)
+    try await eventuallySession { await rig.socket.binarySent.count == 1 }
+    rig.clock.advance(1800)
+    await rig.inactivity.advance()
+    try await eventuallySession { !rig.session.liveMode.isOn }
+    try await rig.turnOn()
+    await rig.socket.releaseSend()
+    rig.capture.emit(tenMilliseconds)
+    try await eventuallySession { await rig.socket.binarySent.count == 2 }
+    #expect(rig.session.liveMode.isOn && rig.capture.active)
+    #expect(await rig.setLiveCommands().map(\.payload) == [["on": .bool(true)], ["on": .bool(true)]])
+    rig.clock.advance(1799)
+    rig.session.liveMode.setForeground(true)
+    #expect(rig.session.liveMode.isOn)
+    rig.clock.advance(1)
+    rig.session.liveMode.setForeground(true)
+    #expect(!rig.session.liveMode.isOn && !rig.capture.active)
+    await rig.session.unpair()
+}
+
+@MainActor @Test func aRefusedBackgroundReenableReleasesItsListeningConnection() async throws {
+    let rig = try LiveRig()
+    try await rig.connect()
+    try await rig.turnOn()
+    let departure = Task { await rig.session.setForeground(false) }
+    try await eventuallySession { await rig.socket.sent.contains { $0.payload["can_show_text"] == .bool(false) } }
+    let presence = try #require(await rig.socket.sent.last { $0.type == "set_presence" })
+    await rig.answer(presence, #""ok":true,"result":{"can_show_text":false}"#)
+    await departure.value
+    await rig.socket.close()
+    try await eventuallySession { await rig.retry.pending == 1 }
+    await rig.retry.advance()
+    try await eventuallySession { await rig.transport.socket(1) != nil }
+    let next = try #require(await rig.transport.socket(1))
+    await next.ready(through: 1)
+    try await eventuallySession { await next.sent.contains { $0.type == "set_presence" } }
+    let renewedPresence = try #require(await next.sent.first { $0.type == "set_presence" })
+    await next.text(#"{"version":1,"type":"command_result","id":"\#(renewedPresence.id)","ok":true,"result":{"can_show_text":false}}"#)
+    try await eventuallySession { await next.sent.contains { $0.type == "set_live" } }
+    let command = try #require(await next.sent.first { $0.type == "set_live" })
+    await next.text(#"{"version":1,"type":"command_result","id":"\#(command.id)","ok":false,"error":{"code":"outcome_unknown","message":"Not confirmed"}}"#)
+    try await eventuallySession { !rig.session.liveMode.isOn && !rig.capture.active }
+    do { try await eventuallySession { await next.closed } }
+    catch { await rig.session.unpair(); throw error }
+    #expect(await next.sent.filter { $0.type == "set_live" }.count == 1)
+    try await eventuallySession { await rig.inactivity.pending == 0 }
+    await rig.session.unpair()
+}
 
 @MainActor @Test(arguments: [false, true])
 func backgroundListeningKeepsTheSocketOnlyWhileLiveModeIsOn(live: Bool) async throws {
@@ -405,6 +615,65 @@ func cancellingAReplyWaitingBehindTheChimeCannotPlayItLater(reason: String) asyn
     let commands = await rig.setLiveCommands()
     #expect(commands.map(\.payload) == [["on": .bool(true)], ["on": .bool(false)]])
     #expect(commands[0].id != commands[1].id)
+    rig.capture.emit(tenMilliseconds)
+    try await Task.sleep(for: .milliseconds(20))
+    #expect(await rig.socket.binarySent.count == 1)
+    await rig.session.unpair()
+}
+
+@MainActor @Test(arguments: ["off", "unpair"])
+func aLateCaptureFailureCannotChangeAnEndedLiveSession(ending: String) async throws {
+    let rig = try LiveRig()
+    try await rig.connect()
+    try await rig.turnOn()
+    if ending == "off" { await rig.session.liveMode.toggle() } else { await rig.session.unpair() }
+    let commands = await rig.setLiveCommands().count
+
+    rig.capture.onFailure?()
+
+    #expect(!rig.session.liveMode.isOn && !rig.capture.active)
+    #expect(rig.session.liveMode.message == nil)
+    try await Task.sleep(for: .milliseconds(20))
+    #expect(await rig.setLiveCommands().count == commands)
+    await rig.session.unpair()
+}
+
+@MainActor @Test func captureFailureRetiresAnActiveReplyBeforeAnotherClipCanReachItsOldEngine() async throws {
+    let rig = try LiveRig()
+    try await rig.connect()
+    try await rig.turnOn()
+    await rig.socket.text(event(2, "speech_begin", #"{"speech_id":"old","reply_id":"r","sample_rate":24000,"channels":1,"sample_width":2}"#))
+    await rig.socket.text(event(3, "speech_clip", #"{"speech_id":"old","reply_id":"r","index":0,"text":"One.","byte_length":2}"#))
+    rig.socket.input.yield(.binary(Data([1, 0])))
+    try await eventuallySession { rig.capture.speech.bytes.count == 1 }
+
+    rig.capture.onFailure?()
+
+    #expect(rig.capture.speech.stops == 1 && rig.session.playback.speechID == nil)
+    await rig.socket.text(event(4, "speech_clip", #"{"speech_id":"old","reply_id":"r","index":1,"text":"Late.","byte_length":2}"#))
+    rig.socket.input.yield(.binary(Data([2, 0])))
+    await rig.socket.text(event(5, "speech_end", #"{"speech_id":"old","reply_id":"r","last_clip_index":1}"#))
+    await rig.socket.text(event(6, "speech_begin", #"{"speech_id":"new","reply_id":"r2","sample_rate":24000,"channels":1,"sample_width":2}"#))
+    await rig.socket.text(event(7, "speech_clip", #"{"speech_id":"new","reply_id":"r2","index":0,"text":"New reply.","byte_length":2}"#))
+    rig.socket.input.yield(.binary(Data([3, 0])))
+    try await eventuallySession { rig.standard.bytes.count == 1 }
+    #expect(rig.capture.speech.bytes == [Data([1, 0])])
+    #expect(rig.standard.bytes == [Data([3, 0])])
+    await rig.session.unpair()
+}
+
+@MainActor @Test func aCaptureFailureTurnsLiveModeOffAndTellsTheUser() async throws {
+    let rig = try LiveRig()
+    try await rig.connect()
+    try await rig.turnOn()
+    rig.capture.emit(tenMilliseconds)
+    try await eventuallySession { await rig.socket.binarySent.count == 1 }
+
+    rig.capture.onFailure?()
+
+    #expect(!rig.session.liveMode.isOn && !rig.capture.active)
+    #expect(rig.session.liveMode.message == "The microphone couldn't start. Try again.")
+    try await eventuallySession { await rig.setLiveCommands().last?.payload == ["on": .bool(false)] }
     rig.capture.emit(tenMilliseconds)
     try await Task.sleep(for: .milliseconds(20))
     #expect(await rig.socket.binarySent.count == 1)

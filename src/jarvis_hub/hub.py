@@ -166,6 +166,8 @@ class Speech(Protocol):
 class Floor(Protocol):
     """Voice mode's say over when the Talker may take a turn the User did not ask for (`VoiceMode`)."""
 
+    def listens(self, client: str) -> bool: ...
+
     async def quiet(self) -> None:
         """Returns once Jarvis is idle with nothing playing."""
         ...
@@ -1810,7 +1812,7 @@ class Hub:
                 return
 
     def _announce_focus(self) -> bool:
-        if self._floor is None:
+        if self._floor is None or not self._floor.listens(self.clients.focus):
             return True
         if self.clients.focus == TERMINAL:
             return self._floor.announce()
@@ -2206,7 +2208,8 @@ class Hub:
         audible = self._turn_spoken and self._client_can_speak(destination_id)
         floor = self._floor is not None and (
             owner is not None and self._floor.owns(owner)
-            or kind == "event" and (destination_id == TERMINAL or self._is_live(destination_id))
+            or kind == "event" and self._floor.listens(destination_id)
+            and (destination_id == TERMINAL or self._is_live(destination_id))
         )
         speech = self._speech if audible else _Silent()
         if audible:

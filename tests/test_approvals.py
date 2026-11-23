@@ -839,6 +839,9 @@ class AlwaysQuiet:
     async def quiet(self) -> None:
         return None
 
+    def listens(self, client: str) -> bool:
+        return True
+
     def owns(self, owner: tuple[str, int]) -> bool:
         return True
 

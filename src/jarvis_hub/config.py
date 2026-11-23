@@ -144,8 +144,7 @@ def main_checkout(repo_dir: Path) -> Path:
 def load_settings(
     repo_dir: Path, environ: Mapping[str, str], *, ignore_voice: Callable[[str], None] | None = None
 ) -> Settings:
-    """With `ignore_voice` (text mode), voice settings stay at their defaults and a bad one is reported to it, except
-    the TTS engine, which `--speak` and the iPhone still use."""
+    """Text mode tolerates invalid voice settings; a remote Hub uses valid settings for phone Live mode."""
     repo_dir = repo_dir.resolve()
     main = main_checkout(repo_dir)
     env_file = main / ".env"
@@ -217,13 +216,17 @@ def load_settings(
         voice = voice_settings()
     else:
         try:
-            voice_settings()
+            configured_voice = voice_settings()
         except ConfigError as e:
             ignore_voice(str(e))
-        try:
-            voice = VoiceSettings(tts_engine=tts_engine())
-        except ConfigError:
-            voice = VoiceSettings()
+            configured_voice = None
+        if values.get("JARVIS_REMOTE") == "on" and configured_voice is not None:
+            voice = configured_voice
+        else:
+            try:
+                voice = VoiceSettings(tts_engine=tts_engine())
+            except ConfigError:
+                voice = VoiceSettings()
 
     def count(name: str, default: int) -> int:
         value = get(name, str(default))

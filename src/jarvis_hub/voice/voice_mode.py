@@ -240,7 +240,7 @@ class VoiceMode:
     def __init__(
         self,
         *,
-        audio: AudioInput,
+        audio: AudioInput | None,
         tts: Synthesizer,
         player: Player,
         clock: SpeechClock,
@@ -250,10 +250,11 @@ class VoiceMode:
         debug: bool = False,
         recognition: RelationAssessment | None = None,
         ready_when: Callable[[], Awaitable[None]] | None = None,
+        ready_sound: bool = True,
         wake_refractory_s: float = 2.0,
     ) -> None:
         # One input per listening Client; `audio` is the Mac's.
-        self._inputs: dict[str, AudioInput] = {TERMINAL: audio}
+        self._inputs: dict[str, AudioInput] = {} if audio is None else {TERMINAL: audio}
         self._listening: dict[str, asyncio.Task[None]] = {}
         self._running = False
         # The Client whose input last moved the machine, which rows from timers and playback name.
@@ -269,6 +270,7 @@ class VoiceMode:
         self._views: dict[str, str] = {}
         # What else must be ready, beyond the voice, before the ready sound says Jarvis can take a request.
         self._ready_when = ready_when
+        self._ready_sound = ready_sound
         self._readying: asyncio.Task[None] | None = None
         self._player = player
         self._clock = clock
@@ -325,12 +327,14 @@ class VoiceMode:
         """Whether speech over Jarvis is being judged as a Backchannel or an Interruption while Jarvis talks on."""
         return self._voice.barge is not None
 
-    def start(self) -> None:
+    def start(self, *, lazy: bool = False) -> None:
         self._notice("Speech loading.")
-        self._speech.start()
+        self._speech.start(lazy=lazy)
 
     def _ready(self) -> None:
         self._notice("Speech ready.")
+        if not self._ready_sound:
+            return
         if self._ready_when is None:
             self._speech.say("ready", "en")
             return
@@ -377,6 +381,7 @@ class VoiceMode:
         on `cues`; `on_state` hears each change of `voice_state(client)`."""
         if client in self._inputs:
             raise ValueError(f"Client {client} already has an audio input")
+        self._speech.start()
         self._inputs[client] = audio
         if cues is not None:
             self._cues[client] = cues
@@ -615,6 +620,9 @@ class VoiceMode:
             if finished is not None and finished[0] == self._owned.token:
                 return ("thinking", True) if at < finished[1] else ("follow_up", None)
         return self._voice.state, True if self._voice.state == "thinking" else None
+
+    def listens(self, client: str) -> bool:
+        return client in self._inputs
 
     def owns(self, owner: tuple[str, int]) -> bool:
         return not self._closed and self._owned is not None and self._owned.token == owner

@@ -16,6 +16,8 @@ Swift tests read the single Python-generated `Tests/JarvisClientTests/Fixtures/c
 
 ## Conversation
 
+The connection dot and any status text are centered together across the screen. The header reserves equal clearance on both sides of that group despite its unequal action buttons; when it cannot fit, the whole status group moves to a centered second row. Composer notices share an overlay above the input pill, so validation, Voice, microphone and Live messages can wrap or stack without changing the bottom inset or moving the content above it. The microphone permission notice keeps its Open Settings link.
+
 `AppSession` is the only consumer of `HubClient.updates`. It routes replayable events through the package's `ConversationProjection`, which retains canonical events and groups script rows by request/reply identity. Sequence deduplication handles reconnect replay; older events can enter the same projection in sequence order for later history support. Live deltas append, while `reply_end` replaces the text with the authoritative final reply. Both Clients appear without source filtering. A show arriving before text creates the reply anchor; an unassociated show has its own stable Details anchor. Details use native disclosure and literal selectable text, with no remote content loading.
 
 The input bar queues typed lines through the Outbox, including while the Mac is unreachable. Empty lines and lines over 16,384 UTF-8 bytes cannot send. The round action sits inside the field: with a draft it sends the line, and with an empty field it records a Talk. A queued line remains a User bubble with a clock until its `heard` event arrives, and a queued Talk also shows a waveform and duration. Definitive failures retain their original content with Try again and Delete; an uncertain item offers Send again. Retrying puts the item last in the queue. The draft stays in memory, and unpairing clears the conversation and Outbox with the existing generation guards.
@@ -84,12 +86,14 @@ The orb's shader needs Xcode's Metal Toolchain; if the app build reports it miss
 
 The microphone tap factory is nonisolated. It installs with the input node's hardware format (`nil`) and creates its converter from the first received buffer. `NativeTalkCaptureTests.swift` feeds real PCM to that handler from a background queue, checks the converted bytes, and verifies the byte-limit callback reaches the main actor without opening a microphone.
 
-To reproduce the actor violation if the factory loses `nonisolated`, run the tests with actor runtime checks. The native build system ensures this compiler flag is applied on the current Swift toolchain:
+The Live engine configuration observer also uses a nonisolated factory. Its test posts a real notification from a background queue and checks that recovery reaches the main actor. An isolated Combine sink crashed the app before its Task could hand off.
+
+To reproduce either callback violation if its factory loses `nonisolated`, run the tests with actor runtime checks. The native build system ensures this compiler flag is applied on the current Swift toolchain:
 
 ```sh
 swift test --package-path ios/JarvisClient --build-system native \
   --scratch-path /tmp/jarvis-tap-actor-checks \
-  -Xswiftc -enable-actor-data-race-checks --filter nativeTap
+  -Xswiftc -enable-actor-data-race-checks --filter 'nativeTap|nativeLiveConfigurationChange'
 ```
 
 With an actor-isolated factory, the background test terminated with signal 5; with the nonisolated factory, both tests passed. A default package test run on Swift 6.4 omitted the callback's runtime check and passed even before the fix.
@@ -133,9 +137,15 @@ Waiting on User: installed-iPhone Voice off mid-sentence, AirPods/current-route 
 
 ## Live mode
 
-The ear button at the right of the top bar turns Live mode on and off. It is off at every launch and never saved. Turning it on asks for the microphone if needed, then sends `set_live` with a fresh command id; when connected, capture starts once the Hub answers `{"on": true}`. When the Mac is unreachable, the button stays on, capture starts while the app is still foregrounded, and the message is “Live mode on. Listening starts when the Mac is back.” for 2.5 seconds. Frames go to the socket only after its own `set_live` acknowledgement, because the Hub closes a socket that sends audio before that. `LiveModeController` owns the state, the request and the stream, and `AppSession.liveMode` exposes it to the view.
+The Live signal button at the right of the top bar turns Live mode on and off. It is off at every launch and never saved. Turning it on asks for the microphone if needed, then sends `set_live` with a fresh command id; when connected, capture starts once the Hub answers `{"on": true}`. When the Mac is unreachable, the button stays on, capture starts while the app is still foregrounded, and the message is “Live mode on. Listening starts when the Mac is back.” for 2.5 seconds. Frames go to the socket only after its own `set_live` acknowledgement, because the Hub closes a socket that sends audio before that. `LiveModeController` owns the state, the request and the stream, and `AppSession.liveMode` exposes it to the view.
 
 `NativeLiveCaptureSource` runs an `AVAudioEngine` with voice processing on the input node, in a `playAndRecord` session that allows Bluetooth hands-free routes. While it runs, `SpeechPlayer` plays in that same session rather than switching it to `playback`, and `LiveSpeechRoute` starts each reply on a player node in the capture's engine, so the voice-processing unit has the reply as its echo reference. A reply stays on the engine it started on; turning Live mode off mid-reply removes the tap and keeps the engine until the reply stops. With Live mode off, replies play on the speech player's own engine as before. The tap converts to 16 kHz mono PCM16LE and cuts it into binary messages of whole 10 ms frames, at most 100 ms each. `HubClient.sendAudio` sends them only on the socket the Hub turned Live mode on for and drops them otherwise; they never go to the Outbox. Turning Live mode off stops capture, lets the last frame go and then sends `set_live` off.
+
+Run the Hub with `./jarvis --text` to use only the iPhone microphone: the Mac keeps its typed terminal and never opens its own microphone or speaker. `--text --speak` adds Mac speech without adding Mac listening.
+
+Live mode turns off after 30 minutes without interaction on this iPhone. A Wake word, a newly admitted spoken request, starting or finishing a Talk, or sending a valid typed line starts a fresh interval. Raw microphone audio, Jarvis-only Announcements, idle updates and reconnects do not extend it. The iPhone owns the monotonic deadline, so it also expires while locked or offline and checks overdue timers before resuming capture. Expiry stops capture immediately, releases the background connection under the usual playback-drain policy, and shows “Live mode turned off after 30 minutes of inactivity.” Turning Live mode on again starts a new interval.
+
+iOS may stop an engine when its hardware format changes, as described in [Apple’s configuration-change documentation](https://developer.apple.com/documentation/foundation/nsnotification/name-swift.struct/avaudioengineconfigurationchange). The live source observes that event, rebuilds its tap and PCM converter, and restarts the current engine on the main actor. Notifications from a retired engine or after capture stops cannot restart it. If recovery fails, Live mode turns off and shows the microphone error instead of leaving its button on with no audio.
 
 The Hub's `voice_state` selects the orb's source: microphone level while listening or in the Follow-up window, playback level while speaking, and calm while idle or thinking. A silent text stream does not override those quiet Live states. A Talk pauses live capture from its press until send or discard, including while locked or paused; capture resumes only if Live mode is still on.
 
@@ -152,6 +162,7 @@ These checks need a signed iPhone and a reachable voice-mode Hub. Record the rou
 - Check echo cancellation against the Mac's Barge-in judge: play replies through the phone speaker, then try Backchannels and Interruptions without the phone hearing Jarvis as the User.
 - Measure cellular data use during Live mode against the uncompressed estimate of about 32 KB/s (115 MB/hour).
 - Measure battery drain over one hour with Live mode on and the screen locked.
+- Leave Live mode idle for 30 minutes in foreground and while locked, including with the Mac offline. Confirm the button turns off and the microphone indicator clears after any existing reply finishes. Wake Jarvis or send a message before expiry and confirm that interaction starts a fresh 30-minute interval; ordinary room noise must not extend it.
 - Check background keep-alive through long locked periods, Wi-Fi/cellular changes and a Mac outage. Wake Jarvis, hear a reply and an Announcement, then answer in its Follow-up window. With Live mode off, verify the previous background drain/suspension behavior.
 - Interrupt Live mode with a call, Siri and another audio app. Check that no call audio is streamed, the button stays on, and listening resumes afterward. Also turn Live mode off or unpair during the interruption and verify it stays off.
 - Measure Mac memory with the second set of per-stream engines loaded on the 18 GB Mac.
