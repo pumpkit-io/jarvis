@@ -2712,3 +2712,63 @@ async def test_mac_resumes_only_after_every_active_remote_client_disconnects(rig
     await until(lambda: bool(rig.user_messages()))
     assert len(rig.user_messages()) == 1
     assert "Back at the desk" in rig.user_messages()[0]
+
+
+async def test_voice_rows_name_the_client_whose_input_was_heard(rig_for: MakeRig) -> None:
+    rig: Rig = await rig_for([Text("It is half past nine, sir.")])
+
+    rig.audio.wake()
+    rig.audio.say("What time is it?")
+    await until(lambda: rig.state == "follow_up")
+    await rig.advance(6)
+
+    assert [(r["to"], r["client"]) for r in rig.metrics.records if r["kind"] == "voice"] == [
+        ("listening", "terminal"), ("thinking", "terminal"), ("speaking", "terminal"), ("follow_up", "terminal"),
+        ("idle", "terminal"),
+    ]
+
+
+async def test_a_second_input_comes_and_goes_while_the_mac_listens_as_before(rig_for: MakeRig) -> None:
+    rig: Rig = await rig_for([Text("Opened, sir.")], [Text("Green, sir.")], [Text("Merged, sir.")], [Text("Done, sir.")])
+    phone = ScriptedAudio(rig.clock)
+    rig.voice.add_input("phone", phone)
+
+    rig.audio.wake()
+    rig.audio.say("Open a PR for the login bug")
+    await until(lambda: rig.state == "follow_up")
+    await rig.advance(4)
+    rig.audio.say("And is the CI green?")
+    await until(lambda: len(rig.user_messages()) == 2 and rig.state == "follow_up")
+    await rig.advance(6)
+    assert rig.state == "idle"
+
+    phone.wake()
+    phone.say("Merge it")
+    await until(lambda: len(rig.user_messages()) == 3 and rig.state == "follow_up")
+    await rig.advance(6)
+    assert rig.state == "idle"
+    assert phone.capturing[-1] is False and True in phone.capturing
+
+    rig.voice.remove_input("phone")
+    assert phone.closed
+    phone.wake()
+    phone.say("Close the issue")
+    await rig.advance(1)
+    assert rig.state == "idle"
+    assert len(rig.user_messages()) == 3
+
+    rig.audio.wake()
+    rig.audio.say("Deploy it")
+    await until(lambda: len(rig.user_messages()) == 4 and rig.state == "follow_up")
+    await rig.advance(6)
+
+    assert rig.user_messages() == [
+        '<user lang="en">Open a PR for the login bug</user>', '<user lang="en">And is the CI green?</user>',
+        '<user lang="en">Merge it</user>', '<user lang="en">Deploy it</user>',
+    ]
+    assert [t for t in rig.player.texts if t] == ["Opened, sir.", "Green, sir.", "Merged, sir.", "Done, sir."]
+    assert rig.player.voices.count("chime") == 3 and rig.player.voices.count("closing") == 3
+    exchange = ["listening", "thinking", "speaking", "follow_up", "idle"]
+    assert rig.states() == [*exchange[:4], *exchange[:4], "idle", *exchange, *exchange]
+    clients = [r["client"] for r in rig.metrics.records if r["kind"] == "voice"]
+    assert clients == ["terminal"] * 9 + ["phone"] * 5 + ["terminal"] * 5

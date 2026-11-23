@@ -788,6 +788,7 @@ class ScriptedAudio:
         self._onset = 0.0
         self.owner: int | None = None
         self.candidate = 0
+        self.closed = False
 
     def emit(self, event: InputEvent) -> None:
         self._queue.put_nowait(event)
@@ -829,6 +830,9 @@ class ScriptedAudio:
 
     def barge_in(self, since: float | None) -> None:
         self.watching.append(since)
+
+    def close(self) -> None:
+        self.closed = True
 
     async def events(self) -> AsyncIterator[InputEvent]:
         while True:

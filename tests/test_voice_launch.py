@@ -84,11 +84,13 @@ async def test_voice_mode_wakes_hears_answers_aloud_and_idles(tmp_path: Path, co
     microphone = ScriptedMicrophone(clock)
     player = RecordingPlayer()
     chosen: list[tuple[EngineChoice, Listening]] = []
+    recorders: list[Callable[[dict[str, Any]], None]] = []
 
     def open_listener(
         choice: EngineChoice, listening: Listening, record: Any, notice: Any, clips: Any
     ) -> ScriptedMicrophone:
         chosen.append((choice, listening))
+        recorders.append(record)
         return microphone
 
     def open_player(rate: int, on_played: Callable[[Samples, int], None]) -> RecordingPlayer:
@@ -120,6 +122,7 @@ async def test_voice_mode_wakes_hears_answers_aloud_and_idles(tmp_path: Path, co
     assert "Speech ready." in stderr.getvalue()
     microphone.wake()
     await until(lambda: microphone.capturing == [True])
+    recorders[0]({"kind": "turn", "text": "What time is it?"})
     microphone.say("What time is it?")
     await until(lambda: microphone.capturing == [True, False, True])
     clock.advance(3.0)
@@ -139,6 +142,7 @@ async def test_voice_mode_wakes_hears_answers_aloud_and_idles(tmp_path: Path, co
         assert cancelled.is_set()
     rows = [json.loads(line) for line in (config.runtime_dir / "metrics.jsonl").read_text().splitlines()]
     assert [r["to"] for r in rows if r["kind"] == "voice"] == ["listening", "thinking", "speaking", "follow_up", "idle"]
+    assert {r["client"] for r in rows if r["kind"] in ("voice", "turn")} == {"terminal"}
 
 
 def test_the_barge_in_windows_reach_the_voice_state_machine() -> None:

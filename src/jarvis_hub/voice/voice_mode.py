@@ -1,4 +1,4 @@
-"""Voice mode: runs the voice state machine on the audio input's events and the replies' playback.
+"""Voice mode: runs the voice state machine on the audio inputs' events and the replies' playback.
 
 The User's turns come out as `Line`s for the Hub; the Hub's spoken replies come back through `speech`, so the
 machine knows when a reply starts and ends playing.
@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Protocol
 from uuid import uuid4
 
+from jarvis_hub.clients import TERMINAL
 from jarvis_hub.hub import Line
 from jarvis_hub.voice.assessment import Assessment, Candidate
 from jarvis_hub.voice.ownership import MAX_REQUEST_CHARACTERS, SpokenTurn
@@ -63,6 +64,13 @@ class AudioInput(Protocol):
         Each call forgets the Barge-in under way, so the next one needs speech held anew."""
         ...
 
+    def close(self) -> None: ...
+
+
+def client_rows(record: Callable[[dict[str, Any]], None], client: str) -> Callable[[dict[str, Any]], None]:
+    """`record` naming `client` on every row, for an input's own metrics."""
+    return lambda row: record({**row, "client": client})
+
 
 class RelationAssessment(Protocol):
     async def assess(
@@ -76,6 +84,8 @@ class RelationAssessment(Protocol):
 class _MicrophoneEvent:
     event: InputEvent
     generation: int
+    client: str
+    source: AudioInput
 
 
 @dataclass(frozen=True)
@@ -205,7 +215,12 @@ class VoiceMode:
         recognition: RelationAssessment | None = None,
         ready_when: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
-        self._audio = audio
+        # One input per listening Client; `audio` is the Mac's.
+        self._inputs: dict[str, AudioInput] = {TERMINAL: audio}
+        self._listening: dict[str, asyncio.Task[None]] = {}
+        self._running = False
+        # The Client whose input last reached the machine, which the voice rows name.
+        self._client = TERMINAL
         # What else must be ready, beyond the voice, before the ready sound says Jarvis can take a request.
         self._ready_when = ready_when
         self._readying: asyncio.Task[None] | None = None
@@ -291,14 +306,47 @@ class VoiceMode:
         listening, before the turn that follows it."""
         self._woke = woke
         self._admitted = admitted
-        tasks = [asyncio.create_task(self._listen()), asyncio.create_task(self._drive(interrupt))]
+        self._running = True
+        for client, audio in self._inputs.items():
+            self._listen_to(client, audio)
+        driving = asyncio.create_task(self._drive(interrupt))
         try:
             while True:
                 yield await self._lines.get()
         finally:
+            self._running = False
+            tasks = [driving, *self._listening.values()]
+            self._listening.clear()
             for task in tasks:
                 task.cancel()
             await asyncio.wait(tasks)
+
+    def add_input(self, client: str, audio: AudioInput) -> None:
+        """Listens to `client`'s audio too, from the machine's current capture and Barge-in settings on."""
+        if client in self._inputs:
+            raise ValueError(f"Client {client} already has an audio input")
+        self._inputs[client] = audio
+        if self._remote_active and (suppress := getattr(audio, "suppress", None)) is not None:
+            suppress(True)
+        if self._capture_setting is not None:
+            audio.capture(self._capture_setting[0], owner=self._capture_setting[1])
+        if self._barge_in_from is not None:
+            audio.barge_in(self._barge_in_from)
+        if self._running:
+            self._listen_to(client, audio)
+
+    def remove_input(self, client: str) -> None:
+        """Stops listening to `client`'s audio and closes it. Events it reported and the machine has not yet
+        taken are dropped."""
+        audio = self._inputs.pop(client, None)
+        if audio is None:
+            return
+        if (task := self._listening.pop(client, None)) is not None:
+            task.cancel()
+        audio.close()
+
+    def _listen_to(self, client: str, audio: AudioInput) -> None:
+        self._listening[client] = asyncio.create_task(self._listen(client, audio))
 
     async def idle(self) -> None:
         await self._speech.idle()
@@ -325,9 +373,12 @@ class VoiceMode:
         return True
 
     async def close(self) -> None:
+        listening = list(self._listening.values())
+        for client in list(self._inputs):
+            self.remove_input(client)
         self._closed = True
         self._retire()
-        pending = [task for task in [self._assessing, self._readying, *self._applying] if task is not None]
+        pending = [task for task in [self._assessing, self._readying, *self._applying, *listening] if task is not None]
         for task in pending:
             task.cancel()
         if pending:
@@ -358,16 +409,18 @@ class VoiceMode:
         woke_at = self._voice.woke_at
         return heard_at is not None and woke_at is not None and heard_at < woke_at
 
-    async def _listen(self) -> None:
-        async for event in self._audio.events():
-            self._events.put_nowait(_MicrophoneEvent(event, self._microphone_generation))
+    async def _listen(self, client: str, audio: AudioInput) -> None:
+        async for event in audio.events():
+            self._events.put_nowait(_MicrophoneEvent(event, self._microphone_generation, client, audio))
 
     async def _drive(self, interrupt: Callable[[], Awaitable[Any]]) -> None:
         while True:
             event = await self._next_event()
             if isinstance(event, _MicrophoneEvent):
-                if self._remote_active or event.generation != self._microphone_generation:
+                if (self._remote_active or event.generation != self._microphone_generation
+                        or self._inputs.get(event.client) is not event.source):
                     continue
+                self._client = event.client
                 event = event.event
             if isinstance(event, _Related):
                 if event.fragments is self._inflight and self.owns(event.owner.token) and event.epoch == self._epoch:
@@ -479,19 +532,22 @@ class VoiceMode:
             return
         self._remote_active = active
         self._microphone_generation += 1
-        if (suppress := getattr(self._audio, "suppress", None)) is not None:
-            suppress(active)
+        for audio in self._inputs.values():
+            if (suppress := getattr(audio, "suppress", None)) is not None:
+                suppress(active)
         self._voice = Voice()
         self._retire()
         self._barge_in_from = None
-        self._audio.barge_in(None)
+        for audio in self._inputs.values():
+            audio.barge_in(None)
         self._idle.set()
 
     def _sync_capture(self) -> None:
         setting = (not self._closed and not self._remote_active and (self._voice.state in CAPTURING or self._voice.state == "thinking"), self._epoch)
         if setting != self._capture_setting:
             self._capture_setting = setting
-            self._audio.capture(setting[0], owner=setting[1])
+            for audio in self._inputs.values():
+                audio.capture(setting[0], owner=setting[1])
 
     def _applied(self, task: asyncio.Task[None]) -> None:
         self._applying.discard(task)
@@ -620,7 +676,8 @@ class VoiceMode:
         # After capture: a turn that starts now keeps the speech of the Barge-in that stopped Jarvis.
         if (since := barge_in_from(self._voice, self._timing)) != self._barge_in_from:
             self._barge_in_from = since
-            self._audio.barge_in(since)
+            for audio in self._inputs.values():
+                audio.barge_in(since)
         if self._voice.woke_at != woke_at:
             self._woke()
         return actions
@@ -653,7 +710,7 @@ class VoiceMode:
             self._metrics.record({
                 "kind": "voice", "from": before, "to": after, "on": type(event).__name__,
                 "event_at": event.at, "processed_at": self._clock.now(), "time_basis": "perf_counter",
-                "request_at": getattr(event, "answers", self._voice.awaiting),
+                "request_at": getattr(event, "answers", self._voice.awaiting), "client": self._client,
             })
         except Exception as e:
             self._notice(f"Could not write metrics: {e}")
