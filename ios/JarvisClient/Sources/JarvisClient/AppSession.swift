@@ -75,7 +75,7 @@ import Observation
     private func interruptSpeech() async {
         // A cue is not speech the Hub can interrupt; it only stops here.
         let speechID = playback.playingCue ? self.speechID : playback.speechID ?? self.speechID
-        let finished = max(lastCompletedClip, playback.lastFinishedIndex)
+        let finished = playback.playingCue ? lastCompletedClip : max(lastCompletedClip, playback.lastFinishedIndex)
         playback.stop(reportStopped: false); stopPlayback()
         guard let speechID, let client else { return }
         self.speechID = nil; talk.speaking = false
@@ -250,6 +250,9 @@ import Observation
         self.talk.microphoneHeld = { [weak liveMode = self.liveMode] in liveMode?.talkHoldsMicrophone($0) }
         self.playback.configure(report: { [weak self] command in
             guard let self, let client = self.client else { return }
+            if command.payload["state"] == .string("started"), command.payload["speech_id"] == self.speechID.map(JSONValue.string) {
+                self.talk.speaking = true
+            }
             self.playbackRevision &+= 1
             let previous = self.playbackDelivery
             self.playbackDelivery = Task {
@@ -295,8 +298,10 @@ import Observation
             orb.update(speaker: .user, target: OrbModel.loudness(rms: talk.level))
         } else if live == .listening || live == .followUp {
             orb.update(speaker: .user, target: OrbModel.loudness(rms: liveMode.level))
-        } else if playback.playingSpeechID != nil || live == .speaking {
+        } else if playback.playingSpeechID != nil && !playback.playingCue || live == .speaking {
             orb.update(speaker: .jarvis, target: OrbModel.loudness(rms: playback.level))
+        } else if live != nil {
+            orb.update(speaker: .idle, target: 0)
         } else if !voiceOn, let reply = streamingReply {
             let time = max(0, orbNow() - reply.started)
             let target = abs(sin(7 * time) * sin(2.3 * time)) * (0.6 + 0.4 * abs(sin(0.9 * time)))
@@ -400,8 +405,9 @@ import Observation
 
     /// Silence stops speech only; a cue playing goes on.
     public func silencePlayback() {
-        guard !playback.playingCue else { return }
-        playback.stop(reportStopped: false); stopPlayback(); talk.speaking = false
+        let cue = playback.playingCue
+        playback.silence()
+        if !cue { stopPlayback(); talk.speaking = false }
     }
 
     public func replay(replyID: String) async {

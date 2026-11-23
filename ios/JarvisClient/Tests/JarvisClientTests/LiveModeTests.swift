@@ -72,6 +72,21 @@ import Testing
         await toggle.value
         try await eventuallySession { session.liveMode.isOn }
     }
+
+    func receiveChimeAndReply() async throws {
+        await socket.text(event(2, "speech_begin", #"{"speech_id":"cue","cue":"chime","sample_rate":24000,"channels":1,"sample_width":2}"#))
+        await socket.text(event(3, "speech_clip", #"{"speech_id":"cue","cue":"chime","index":0,"text":"","byte_length":2}"#))
+        socket.input.yield(.binary(Data([1, 0])))
+        await socket.text(event(4, "speech_end", #"{"speech_id":"cue","cue":"chime","last_clip_index":0}"#))
+        try await eventuallySession { capture.speech.bytes.count == 1 }
+        await socket.text(event(5, "speech_begin", #"{"speech_id":"reply","reply_id":"r","sample_rate":24000,"channels":1,"sample_width":2}"#))
+        for index in 0..<2 {
+            await socket.text(event(6 + index, "speech_clip", #"{"speech_id":"reply","reply_id":"r","index":\#(index),"text":"Reply.","byte_length":2}"#))
+            socket.input.yield(.binary(Data([UInt8(index + 2), 0])))
+        }
+        await socket.text(event(8, "speech_end", #"{"speech_id":"reply","reply_id":"r","last_clip_index":1}"#))
+        try await voiceState(9, "thinking")
+    }
 }
 
 private let tenMilliseconds = Data(repeating: 7, count: 320)
@@ -107,6 +122,28 @@ private let speech = Data((0..<160).flatMap { _ in [UInt8(0x00), 0x20] })
     try await rig.orbShows(.user)
     try await rig.voiceState(9, "idle")
     try await rig.orbShows(.idle)
+    await rig.session.unpair()
+}
+
+@MainActor @Test(arguments: ["idle", "thinking"])
+func liveQuietStatesKeepTheOrbCalmDuringSilentTextStreaming(state: String) async throws {
+    let rig = try LiveRig()
+    try await rig.connect()
+    try await rig.turnOn()
+    await rig.session.setVoiceOn(false)
+    try await rig.voiceState(2, state)
+    await rig.socket.text(event(3, "reply_delta", #"{"reply_id":"r","text":"Still writing"}"#))
+    try await eventuallySession { rig.session.conversation.rows.contains { $0.text == "Still writing" } }
+
+    try await rig.orbShows(.idle)
+
+    await rig.socket.text(event(4, "speech_begin", #"{"speech_id":"cue","cue":"closing","sample_rate":24000,"channels":1,"sample_width":2}"#))
+    await rig.socket.text(event(5, "speech_clip", #"{"speech_id":"cue","cue":"closing","index":0,"text":"","byte_length":2}"#))
+    rig.socket.input.yield(.binary(Data([1, 0])))
+    try await eventuallySession { rig.capture.speech.bytes.count == 1 }
+    rig.capture.speech.level = 0.4
+    try await rig.orbShows(.idle)
+
     await rig.session.unpair()
 }
 
@@ -183,6 +220,26 @@ func aTalkPausesLiveFramesFromItsPressUntilItIsSentOrDiscarded(ending: String) a
     await rig.session.unpair()
 }
 
+@MainActor @Test func aLockedTalkKeepsLiveCapturePausedThroughPauseAndResume() async throws {
+    let rig = try LiveRig()
+    try await rig.connect()
+    try await rig.turnOn()
+    let interaction = UUID()
+    rig.session.talk.holdBegan(interaction: interaction)
+    try await eventuallySession { rig.recorder.active }
+    await rig.session.talk.holdMoved(verticalTranslation: -200, interaction: interaction).value
+    #expect(rig.session.talk.isLocked && !rig.capture.active)
+    rig.session.talk.pause()
+    #expect(rig.session.talk.state == .paused && !rig.capture.active)
+    await rig.session.talk.resume()
+    #expect(rig.recorder.active && !rig.capture.active)
+    await rig.session.talk.holdEnded(interaction: interaction).value
+    #expect(rig.recorder.active && !rig.capture.active)
+    await rig.session.talk.discard()
+    #expect(!rig.recorder.active && rig.capture.active && rig.capture.starts == 2)
+    await rig.session.unpair()
+}
+
 @MainActor @Test func cuesPlayThroughTheLiveCaptureWhateverTheSilenceAndAreReported() async throws {
     let rig = try LiveRig()
     try await rig.connect()
@@ -209,6 +266,67 @@ func aTalkPausesLiveFramesFromItsPressUntilItIsSentOrDiscarded(ending: String) a
     #expect(rig.capture.speech.bytes == [Data([1, 0]), Data([2, 0])] && rig.standard.bytes.isEmpty)
     rig.capture.speech.callbacks[1]()
     try await eventuallySession { await reports("closing") == [.string("started"), .string("finished")] }
+    await rig.session.unpair()
+}
+
+@MainActor @Test func aReplyArrivingBeforeTheChimeFinishesPlaysAfterItAndReportsEveryClip() async throws {
+    let rig = try LiveRig()
+    try await rig.connect()
+    try await rig.turnOn()
+    try await rig.receiveChimeAndReply()
+    #expect(rig.capture.speech.bytes == [Data([1, 0])])
+    #expect(rig.capture.speech.stops == 0)
+    #expect(rig.standard.bytes.isEmpty)
+    #expect(await rig.socket.sent.filter { $0.type == "playback_report" }.map(\.payload) == [
+        ["speech_id": .string("cue"), "clip_index": .integer(0), "state": .string("started")]
+    ])
+
+    for (index, count) in [3, 5, 6].enumerated() {
+        try await eventuallySession { rig.capture.speech.callbacks.count > index }
+        rig.capture.speech.callbacks[index]()
+        try await eventuallySession { await rig.socket.sent.filter { $0.type == "playback_report" }.count == count }
+    }
+    let reports = await rig.socket.sent.filter { $0.type == "playback_report" }.map(\.payload)
+    #expect(reports == [
+        ["speech_id": .string("cue"), "clip_index": .integer(0), "state": .string("started")],
+        ["speech_id": .string("cue"), "clip_index": .integer(0), "state": .string("finished")],
+        ["speech_id": .string("reply"), "clip_index": .integer(0), "state": .string("started")],
+        ["speech_id": .string("reply"), "clip_index": .integer(0), "state": .string("finished")],
+        ["speech_id": .string("reply"), "clip_index": .integer(1), "state": .string("started")],
+        ["speech_id": .string("reply"), "clip_index": .integer(1), "state": .string("finished")]
+    ])
+    #expect(rig.session.playback.missedReplies.isEmpty)
+    await rig.session.unpair()
+}
+
+@MainActor @Test(arguments: ["silence", "talk", "hub_stop"])
+func cancellingAReplyWaitingBehindTheChimeCannotPlayItLater(reason: String) async throws {
+    let rig = try LiveRig()
+    try await rig.connect()
+    try await rig.turnOn()
+    try await rig.receiveChimeAndReply()
+    if reason == "silence" {
+        await rig.session.setVoiceOn(false)
+        #expect(rig.capture.speech.stops == 0)
+    } else if reason == "talk" {
+        await rig.session.talk.press()
+        #expect(rig.recorder.active && !rig.capture.active)
+        try await eventuallySession { await rig.socket.sent.contains { $0.type == "interrupt" } }
+        #expect(await rig.socket.sent.first { $0.type == "interrupt" }?.payload == [
+            "speech_id": .string("reply"), "last_clip_index": .integer(-1)
+        ])
+    } else {
+        await rig.socket.text(event(10, "speech_stop", #"{"speech_id":"reply","reply_id":"r","reason":"interrupted"}"#))
+        try await rig.voiceState(11, "idle")
+    }
+    rig.capture.speech.callbacks[0]()
+    if reason != "talk" {
+        try await eventuallySession { await rig.socket.sent.contains {
+            $0.type == "playback_report" && $0.payload["speech_id"] == .string("cue") && $0.payload["state"] == .string("finished")
+        } }
+    }
+    #expect(rig.capture.speech.bytes == [Data([1, 0])])
+    #expect(rig.session.playback.missedReplies.contains("r"))
     await rig.session.unpair()
 }
 

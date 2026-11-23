@@ -20,6 +20,12 @@ import Observation
     public var playingSpeechID: String? { sentence == nil ? nil : speechID }
     public private(set) var activeSpeechID: String?
     private struct Clip { let index: Int64; let text: String; let pcm: Data }
+    private struct WaitingReply {
+        let id: String
+        let replyID: String
+        var clips: [Clip] = []
+        var lastIndex: Int64?
+    }
     private let session: any TalkAudioSession
     private let output: any SpeechOutput
     private let wait: @Sendable () async throws -> Void
@@ -29,6 +35,7 @@ import Observation
     private var nextIndex: Int64 = 0
     private var ended = false
     private var generation: UInt64 = 0
+    private var waitingReply: WaitingReply?
     private var watchdog: Task<Void, Never>?
     private var report: @MainActor (HubCommand) -> Void = { _ in }
     private var drained: @MainActor (String) -> Void = { _ in }
@@ -43,6 +50,12 @@ import Observation
     public var playingCue: Bool { speechID != nil && replyID == nil }
     /// A nil `replyID` begins a cue stream: it plays and reports like a reply but marks no reply heard or missed.
     public func begin(speechID: String, replyID: String?) {
+        if playingCue, ended, !queue.isEmpty, let replyID {
+            // The Hub ends its cue before the phone finishes it; keep the reply behind the physical playback.
+            waitingReply = WaitingReply(id: speechID, replyID: replyID)
+            missedReplies.insert(replyID)
+            return
+        }
         stop(reportStopped: false)
         generation &+= 1
         self.speechID = speechID; self.replyID = replyID
@@ -50,6 +63,12 @@ import Observation
         if let replyID { missedReplies.insert(replyID); messages[replyID] = nil }
     }
     public func append(speechID: String, replyID: String?, index: Int64, text: String, pcm: Data) {
+        if var waiting = waitingReply, waiting.id == speechID, waiting.replyID == replyID {
+            guard waiting.lastIndex == nil, index == waiting.clips.count, pcm.count.isMultiple(of: 2) else { return }
+            waiting.clips.append(Clip(index: index, text: text, pcm: pcm))
+            waitingReply = waiting
+            return
+        }
         guard self.speechID == speechID, self.replyID == replyID, !ended,
               index == nextIndex, pcm.count % 2 == 0 else { return }
         guard !pcm.isEmpty else {
@@ -75,14 +94,24 @@ import Observation
     }
 
     public func end(speechID: String, replyID: String?, lastIndex: Int64) {
+        if var waiting = waitingReply, waiting.id == speechID, waiting.replyID == replyID {
+            guard lastIndex == waiting.clips.count - 1 else { return }
+            waiting.lastIndex = lastIndex; waitingReply = waiting
+            return
+        }
         guard self.speechID == speechID, self.replyID == replyID, lastIndex == nextIndex - 1 else { return }
         ended = true; watchdog?.cancel(); watchdog = nil
         if sentence == nil && queue.isEmpty { finish() }
     }
     public func stop(speechID: String? = nil, reportStopped: Bool = true) {
+        if let speechID, waitingReply?.id == speechID {
+            waitingReply = nil; drained(speechID)
+            return
+        }
         if let speechID, self.speechID != speechID { return }
         guard let id = self.speechID else { return }
         if reportStopped { emit("stopped", index: lastFinishedIndex) }
+        waitingReply = nil
         generation &+= 1; watchdog?.cancel(); watchdog = nil
         output.stop(); session.releasePlayback(); activeSpeechID = nil; queue = []; sentence = nil
         self.speechID = nil; replyID = nil
@@ -91,6 +120,14 @@ import Observation
     public func reset() {
         stop(reportStopped: false)
         missedReplies = []; heardReplies = []; completedSentences = []; messages = [:]
+    }
+    /// Silence leaves cues audible and discards any reply waiting behind one.
+    public func silence() {
+        if playingCue {
+            if let waitingReply { stop(speechID: waitingReply.id, reportStopped: false) }
+        } else {
+            stop(reportStopped: false)
+        }
     }
     public func markMissed(replyID: String) { if !heardReplies.contains(replyID) { missedReplies.insert(replyID) } }
     private func emit(_ state: String, index: Int64) {
@@ -121,9 +158,17 @@ import Observation
     }
     private func finish() {
         guard let id = speechID else { return }
+        let waiting = waitingReply; waitingReply = nil
         if let replyID, nextIndex > 0 { missedReplies.remove(replyID); heardReplies.insert(replyID) }
         output.stop(); session.releasePlayback(); activeSpeechID = nil; speechID = nil; replyID = nil; sentence = nil
         drained(id)
+        if let waiting {
+            begin(speechID: waiting.id, replyID: waiting.replyID)
+            for clip in waiting.clips {
+                append(speechID: waiting.id, replyID: waiting.replyID, index: clip.index, text: clip.text, pcm: clip.pcm)
+            }
+            if let last = waiting.lastIndex { end(speechID: waiting.id, replyID: waiting.replyID, lastIndex: last) }
+        }
     }
 }
 

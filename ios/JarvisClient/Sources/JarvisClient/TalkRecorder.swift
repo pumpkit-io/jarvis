@@ -70,6 +70,18 @@ public extension TalkAudioSession {
     }
 }
 
+func pcm16Level(_ pcm: Data) -> Double {
+    let samples = pcm.count / 2
+    guard samples > 0 else { return 0 }
+    let energy = pcm.withUnsafeBytes { raw in
+        (0..<samples).reduce(0.0) { sum, index in
+            let sample = Double(Int16(littleEndian: raw.loadUnaligned(fromByteOffset: index * 2, as: Int16.self))) / 32_768
+            return sum + sample * sample
+        }
+    }
+    return (energy / Double(samples)).squareRoot()
+}
+
 /// The frame bound is independent of the UI timer and of scheduling delays on the main actor.
 public final class TalkPCMBuffer: @unchecked Sendable {
     public static let maximumBytes = 9_600_000
@@ -84,16 +96,7 @@ public final class TalkPCMBuffer: @unchecked Sendable {
             guard !closed else { return false }
             let count = min(Self.maximumBytes - data.count, bytes.count - bytes.count % 2)
             data.append(bytes.prefix(count))
-            if count > 0 {
-                currentLevel = bytes.withUnsafeBytes { raw in
-                    var energy = 0.0
-                    for offset in stride(from: 0, to: count, by: 2) {
-                        let sample = Double(Int16(littleEndian: raw.loadUnaligned(fromByteOffset: offset, as: Int16.self))) / 32768
-                        energy += sample * sample
-                    }
-                    return sqrt(energy / Double(count / 2))
-                }
-            }
+            if count > 0 { currentLevel = pcm16Level(bytes.prefix(count)) }
             if data.count == Self.maximumBytes { closed = true; return true }
             return false
         }

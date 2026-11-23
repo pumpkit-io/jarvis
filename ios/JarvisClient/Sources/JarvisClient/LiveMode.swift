@@ -141,7 +141,7 @@ import Observation
             // A paused stream may still be sending its last frame; this one goes after it.
             await previous?.value
             for await frame in stream {
-                self?.level = Self.rms(frame)
+                self?.level = pcm16Level(frame)
                 await sendAudio(frame)
             }
         }
@@ -152,18 +152,6 @@ import Observation
     private func pauseCapture() {
         capture.stop(); frames?.finish(); frames = nil
         streaming?.cancel(); level = 0
-    }
-
-    nonisolated static func rms(_ pcm: Data) -> Double {
-        let samples = pcm.count / 2
-        guard samples > 0 else { return 0 }
-        let energy = pcm.withUnsafeBytes { raw in
-            (0..<samples).reduce(0.0) { sum, index in
-                let sample = Double(Int16(littleEndian: raw.loadUnaligned(fromByteOffset: index * 2, as: Int16.self))) / 32_768
-                return sum + sample * sample
-            }
-        }
-        return (energy / Double(samples)).squareRoot()
     }
 
     private func show(_ text: String?, for seconds: Double? = nil) {

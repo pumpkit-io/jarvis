@@ -68,6 +68,7 @@ public actor HubClient {
     private var running = false
     private var playing = false
     private var activeSpeechID: String?
+    private var cueSpeechID: String?
     private var drainingSpeechID: String?
     private var pathTask: Task<Void, Never>?
     private var handover = false
@@ -285,14 +286,20 @@ public actor HubClient {
     public func reportPlayback(_ command: HubCommand) async throws {
         guard command.type == "playback_report", handover, let socket,
               case .string(let speechID) = command.payload["speech_id"],
-              foreground ? speechID == activeSpeechID : playing && speechID == drainingSpeechID else { throw HubProtocolError.notConnected }
+              foreground ? speechID == activeSpeechID || speechID == cueSpeechID
+                         : playing && speechID == drainingSpeechID else { throw HubProtocolError.notConnected }
         guard results[command.id] == nil else { return }
         let data = try encodedCommand(command)
         try retain(command, data: data)
         let owner = generation
         do {
             try await socket.send(pendingData[command.id] ?? data)
-            if generation == owner { startRetryDeadline(command.id, owner: owner) }
+            if generation == owner {
+                if cueSpeechID == speechID, command.payload["state"] == .string("finished") || command.payload["state"] == .string("stopped") {
+                    cueSpeechID = nil
+                }
+                startRetryDeadline(command.id, owner: owner)
+            }
         } catch {
             if generation == owner { await socket.close() }
             throw error
@@ -397,7 +404,7 @@ public actor HubClient {
         cancelRetries(); dropSocketBoundCommands()
         keepalive?.cancel(); keepalive = nil; waitingToRetry = false
         if let activeSpeechID { continuation.yield(.speechConnectionEnded(activeSpeechID)) }
-        let old = socket; socket = nil; handover = false; displayReady = false; presenceID = nil; activeSpeechID = nil
+        let old = socket; socket = nil; handover = false; displayReady = false; presenceID = nil; activeSpeechID = nil; cueSpeechID = nil
         presenceTimeout?.cancel(); presenceTimeout = nil
         presenceWaiter?.resume(); presenceWaiter = nil
         await old?.close()
@@ -517,6 +524,7 @@ public actor HubClient {
                                   event.integer("sample_width") == 2, let id = event.string("speech_id") else { throw HubProtocolError.malformedAudio }
                             if !foreground, id != drainingSpeechID { await retire(); return }
                             speechID = id; speechReplyID = event.string("reply_id"); activeSpeechID = id; nextClip = 0
+                            if event.string("cue") != nil { cueSpeechID = id }
                         case .speechClip:
                             guard event.string("speech_id") == speechID, event.string("reply_id") == speechReplyID, event.integer("index") == nextClip,
                                   let length = event.integer("byte_length"), length >= 0,
@@ -526,6 +534,7 @@ public actor HubClient {
                             guard event.string("speech_id") == speechID, event.string("reply_id") == speechReplyID, event.integer("last_clip_index") == nextClip - 1 else { throw HubProtocolError.malformedAudio }
                         case .speechStop:
                             guard event.string("speech_id") == speechID, event.string("reply_id") == speechReplyID else { throw HubProtocolError.malformedAudio }
+                            if cueSpeechID == speechID { cueSpeechID = nil }
                             speechID = nil; speechReplyID = nil
                         default: break
                         }
@@ -545,7 +554,7 @@ public actor HubClient {
                 cancelRetries(); dropSocketBoundCommands()
                 keepalive?.cancel(); keepalive = nil
                 if let activeSpeechID { continuation.yield(.speechConnectionEnded(activeSpeechID)) }
-                socket = nil; handover = false; displayReady = false; presenceID = nil; activeSpeechID = nil
+                socket = nil; handover = false; displayReady = false; presenceID = nil; activeSpeechID = nil; cueSpeechID = nil
                 presenceTimeout?.cancel(); presenceTimeout = nil
                 presenceWaiter?.resume(); presenceWaiter = nil
                 if error is DecodingError || (error as? HubProtocolError) == .malformedAudio {
