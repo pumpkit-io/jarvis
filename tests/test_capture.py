@@ -12,9 +12,9 @@ import pytest
 
 from jarvis_hub.voice.clips import ClipSettings, ClipStore
 from jarvis_hub.voice.engines import NoEchoCancellation, ReferenceBuffer, WebRtcEchoCancellation
-from jarvis_hub.voice.input import Capture, Engines, Listening, Push
+from jarvis_hub.voice.input import UPLINK_JITTER_S, Capture, Engines, Listening, Push, UplinkFrames
 from jarvis_hub.voice.player import Samples
-from jarvis_hub.voice.state import Heard
+from jarvis_hub.voice.state import Heard, WakeWord
 from tests.fakes import until
 from tests.test_input_pipeline import Everyone, LoudVad, MarkerWake, ScriptedStt, ScriptedTurn
 
@@ -1412,3 +1412,100 @@ async def test_remote_resume_forgets_streaming_detector_context_on_its_worker(de
         capture.close()
         collecting.cancel()
         await asyncio.gather(collecting, return_exceptions=True)
+
+
+def uplinked(frames: int, value: int = 0) -> bytes:
+    return np.full(frames * FRAME, value, "<i2").tobytes()
+
+
+async def wake_at(capture: Capture) -> float:
+    async with asyncio.timeout(1):
+        async for event in capture.events():
+            if isinstance(event, WakeWord):
+                return event.at
+    raise AssertionError("no Wake word")
+
+
+async def test_uplinked_frames_are_stamped_by_sample_count_until_a_gap_re_anchors_them() -> None:
+    now = [10.0]
+    source = UplinkFrames(clock=lambda: now[0])
+    capture = Capture(lambda: engines(CountingEcho()), Listening(min_speech_db=0), lambda row: None,
+                      lambda text: None, source=source, backlog_s=10)
+    capture.start()
+    try:
+        await until(capture.ready.is_set)
+        # The first message's last frame was captured as it arrived.
+        source.feed(uplinked(8))
+        # Late by network jitter only: its frames follow the first by sample count, not by arrival.
+        now[0] = 10.3
+        source.feed(uplinked(8, value=2000))
+        assert await wake_at(capture) == pytest.approx(10.08)
+        # A pause in the stream: the next frames are stamped from their own arrival.
+        now[0] = 20.0
+        source.feed(uplinked(8, value=2000))
+        assert await wake_at(capture) == pytest.approx(20.0)
+    finally:
+        capture.close()
+
+
+def test_uplinked_frames_keep_sample_count_spacing_when_on_time_messages_follow_a_delayed_one() -> None:
+    now, stamps = [10.05], list[float]()
+    source = UplinkFrames(clock=lambda: now[0])
+    source.open(lambda pcm, at: stamps.append(at))
+    # The anchoring message was delayed, so the on-time ones after it arrive early, within the tolerance.
+    source.feed(uplinked(8))
+    for arrival in (10.08, 10.16, 10.26, 10.32, 10.40, 10.56):
+        now[0] = arrival
+        source.feed(uplinked(8))
+    assert np.diff(stamps) == pytest.approx([0.01] * (len(stamps) - 1))
+
+
+def test_uplinked_frames_drop_a_backlog_a_stall_releases_and_keep_the_stream_on_schedule() -> None:
+    now, stamps = [10.0], list[float]()
+    source = UplinkFrames(clock=lambda: now[0])
+    source.open(lambda pcm, at: stamps.append(at))
+    source.feed(uplinked(8))
+    # A network stall held a second of audio, which then arrives at once.
+    now[0] = 11.08
+    for _ in range(12):
+        source.feed(uplinked(8))
+    now[0] = 11.16
+    source.feed(uplinked(8))
+    # The burst's first message re-anchors; what lies beyond the tolerance is dropped, and the stream goes on in time.
+    expected = [9.93 + 0.01 * i for i in range(8)] + [11.01 + 0.01 * i for i in range(24)]
+    assert stamps == pytest.approx(expected)
+
+
+def test_uplinked_frames_from_a_fast_phone_clock_drop_one_message_at_a_time() -> None:
+    now, stamps, pushed = [10.0], list[float](), list[int]()
+    source = UplinkFrames(clock=lambda: now[0])
+    source.open(lambda pcm, at: stamps.append(at))
+    # Each 80 ms message arrives 70 ms after the last.
+    for i in range(100):
+        now[0] = 10.0 + 0.07 * i
+        before = len(stamps)
+        source.feed(uplinked(8))
+        pushed.append(len(stamps) - before)
+        assert stamps[-1] <= now[0] + UPLINK_JITTER_S + 1e-9
+    assert 0 in pushed
+    assert all(a or b for a, b in zip(pushed, pushed[1:]))
+    assert np.diff(stamps) == pytest.approx([0.01] * (len(stamps) - 1))
+
+
+async def test_uplinked_frames_are_dropped_rather_than_queued_while_the_capture_thread_falls_behind() -> None:
+    notices, wake = list[str](), BlockingWake()
+    now = [10.0]
+    source = UplinkFrames(clock=lambda: now[0])
+    capture = Capture(lambda: engines(CountingEcho(), wake), Listening(), lambda row: None, notices.append,
+                      source=source, backlog_s=0.5)
+    capture.start()
+    try:
+        await until(capture.ready.is_set)
+        for _ in range(50):
+            now[0] += 0.1
+            source.feed(uplinked(10, value=3))
+        await until(lambda: any("falling behind" in n for n in notices))
+        wake.release.set()
+        assert len([n for n in notices if "falling behind" in n]) == 1
+    finally:
+        capture.close()

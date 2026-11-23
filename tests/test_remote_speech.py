@@ -12,6 +12,7 @@ from jarvis_hub.door import Door
 from jarvis_hub.event_log import EventLog, EventOutput
 from jarvis_hub.hub import Hub, Line
 from jarvis_hub.pairing import PairingResult, PairingStore
+from jarvis_hub.voice.live import LiveInputs
 from jarvis_hub.voice.speech import Speech
 from jarvis_hub.voice.voice_mode import VoiceMode
 from jarvis_hub.voice.player import Samples
@@ -81,7 +82,7 @@ async def test_spoken_reply_has_ordered_private_pcm_and_reported_playback(tmp_pa
 
 
 @asynccontextmanager
-async def remote_rig(tmp_path: Path, backend: FakeBackend | None = None, voice: VoiceMode | None = None, begin_entered: asyncio.Event | None = None, tts: FakeTts | None = None, local: RecordingPlayer | None = None, focus_entered: asyncio.Event | None = None) -> AsyncGenerator[tuple[aiohttp.ClientSession, Door, Hub, EventLog, FakeBackend, list[PairingResult], PairingStore]]:
+async def remote_rig(tmp_path: Path, backend: FakeBackend | None = None, voice: VoiceMode | None = None, begin_entered: asyncio.Event | None = None, tts: FakeTts | None = None, local: RecordingPlayer | None = None, focus_entered: asyncio.Event | None = None, live: Callable[[VoiceMode], LiveInputs] | None = None) -> AsyncGenerator[tuple[aiohttp.ClientSession, Door, Hub, EventLog, FakeBackend, list[PairingResult], PairingStore]]:
     clock, metrics = FakeClock(), RecordingMetrics()
     with EventLog(tmp_path / 'events.db') as log, PairingStore(tmp_path / 'pairing.db') as pairing:
         phones = [pairing.exchange(pairing.create_code('https://mac.example.ts.net'), name, 'iphone') for name in ('One', 'Two')]
@@ -95,7 +96,8 @@ async def remote_rig(tmp_path: Path, backend: FakeBackend | None = None, voice: 
             adapter.focus_entered = focus_entered
         if begin_entered is not None:
             adapter.begin_entered = begin_entered
-        door = Door(enabled=True, port=0, health=hub.health, pairing=pairing, hub=adapter, log=log, revocation_interval=.005)
+        door = Door(enabled=True, port=0, health=hub.health, pairing=pairing, hub=adapter, log=log, revocation_interval=.005,
+                    live=live(voice) if live is not None and voice is not None else None)
         if voice is not None:
             voice.start()
         else:

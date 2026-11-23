@@ -588,6 +588,51 @@ class Microphone:
             stream.close()
 
 
+# Arriving later than this after its frames were due means the stream paused, not network jitter.
+UPLINK_GAP_S = 0.5
+# Arriving earlier than this before its frames were due is a held-back burst, not network jitter.
+UPLINK_JITTER_S = 0.1
+
+
+class UplinkFrames:
+    """An iPhone Client's microphone, fed with the 16 kHz mono PCM16 its socket uplinks, stamped by sample count
+    from an anchor set on the first message and after a pause. A held-back burst is dropped, not heard late."""
+
+    def __init__(self, clock: Callable[[], float] = time.perf_counter) -> None:
+        self._clock = clock
+        self._push: Push | None = None
+        self._anchor: float | None = None
+        self._samples = 0
+        self._last = float("-inf")
+
+    def open(self, push: Push) -> None:
+        self._anchor = None
+        self._push = push
+
+    def close(self) -> None:
+        self._push = None
+
+    def feed(self, pcm: bytes) -> None:
+        """Pushes each whole 10 ms frame in `pcm`, signed 16-bit little-endian samples, on the caller's thread."""
+        push = self._push
+        if push is None:
+            return
+        samples = np.frombuffer(pcm, "<i2")
+        frames = len(samples) // FRAME
+        arrived = self._clock()
+        late = None if self._anchor is None else arrived - self._anchor - (self._samples + frames * FRAME) / SAMPLE_RATE
+        if late is None or late > UPLINK_GAP_S:
+            self._anchor, self._samples = arrived - frames * FRAME / SAMPLE_RATE, 0
+        elif late < -UPLINK_JITTER_S:
+            return
+        assert self._anchor is not None
+        for i in range(frames):
+            self._samples += FRAME
+            # A reopened stream may anchor just before the last stamp of the one it follows.
+            self._last = max(self._last, self._anchor + self._samples / SAMPLE_RATE)
+            push(samples[i * FRAME:(i + 1) * FRAME], self._last)
+
+
 @dataclass(frozen=True)
 class _Capture:
     on: bool
@@ -653,8 +698,11 @@ class Capture:
         clips: ClipStore | None = None,
         clock: Callable[[], float] = time.perf_counter,
         on_close: Callable[[], None] | None = None,
+        mac_notices: bool = True,
     ) -> None:
         self._on_close = on_close
+        # The ready and silent-microphone notices speak of the Mac's own microphone.
+        self._mac_notices = mac_notices
         self._clock = clock
         self._trace_frames = 0
         self._max_delay_ms = 0.0
@@ -845,7 +893,8 @@ class Capture:
         pipeline = fresh_pipeline()
         self.ready.set()
         self._on_loop(self._record, {"kind": "ears_loaded", "load_ms": round((time.perf_counter() - began) * 1000)})
-        self._on_loop(self._notice, 'Listening ready: waiting for "Hey Jarvis".')
+        if self._mac_notices:
+            self._on_loop(self._notice, 'Listening ready: waiting for "Hey Jarvis".')
         silent = 0
         epoch = 0
         processed_frame = 0
@@ -908,7 +957,7 @@ class Capture:
                 continue
             processed_frame = item.sequence
             silent = silent + 1 if item.raw_silent else 0
-            if silent == round(SILENT_MIC_S * 100):
+            if silent == round(SILENT_MIC_S * 100) and self._mac_notices:
                 self._on_loop(
                     self._notice,
                     "The microphone gives only silence. If macOS has not allowed it, turn on your terminal app in "

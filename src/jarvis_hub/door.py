@@ -26,6 +26,11 @@ from jarvis_hub.pairing import PairedClient, PairingError, PairingStore
 
 if TYPE_CHECKING:
     from jarvis_hub.hub import Line
+    from jarvis_hub.voice.live import LiveInput, LiveInputs
+
+# Uplink audio is whole 10 ms frames of 16 kHz mono PCM16, at most 100 ms a message.
+UPLINK_FRAME_BYTES = 320
+UPLINK_MAX_BYTES = 3200
 
 
 class Conversation(Protocol):
@@ -64,6 +69,8 @@ class _Connection:
     writer: asyncio.Task[None] | None = None
     closing: bool = False
     player: RemotePlayer | None = None
+    # Live mode belongs to the socket: None until it turns Live mode on.
+    live: LiveInput | None = None
 
 
 class _SpeechTransport:
@@ -103,9 +110,11 @@ class Door:
         hub: Conversation | None = None, log: EventLog | None = None, revocation_interval: float = 0.25,
         on_replay: Callable[[str], None] | None = None, now: Callable[[], float] = time.perf_counter,
         transcription: BufferTranscriber | None = None, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-        wall: Callable[[], float] = time.time,
+        wall: Callable[[], float] = time.time, live: LiveInputs | None = None,
     ) -> None:
         self._enabled = enabled
+        # None without voice mode, where Live mode is unavailable.
+        self._live = live
         self._host = host
         self._configured_port = port
         self._health = health
@@ -253,6 +262,7 @@ class Door:
 
     async def _retire(self, connection: _Connection, code: int) -> None:
         connection.closing = True
+        self._stop_live(connection)
         if connection.subscription is not None and self._log is not None:
             self._log.unsubscribe(connection.subscription)
             connection.subscription = None
@@ -306,6 +316,12 @@ class Door:
         finally:
             frames = ()
             frame = None
+
+    @staticmethod
+    def _stop_live(connection: _Connection) -> None:
+        live, connection.live = connection.live, None
+        if live is not None:
+            live.close()
 
     @staticmethod
     def _upload_response(command_id: str, result: dict[str, Any]) -> web.Response:
@@ -560,8 +576,12 @@ class Door:
                         result = self._command_error("invalid_payload", "Expected a valid command envelope")
                     self._enqueue(connection, result)
                 elif message.type == WSMsgType.BINARY:
-                    await self._retire(connection, 1002)
-                    break
+                    data = cast(bytes, message.data)
+                    if (connection.live is None or not data or len(data) > UPLINK_MAX_BYTES
+                            or len(data) % UPLINK_FRAME_BYTES):
+                        await self._retire(connection, 1002)
+                        break
+                    connection.live.feed(data)
         finally:
             await self._retire(connection, 1000)
         return socket
@@ -702,6 +722,18 @@ class Door:
                     result = rejected("reset_failed", "Could not delete the saved conversation; try again")
                 else:
                     result = {"ok": True, "result": {"status": "reset"}}
+            elif kind == "set_live":
+                on = payload.get("on")
+                if type(on) is not bool or set(payload) != {"on"} or connection.client.kind != "iphone":
+                    raise ValueError("on must be a boolean, from an iPhone Client")
+                if self._live is None:
+                    result = rejected("voice_unavailable", "Live mode needs Jarvis in voice mode on the Mac")
+                else:
+                    if not on:
+                        self._stop_live(connection)
+                    elif connection.live is None:
+                        connection.live = self._live.open(connection.client.id)
+                    result = {"ok": True, "result": {"on": on}}
             elif kind == "acknowledge":
                 seq = sequence(payload.get("seq"))
                 if seq > self._log.high_water:

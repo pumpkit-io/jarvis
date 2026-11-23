@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 from collections.abc import AsyncIterator, Callable, Coroutine, MutableMapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, TextIO
@@ -38,7 +38,8 @@ from jarvis_hub.talker import talker_spec
 from jarvis_hub.voice import language
 from jarvis_hub.voice.clips import ClipSettings, ClipStore
 from jarvis_hub.voice.engines import EngineChoice
-from jarvis_hub.voice.input import Listening
+from jarvis_hub.voice.input import Engines, Listening
+from jarvis_hub.voice.live import LiveInputs
 from jarvis_hub.voice.player import NoLocalPlayer, Player, Samples, SoundPlayer
 from jarvis_hub.voice.speech import Speech, SpeechClock
 from jarvis_hub.voice.transcription import TranscriptionService
@@ -436,8 +437,14 @@ async def voice_mode(
             preconnect_orchestrator=True,
             on_model_ready=lambda: (output.notice("Model ready."), model_ready.set()),
         )
+        live = None
+        if transcription is not None:
+            service = transcription
+            # iOS cancels echo on the phone, so its stream gets none here.
+            live = LiveInputs(conversation, lambda: _load_engines(replace(choice, aec="off"), service), listening(voice),
+                              metrics.record, output.notice, clock=clock.now)
         door = Door(enabled=settings.remote, port=settings.remote_port, health=hub.health, pairing=pairing, hub=hub, log=log, now=clock.now,
-                    transcription=transcription, sleep=clock.sleep)
+                    transcription=transcription, sleep=clock.sleep, live=live)
         try:
             output.notice("Model loading.")
             await hub.start()
@@ -489,6 +496,12 @@ def _open_listener(
         lambda: load_engines(choice, transcription=service), settings, record, notice, clips=clips,
         on_close=service.close if owned else None,
     )
+
+
+def _load_engines(choice: EngineChoice, transcription: TranscriptionService) -> Engines:
+    from jarvis_hub.voice import engines
+
+    return engines.load_engines(choice, transcription=transcription)
 
 
 def _open_player(rate: int, on_played: PlayedTap) -> Player:
