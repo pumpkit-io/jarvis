@@ -16,7 +16,23 @@ public extension TalkAudioSession {
 @MainActor public final class NativeTalkAudioSession: TalkAudioSession {
     private enum Owner { case recording, playback }
     private var owner: Owner?
+    /// While Live mode captures, replies play in its play-and-record session instead of switching it to playback.
+    private var live = false
     public init() {}
+    public func activateLive() throws {
+        guard owner != .recording else { throw HubProtocolError.invalidFrame }
+        #if os(iOS)
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
+        try session.setActive(true)
+        #endif
+        live = true
+    }
+    public func releaseLive() {
+        guard live else { return }
+        live = false
+        if owner == nil { deactivate() }
+    }
     public func activate() throws {
         guard owner == nil || owner == .recording else { throw HubProtocolError.invalidFrame }
         #if os(iOS)
@@ -29,6 +45,7 @@ public extension TalkAudioSession {
     public func activatePlayback() throws {
         if owner == .playback { return }
         guard owner == nil || owner == .playback else { throw HubProtocolError.invalidFrame }
+        if live { owner = .playback; return }
         #if os(iOS)
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.playback, mode: .spokenAudio, options: [])
@@ -46,6 +63,7 @@ public extension TalkAudioSession {
     }
     private func deactivate() {
         owner = nil
+        guard !live else { return }
         #if os(iOS)
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         #endif
@@ -137,9 +155,9 @@ public final class TalkPCMBuffer: @unchecked Sendable {
     // Core Audio invokes this closure on its render thread, outside the main actor.
     nonisolated static func makeTapHandler(buffer: TalkPCMBuffer,
                                           limitReached: @escaping @MainActor @Sendable () -> Void) throws -> AVAudioNodeTapBlock {
-        guard let target = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000,
-                                         channels: 1, interleaved: true) else { throw HubProtocolError.invalidFrame }
-        let sink = NativePCMConverter(target: target, buffer: buffer, limitReached: limitReached)
+        let sink = try NativePCMConverter { bytes in
+            if buffer.append(bytes) { Task { @MainActor in limitReached() } }
+        }
         return { pcm, _ in sink.receive(pcm) }
     }
     public func stop() {
@@ -149,14 +167,15 @@ public final class TalkPCMBuffer: @unchecked Sendable {
     }
 }
 
-private final class NativePCMConverter: @unchecked Sendable {
+/// Converts the microphone's hardware format to 16 kHz mono PCM16LE on the render thread.
+final class NativePCMConverter: @unchecked Sendable {
     private var converter: AVAudioConverter?
     let target: AVAudioFormat
-    let buffer: TalkPCMBuffer
-    let limitReached: @MainActor @Sendable () -> Void
-    init(target: AVAudioFormat, buffer: TalkPCMBuffer,
-         limitReached: @escaping @MainActor @Sendable () -> Void) {
-        self.target = target; self.buffer = buffer; self.limitReached = limitReached
+    let deliver: @Sendable (Data) -> Void
+    init(deliver: @escaping @Sendable (Data) -> Void) throws {
+        guard let target = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000,
+                                         channels: 1, interleaved: true) else { throw HubProtocolError.invalidFrame }
+        self.target = target; self.deliver = deliver
     }
     func receive(_ pcm: AVAudioPCMBuffer) {
         if converter == nil {
@@ -173,7 +192,6 @@ private final class NativePCMConverter: @unchecked Sendable {
             supplied = true; status.pointee = .haveData; return pcm
         }
         guard error == nil, let samples = output.int16ChannelData?[0] else { return }
-        let bytes = Data(bytes: samples, count: Int(output.frameLength) * 2)
-        if buffer.append(bytes) { Task { @MainActor in limitReached() } }
+        deliver(Data(bytes: samples, count: Int(output.frameLength) * 2))
     }
 }
