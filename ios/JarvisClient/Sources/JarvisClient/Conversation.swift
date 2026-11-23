@@ -35,6 +35,10 @@ public struct ConversationProjection: Sendable {
         } else { events.append(event); apply(event) }
     }
 
+    public mutating func ingest(contentsOf events: [HubEvent]) {
+        for event in events { ingest(event) }
+    }
+
     private mutating func apply(_ event: HubEvent) {
         let id: String
         let speaker: ConversationRow.Speaker

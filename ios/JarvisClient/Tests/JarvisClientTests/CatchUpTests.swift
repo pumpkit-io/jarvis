@@ -63,3 +63,21 @@ private func monthOfTurns(_ turns: Int) -> [String] {
     #expect(single == [102])
     await client.stop()
 }
+
+@Test func replayCutShortStillShowsTheEventsItCached() async throws {
+    let transport = FakeTransport()
+    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }), sleep: { _ in })
+    await client.start()
+    try await eventually { await transport.socket(0) != nil }
+    let socket = try #require(await transport.socket(0))
+    for frame in monthOfTurns(2).prefix(4) { await socket.text(frame) }
+    socket.input.finish(throwing: URLError(.networkConnectionLost))
+    var shown: [Int64] = []
+    for await update in client.updates {
+        if case .events(let events) = update { shown = events.map(\.seq); break }
+    }
+    #expect(shown == [1, 2, 3, 4])
+    try await eventually { await transport.cursors.count == 2 }
+    #expect(await transport.cursors.last == 4)
+    await client.stop()
+}

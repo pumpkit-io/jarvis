@@ -400,6 +400,9 @@ public actor HubClient {
         var failures = 0
         while running, foreground, generation == owner, !Task.isCancelled {
             var current: (any HubSocket)?
+            // Replayed events are already cached, so a socket ending mid-replay still shows what arrived.
+            var replayed: [HubEvent] = []
+            defer { if !replayed.isEmpty { continuation.yield(.events(replayed)) } }
             do {
                 continuation.yield(.replayStarted)
                 let opened = try await transport.connect(cursor)
@@ -472,6 +475,7 @@ public actor HubClient {
                         try await cache(nil, replay.through_seq)
                         guard generation == owner else { return }
                         cursor = replay.through_seq; handover = true
+                        if !replayed.isEmpty { continuation.yield(.events(replayed)); replayed = [] }
                         continuation.yield(.replay(replay))
                         guard foreground else { await retire(); return }
                         if desiredSilence != nil {
@@ -510,10 +514,11 @@ public actor HubClient {
                             if desiredSilence == nil, let status { continuation.yield(.silence(status.silence, pending: false, revision: silenceRevision)) }
                             if handover { refreshState() }
                         }
-                        continuation.yield(.event(event))
+                        if handover { continuation.yield(.event(event)) } else { replayed.append(event) }
                     }
                 }
             } catch {
+                if !replayed.isEmpty { continuation.yield(.events(replayed)); replayed = [] }
                 guard generation == owner else { await current?.close(); return }
                 cancelRetries(); dropSocketBoundCommands()
                 keepalive?.cancel(); keepalive = nil
