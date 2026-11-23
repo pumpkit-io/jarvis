@@ -8,6 +8,7 @@ import json
 import statistics
 import subprocess
 import time
+from pathlib import Path
 
 import numpy as np
 import psutil
@@ -35,6 +36,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--stt", choices=["parakeet", "mlx-whisper"], default="parakeet")
     ap.add_argument("--cache-limit-mb", type=int, default=256)
+    ap.add_argument("--tts", default="kokoro", help="kokoro, or a Qwen3-TTS Base checkpoint cloning assets/voice")
     args = ap.parse_args()
     import mlx.core as mx
 
@@ -54,15 +56,29 @@ def main() -> None:
     stt(speech)
     stages.append(snapshot(f"+ STT ({stt.name})", mx))
 
-    from kokoro_mlx import KokoroTTS
-    from common import prepare_tts
+    if args.tts == "kokoro":
+        from kokoro_mlx import KokoroTTS
+        from common import prepare_tts
 
-    prepare_tts()
+        prepare_tts()
 
-    tts = KokoroTTS.from_pretrained("mlx-community/Kokoro-82M-bf16")
-    tts.generate("I have opened the pull request on pumpkit and checks are running.", voice="am_liam")
-    tts.generate("Ho aperto la pull request su pumpkit e i controlli sono partiti.", voice="im_nicola")
-    stages.append(snapshot("+ TTS (kokoro-mlx, en + it voices)", mx))
+        kokoro = KokoroTTS.from_pretrained("mlx-community/Kokoro-82M-bf16")
+
+        def say(text: str, lang: str) -> None:
+            kokoro.generate(text, voice={"en": "am_liam", "it": "im_nicola"}[lang])
+    else:
+        from mlx_audio.tts.utils import load_model
+        from bench_qwen_tts import REFERENCES
+
+        qwen = load_model(args.tts)
+
+        def say(text: str, lang: str) -> None:
+            path, code, transcript = REFERENCES[lang]
+            list(qwen.generate(text=text, ref_audio=str(path), ref_text=transcript, lang_code=code))
+
+    say("I have opened the pull request on pumpkit and checks are running.", "en")
+    say("Ho aperto la pull request su pumpkit e i controlli sono partiti.", "it")
+    stages.append(snapshot(f"+ TTS ({args.tts}, en + it voices)", mx))
 
     from openwakeword.model import Model
     from openwakeword.vad import VAD
@@ -91,7 +107,7 @@ def main() -> None:
 
     for _ in range(3):
         stt(speech)
-        tts.generate("One more sentence to keep the buffers warm, sir.", voice="am_liam")
+        say("One more sentence to keep the buffers warm, sir.", "en")
     time.sleep(1)
     stages.append(snapshot("after warm reuse", mx))
 
@@ -100,7 +116,7 @@ def main() -> None:
     per_claude = statistics.median(feet) if feet else None
     audio = stages[-1]["footprint"]
     result = {
-        "stt": args.stt, "mlx_cache_limit_mb": args.cache_limit_mb, "stages": stages,
+        "stt": args.stt, "tts": args.tts, "mlx_cache_limit_mb": args.cache_limit_mb, "stages": stages,
         "mlx_peak_mb": round(mx.get_peak_memory() / 2**20),
         "claude_processes_seen": claudes, "claude_median_footprint_mb": per_claude,
         "audio_stack_footprint_mb": audio, "budget_mb": BUDGET_MB,
@@ -108,7 +124,7 @@ def main() -> None:
         "machine_total_mb": round(psutil.virtual_memory().total / 2**20),
     }
     print(json.dumps({k: v for k, v in result.items() if k != "claude_processes_seen"}, indent=2))
-    print(f"-> {write_result(f'memory-{args.stt}', result)}")
+    print(f"-> {write_result(f'memory-{args.stt}' + ("" if args.tts == "kokoro" else f"-{Path(args.tts).name}"), result)}")
 
 
 if __name__ == "__main__":

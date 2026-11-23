@@ -1,4 +1,4 @@
-"""The User's language, English or Italian, and the voice Jarvis answers in."""
+"""The User's language, English or Italian; each speech engine names the voice it answers in."""
 
 import re
 from functools import cache
@@ -7,9 +7,6 @@ from typing import Literal
 from lingua import Language, LanguageDetector, LanguageDetectorBuilder
 
 Lang = Literal["en", "it"]
-
-# American English only: never a British voice (bf_*, bm_*).
-VOICES: dict[Lang, str] = {"en": "am_liam", "it": "im_nicola"}
 
 # A single word needs more confidence: "Hello" scores 0.69 Italian.
 CONFIDENT = 0.8
@@ -76,6 +73,3 @@ def detect_language(text: str, previous: Lang) -> Lang:
     needed = CONFIDENT_ONE_WORD if len(text.split()) < 2 else CONFIDENT
     return _CODES[best.language] if best.value >= needed else previous
 
-
-def voice_for(lang: Lang) -> str:
-    return VOICES[lang]

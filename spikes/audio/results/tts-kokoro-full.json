@@ -1,0 +1,33 @@
+{
+  "engine": "kokoro",
+  "per_lang": {
+    "en": {
+      "short": {
+        "full_ms_p50": 105,
+        "rms_db_p50": -25.1
+      },
+      "one": {
+        "full_ms_p50": 209,
+        "rms_db_p50": -25.2
+      },
+      "two": {
+        "full_ms_p50": 291,
+        "rms_db_p50": -25.4
+      }
+    },
+    "it": {
+      "short": {
+        "full_ms_p50": 123,
+        "rms_db_p50": -22.1
+      },
+      "one": {
+        "full_ms_p50": 247,
+        "rms_db_p50": -22.3
+      },
+      "two": {
+        "full_ms_p50": 377,
+        "rms_db_p50": -22.8
+      }
+    }
+  }
+}

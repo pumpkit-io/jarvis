@@ -1,0 +1,93 @@
+{
+  "engine": "qwen3",
+  "model": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16",
+  "load_ms": 3012,
+  "model_sample_rate": 24000,
+  "temperature": null,
+  "seed": null,
+  "streaming_interval_s": 0.5,
+  "per_lang": {
+    "en": {
+      "first_call_ms": 1939,
+      "sentences": {
+        "short": {
+          "full_ms_p50": 1436,
+          "full_ms_max": 1445,
+          "rtf_p50": 1.02,
+          "rtf_max": 1.166,
+          "audio_seconds": 1.28,
+          "rms_db_p50": -23.8,
+          "speaker_similarity_to_reference_min": 0.972,
+          "speaker_similarity_between_runs_min": 0.978
+        },
+        "one": {
+          "full_ms_p50": 2452,
+          "full_ms_max": 2611,
+          "rtf_p50": 0.666,
+          "rtf_max": 0.706,
+          "audio_seconds": 3.92,
+          "rms_db_p50": -23.0,
+          "speaker_similarity_to_reference_min": 0.99,
+          "speaker_similarity_between_runs_min": 0.992
+        },
+        "two": {
+          "full_ms_p50": 3210,
+          "full_ms_max": 3221,
+          "rtf_p50": 0.645,
+          "rtf_max": 0.67,
+          "audio_seconds": 5.04,
+          "rms_db_p50": -22.6,
+          "speaker_similarity_to_reference_min": 0.991,
+          "speaker_similarity_between_runs_min": 0.996
+        }
+      },
+      "stream_first_chunk_ms": 710
+    },
+    "it": {
+      "first_call_ms": 1569,
+      "sentences": {
+        "short": {
+          "full_ms_p50": 1515,
+          "full_ms_max": 1599,
+          "rtf_p50": 0.902,
+          "rtf_max": 0.967,
+          "audio_seconds": 1.84,
+          "rms_db_p50": -21.5,
+          "speaker_similarity_to_reference_min": 0.977,
+          "speaker_similarity_between_runs_min": 0.984
+        },
+        "one": {
+          "full_ms_p50": 2730,
+          "full_ms_max": 2791,
+          "rtf_p50": 0.684,
+          "rtf_max": 0.708,
+          "audio_seconds": 3.76,
+          "rms_db_p50": -20.7,
+          "speaker_similarity_to_reference_min": 0.988,
+          "speaker_similarity_between_runs_min": 0.993
+        },
+        "two": {
+          "full_ms_p50": 3672,
+          "full_ms_max": 3855,
+          "rtf_p50": 0.66,
+          "rtf_max": 0.679,
+          "audio_seconds": 5.6,
+          "rms_db_p50": -19.8,
+          "speaker_similarity_to_reference_min": 0.988,
+          "speaker_similarity_between_runs_min": 0.992
+        }
+      },
+      "stream_first_chunk_ms": 495
+    }
+  },
+  "reference_rms_db": {
+    "en": -22.0,
+    "it": -19.8
+  },
+  "memory_mb": {
+    "rss": 265,
+    "footprint": 3164.0,
+    "mlx_active": 2478,
+    "mlx_peak": 6962
+  }
+}

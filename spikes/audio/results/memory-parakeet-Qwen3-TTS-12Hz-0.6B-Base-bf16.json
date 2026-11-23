@@ -1,0 +1,99 @@
+{
+  "stt": "parakeet",
+  "tts": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16",
+  "mlx_cache_limit_mb": 256,
+  "stages": [
+    {
+      "stage": "python + mlx",
+      "rss": 114,
+      "footprint": 80.0,
+      "mlx_active": 0,
+      "mlx_cache": 0
+    },
+    {
+      "stage": "+ STT (parakeet-mlx parakeet-tdt-0.6b-v3)",
+      "rss": 530,
+      "footprint": 1690.0,
+      "mlx_active": 1220,
+      "mlx_cache": 256
+    },
+    {
+      "stage": "+ TTS (mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16, en + it voices)",
+      "rss": 250,
+      "footprint": 4937.0,
+      "mlx_active": 3696,
+      "mlx_cache": 63
+    },
+    {
+      "stage": "+ openWakeWord hey_jarvis + Silero VAD",
+      "rss": 435,
+      "footprint": 4235.0,
+      "mlx_active": 3696,
+      "mlx_cache": 63
+    },
+    {
+      "stage": "+ Smart Turn v3.2 cpu",
+      "rss": 474,
+      "footprint": 4196.0,
+      "mlx_active": 3696,
+      "mlx_cache": 63
+    },
+    {
+      "stage": "+ WebRTC APM (livekit)",
+      "rss": 493,
+      "footprint": 4202.0,
+      "mlx_active": 3696,
+      "mlx_cache": 63
+    },
+    {
+      "stage": "after warm reuse",
+      "rss": 231,
+      "footprint": 4244.0,
+      "mlx_active": 3696,
+      "mlx_cache": 35
+    }
+  ],
+  "mlx_peak_mb": 7798,
+  "claude_processes_seen": [
+    {
+      "pid": 5100,
+      "footprint": 340.0,
+      "rss": 14
+    },
+    {
+      "pid": 31033,
+      "footprint": 346.0,
+      "rss": 43
+    },
+    {
+      "pid": 37281,
+      "footprint": 153.0,
+      "rss": 11
+    },
+    {
+      "pid": 37282,
+      "footprint": 162.0,
+      "rss": 12
+    },
+    {
+      "pid": 41424,
+      "footprint": 374.0,
+      "rss": 89
+    },
+    {
+      "pid": 58197,
+      "footprint": 343.0,
+      "rss": 261
+    },
+    {
+      "pid": 89091,
+      "footprint": 258.0,
+      "rss": 16
+    }
+  ],
+  "claude_median_footprint_mb": 340.0,
+  "audio_stack_footprint_mb": 4244.0,
+  "budget_mb": 4096,
+  "within_budget": false,
+  "machine_total_mb": 18432
+}

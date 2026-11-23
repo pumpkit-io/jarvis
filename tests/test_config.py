@@ -328,3 +328,27 @@ def test_remote_port_must_be_a_valid_tcp_port(checkout: Path, value: str) -> Non
 def test_remote_switch_requires_on_or_off(checkout: Path) -> None:
     with pytest.raises(ConfigError, match="JARVIS_REMOTE"):
         load_settings(checkout, environ={"JARVIS_REMOTE": "yes"})
+
+
+def test_jarvis_speaks_with_the_cloned_qwen3_voice_unless_kokoro_is_chosen(checkout: Path) -> None:
+    assert load_settings(checkout, environ={}).voice.tts_engine == "qwen3"
+    assert load_settings(checkout, environ={"JARVIS_TTS_ENGINE": "kokoro"}).voice.tts_engine == "kokoro"
+
+
+def test_text_mode_keeps_the_chosen_tts_engine_for_speak_and_the_iphone(checkout: Path) -> None:
+    ignored: list[str] = []
+    environ = {"JARVIS_TTS_ENGINE": "kokoro", "JARVIS_AEC": "maybe"}
+
+    settings = load_settings(checkout, environ=environ, ignore_voice=ignored.append)
+
+    assert settings.voice.tts_engine == "kokoro"
+    assert settings.voice.aec == "webrtc" and ignored and "JARVIS_AEC" in ignored[0]
+
+
+def test_text_mode_reports_an_unknown_tts_engine_and_falls_back_to_the_default(checkout: Path) -> None:
+    ignored: list[str] = []
+
+    settings = load_settings(checkout, environ={"JARVIS_TTS_ENGINE": "cloud"}, ignore_voice=ignored.append)
+
+    assert settings.voice.tts_engine == "qwen3"
+    assert ignored and "JARVIS_TTS_ENGINE" in ignored[0]

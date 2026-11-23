@@ -384,7 +384,7 @@ def test_text_only_launch_never_constructs_or_loads_audio_engines(tmp_path: Path
     monkeypatch.setattr(entry.shutil, "which", fake_cli)
     monkeypatch.setattr(entry, "load_settings", fake_settings)
     monkeypatch.setattr(entry, "SdkBackend", fake_backend)
-    monkeypatch.setattr(entry, "KokoroSynthesizer", unexpected_audio)
+    monkeypatch.setattr(entry, "make_synthesizer", unexpected_audio)
     monkeypatch.setattr(entry, "SoundPlayer", unexpected_audio)
     monkeypatch.setattr(entry, "_open_listener", unexpected_audio)
     monkeypatch.setattr(engines, "load_engines", unexpected_audio)
@@ -477,3 +477,46 @@ async def test_a_busy_remote_port_preserves_saved_tasks_for_the_next_launch(tmp_
         typist.end()
         await running
         await hub.close()
+
+
+@pytest.mark.parametrize(("argv", "engine"), [(["jarvis-hub"], "kokoro"), (["jarvis-hub", "--text", "--speak"], "qwen3")])
+def test_speaking_launches_build_the_configured_tts_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, argv: list[str], engine: str
+) -> None:
+    import sys
+    from dataclasses import replace
+    from typing import Any
+    import jarvis_hub.main as entry
+
+    config = settings(tmp_path)
+    config = replace(config, voice=replace(config.voice, tts_engine=engine))
+    built: list[str] = []
+    launched: dict[str, Any] = {}
+
+    def make(name: str) -> FakeTts:
+        built.append(name)
+        return FakeTts()
+
+    async def launch(**kwargs: Any) -> None:
+        launched.update(kwargs)
+
+    def fake_settings(*args: object, **kwargs: object) -> Settings:
+        return config
+
+    def fake_cli(_: str) -> str:
+        return "/fake/claude"
+
+    def fake_backend(_: str) -> FakeBackend:
+        return FakeBackend(FakeClock())
+
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(entry.shutil, "which", fake_cli)
+    monkeypatch.setattr(entry, "load_settings", fake_settings)
+    monkeypatch.setattr(entry, "SdkBackend", fake_backend)
+    monkeypatch.setattr(entry, "make_synthesizer", make)
+    monkeypatch.setattr(entry, "text_mode", launch)
+    monkeypatch.setattr(entry, "voice_mode", launch)
+    entry.main()
+
+    assert built == [engine]
+    assert isinstance((launched.get("ears") or launched["voice"]).tts, FakeTts)
