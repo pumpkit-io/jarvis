@@ -219,7 +219,7 @@ class VoiceMode:
         self._inputs: dict[str, AudioInput] = {TERMINAL: audio}
         self._listening: dict[str, asyncio.Task[None]] = {}
         self._running = False
-        # The Client whose input last reached the machine, which the voice rows name.
+        # The Client whose input last moved the machine, which rows from timers and playback name.
         self._client = TERMINAL
         # What else must be ready, beyond the voice, before the ready sound says Jarvis can take a request.
         self._ready_when = ready_when
@@ -322,7 +322,8 @@ class VoiceMode:
             await asyncio.wait(tasks)
 
     def add_input(self, client: str, audio: AudioInput) -> None:
-        """Listens to `client`'s audio too, from the machine's current capture and Barge-in settings on."""
+        """Starts listening to `client`'s audio alongside the other inputs. It starts with the capture, Barge-in
+        and suppression settings the other inputs have now."""
         if client in self._inputs:
             raise ValueError(f"Client {client} already has an audio input")
         self._inputs[client] = audio
@@ -373,9 +374,15 @@ class VoiceMode:
         return True
 
     async def close(self) -> None:
+        """Closes every input and shuts the machine down even when an input fails to close, then raises the first
+        such failure."""
         listening = list(self._listening.values())
+        failures: list[Exception] = []
         for client in list(self._inputs):
-            self.remove_input(client)
+            try:
+                self.remove_input(client)
+            except Exception as failure:
+                failures.append(failure)
         self._closed = True
         self._retire()
         pending = [task for task in [self._assessing, self._readying, *self._applying, *listening] if task is not None]
@@ -387,6 +394,8 @@ class VoiceMode:
             await self._recognition.close()
         self._bargein_log.close()
         await self._speech.close()
+        if failures:
+            raise failures[0]
 
     def _reply_audio(self, heard_at: float | None, owner: tuple[str, int] | None = None) -> None:
         now = self._clock.now()
@@ -416,11 +425,12 @@ class VoiceMode:
     async def _drive(self, interrupt: Callable[[], Awaitable[Any]]) -> None:
         while True:
             event = await self._next_event()
+            client: str | None = None
             if isinstance(event, _MicrophoneEvent):
                 if (self._remote_active or event.generation != self._microphone_generation
                         or self._inputs.get(event.client) is not event.source):
                     continue
-                self._client = event.client
+                client = event.client
                 event = event.event
             if isinstance(event, _Related):
                 if event.fragments is self._inflight and self.owns(event.owner.token) and event.epoch == self._epoch:
@@ -456,7 +466,7 @@ class VoiceMode:
                     before = self._voice.state
                     self._voice = Voice()
                     self._retire()
-                    self._transition(before, "idle", event)
+                    self._transition(before, "idle", event, client)
                 continue
             if isinstance(event, SpeechStarted):
                 if len(self._origins) >= 64:
@@ -476,7 +486,7 @@ class VoiceMode:
                         self._waiting.append(_Fragment(event, *origin))
                         self._start_assessment()
                     continue
-            for action in self._step(event):
+            for action in self._step(event, client):
                 await self._act(action, interrupt)
 
     def _origin(self, at: float | None) -> tuple[str, bool | None]:
@@ -640,7 +650,8 @@ class VoiceMode:
             self._lines.put_nowait(line)
         self._start_assessment()
 
-    def _step(self, event: Event) -> list[Action]:
+    def _step(self, event: Event, client: str | None = None) -> list[Action]:
+        """`client` names the input `event` came from; None for timers, playback and Announcements."""
         before_voice = self._voice
         before, woke_at = before_voice.state, before_voice.woke_at
         if isinstance(event, (ReplyAudio, ReplyDone)) and event.owner is not None and not self.owns(event.owner):
@@ -672,7 +683,7 @@ class VoiceMode:
         elif before_voice.barge is not None and self._voice.barge is None and after == before:
             self._debug_notice("voice: speech over Jarvis was no interruption")
         if after != before:
-            self._transition(before, after, event)
+            self._transition(before, after, event, client)
         # After capture: a turn that starts now keeps the speech of the Barge-in that stopped Jarvis.
         if (since := barge_in_from(self._voice, self._timing)) != self._barge_in_from:
             self._barge_in_from = since
@@ -701,7 +712,9 @@ class VoiceMode:
             return getting.result()
         return Tick(self._clock.now())
 
-    def _transition(self, before: VoiceState, after: VoiceState, event: Event) -> None:
+    def _transition(self, before: VoiceState, after: VoiceState, event: Event, client: str | None = None) -> None:
+        if client is not None:
+            self._client = client
         if after == "idle":
             self._idle.set()
         else:

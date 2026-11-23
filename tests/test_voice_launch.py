@@ -15,6 +15,7 @@ from jarvis_hub.config import RoleModel, Settings, VoiceSettings
 from jarvis_hub.main import Ears, timing, voice_mode
 from jarvis_hub.voice.engines import EngineChoice
 from jarvis_hub.voice.input import Listening
+from jarvis_hub.voice.language import Lang
 from jarvis_hub.voice.player import Samples
 from tests.fakes import FakeBackend, FakeClock, FakeSession, FakeTts, RecordingPlayer, ScriptedAudio, Text, until
 
@@ -36,6 +37,7 @@ class ScriptedMicrophone(ScriptedAudio):
         super().__init__(clock)
         self.started = self.closed = False
         self.ready = threading.Event()
+        self.record: Callable[[dict[str, Any]], None] = lambda row: None
 
     def start(self) -> None:
         self.started = True
@@ -46,6 +48,11 @@ class ScriptedMicrophone(ScriptedAudio):
 
     def reference(self, samples: Samples, rate: int) -> None:
         pass
+
+    def say(self, text: str, lang: Lang | None = None, *, limited: bool = False) -> None:
+        """Records the turn as Capture does, then reports it."""
+        self.record({"kind": "turn", "text": text})
+        super().say(text, lang, limited=limited)
 
 
 def settings(tmp_path: Path, voice: VoiceSettings = VoiceSettings()) -> Settings:
@@ -84,13 +91,12 @@ async def test_voice_mode_wakes_hears_answers_aloud_and_idles(tmp_path: Path, co
     microphone = ScriptedMicrophone(clock)
     player = RecordingPlayer()
     chosen: list[tuple[EngineChoice, Listening]] = []
-    recorders: list[Callable[[dict[str, Any]], None]] = []
 
     def open_listener(
         choice: EngineChoice, listening: Listening, record: Any, notice: Any, clips: Any
     ) -> ScriptedMicrophone:
         chosen.append((choice, listening))
-        recorders.append(record)
+        microphone.record = record
         return microphone
 
     def open_player(rate: int, on_played: Callable[[Samples, int], None]) -> RecordingPlayer:
@@ -122,7 +128,6 @@ async def test_voice_mode_wakes_hears_answers_aloud_and_idles(tmp_path: Path, co
     assert "Speech ready." in stderr.getvalue()
     microphone.wake()
     await until(lambda: microphone.capturing == [True])
-    recorders[0]({"kind": "turn", "text": "What time is it?"})
     microphone.say("What time is it?")
     await until(lambda: microphone.capturing == [True, False, True])
     clock.advance(3.0)

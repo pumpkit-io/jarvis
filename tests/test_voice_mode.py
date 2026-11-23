@@ -2772,3 +2772,39 @@ async def test_a_second_input_comes_and_goes_while_the_mac_listens_as_before(rig
     assert rig.states() == [*exchange[:4], *exchange[:4], "idle", *exchange, *exchange]
     clients = [r["client"] for r in rig.metrics.records if r["kind"] == "voice"]
     assert clients == ["terminal"] * 9 + ["phone"] * 5 + ["terminal"] * 5
+
+
+async def test_rows_after_a_phone_exchange_name_the_phone_despite_a_stray_mac_event(rig_for: MakeRig) -> None:
+    rig: Rig = await rig_for([Text("Merged, sir.")])
+    phone = ScriptedAudio(rig.clock)
+    rig.voice.add_input("phone", phone)
+
+    phone.wake()
+    phone.say("Merge it")
+    await until(lambda: rig.state == "follow_up")
+    rig.audio.emit(Heard("on the telly", None, rig.clock.now(), owner=-1))
+    await rig.settle()
+    await rig.advance(6)
+
+    assert [(r["to"], r["client"]) for r in rig.metrics.records if r["kind"] == "voice"] == [
+        ("listening", "phone"), ("thinking", "phone"), ("speaking", "phone"), ("follow_up", "phone"), ("idle", "phone"),
+    ]
+
+
+async def test_close_finishes_shutdown_when_an_input_fails_to_close(rig_for: MakeRig) -> None:
+    rig: Rig = await rig_for()
+
+    class Broken(ScriptedAudio):
+        def close(self) -> None:
+            super().close()
+            raise OSError("stream close failed")
+
+    broken, tablet = Broken(rig.clock), ScriptedAudio(rig.clock)
+    rig.voice.add_input("phone", broken)
+    rig.voice.add_input("tablet", tablet)
+
+    with pytest.raises(OSError, match="stream close failed"):
+        await rig.voice.close()
+
+    assert rig.audio.closed and broken.closed and tablet.closed
+    assert rig.player.closed
