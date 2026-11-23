@@ -5,10 +5,12 @@ The phone's Capture runs with marker-sample engines on its own thread; the Mac's
 
 import asyncio
 import threading
+import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 import numpy as np
@@ -27,7 +29,6 @@ from tests.test_input_pipeline import SPEECH, WAKE, Everyone, LoudVad, MarkerWak
 from tests.test_remote_speech import control, foreground, remote_rig
 
 FRAME = 160
-READY = 'Listening ready: waiting for "Hey Jarvis".'
 
 
 def pcm(frames: int, value: int = 0) -> bytes:
@@ -46,14 +47,18 @@ class Rig:
     pairing: PairingStore
     metrics: RecordingMetrics
     notices: list[str]
+    clock: FakeClock
     # The threads the phone Captures loaded their engines on, one per Live mode turned on.
     threads: list[threading.Thread] = field(default_factory=lambda: [])
 
     def requests(self) -> list[str]:
         return [m for s in self.backend.all_sessions("talker") for m in s.received if m.startswith("<user")]
 
+    def rows(self, kind: str) -> list[dict[str, Any]]:
+        return [r for r in self.metrics.records if r["kind"] == kind and r.get("client") == self.phones[0].client.id]
+
     def ready(self) -> int:
-        return self.notices.count(READY)
+        return len(self.rows("ears_loaded"))
 
 
 @asynccontextmanager
@@ -76,7 +81,7 @@ async def live_rig(tmp_path: Path) -> AsyncGenerator[Rig]:
     async with remote_rig(tmp_path, backend=backend, voice=voice, live=live) as (session, door, hub, _log, _backend, phones, pairing):
         running = asyncio.create_task(hub.run(voice.lines(hub.interrupt, hub.woke, hub.admit_spoken_revision)))
         try:
-            yield Rig(session, door, hub, voice, mac, backend, phones, pairing, metrics, notices, threads)
+            yield Rig(session, door, hub, voice, mac, backend, phones, pairing, metrics, notices, clock, threads)
         finally:
             running.cancel()
             await asyncio.gather(running, return_exceptions=True)
@@ -88,9 +93,13 @@ async def live_on(rig: Rig, socket: aiohttp.ClientWebSocketResponse, id: str = "
     await until(lambda: rig.ready() > loaded)
 
 
-async def stream(socket: aiohttp.ClientWebSocketResponse, frames: int, value: int = 0) -> None:
+async def stream(rig: Rig, socket: aiohttp.ClientWebSocketResponse, frames: int, value: int = 0) -> None:
+    """Sends `frames` in real time: each message arrives as the clock reaches its end."""
     for _ in range(frames // 10):
+        rig.clock.advance(0.1)
         await socket.send_bytes(pcm(10, value))
+        # The Door hears a socket's messages in order, so the answer means that audio has arrived.
+        await control(socket, uuid.uuid4().hex, "set_live", on=True)
 
 
 async def test_a_wake_word_said_to_the_phone_opens_listening_and_its_request_reaches_the_talker(tmp_path: Path) -> None:
@@ -100,8 +109,8 @@ async def test_a_wake_word_said_to_the_phone_opens_listening_and_its_request_rea
 
         await socket.send_bytes(pcm(8, WAKE))
         await until(lambda: rig.voice.state == "listening")
-        await stream(socket, 80, SPEECH)
-        await stream(socket, 100)
+        await stream(rig, socket, 80, SPEECH)
+        await stream(rig, socket, 100)
 
         await until(lambda: any("Open a PR" in m for m in rig.requests()))
         phone = rig.phones[0].client.id
@@ -183,9 +192,20 @@ async def test_turning_live_mode_off_closes_the_phone_input_and_the_mac_keeps_li
 
         assert (await control(socket, "off", "set_live", on=False))["result"] == {"on": False}
 
-        await asyncio.to_thread(rig.threads[0].join, 2)
-        assert not rig.threads[0].is_alive()
+        assert await closes_with(socket, pcm(10)) == 1002
         await mac_still_listens(rig, "Status of the Mac")
+
+
+async def test_the_phone_input_shows_none_of_the_mac_microphone_notices(tmp_path: Path) -> None:
+    async with live_rig(tmp_path) as rig, connect(rig.session, rig.door, rig.phones[0].token) as socket:
+        await foreground(socket)
+        await live_on(rig, socket)
+
+        # Digital silence long enough for the Mac's microphone to suggest macOS privacy settings.
+        await stream(rig, socket, 400)
+        await until(lambda: sum(r["frames"] for r in rig.rows("capture")) >= 400)
+
+        assert rig.notices == []
 
 
 async def test_a_closed_socket_closes_the_phone_input_and_the_mac_keeps_listening(tmp_path: Path) -> None:

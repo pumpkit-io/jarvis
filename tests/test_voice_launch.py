@@ -301,6 +301,10 @@ async def test_live_mode_hears_the_phone_through_its_own_engines_and_keeps_no_cl
     def pcm(frames: int, value: int = 0) -> bytes:
         return np.full(frames * 160, value, '<i2').tobytes()
 
+    def metric_rows() -> list[dict[str, Any]]:
+        path = config.runtime_dir / 'metrics.jsonl'
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
     running = asyncio.create_task(entry.voice_mode(
         settings=config, environ={}, backend=backend, clock=clock, stdin=stdin,
         stdout=io.StringIO(), stderr=stderr, ears=Ears(FakeTts(), open_player, open_listener),
@@ -310,12 +314,16 @@ async def test_live_mode_hears_the_phone_through_its_own_engines_and_keeps_no_cl
         async with aiohttp.ClientSession() as session, connect(session, doors[0], phone.token) as socket:
             await foreground(socket)
             assert (await control(socket, 'live', 'set_live', on=True))['result'] == {'on': True}
-            await until(lambda: 'Listening ready' in stderr.getvalue())
+            await until(lambda: any(r['kind'] == 'ears_loaded' and r.get('client') == phone.client.id
+                                    for r in metric_rows()))
             await socket.send_bytes(pcm(8, WAKE))
             await until(lambda: microphone.capturing[-1:] == [True])
             for value, messages in ((SPEECH, 8), (0, 10)):
-                for _ in range(messages):
+                for i in range(messages):
+                    clock.advance(0.1)
                     await socket.send_bytes(pcm(10, value))
+                    # Answered after the Door has heard the audio sent before it.
+                    await control(socket, f'sent-{value}-{i}', 'set_live', on=True)
             await until(lambda: any('Hello from the phone' in m for s in backend.all_sessions('talker') for m in s.received))
     finally:
         stdin.done.set()
@@ -324,5 +332,5 @@ async def test_live_mode_hears_the_phone_through_its_own_engines_and_keeps_no_cl
     assert choice.aec == 'off'
     assert isinstance(transcription, Transcription)
     assert not any(path.is_file() for path in (config.runtime_dir / 'clips').rglob('*'))
-    rows = [json.loads(line) for line in (config.runtime_dir / 'metrics.jsonl').read_text().splitlines()]
-    assert {r['client'] for r in rows if r['kind'] == 'turn'} == {phone.client.id}
+    assert {r['client'] for r in metric_rows() if r['kind'] == 'turn'} == {phone.client.id}
+    assert 'Listening ready' not in stderr.getvalue()

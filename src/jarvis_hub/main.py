@@ -439,9 +439,9 @@ async def voice_mode(
         )
         live = None
         if transcription is not None:
-            phone = transcription
+            service = transcription
             # iOS cancels echo on the phone, so its stream gets none here.
-            live = LiveInputs(conversation, lambda: _load_engines(replace(choice, aec="off"), phone), listening(voice),
+            live = LiveInputs(conversation, lambda: _load_engines(replace(choice, aec="off"), service), listening(voice),
                               metrics.record, output.notice, clock=clock.now)
         door = Door(enabled=settings.remote, port=settings.remote_port, health=hub.health, pairing=pairing, hub=hub, log=log, now=clock.now,
                     transcription=transcription, sleep=clock.sleep, live=live)

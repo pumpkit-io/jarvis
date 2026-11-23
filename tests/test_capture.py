@@ -1448,6 +1448,27 @@ async def test_uplinked_frames_are_stamped_by_sample_count_until_a_gap_re_anchor
         capture.close()
 
 
+async def test_uplinked_frames_are_never_stamped_after_they_arrive_when_a_stall_releases_a_backlog() -> None:
+    now = [10.0]
+    source = UplinkFrames(clock=lambda: now[0])
+    capture = Capture(lambda: engines(CountingEcho()), Listening(min_speech_db=0), lambda row: None,
+                      lambda text: None, source=source, backlog_s=10)
+    capture.start()
+    try:
+        await until(capture.ready.is_set)
+        source.feed(uplinked(8))
+        # A network stall held a second of audio, which then arrives at once.
+        now[0] = 11.08
+        for _ in range(12):
+            source.feed(uplinked(8))
+        # The stream goes on in time: its frames are stamped as they arrive, not a backlog's length later.
+        now[0] = 11.16
+        source.feed(uplinked(8, value=2000))
+        assert await wake_at(capture) == pytest.approx(11.16)
+    finally:
+        capture.close()
+
+
 async def test_uplinked_frames_are_dropped_rather_than_queued_while_the_capture_thread_falls_behind() -> None:
     notices, wake = list[str](), BlockingWake()
     source = UplinkFrames(clock=lambda: 10.0)

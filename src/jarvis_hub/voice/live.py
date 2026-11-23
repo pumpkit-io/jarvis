@@ -54,7 +54,7 @@ class LiveInputs:
         """Starts hearing `client`'s uplink, in place of any input an earlier socket of that Client left open."""
         source = UplinkFrames(self._clock)
         capture = Capture(self._load, self._settings, client_rows(self._record, client), self._notice, source=source,
-                          clock=self._clock)
+                          clock=self._clock, mac_notices=False)
         if self._open.pop(client, None) is not None:
             self._floor.remove_input(client)
         self._floor.add_input(client, capture)
