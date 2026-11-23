@@ -4,6 +4,7 @@ import SwiftUI
 struct SettingsView: View {
     @Bindable var session: AppSession
     @State private var confirmingUnpair = false
+    @State private var confirmingReset = false
     @ScaledMetric(relativeTo: .subheadline) var controlSize = 15
     private var theme: JarvisTheme { JarvisTheme() }
 
@@ -23,6 +24,13 @@ struct SettingsView: View {
                     Text("Paired Mac").foregroundStyle(theme.haze)
                     Text(session.credentials?.macName ?? "Unpaired")
                 }
+                VStack(alignment: .leading, spacing: 12) {
+                    Button { confirmingReset = true } label: {
+                        Text(session.contextReset.buttonTitle).frame(minWidth: 44, minHeight: 44, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }.buttonStyle(.plain).disabled(!session.canResetContext)
+                    if let status = session.contextReset.statusLine { Text(status).foregroundStyle(theme.haze) }
+                }
                 Button { confirmingUnpair = true } label: {
                     Text("Unpair this iPhone").frame(minWidth: 44, minHeight: 44, alignment: .leading)
                         .contentShape(Rectangle())
@@ -34,6 +42,13 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(theme.void).tint(theme.frost)
+        .onDisappear { session.leaveSettings() }
+        .confirmationDialog(ContextReset.dialogTitle, isPresented: $confirmingReset, titleVisibility: .visible) {
+            Button(ContextReset.confirmTitle, role: .destructive) { Task { await session.resetContext() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(ContextReset.dialogMessage)
+        }
         .confirmationDialog("Unpair this iPhone?", isPresented: $confirmingUnpair, titleVisibility: .visible) {
             Button("Unpair this iPhone") { Task { await session.unpair() } }
             Button("Cancel", role: .cancel) {}

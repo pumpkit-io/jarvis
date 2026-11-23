@@ -23,6 +23,9 @@ import Observation
     public private(set) var focusPending = false
     public private(set) var focusMessage: String?
     private var focusCommand: HubCommand?
+    public private(set) var contextReset: ContextReset = .idle
+    private var resetCommand: HubCommand?
+    public var canResetContext: Bool { connection.canSend && contextReset != .resetting }
     public private(set) var voiceOn = true
     public private(set) var voicePending = false
     public private(set) var voiceMessage: String?
@@ -143,6 +146,9 @@ import Observation
                     ? "Focus is not confirmed. Check the current status before trying again."
                     : "Couldn't reach the Mac. Not changed."
             }
+            if resetCommand?.id == result.id {
+                resetCommand = nil; contextReset = ContextReset(result)
+            }
             if let entry = replayCommands.first(where: { $0.value.id == result.id }) {
                 replayCommands.removeValue(forKey: entry.key)
                 replayMessages[entry.key] = result.ok ? nil : result.error?.message ?? "Jarvis could not play this reply."
@@ -157,6 +163,8 @@ import Observation
         case .replay(let replay):
             tasksReplaying = false
             if replay.history_pruned == true { historyMessage = "Some older history is no longer available on the Mac." }
+        case .commandDropped(let id):
+            if resetCommand?.id == id { resetCommand = nil; contextReset = .unsure }
         case .speechConnectionEnded(let id):
             playback.stop(speechID: id, reportStopped: false)
         case .failure:
@@ -317,6 +325,28 @@ import Observation
         }
     }
 
+    public func resetContext() async {
+        guard contextReset != .resetting, connection.canSend, let client else { return }
+        let command = HubCommand(type: "reset_context")
+        resetCommand = command; contextReset = .resetting
+        let owner = generation
+        do { try await sendCommand(client, command) }
+        catch {
+            let delivery = await client.delivery(of: command.id)
+            guard generation == owner, self.client === client, resetCommand?.id == command.id else { return }
+            switch delivery {
+            case .pending: break
+            case .completed(let result): receive(.result(result))
+            case .absent: resetCommand = nil; contextReset = .notReset
+            }
+        }
+    }
+
+    /// A reset's status line lasts until the User leaves Settings; one still waiting keeps its result for the next visit.
+    public func leaveSettings() {
+        if contextReset != .resetting { contextReset = .idle }
+    }
+
     public func setVoiceOn(_ value: Bool) async {
         guard let credentials, let client else { return }
         let silence = !value, owner = generation
@@ -395,6 +425,7 @@ import Observation
             if let oldCredentials { try voiceStore?.clear(oldCredentials) }
         } catch { historyClearFailed = true }
         focusHere = false; focusPending = false; focusCommand = nil; focusMessage = nil
+        contextReset = .idle; resetCommand = nil
         voiceOn = true; explicitSilence = nil; voicePending = false; voiceMessage = nil; voicePersistenceFailed = false; voiceRevision = 0
         do { try store.clear(); error = historyClearFailed ? .storage : nil } catch { self.error = .storage }
         tasksNeedRefresh = true; tasksReplaying = true
