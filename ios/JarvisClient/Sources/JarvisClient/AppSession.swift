@@ -99,6 +99,7 @@ import Observation
             if let message = draftValidationMessage { inputMessage = message }
             return
         }
+        liveMode.recordActivity()
         outbox.enqueueLine(draft, recordedAt: historyNow())
         draft = ""; inputMessage = nil
     }
@@ -588,6 +589,13 @@ import Observation
             guard let self, self.client === client, self.generation == owner else { return }
             self.playback.stop(reportStopped: false); self.stopPlayback()
             self.speechID = nil; self.talk.speaking = false
+        }, turnedOff: { [weak self] in
+            guard let self, self.client === client, self.generation == owner,
+                  !self.foreground, !self.liveMode.isOn else { return }
+            let playing = self.playback.activeSpeechID ?? self.pendingPlaybackDrain?.speechID ?? self.backgroundSpeechID
+            self.backgroundSpeechID = playing
+            if playing == nil { self.playback.stop(reportStopped: false) }
+            await client.setForeground(false, playingSpeechID: playing)
         })
         await outbox.resume()
         guard generation == owner else { await client.stop(); return }

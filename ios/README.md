@@ -143,6 +143,8 @@ The Live signal button at the right of the top bar turns Live mode on and off. I
 
 Run the Hub with `./jarvis --text` to use only the iPhone microphone: the Mac keeps its typed terminal and never opens its own microphone or speaker. `--text --speak` adds Mac speech without adding Mac listening.
 
+Live mode turns off after 30 minutes without interaction on this iPhone. A Wake word, a newly admitted spoken request, starting or finishing a Talk, or sending a valid typed line starts a fresh interval. Raw microphone audio, Jarvis-only Announcements, idle updates and reconnects do not extend it. The iPhone owns the monotonic deadline, so it also expires while locked or offline and checks overdue timers before resuming capture. Expiry stops capture immediately, releases the background connection under the usual playback-drain policy, and shows “Live mode turned off after 30 minutes of inactivity.” Turning Live mode on again starts a new interval.
+
 iOS may stop an engine when its hardware format changes, as described in [Apple’s configuration-change documentation](https://developer.apple.com/documentation/foundation/nsnotification/name-swift.struct/avaudioengineconfigurationchange). The live source observes that event, rebuilds its tap and PCM converter, and restarts the current engine on the main actor. Notifications from a retired engine or after capture stops cannot restart it. If recovery fails, Live mode turns off and shows the microphone error instead of leaving its button on with no audio.
 
 The Hub's `voice_state` selects the orb's source: microphone level while listening or in the Follow-up window, playback level while speaking, and calm while idle or thinking. A silent text stream does not override those quiet Live states. A Talk pauses live capture from its press until send or discard, including while locked or paused; capture resumes only if Live mode is still on.
@@ -160,6 +162,7 @@ These checks need a signed iPhone and a reachable voice-mode Hub. Record the rou
 - Check echo cancellation against the Mac's Barge-in judge: play replies through the phone speaker, then try Backchannels and Interruptions without the phone hearing Jarvis as the User.
 - Measure cellular data use during Live mode against the uncompressed estimate of about 32 KB/s (115 MB/hour).
 - Measure battery drain over one hour with Live mode on and the screen locked.
+- Leave Live mode idle for 30 minutes in foreground and while locked, including with the Mac offline. Confirm the button turns off and the microphone indicator clears after any existing reply finishes. Wake Jarvis or send a message before expiry and confirm that interaction starts a fresh 30-minute interval; ordinary room noise must not extend it.
 - Check background keep-alive through long locked periods, Wi-Fi/cellular changes and a Mac outage. Wake Jarvis, hear a reply and an Announcement, then answer in its Follow-up window. With Live mode off, verify the previous background drain/suspension behavior.
 - Interrupt Live mode with a call, Siri and another audio app. Check that no call audio is streamed, the button stays on, and listening resumes afterward. Also turn Live mode off or unpair during the interruption and verify it stays off.
 - Measure Mac memory with the second set of per-stream engines loaded on the 18 GB Mac.

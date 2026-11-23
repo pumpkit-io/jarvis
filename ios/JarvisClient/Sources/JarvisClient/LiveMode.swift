@@ -43,6 +43,7 @@ private struct LiveFrame: Sendable {
     public static let onMessage = "Live mode on. Say “Jarvis” to talk."
     public static let textModeMessage = "Live mode needs Jarvis in voice mode on the Mac."
     public static let offlineMessage = "Live mode on. Listening starts when the Mac is back."
+    public static let inactivityMessage = "Live mode turned off after 30 minutes of inactivity."
     static let failedMessage = "Couldn't reach the Mac. Not changed."
     static let microphoneFailedMessage = "The microphone couldn't start. Try again."
     public private(set) var isOn = false
@@ -63,17 +64,25 @@ private struct LiveFrame: Sendable {
     private let capture: any LiveCaptureSource
     private let permission: @MainActor () async -> Bool
     private let sleep: @Sendable (Double) async throws -> Void
+    private let now: @MainActor () -> ContinuousClock.Instant
+    private let inactivitySleep: @Sendable (Duration) async throws -> Void
     private var send: @MainActor (HubCommand) async throws -> Void = { _ in throw HubProtocolError.notConnected }
     private var sendAudio: @Sendable (Data) async -> Void = { _ in }
     private var permissionAnswered: @MainActor (Bool) -> Void = { _ in }
     private var onCaptureFailure: @MainActor () -> Void = {}
+    private var onTurnedOff: @MainActor () async -> Void = {}
+    private var inactivityDeadline: ContinuousClock.Instant?
+    private var inactivityTimer: Task<Void, Never>?
     private var frames: AsyncStream<LiveFrame>.Continuation?
     private var streaming: Task<Void, Never>?
     private var notice: Task<Void, Never>?
 
     public init(capture: any LiveCaptureSource, permission: @escaping @MainActor () async -> Bool,
-                sleep: @escaping @Sendable (Double) async throws -> Void = { try await Task.sleep(for: .seconds($0)) }) {
+                sleep: @escaping @Sendable (Double) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
+                now: @escaping @MainActor () -> ContinuousClock.Instant = { .now },
+                inactivitySleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
         self.capture = capture; self.permission = permission; self.sleep = sleep
+        self.now = now; self.inactivitySleep = inactivitySleep
         capture.onFailure = { [weak self] in self?.captureFailed() }
     }
 
@@ -81,9 +90,11 @@ private struct LiveFrame: Sendable {
     public func configure(send: @escaping @MainActor (HubCommand) async throws -> Void,
                           sendAudio: @escaping @Sendable (Data) async -> Void,
                           permissionAnswered: @escaping @MainActor (Bool) -> Void = { _ in },
-                          captureFailed: @escaping @MainActor () -> Void = {}) {
+                          captureFailed: @escaping @MainActor () -> Void = {},
+                          turnedOff: @escaping @MainActor () async -> Void = {}) {
         self.send = send; self.sendAudio = sendAudio; self.permissionAnswered = permissionAnswered
         self.onCaptureFailure = captureFailed
+        self.onTurnedOff = turnedOff
         paired = true
     }
 
@@ -95,23 +106,27 @@ private struct LiveFrame: Sendable {
     }
 
     public func receive(_ result: CommandResult) {
-        guard let request, result.id == request.id else { return }
+        guard !expireIfInactive(), let request, result.id == request.id else { return }
         self.request = nil
         if result.ok, result.result?["on"] == .bool(true) {
             guard isOn || foreground else { return }
             audioReadyAt = .now
             let resuming = isOn
             isOn = true
+            if !resuming { recordActivity() }
             if startCapture(), !resuming { show(Self.onMessage, for: 2.5) }
         } else if !result.ok {
-            isOn = false; voiceState = .idle; pauseCapture()
-            show(result.error?.code == "voice_unavailable" ? Self.textModeMessage : Self.failedMessage)
+            _ = stopLive(message: result.error?.code == "voice_unavailable" ? Self.textModeMessage : Self.failedMessage,
+                         notifyHub: false)
         }
     }
 
     public func receive(voiceState event: HubEvent) {
-        guard isOn, let payload = try? event.decodePayload(VoiceStatePayload.self) else { return }
-        voiceState = VoiceState(rawValue: payload.state) ?? .idle
+        guard !expireIfInactive(), isOn, let payload = try? event.decodePayload(VoiceStatePayload.self) else { return }
+        let next = VoiceState(rawValue: payload.state) ?? .idle
+        let changed = next != voiceState
+        voiceState = next
+        if changed, next == .listening || next == .thinking { recordActivity() }
     }
 
     public func dropped(commandID: String) {
@@ -123,25 +138,32 @@ private struct LiveFrame: Sendable {
     public func talkHoldsMicrophone(_ held: Bool) {
         guard talking != held else { return }
         talking = held
+        recordActivity()
         if held { pauseCapture() } else { _ = startCapture() }
     }
 
-    public func setForeground(_ value: Bool) { foreground = value }
+    public func setForeground(_ value: Bool) {
+        foreground = value
+        _ = expireIfInactive()
+    }
 
     public func audioInterrupted(_ began: Bool) {
         guard interrupted != began else { return }
         interrupted = began
+        guard !expireIfInactive() else { return }
         if began { pauseCapture(); voiceState = .idle } else { _ = startCapture() }
     }
 
     public func unpair() {
         generation &+= 1
+        cancelInactivity()
         paired = false
         request = nil; isOn = false; ready = false; audioReadyAt = nil; voiceState = .idle
         show(nil); pauseCapture()
     }
 
     public func connectionChanged(ready: Bool) async {
+        _ = expireIfInactive()
         guard self.ready != ready else { return }
         self.ready = ready
         if !ready { voiceState = .idle; audioReadyAt = nil }
@@ -149,8 +171,10 @@ private struct LiveFrame: Sendable {
     }
 
     private func enableOffline() {
-        guard isOn || foreground else { return }
+        guard !expireIfInactive(), isOn || foreground else { return }
+        let resuming = isOn
         isOn = true
+        if !resuming { recordActivity() }
         if startCapture() { show(Self.offlineMessage, for: 2.5) }
     }
 
@@ -177,16 +201,56 @@ private struct LiveFrame: Sendable {
     }
 
     private func turnOff() async {
+        await stopLive(message: nil).value
+    }
+
+    private func stopLive(message: String?, notifyHub: Bool = true) -> Task<Void, Never> {
+        cancelInactivity()
         request = nil
-        isOn = false; audioReadyAt = nil; voiceState = .idle; show(nil)
+        isOn = false; audioReadyAt = nil; voiceState = .idle; show(message)
         pauseCapture()
         // The Hub closes the socket on audio after Live mode is off, so the last frame goes before this command.
-        await streaming?.value
-        try? await send(HubCommand(type: "set_live", payload: ["on": .bool(false)]))
+        let pending = streaming, owner = generation
+        return Task {
+            guard generation == owner, !isOn, request == nil else { return }
+            await onTurnedOff()
+            guard notifyHub else { return }
+            await pending?.value
+            guard generation == owner, !isOn, request == nil else { return }
+            try? await send(HubCommand(type: "set_live", payload: ["on": .bool(false)]))
+        }
+    }
+
+    public func recordActivity() {
+        guard !expireIfInactive(), isOn else { return }
+        inactivityDeadline = now().advanced(by: .seconds(1800))
+        armInactivityTimer()
+    }
+
+    private func armInactivityTimer() {
+        inactivityTimer?.cancel()
+        guard let deadline = inactivityDeadline else { return }
+        let delay = max(.zero, now().duration(to: deadline))
+        inactivityTimer = Task { [weak self, inactivitySleep] in
+            do { try await inactivitySleep(delay) } catch { return }
+            guard let self, !Task.isCancelled, self.inactivityDeadline == deadline else { return }
+            if !self.expireIfInactive() { self.armInactivityTimer() }
+        }
+    }
+
+    private func cancelInactivity() {
+        inactivityTimer?.cancel(); inactivityTimer = nil; inactivityDeadline = nil
+    }
+
+    private func expireIfInactive() -> Bool {
+        guard isOn, let deadline = inactivityDeadline, now() >= deadline else { return false }
+        _ = stopLive(message: Self.inactivityMessage)
+        return true
     }
 
     /// Answers false when the microphone wouldn't start, which turns Live mode off.
     private func startCapture() -> Bool {
+        guard !expireIfInactive() else { return false }
         guard isOn, !talking, !interrupted, frames == nil else { return true }
         // Newest frames win if the socket falls behind: late audio would only distort the Mac's turn timing.
         let (stream, continuation) = AsyncStream<LiveFrame>.makeStream(bufferingPolicy: .bufferingNewest(10))
@@ -214,14 +278,8 @@ private struct LiveFrame: Sendable {
 
     private func captureFailed() {
         guard isOn else { return }
-        request = nil; isOn = false; audioReadyAt = nil; voiceState = .idle
-        pauseCapture(); onCaptureFailure(); show(Self.microphoneFailedMessage)
-        let pending = streaming, owner = generation
-        Task {
-            await pending?.value
-            guard generation == owner, !isOn, request == nil else { return }
-            try? await send(HubCommand(type: "set_live", payload: ["on": .bool(false)]))
-        }
+        _ = stopLive(message: Self.microphoneFailedMessage)
+        onCaptureFailure()
     }
 
     /// Frames captured but not yet sent are dropped: the Talk or the end of Live mode replaces them.
