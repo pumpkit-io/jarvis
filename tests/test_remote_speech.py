@@ -16,7 +16,7 @@ from jarvis_hub.voice.live import LiveInputs
 from jarvis_hub.voice.speech import Speech
 from jarvis_hub.voice.voice_mode import VoiceMode
 from jarvis_hub.voice.player import Samples
-from tests.fakes import FakeBackend, FakeClock, FakeTts, RecordingMetrics, RecordingOutput, RecordingPlayer, Text, make_hub, until
+from tests.fakes import FakeBackend, FakeClock, FakeTts, RecordingMetrics, RecordingOutput, RecordingPlayer, Text, Tool, make_hub, until
 from tests.protocol_exchanges import DelayedAdmission, command, connect, receive
 
 
@@ -169,6 +169,30 @@ async def test_reports_interrupt_heard_text_and_private_routing(tmp_path: Path) 
             await through(two, 'speech_end')
             assert '<interrupted spoken="First sentence."/>' in backend.session('talker').received[-1]
             assert not any(e.type.startswith('speech_') for e in log.after(0))
+
+
+async def test_a_talk_over_a_replay_carries_what_was_heard_after_a_reply_stood_by(tmp_path: Path) -> None:
+    backend = FakeBackend(FakeClock(), [[Text('First sentence. Second sentence.')],
+                                        [Text('Certainly. '), Tool('stand_by')], [Text('New reply.')]])
+    async with remote_rig(tmp_path, backend) as (session, door, hub, _log, backend, phones, _pairing):
+        async with connect(session, door, phones[0].token) as one:
+            await foreground(one)
+            await hub.admit_line(Line('First', 0, typed=False, client_id=phones[0].client.id))
+            frames = await through(one, 'speech_end')
+            reply = next(f['payload'] for f in frames if f['type'] == 'speech_begin')
+            for index in (0, 1):
+                await control(one, f'heard-{index}', 'playback_report', speech_id=reply['speech_id'],
+                              clip_index=index, state='finished')
+            await hub.admit_line(Line('On the Mac', 0, typed=False))
+            await until(lambda: len(backend.session('talker').tool_results) == 1)
+            replay = (await control(one, 'replay', 'replay_speech', reply_id=reply['reply_id']))['result']['speech_id']
+            await through(one, 'speech_end')
+            await control(one, 'replayed', 'playback_report', speech_id=replay, clip_index=0, state='finished')
+
+            await hub.admit_line(Line('Continue', 0, typed=False, client_id=phones[0].client.id))
+
+            await until(lambda: 'Continue' in backend.session('talker').received[-1])
+            assert '<interrupted spoken="First sentence."/>' in backend.session('talker').received[-1]
 
 
 async def test_stopping_the_last_clip_before_its_report_frees_the_mac_microphone(tmp_path: Path) -> None:

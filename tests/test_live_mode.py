@@ -19,7 +19,7 @@ import pytest
 
 from jarvis_hub.clients import TERMINAL
 from jarvis_hub.door import Door
-from jarvis_hub.hub import Hub
+from jarvis_hub.hub import Hub, Line
 from jarvis_hub.pairing import PairingResult, PairingStore
 from jarvis_hub.voice.engines import NoEchoCancellation
 from jarvis_hub.voice.input import Engines, Listening
@@ -424,6 +424,45 @@ async def test_the_request_after_standing_by_on_the_phone_is_not_marked_interrup
         talker = rig.backend.session("talker")
         await until(lambda: len(talker.received) >= 2 and "Open a PR" in talker.received[-1])
         assert "<interrupted" not in talker.received[-1]
+
+
+async def cut_in_on_the_reply(phone: Phone) -> None:
+    """Has the phone play the reply's first sentence, then says the Wake word over the rest."""
+    await until(lambda: phone.ended() == 1 and phone.states()[-1] == "speaking")
+    first = next(f["payload"] for f in phone.frames if f["type"] == "speech_clip" and "reply_id" in f["payload"])
+    await phone.command("playback_report", speech_id=first["speech_id"], clip_index=first["index"], state="finished")
+    # Past the Wake word's refractory time.
+    await phone.stream(30)
+    await phone.wake()
+
+
+async def test_a_stop_phrase_over_the_reply_on_the_phone_leaves_the_next_line_uninterrupted(tmp_path: Path) -> None:
+    replies: list[list[Step]] = [[Text("Opened the pull request, sir. Review is next.")], [Text("All quiet.")]]
+    async with live_phone(tmp_path, replies, words={SPEECH: "Open a PR", STOP: "That's all."}) as (rig, phone):
+        await phone.wake()
+        await phone.ask()
+        await cut_in_on_the_reply(phone)
+        await phone.ask(STOP)
+        await until(lambda: phone.states()[-1] == "idle")
+
+        await rig.hub.admit_line(Line("Status", 0))
+
+        talker = rig.backend.session("talker")
+        await until(lambda: "Status" in talker.received[-1])
+        assert "<interrupted" not in talker.received[-1]
+
+
+async def test_a_request_over_the_reply_on_the_phone_carries_what_was_heard(tmp_path: Path) -> None:
+    replies: list[list[Step]] = [[Text("Opened the pull request, sir. Review is next.")], [Text("Right away.")]]
+    async with live_phone(tmp_path, replies) as (rig, phone):
+        await phone.wake()
+        await phone.ask()
+        await cut_in_on_the_reply(phone)
+        await phone.ask()
+
+        talker = rig.backend.session("talker")
+        await until(lambda: len(talker.received) >= 2 and "Open a PR" in talker.received[-1])
+        assert talker.received[-1].startswith('<interrupted spoken="Opened the pull request, sir."/>\n')
 
 
 async def test_a_farewell_on_the_phone_ends_without_a_follow_up_window(tmp_path: Path) -> None:
