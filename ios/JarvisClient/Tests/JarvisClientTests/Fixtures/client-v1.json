@@ -2409,6 +2409,43 @@
         }
       ]
     },
+    "reset_context": {
+      "command": {
+        "version": 1,
+        "id": "reset-1",
+        "type": "reset_context",
+        "payload": {}
+      },
+      "result": {
+        "version": 1,
+        "type": "command_result",
+        "id": "reset-1",
+        "ok": true,
+        "result": {
+          "status": "reset"
+        }
+      },
+      "retry_result": {
+        "version": 1,
+        "type": "command_result",
+        "id": "reset-1",
+        "ok": true,
+        "result": {
+          "status": "reset"
+        }
+      },
+      "refused_payload": {
+        "version": 1,
+        "type": "command_result",
+        "id": "reset-2",
+        "ok": false,
+        "error": {
+          "code": "invalid_payload",
+          "message": "Command payload is invalid or Hub is stopping",
+          "retry_after_seconds": null
+        }
+      }
+    },
     "uploaded_talk": {
       "begin": {
         "version": 1,

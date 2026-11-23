@@ -123,6 +123,10 @@ class SavedFile:
         if not self._blocked:
             write_atomically(self._path, {"version": self._version, **data}, indent=self._indent)
 
+    def unblock(self) -> None:
+        """Lets saves write over a file that could not be moved aside, once what it held may be lost."""
+        self._blocked = False
+
     def set_aside(self, problem: str) -> str:
         """Moves the file out of the way, so the next save starts clean; returns the notice saying where it went."""
         aside = self._path.with_name(f"{self._path.stem}.unreadable{self._path.suffix}")
