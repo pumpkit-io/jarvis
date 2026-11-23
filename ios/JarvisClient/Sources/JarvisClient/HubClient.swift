@@ -32,6 +32,8 @@ public enum HubTransportError: Error, Equatable, Sendable {
 
 public enum HubClientUpdate: Sendable {
     case state(HubConnectionState), event(HubEvent), audio(HubEvent, Data), result(CommandResult)
+    /// Replayed history, in sequence order, delivered together so the screen redraws once for the whole catch-up.
+    case events([HubEvent])
     case failure(String), replayStarted, replay(ReplayComplete), speechConnectionEnded(String)
     case silence(Bool, pending: Bool, revision: UInt64)
     /// A socket-bound command lost its socket before its result arrived; it will not be sent again.
