@@ -305,44 +305,62 @@ async def text_mode(
         terminal.on_notice = output.notice
         metrics = JsonlMetrics(settings.runtime_dir / "metrics.jsonl")
         log.start_backfill(record=metrics.record)
-        speech = None
+        player = None
         if voice is not None:
             try:
                 player = voice.open_player(voice.tts.sample_rate)
             except Exception as e:
                 output.notice(f"Speech is off: no audio output: {type(e).__name__}: {e}")
-            else:
-                speech = Speech(
-                    voice.tts, player, clock, metrics=metrics, notice=output.notice,
-                    on_ready=lambda: output.notice("Speech ready."),
-                )
-        local_speech = speech is not None
-        if speech is None and settings.remote:
-            speech = Speech(voice.tts if voice is not None else make_synthesizer(settings.voice.tts_engine), NoLocalPlayer(), clock, metrics=metrics, notice=output.notice)
+        local_speech = player is not None
+        transcription = TranscriptionService() if settings.remote else None
+        floor = None
+        speech = None
+        local_voice = None
+        if settings.remote:
+            tts = voice.tts if voice is not None else make_synthesizer(settings.voice.tts_engine)
+            floor = VoiceMode(audio=None, tts=tts, player=player if player is not None else NoLocalPlayer(),
+                                     clock=clock, timing=timing(settings.voice), metrics=metrics, notice=output.notice,
+                                     wake_refractory_s=listening(settings.voice).wake_refractory_s)
+            speech = floor.speech
+        elif player is not None and voice is not None:
+            local_voice = Speech(voice.tts, player, clock, metrics=metrics, notice=output.notice,
+                                 on_ready=lambda: output.notice("Speech ready."))
+            speech = local_voice
         hub = settings_hub(
             settings, backend=backend, clock=clock, output=output, metrics=metrics, speech=speech,
-            terminal_speech=local_speech,
+            terminal_speech=local_speech, floor=floor,
+            on_end_conversation=floor.end_conversation if floor is not None else None,
+            on_stand_by=floor.stand_by if floor is not None else None,
             on_model_ready=lambda: output.notice("Model ready."),
         )
-        transcription = TranscriptionService() if settings.remote else None
+        live = None
+        if floor is not None and transcription is not None:
+            choice = EngineChoice(aec="off", wake=settings.voice.wake_engine, stt=settings.voice.stt_engine)
+            service = transcription
+            live = LiveInputs(floor, lambda: _load_engines(choice, service), listening(settings.voice),
+                              metrics.record, output.notice, clock=clock.now)
         door = Door(enabled=settings.remote, port=settings.remote_port, health=hub.health, pairing=pairing, hub=hub, log=log, now=clock.now,
-                    transcription=transcription, sleep=clock.sleep)
+                    transcription=transcription, sleep=clock.sleep, live=live)
         try:
             output.notice("Model loading.")
             await hub.start()
             await door.start()
             await asyncio.to_thread(language.warm_up)
-            if speech is not None:
+            if floor is not None:
+                floor.start(lazy=not local_speech)
+            elif local_voice is not None:
                 output.notice("Speech loading.")
-                speech.start(lazy=not local_speech)
-                if local_speech:
-                    speech.say("ready", "en")
+                local_voice.start()
+                local_voice.say("ready", "en")
             if interactive:
                 stdout.write(PROMPT)
                 stdout.flush()
-            await hub.run(_typed_lines(stdin, clock))
+            inputs = _typed_lines(stdin, clock)
+            if floor is not None:
+                inputs = merge(inputs, floor.lines(hub.interrupt, hub.woke, hub.admit_spoken_revision))
+            await hub.run(inputs)
             if speech is not None and local_speech:
-                await speech.idle(local_only=True)
+                await speech.idle()
         finally:
             try:
                 try:
@@ -351,8 +369,10 @@ async def text_mode(
                     await hub.close()
             finally:
                 try:
-                    if speech is not None:
-                        await speech.close()
+                    if floor is not None:
+                        await floor.close()
+                    elif local_voice is not None:
+                        await local_voice.close()
                 finally:
                     if transcription is not None:
                         transcription.close()
@@ -525,7 +545,7 @@ async def _follow_devices(listener: Any, player: Any, notice: Callable[[str], No
 
 
 def _ignored_in_text(error: str) -> None:
-    sys.stderr.write(f"jarvis-hub: {error}; voice settings are not used with --text, so it is ignored.\n")
+    sys.stderr.write(f"jarvis-hub: {error}; using default listening settings with --text.\n")
 
 
 def print_stats(
@@ -566,7 +586,7 @@ def print_stats(
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="jarvis-hub", description="Run the Jarvis Hub.")
-    parser.add_argument("--text", action="store_true", help="talk by typing, with no audio")
+    parser.add_argument("--text", action="store_true", help="type on the Mac without its microphone; iPhone Live mode stays available")
     parser.add_argument("--speak", action="store_true", help="with --text, speak generated replies; readiness is nonverbal")
     parser.add_argument("--headphones", action="store_true", help="voice mode with echo cancellation off")
     parser.add_argument("--debug", action="store_true", help="show the voice state machine's transitions")

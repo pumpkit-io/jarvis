@@ -387,6 +387,9 @@ class Voice:
     async def quiet(self) -> None:
         await self.silent.wait()
 
+    def listens(self, client: str) -> bool:
+        return True
+
     def owns(self, owner: tuple[str, int]) -> bool:
         return True
 

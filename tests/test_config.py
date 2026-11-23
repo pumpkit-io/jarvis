@@ -225,6 +225,17 @@ def test_text_mode_warns_about_a_bad_voice_setting_and_starts_on_the_defaults(ch
     assert len(warnings) == 1 and "JARVIS_AEC" in warnings[0]
 
 
+def test_remote_text_mode_uses_the_configured_listening_settings_for_the_phone(checkout: Path) -> None:
+    (checkout / ".env").write_text("JARVIS_REMOTE=on\nJARVIS_FOLLOWUP_SECONDS=8\nJARVIS_WAKE_THRESHOLD=0.7\n")
+    warnings: list[str] = []
+
+    settings = load_settings(checkout, environ={}, ignore_voice=warnings.append)
+
+    assert settings.voice.follow_up_s == 8
+    assert settings.voice.wake_threshold == .7
+    assert warnings == []
+
+
 def test_memory_defaults_fold_at_200000_tokens_keep_a_40000_tail_and_stop_at_300000(checkout: Path) -> None:
     memory = load_settings(checkout, environ={}).memory
     assert (memory.fold_at, memory.tail, memory.ceiling) == (200_000, 40_000, 300_000)

@@ -187,6 +187,9 @@ async def test_transcription_errors_are_private_and_admit_nothing(tmp_path: Path
 
 async def test_italian_and_mac_floor_use_remote_spoken_scope(tmp_path: Path) -> None:
     class MacFloor:
+        def listens(self, client: str) -> bool:
+            return True
+
         def owns(self, owner: tuple[str, int]) -> bool:
             return False
         def typed_input(self, *, client: str | None = None):
@@ -406,7 +409,7 @@ async def test_remote_text_launch_transcribes_without_any_mac_audio_device(tmp_p
         pytest.fail('Remote --text must not open a Mac audio device or load microphone engines')
     monkeypatch.setattr(entry, 'TranscriptionService', Service)
     monkeypatch.setattr(entry, 'Door', CaptureDoor)
-    for name in ['SoundPlayer', 'VoiceMode']:
+    for name in ['SoundPlayer', '_open_listener', '_open_player']:
         monkeypatch.setattr(entry, name, no_audio)
     monkeypatch.setattr(engines, 'load_engines', no_audio)
     from tests.fakes import FakeTts
