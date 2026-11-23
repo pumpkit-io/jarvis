@@ -15,7 +15,9 @@ from typing import Any
 
 import aiohttp
 import numpy as np
+import pytest
 
+from jarvis_hub.clients import TERMINAL
 from jarvis_hub.door import Door
 from jarvis_hub.hub import Hub
 from jarvis_hub.pairing import PairingResult, PairingStore
@@ -67,7 +69,8 @@ class Rig:
 
 @asynccontextmanager
 async def live_rig(tmp_path: Path, replies: list[list[Step]] | None = None,
-                   orchestrator: list[list[Step]] | None = None) -> AsyncGenerator[Rig]:
+                   orchestrator: list[list[Step]] | None = None, words: dict[int, str] | None = None) -> AsyncGenerator[Rig]:
+    """`words` has the phone's STT say each word whose marker samples the audio holds, in place of "Open a PR"."""
     clock, metrics, notices = FakeClock(), RecordingMetrics(), list[str]()
     mac, speaker = ScriptedAudio(clock), RecordingPlayer()
     voice = VoiceMode(audio=mac, tts=FakeTts(), player=speaker, clock=clock, metrics=metrics,
@@ -77,7 +80,7 @@ async def live_rig(tmp_path: Path, replies: list[list[Step]] | None = None,
     def load() -> Engines:
         threads.append(threading.current_thread())
         return Engines(echo=NoEchoCancellation(), wake=MarkerWake(), vad=LoudVad(), turn=ScriptedTurn(),
-                       stt=ScriptedStt(), gate=Everyone())
+                       stt=ScriptedStt(words=words or {}), gate=Everyone())
 
     def live(floor: VoiceMode) -> LiveInputs:
         return LiveInputs(floor, load, Listening(), metrics.record, notices.append, clock=clock.now)
@@ -289,9 +292,9 @@ class Phone:
         await self.socket.send_bytes(pcm(8, WAKE))
         await until(lambda: self.rig.voice.state == "listening")
 
-    async def ask(self) -> None:
-        """Says a request, then the silence that ends the turn."""
-        await self.stream(80, SPEECH)
+    async def ask(self, marker: int = SPEECH) -> None:
+        """Says a request, or the words `marker` stands for, then the silence that ends the turn."""
+        await self.stream(80, marker)
         await self.stream(100)
 
     def close(self) -> None:
@@ -325,8 +328,9 @@ class Phone:
 
 @asynccontextmanager
 async def live_phone(tmp_path: Path, replies: list[list[Step]] | None = None,
-                     orchestrator: list[list[Step]] | None = None) -> AsyncGenerator[tuple[Rig, Phone]]:
-    async with live_rig(tmp_path, replies, orchestrator) as rig, connect(rig.session, rig.door, rig.phones[0].token) as socket:
+                     orchestrator: list[list[Step]] | None = None,
+                     words: dict[int, str] | None = None) -> AsyncGenerator[tuple[Rig, Phone]]:
+    async with live_rig(tmp_path, replies, orchestrator, words) as rig, connect(rig.session, rig.door, rig.phones[0].token) as socket:
         await foreground(socket)
         phone = Phone(rig, socket, rig.phones[0].client.id)
         try:
@@ -462,6 +466,22 @@ async def test_voice_state_follows_set_live_and_another_live_phone_sees_only_idl
             other.close()
 
 
+async def test_a_wake_word_on_the_mac_while_the_phone_listens_moves_the_exchange_and_the_phone_sees_idle(
+    tmp_path: Path,
+) -> None:
+    async with live_phone(tmp_path) as (rig, phone):
+        await phone.wake()
+        await until(lambda: phone.states()[-1] == "listening")
+        # Past the chime, when a Wake word is no longer its echo.
+        rig.clock.advance(1)
+
+        rig.mac.wake()
+
+        await until(lambda: phone.states()[-1] == "idle")
+        assert rig.voice.state == "listening"
+        assert rig.voice.voice_state(TERMINAL) == "listening"
+
+
 async def test_a_second_exchange_on_the_phone_stops_no_stream_but_the_one_playing(tmp_path: Path) -> None:
     async with live_phone(tmp_path) as (rig, phone):
         await phone.wake()
@@ -475,14 +495,18 @@ async def test_a_second_exchange_on_the_phone_stops_no_stream_but_the_one_playin
         await phone.ask()
         await heard_out(rig, phone, 2)
 
-        # The phone plays one stream at a time, so a stop for any other is malformed there.
-        current = None
-        for frame in phone.frames:
-            if frame["type"] == "speech_begin":
-                current = frame["payload"]["speech_id"]
-            elif frame["type"] == "speech_stop":
-                assert frame["payload"]["speech_id"] == current
+        assert_one_stream_at_a_time(phone)
         assert [stream[0] for stream in phone.streams()] == ["chime", "reply", "closing", "chime", "reply"]
+
+
+def assert_one_stream_at_a_time(phone: Phone) -> None:
+    """The phone plays one stream at a time, so a clip, end or stop for any but the latest begun is malformed there."""
+    current = None
+    for frame in phone.frames:
+        if frame["type"] == "speech_begin":
+            current = frame["payload"]["speech_id"]
+        elif frame["type"] in ("speech_clip", "speech_end", "speech_stop"):
+            assert frame["payload"]["speech_id"] == current
 
 
 async def test_stopping_the_reply_on_the_phone_idles_the_voice_there(tmp_path: Path) -> None:
@@ -518,3 +542,156 @@ async def test_news_for_the_phone_waits_out_its_follow_up_window(tmp_path: Path)
         rig.clock.advance(6)
         await until(lambda: [s for s in phone.streams() if s[0] == "reply"][-1:] == [("reply", ["The fix is ready."])])
         assert [stream[0] for stream in phone.streams()] == ["chime", "reply", "closing", "reply"]
+
+
+async def test_a_replay_on_a_live_phone_is_remote_activity_that_the_wake_word_cannot_cut_into(tmp_path: Path) -> None:
+    async with live_phone(tmp_path) as (rig, phone):
+        await phone.wake()
+        await phone.ask()
+        await heard_out(rig, phone)
+        rig.clock.advance(6)
+        await until(lambda: phone.streams()[-1:] == [("closing", [""])])
+        reply = next(f["payload"]["reply_id"] for f in phone.frames if f["type"] == "speech_begin" and "reply_id" in f["payload"])
+
+        assert (await phone.command("replay_speech", reply_id=reply))["ok"]
+        await until(lambda: len(phone.streams()) == 4 and rig.hub.clients.remote_activity)
+        await phone.stream(10)
+        await phone.socket.send_bytes(pcm(8, WAKE))
+        await phone.stream(10)
+
+        assert rig.voice.state == "idle"
+        assert [stream[0] for stream in phone.streams()] == ["chime", "reply", "closing", "reply"]
+        assert not phone.socket.closed
+
+
+@pytest.mark.parametrize("leaving", ["set_live", "close"])
+async def test_the_phone_leaving_live_mode_ends_its_exchange_and_the_mac_needs_the_wake_word(
+    tmp_path: Path, leaving: str,
+) -> None:
+    async with live_phone(tmp_path, [[Text("Opened.")], [Text("On the Mac.")]]) as (rig, phone):
+        await phone.wake()
+        await phone.ask()
+        await heard_out(rig, phone)
+
+        if leaving == "set_live":
+            assert (await phone.command("set_live", on=False))["result"] == {"on": False}
+        else:
+            await phone.socket.close()
+        await until(lambda: rig.voice.state == "idle")
+        rig.mac.say("Status of the Mac")
+        await asyncio.sleep(0.05)
+        assert len(rig.requests()) == 1
+
+        await mac_still_listens(rig, "Status of the Mac")
+        await until(lambda: rig.speaker.texts[-1:] == ["On the Mac."])
+        assert rig.hub.clients.focus == TERMINAL
+        assert rig.speaker.voices[:2] == ["ready", "chime"]
+
+
+async def test_turning_live_mode_off_mid_reply_stops_the_reply_there_and_leaves_the_mac_listening(
+    tmp_path: Path,
+) -> None:
+    async with live_phone(tmp_path) as (rig, phone):
+        await phone.wake()
+        await phone.ask()
+        await until(lambda: phone.ended() == 1 and phone.states()[-1] == "speaking")
+        assert not rig.hub.clients.remote_activity
+
+        assert (await phone.command("set_live", on=False))["result"] == {"on": False}
+
+        await until(lambda: any(frame["type"] == "speech_stop" for frame in phone.frames))
+        assert rig.voice.state == "idle"
+        assert not rig.hub.clients.remote_activity
+        await mac_still_listens(rig, "Status of the Mac")
+
+
+async def test_a_reply_to_a_phone_exchange_ended_by_leaving_live_mode_does_not_play_there(tmp_path: Path) -> None:
+    released = asyncio.Event()
+    async with live_phone(tmp_path, [[Gate(released), Text("Opened.")]]) as (rig, phone):
+        await phone.wake()
+        await phone.ask()
+        await until(lambda: phone.states()[-1] == "thinking")
+
+        assert (await phone.command("set_live", on=False))["result"] == {"on": False}
+        await until(lambda: rig.voice.state == "idle")
+        released.set()
+
+        await until(lambda: any(frame["type"] == "reply_end" for frame in phone.frames))
+        await asyncio.sleep(0.05)
+        assert phone.streams() == [("chime", [""])]
+        assert not rig.hub.clients.remote_activity
+        await mac_still_listens(rig, "Status of the Mac")
+
+
+STOP = 1500
+
+
+@pytest.mark.parametrize("phrase", ["That's all.", "Stand by."])
+async def test_a_stop_phrase_in_the_phones_follow_up_window_closes_there_and_idles(tmp_path: Path, phrase: str) -> None:
+    async with live_phone(tmp_path, words={SPEECH: "Open a PR", STOP: phrase}) as (rig, phone):
+        await phone.wake()
+        await phone.ask()
+        await heard_out(rig, phone)
+        await phone.stream(50)
+
+        await phone.ask(STOP)
+
+        await until(lambda: phone.states()[-1] == "idle")
+        await until(lambda: phone.streams()[-1:] == [("closing", [""])])
+        assert [stream[0] for stream in phone.streams()] == ["chime", "reply", "closing"]
+        assert len(rig.requests()) == 1
+        assert rig.speaker.voices == ["ready"]
+
+
+async def test_be_quiet_said_over_the_reply_on_the_phone_stops_it_there_and_closes_there(tmp_path: Path) -> None:
+    replies: list[list[Step]] = [[Text("Opened the pull request, sir, and asked for a review.")], [Tool("stand_by")]]
+    async with live_phone(tmp_path, replies, words={SPEECH: "Open a PR", STOP: "Be quiet."}) as (rig, phone):
+        await phone.wake()
+        await phone.ask()
+        await until(lambda: phone.ended() == 1 and phone.states()[-1] == "speaking")
+
+        await phone.ask(STOP)
+
+        await until(lambda: phone.streams()[-1:] == [("closing", [""])])
+        await until(lambda: phone.states()[-1] == "idle")
+        reply = [frame["type"] for frame in phone.frames
+                 if frame["type"].startswith("speech_") and "reply_id" in frame["payload"]]
+        assert reply == ["speech_begin", "speech_clip", "speech_end", "speech_stop"]
+        assert phone.states()[-3:] == ["listening", "thinking", "idle"]
+        assert any(t.name == "stand_by" for t in rig.backend.session("talker").tool_results)
+        assert rig.speaker.voices == ["ready"]
+
+
+async def test_a_phone_that_never_reports_its_reply_played_gives_the_floor_back_without_mixing_streams(
+    tmp_path: Path,
+) -> None:
+    async with live_phone(tmp_path) as (rig, phone):
+        await phone.wake()
+        await phone.ask()
+        await until(lambda: phone.ended() == 1 and phone.states()[-1] == "speaking")
+
+        rig.clock.advance(31)
+        await until(lambda: phone.states()[-1] == "follow_up")
+        rig.clock.advance(6)
+        await until(lambda: phone.streams()[-1:] == [("closing", [""])])
+        await phone.stream(10)
+        await phone.wake()
+        await phone.ask()
+        await until(lambda: phone.ended() == 2)
+
+        assert_one_stream_at_a_time(phone)
+        assert [stream[0] for stream in phone.streams()] == ["chime", "reply", "closing", "chime", "reply"]
+        assert not phone.socket.closed
+
+
+async def test_a_cue_takes_playback_reports_of_a_known_state_only(tmp_path: Path) -> None:
+    async with live_phone(tmp_path) as (_rig, phone):
+        await phone.wake()
+        await until(lambda: phone.streams() == [("chime", [""])])
+        chime = next(f["payload"]["speech_id"] for f in phone.frames if f["type"] == "speech_begin")
+
+        finished = await phone.command("playback_report", speech_id=chime, clip_index=0, state="finished")
+        bogus = await phone.command("playback_report", speech_id=chime, clip_index=0, state="paused")
+
+        assert finished["ok"]
+        assert not bogus["ok"] and bogus["error"]["code"] == "invalid_payload"

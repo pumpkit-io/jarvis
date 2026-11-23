@@ -814,6 +814,7 @@ class Hub:
         player = self._client_players.get(client_id)
         if not isinstance(player, RemotePlayer) or not self._client_can_speak(client_id):
             raise ValueError("Client cannot speak")
+        self.clients.begin_stream(client_id, floor=False)
         return self._speech.replay(text, "it" if lang == "it" else "en", destination=player, reply_id=reply_id,
                                    allowed=lambda: self._client_can_speak(client_id)
                                    and self._client_players.get(client_id) is player)
@@ -881,7 +882,7 @@ class Hub:
             self._settled.set()
         self._persist()
 
-    def _live(self, client_id: str) -> bool:
+    def _is_live(self, client_id: str) -> bool:
         """Whether `client_id` is a phone in Live mode, whose voice is the voice floor's."""
         client = self.clients.get(client_id)
         return client is not None and client.live
@@ -897,7 +898,8 @@ class Hub:
         if self.clients.focus == TERMINAL:
             return self.clients.remote_activity
         client = self.clients.get(self.clients.focus)
-        return bool(client is not None and (client.talking or client.playing))
+        # A Live mode Focus's exchange speech is the floor's, which _focus_quiet waits out as the floor's quiet.
+        return bool(client is not None and client.remote_activity)
 
     def _news_delivery_told(self, delivery: _NewsDelivery) -> bool:
         return delivery.reply is not None and (
@@ -926,7 +928,7 @@ class Hub:
             self._remote_interrupted = player.played()
         if client_id == self._speech_client_id:
             await self.interrupt()
-            if self._floor is not None and self._live(client_id):
+            if self._floor is not None and self._is_live(client_id):
                 # Stopped by hand, the voice floor's reply ends with no Follow-up window, as a typed line ends one.
                 self._floor.typed_input()
         elif (player := self._client_players.get(client_id)) is not None:
@@ -1810,7 +1812,7 @@ class Hub:
         while self._focus_busy():
             self._clients_updated.clear()
             await self._clients_updated.wait()
-        if self._floor is not None and (self.clients.focus == TERMINAL or self._live(self.clients.focus)):
+        if self._floor is not None and (self.clients.focus == TERMINAL or self._is_live(self.clients.focus)):
             await self._quiet()
         elif self._client_can_speak(self.clients.focus):
             await self._speech.idle(stall_timeout=None, destination=self._client_players.get(self.clients.focus))
@@ -2196,6 +2198,9 @@ class Hub:
         speech = self._speech if audible else _Silent()
         if audible:
             self._speech_client_id = destination_id
+            if destination_id != TERMINAL:
+                self.clients.begin_stream(destination_id, floor=owner is not None and self._floor is not None
+                                          and self._floor.owns(owner))
         player = self._client_players.get(destination_id)
         receipt = speech.begin(self._lang, reply_id=self._output.reply_id, turn=turn, heard_at=arrived if kind == "user" else None, owner=owner,
                      destination=player, client=destination_id,

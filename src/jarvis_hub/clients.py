@@ -18,6 +18,14 @@ class Client:
     playing: bool = False
     # In Live mode the phone is one of the voice floor's inputs and speakers (ADR 0031).
     live: bool = False
+    # The stream last begun here is the voice floor's own exchange speech, which is not remote activity.
+    floor_speech: bool = False
+
+    @property
+    def remote_activity(self) -> bool:
+        """Its Talk or its playback, which the voice floor must not talk over. Playback of a Live mode exchange is
+        the floor's own speech, so it is not."""
+        return self.talking or (self.playing and not self.floor_speech)
 
 
 class Clients:
@@ -54,7 +62,8 @@ class Clients:
 
     def disconnect(self, client_id: str) -> None:
         client = self._clients[client_id]
-        self._clients[client_id] = replace(client, connected=False, talking=False, playing=False, live=False)
+        self._clients[client_id] = replace(client, connected=False, talking=False, playing=False, live=False,
+                                          floor_speech=False)
         self._on_change()
 
     def take_focus(self, client_id: str) -> None:
@@ -72,10 +81,22 @@ class Clients:
 
     @property
     def remote_activity(self) -> bool:
-        """A phone's Talk or its playback, which the voice floor must not talk over. A Live mode phone's playback is
-        the floor's own speech, so it is not."""
-        return any(client.id != TERMINAL and client.connected and (client.talking or client.playing and not client.live)
+        """Whether any connected phone has remote activity."""
+        return any(client.id != TERMINAL and client.connected and client.remote_activity
                    for client in self._clients.values())
+
+    def set_live(self, client_id: str, live: bool) -> None:
+        client = self._clients[client_id]
+        if client.live != live:
+            self._clients[client_id] = replace(client, live=live)
+            self._on_change()
+
+    def begin_stream(self, client_id: str, *, floor: bool) -> None:
+        """A speech stream begins on `client_id`; `floor` says it is the voice floor's own exchange speech."""
+        client = self._clients[client_id]
+        if client.floor_speech != floor:
+            self._clients[client_id] = replace(client, floor_speech=floor)
+            self._on_change()
 
     def set_talking(self, client_id: str, talking: bool) -> None:
         self._clients[client_id] = replace(self._clients[client_id], talking=talking)

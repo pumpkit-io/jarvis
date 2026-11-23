@@ -101,7 +101,7 @@ class _Reply:
     heard_at: float | None
     owner: tuple[str, int] | None = None
     player: Player | None = None
-    # The Client the reply speaks on, for its metrics rows; None when the caller did not say.
+    # The Client the reply speaks on, for its metrics rows.
     client: str | None = None
     reply_id: str | None = None
     speech_id: str = field(default_factory=lambda: uuid4().hex)
@@ -497,7 +497,8 @@ class Speech:
                 self._record_reply(reply)
 
     def _play(self, clip: Clip, reply: _Reply | None, *, sentence: bool, player: Player | None = None) -> float:
-        """Plays `clip` after what is queued, on `player` when it is no reply's; returns when it starts."""
+        """Plays `clip` after what is queued; returns when it starts. A reply's clip plays on the reply's player,
+        any other on `player`, or the Mac when that is None."""
         player = reply.player if reply is not None and reply.player is not None else player or self._player
         if reply is not None and not self._reply_allowed(reply):
             return self._clock.now()

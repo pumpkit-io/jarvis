@@ -115,8 +115,9 @@ class _CuePlayer:
     """Plays a Live mode exchange's chime and closing sound on the phone, each a one-clip speech stream named by its
     `cue`. Cues are not speech: they play under Silence, nothing stops them, and they are not remote activity."""
 
-    def __init__(self, publish: Callable[[str, dict[str, Any], bytes | None], None]) -> None:
+    def __init__(self, publish: Callable[[str, dict[str, Any], bytes | None], None], speaker: RemotePlayer) -> None:
         self._publish = publish
+        self._speaker = speaker
         # Recent cue streams, whose playback reports the phone may still send.
         self._streams: deque[str] = deque(maxlen=8)
 
@@ -125,6 +126,8 @@ class _CuePlayer:
 
     def play(self, clip: Clip, *, starts_reply: bool = False) -> PlaybackReceipt:
         pcm, cue = _pcm(clip), {"speech_id": uuid4().hex, "cue": clip.voice}
+        # The phone plays one stream at a time: one still open there would send it a clip or stop out of turn.
+        self._speaker.stop()
         self._streams.append(cue["speech_id"])
         self._publish("speech_begin", {**cue, "sample_rate": 24000, "channels": 1, "sample_width": 2}, None)
         self._publish("speech_clip", {**cue, "index": 0, "text": clip.text, "byte_length": len(pcm)}, pcm)
@@ -600,7 +603,7 @@ class Door:
 
             connection.publish = publish
             connection.player = RemotePlayer(_SpeechTransport(publish, playing, silenced))
-            connection.cues = _CuePlayer(publish)
+            connection.cues = _CuePlayer(publish, connection.player)
             self._hub.attach_client(Client(client.id, "iphone" if client.kind == "iphone" else "reference", connected=True, can_show_text=False, can_speak=self._hub.speech_available,
                                            silence=self._log.silence(client.id)), player=connection.player)
             # Replay is queued before scheduled append notifications can run on this loop.
@@ -703,8 +706,10 @@ class Door:
                 player = connection.player
                 if not isinstance(speech_id, str) or type(index) is not int or player is None:
                     raise ValueError("Unknown speech")
-                if (kind == "playback_report" and connection.cues is not None and connection.cues.owns(speech_id)
-                        and set(payload) == {"speech_id", "clip_index", "state"}):
+                if kind == "playback_report" and connection.cues is not None and connection.cues.owns(speech_id):
+                    if (set(payload) != {"speech_id", "clip_index", "state"}
+                            or payload.get("state") not in ("started", "finished", "stopped")):
+                        raise ValueError("Invalid report")
                     result = {"ok": True, "result": {}}
                 elif kind == "interrupt":
                     if set(payload) != {"speech_id", "last_clip_index"} or not player.heard_through(speech_id, index):
@@ -789,8 +794,7 @@ class Door:
                 if self._live is None:
                     result = rejected("voice_unavailable", "Live mode needs Jarvis in voice mode on the Mac")
                 else:
-                    client = self._hub.clients.get(connection.client.id)
-                    if client is None:
+                    if self._hub.clients.get(connection.client.id) is None:
                         raise ValueError("Client is disconnected")
                     if not on:
                         self._stop_live(connection)
@@ -798,8 +802,7 @@ class Door:
                         assert connection.cues is not None
                         connection.live = self._live.open(connection.client.id, cues=connection.cues,
                                                           on_state=lambda state: self._voice_state(connection, state))
-                    if client.live != on:
-                        self._hub.attach_client(replace(client, live=on))
+                    self._hub.clients.set_live(connection.client.id, on)
                     result = {"ok": True, "result": {"on": on}}
             elif kind == "acknowledge":
                 seq = sequence(payload.get("seq"))
