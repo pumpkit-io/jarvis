@@ -100,6 +100,7 @@ class _Reply:
     began: float
     heard_at: float | None
     owner: tuple[str, int] | None = None
+    floor: bool = False
     player: Player | None = None
     # The Client the reply speaks on, for its metrics rows.
     client: str | None = None
@@ -220,7 +221,7 @@ class Speech:
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
               destination: Player | None = None, allowed: Callable[[], bool] | None = None,
               can_start: Callable[[], bool] | None = None, reply_id: str | None = None,
-              client: str | None = None) -> Callable[[], bool]:
+              client: str | None = None, floor: bool = False) -> Callable[[], bool]:
         """Bind a reply's destination and return a completion check unaffected by later replies.
         `can_start` gates only the first audio; `allowed` continues to guard an active reply."""
         self.start()
@@ -229,7 +230,7 @@ class Speech:
             self._players.append(player)
         self._last_player = player
         self._reply = _Reply(turn, lang, self._clock.now(), heard_at, owner=owner, player=player, client=client,
-                             reply_id=reply_id, allowed=allowed, can_start=can_start)
+                             reply_id=reply_id, allowed=allowed, can_start=can_start, floor=floor)
         self._prune_replies()
         self._replies[turn] = self._reply
         reply = self._reply
@@ -534,8 +535,8 @@ class Speech:
         receipt = player.play(clip, starts_reply=starts_reply)
         if reply is not None and sentence and clip.seconds > 0:
             reply.receipts.append(receipt)
-        # Off the Mac only a spoken turn's reply is reported, and the floor ignores any turn it does not own.
-        if (first and reply is not None and (player is self._player or reply.owner is not None)
+        # The floor observes both its spoken requests and its Announcements on a remote player.
+        if (first and reply is not None and (player is self._player or reply.owner is not None or reply.floor)
                 and self._on_reply_audio is not None):
             self._on_reply_audio(reply.heard_at, reply.owner)
         return starts

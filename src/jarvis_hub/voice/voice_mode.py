@@ -139,6 +139,7 @@ class _ObservedSpeech:
         # A reply begun and not yet ended.
         self._open = False
         self._remote = False
+        self._floor = False
         self._destination: Player | None = None
         self._client: str | None = None
         self._waits: set[asyncio.Task[None]] = set()
@@ -146,9 +147,10 @@ class _ObservedSpeech:
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
               destination: Player | None = None, allowed: Callable[[], bool] | None = None,
               can_start: Callable[[], bool] | None = None, reply_id: str | None = None,
-              client: str | None = None) -> Callable[[], bool] | None:
+              client: str | None = None, floor: bool = False) -> Callable[[], bool] | None:
         # The reply to the floor's own turn is the floor's speech on whichever Client's player it plays.
-        self._remote = destination is not None and not (owner is not None and self._owns(owner))
+        self._remote = destination is not None and not (floor or owner is not None and self._owns(owner))
+        self._floor = floor
         self._destination = destination
         self._client = client
         self._open = False
@@ -160,7 +162,7 @@ class _ObservedSpeech:
         self._heard_at = heard_at
         self._owner = owner
         return self._speech.begin(lang, turn=turn, heard_at=heard_at, owner=owner, destination=destination, allowed=allowed,
-                                  can_start=can_start, reply_id=reply_id, client=client)
+                                  can_start=can_start, reply_id=reply_id, client=client, floor=floor)
 
     def replay(self, text: str, lang: Lang, *, destination: RemotePlayer, reply_id: str,
                allowed: Callable[[], bool]) -> str:
@@ -205,13 +207,15 @@ class _ObservedSpeech:
         if self._destination is destination:
             self._dropping = True
             # The floor's own turn waits on its reply, which, like a reply under Silence, ends with its text.
-            if self._remote or self._owner is None or not self._owns(self._owner):
+            if (self._remote or self._owner is None and not self._floor
+                    or self._owner is not None and not self._owns(self._owner)):
                 self._stopped = self._replies
         self._speech.retire(destination)
 
     def stop_on(self, client: str) -> None:
         """Stops the floor's own reply if it plays on `client`, leaving speech elsewhere alone."""
-        if not self._remote and self._client == client and self._destination is not None:
+        if not self._remote and self._client == client:
+            self._stopped = self._replies
             self.retire(self._destination)
 
     def played(self) -> str:
@@ -304,7 +308,7 @@ class VoiceMode:
         self._heard_before_cut = ""
         self._idle = asyncio.Event()
         self._idle.set()
-        self._woke: Callable[[], None] = lambda: None
+        self._woke: Callable[[str], None] = lambda client: None
         self._events: asyncio.Queue[Event | _Related | _MicrophoneEvent] = asyncio.Queue()
         self._lines: asyncio.Queue[Line] = asyncio.Queue()
         self._speech = Speech(
@@ -345,7 +349,7 @@ class VoiceMode:
         self._events.put_nowait(StandBy(self._clock.now()))
 
     async def lines(
-        self, interrupt: Callable[[], Awaitable[Any]], woke: Callable[[], None] = lambda: None,
+        self, interrupt: Callable[[], Awaitable[Any]], woke: Callable[[str], None] = lambda client: None,
         admitted: Callable[[Line], None] = lambda line: None,
     ) -> AsyncIterator[Line]:
         """The User's spoken turns, for as long as this is iterated. `woke` hears of each Wake word that opens
@@ -432,9 +436,11 @@ class VoiceMode:
                 self._views[client] = view
                 watcher(view)
 
-    def text_reply(self, owner: tuple[str, int]) -> None:
-        """The reply to the spoken turn `owner` was text only, as under Silence, and its text has ended."""
-        if self.owns(owner) and self._owned is not None:
+    def text_reply(self, owner: tuple[str, int] | None, *, client: str = TERMINAL) -> None:
+        """A spoken request or Announcement was text only, as under Silence, and its text has ended."""
+        if owner is None and self._voice.state == "announce" and client == self._exchange:
+            self._replied(None, None)
+        elif owner is not None and self.owns(owner) and self._owned is not None:
             self._replied(self._owned.arrived, owner)
 
     def _listen_to(self, client: str, audio: AudioInput) -> None:
@@ -451,19 +457,19 @@ class VoiceMode:
             if self._voice.state == "idle":
                 return
 
-    def announce(self) -> bool:
+    def announce(self, client: str = TERMINAL) -> bool:
         """Moves an idle machine into an Announcement at once, so a Wake word from now on interrupts it.
 
         Returns False, changing nothing, when Jarvis is not idle: the news waits for the next `quiet`.
         """
-        if self._voice.state != "idle":
+        if self._voice.state != "idle" or client not in self._inputs:
             return False
-        # Announcements open on the Mac.
-        self._exchange = TERMINAL
+        self._exchange = client
+        self._wake = None
         for action in self._step(AnnouncementBegins(self._clock.now())):
             if isinstance(action, Chime):
                 # Queued now, so it plays ahead of the news turn's first sentence.
-                self._speech.say("chime", "en")
+                self._cue("chime")
         return True
 
     async def close(self) -> None:
@@ -634,7 +640,11 @@ class VoiceMode:
         if self.owns(owner) and self._owned is not None and 0 <= start < len(self._owned.segments):
             self._owned = replace(self._owned, semantic_start=start)
 
-    def typed_input(self) -> None:
+    def typed_input(self, *, client: str | None = None) -> None:
+        if client is not None:
+            if client != self._exchange:
+                return
+            self.speech.stop_on(client)
         if self._exchange == TERMINAL and self._owned is None and self._voice.in_turn and self._voice.state in CAPTURING:
             return
         self._wake = None
@@ -830,7 +840,7 @@ class VoiceMode:
         self._barge_in_from = barge_in_from(self._voice, self._timing)
         self._sync_barge_in()
         if self._voice.woke_at != woke_at:
-            self._woke()
+            self._woke(self._exchange)
         return actions
 
     async def _next_event(self) -> Event | _Related | _MicrophoneEvent:

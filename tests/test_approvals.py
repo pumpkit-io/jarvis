@@ -842,16 +842,16 @@ class AlwaysQuiet:
     def owns(self, owner: tuple[str, int]) -> bool:
         return True
 
-    def typed_input(self) -> None:
+    def typed_input(self, *, client: str | None = None) -> None:
         pass
 
     def semantic_context(self, owner: tuple[str, int], start: int) -> None:
         pass
 
-    def announce(self) -> bool:
+    def announce(self, client: str = "terminal") -> bool:
         return True
 
-    def text_reply(self, owner: tuple[str, int]) -> None:
+    def text_reply(self, owner: tuple[str, int] | None, *, client: str = "terminal") -> None:
         pass
 
 

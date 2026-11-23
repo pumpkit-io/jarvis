@@ -132,6 +132,45 @@ async def test_a_wake_word_said_to_the_phone_opens_listening_and_its_request_rea
         assert [r["client"] for r in rig.metrics.records if r["kind"] == "voice"][0] == phone
 
 
+async def test_a_phone_wake_word_moves_focus_before_the_request_and_its_duplicate_does_not_steal_it(tmp_path: Path) -> None:
+    async with live_phone(tmp_path) as (rig, phone):
+        assert rig.hub.clients.focus == TERMINAL
+
+        await phone.wake()
+
+        await until(lambda: rig.hub.clients.focus == phone.client)
+        await until(lambda: any(frame["type"] == "status" and frame["payload"]["focus_client_id"] == phone.client
+                                for frame in phone.frames))
+        rig.clock.advance(1)
+        rig.mac.wake()
+        await asyncio.sleep(.05)
+        assert rig.hub.clients.focus == phone.client
+        assert rig.requests() == []
+
+
+@pytest.mark.parametrize("live", [False, True])
+async def test_only_a_live_phone_can_start_new_reply_speech_with_its_display_hidden(tmp_path: Path, live: bool) -> None:
+    async with live_phone(tmp_path) as (rig, phone):
+        if not live:
+            assert (await phone.command("set_live", on=False))["ok"]
+        assert (await phone.command("set_presence", can_show_text=False))["ok"]
+
+        if live:
+            await phone.wake()
+            await phone.ask()
+        else:
+            await rig.hub.admit_line(Line("Status from the phone", rig.clock.now(), typed=False, client_id=phone.client))
+
+        await until(lambda: any(frame["type"] == "reply_end" and frame["payload"].get("text") == "Opened."
+                                for frame in phone.frames))
+        if live:
+            await until(lambda: phone.ended() == 1)
+            assert phone.streams() == [("chime", [""]), ("reply", ["Opened."])]
+        else:
+            assert phone.streams() == []
+        assert rig.speaker.voices == ["ready"]
+
+
 async def test_set_live_answers_on_and_a_retry_returns_the_original_result(tmp_path: Path) -> None:
     async with live_rig(tmp_path) as rig, connect(rig.session, rig.door, rig.phones[0].token) as socket:
         await foreground(socket)
@@ -612,15 +651,18 @@ async def test_stopping_the_reply_on_the_phone_idles_the_voice_there(tmp_path: P
         assert [stream[0] for stream in phone.streams()] == ["chime", "reply"]
 
 
-async def test_news_for_the_phone_waits_out_its_follow_up_window(tmp_path: Path) -> None:
+@pytest.mark.parametrize("background", [False, True])
+async def test_news_for_the_phone_waits_out_its_follow_up_window(tmp_path: Path, background: bool) -> None:
     arrival, reported = asyncio.Event(), asyncio.Event()
     replies: list[list[Step]] = [[Tool("delegate", {"request": "Fix typo", "context": ""}), Text("Working, sir.")],
-                                 [Text("The fix is ready.")]]
+                                 [Text("The fix is ready.")], [Text("Follow-up answer.")]]
     orchestrator: list[list[Step]] = [[Gate(arrival), Tool("report", {"task_id": "T1", "spoken": "Ready"}), Set(reported)]]
     async with live_phone(tmp_path, replies, orchestrator) as (rig, phone):
         await phone.wake()
         await phone.ask()
         await heard_out(rig, phone)
+        if background:
+            assert (await phone.command("set_presence", can_show_text=False))["ok"]
 
         arrival.set()
         await reported.wait()
@@ -629,7 +671,132 @@ async def test_news_for_the_phone_waits_out_its_follow_up_window(tmp_path: Path)
 
         rig.clock.advance(6)
         await until(lambda: [s for s in phone.streams() if s[0] == "reply"][-1:] == [("reply", ["The fix is ready."])])
-        assert [stream[0] for stream in phone.streams()] == ["chime", "reply", "closing", "reply"]
+        assert [stream[0] for stream in phone.streams()] == ["chime", "reply", "closing", "chime", "reply"]
+        await heard_out(rig, phone, 2)
+        await phone.stream(30)
+        await phone.ask()
+        await until(lambda: phone.ended() == 3)
+        assert phone.streams()[-1] == ("reply", ["Follow-up answer."])
+        assert rig.speaker.voices == ["ready"]
+
+
+async def test_a_phone_wake_ends_quiet_mode_and_folds_held_news_into_its_next_request(tmp_path: Path) -> None:
+    arrival, reported = asyncio.Event(), asyncio.Event()
+    replies: list[list[Step]] = [
+        [Tool("delegate", {"request": "Fix typo", "context": ""}), Tool("quiet_mode", {"on": True}), Text("Quiet, sir.")],
+        [Text("One update, then your answer.")],
+    ]
+    orchestrator: list[list[Step]] = [[Gate(arrival), Tool("report", {"task_id": "T1", "spoken": "Ready"}), Set(reported)]]
+    async with live_phone(tmp_path, replies, orchestrator) as (rig, phone):
+        await phone.wake()
+        await phone.ask()
+        await heard_out(rig, phone)
+        arrival.set()
+        await reported.wait()
+        await phone.stream(650)
+        await until(lambda: phone.states()[-1] == "idle")
+        assert phone.ended() == 1
+        assert any(frame["type"] == "status" and frame["payload"]["quiet"] for frame in phone.frames)
+
+        await phone.wake()
+
+        await until(lambda: [frame["payload"]["quiet"] for frame in phone.frames if frame["type"] == "status"][-1] is False)
+        await phone.ask()
+        await until(lambda: phone.ended() == 2)
+        assert len(rig.requests()) == 2
+        assert '<event source="hub" away="1">' in rig.requests()[-1]
+        assert "Open a PR" in rig.requests()[-1]
+        assert rig.speaker.voices == ["ready"]
+
+
+async def test_a_silent_live_announcement_opens_the_announcement_window_after_its_text_ends(tmp_path: Path) -> None:
+    arrival, reported = asyncio.Event(), asyncio.Event()
+    replies: list[list[Step]] = [[Tool("delegate", {"request": "Fix typo", "context": ""}), Text("Working.")],
+                                 [Text("The fix is ready.")]]
+    orchestrator: list[list[Step]] = [[Gate(arrival), Tool("report", {"task_id": "T1", "spoken": "Ready"}), Set(reported)]]
+    async with live_phone(tmp_path, replies, orchestrator) as (rig, phone):
+        assert (await phone.command("say_text", text="Fix the typo"))["ok"]
+        await until(lambda: any(frame["type"] == "reply_end" for frame in phone.frames))
+        assert (await phone.command("set_silence", silence=True))["ok"]
+        arrival.set()
+        await reported.wait()
+        await until(lambda: any(frame["type"] == "reply_end" and frame["payload"].get("text") == "The fix is ready."
+                                for frame in phone.frames))
+
+        await until(lambda: phone.states()[-1] == "follow_up")
+
+        rig.clock.advance(3.9)
+        await asyncio.sleep(.05)
+        assert phone.states()[-1] == "follow_up"
+        rig.clock.advance(.2)
+        await until(lambda: phone.states()[-1] == "idle" and len(phone.streams()) == 2)
+        assert phone.streams() == [("chime", [""]), ("closing", [""])]
+        assert rig.speaker.voices == ["ready"]
+
+
+@pytest.mark.parametrize("silenced_before", [False, True])
+async def test_news_finished_as_hidden_text_is_held_instead_of_counted_as_seen(
+    tmp_path: Path, silenced_before: bool,
+) -> None:
+    arrival, reported, writing, finish = (asyncio.Event() for _ in range(4))
+    replies: list[list[Step]] = [
+        [Tool("delegate", {"request": "Fix typo", "context": ""}), Text("Working.")],
+        [Text("News opening. "), Set(writing), Gate(finish), Text("Hidden ending.")],
+        [Text("One held update.")],
+    ]
+    orchestrator: list[list[Step]] = [[Gate(arrival), Tool("report", {"task_id": "T1", "spoken": "Ready"}), Set(reported)]]
+    async with live_phone(tmp_path, replies, orchestrator) as (rig, phone):
+        try:
+            assert (await phone.command("say_text", text="Fix the typo"))["ok"]
+            await until(lambda: any(frame["type"] == "reply_end" for frame in phone.frames))
+            if silenced_before:
+                assert (await phone.command("set_silence", silence=True))["ok"]
+            arrival.set()
+            await writing.wait()
+            if not silenced_before:
+                await until(lambda: any("News opening." in texts for kind, texts in phone.streams() if kind == "reply"))
+            assert (await phone.command("set_presence", can_show_text=False))["ok"]
+            if not silenced_before:
+                assert (await phone.command("set_silence", silence=True))["ok"]
+            finish.set()
+            await until(lambda: any(frame["type"] == "reply_end" and frame["payload"].get("text") == "News opening. Hidden ending."
+                                    for frame in phone.frames))
+            await until(lambda: phone.states()[-1] == "follow_up")
+
+            assert (await phone.command("set_presence", can_show_text=True))["ok"]
+            await phone.stream(450)
+
+            await until(lambda: any(frame["type"] == "reply_end" and frame["payload"].get("text") == "One held update."
+                                    for frame in phone.frames))
+            message = rig.backend.session("talker").received[-1]
+            assert message.startswith('<event source="hub" away="1">')
+            assert message.count('task="T1"') == 1
+            assert rig.speaker.voices == ["ready"]
+        finally:
+            finish.set()
+
+
+async def test_a_phone_wake_during_a_mac_announcement_keeps_listening_on_the_phone(tmp_path: Path) -> None:
+    arrival, reported = asyncio.Event(), asyncio.Event()
+    replies: list[list[Step]] = [
+        [Tool("delegate", {"request": "Fix typo", "context": ""}), Text("Working.")],
+        [Text("News on the Mac.")],
+        [Text("On the phone.")],
+    ]
+    orchestrator: list[list[Step]] = [[Gate(arrival), Tool("report", {"task_id": "T1", "spoken": "Ready"}), Set(reported)]]
+    async with live_phone(tmp_path, replies, orchestrator) as (rig, phone):
+        await rig.hub.admit_line(Line("Fix the typo", rig.clock.now(), typed=True))
+        await until(lambda: any(frame["type"] == "reply_end" for frame in phone.frames))
+        rig.speaker.hold = True
+        arrival.set()
+        await until(lambda: "News on the Mac." in rig.speaker.texts)
+
+        await phone.wake()
+
+        assert rig.hub.clients.focus == phone.client
+        await phone.ask()
+        await until(lambda: phone.ended() == 1)
+        assert phone.streams()[-1] == ("reply", ["On the phone."])
 
 
 async def test_a_replay_on_a_live_phone_is_remote_activity_that_the_wake_word_cannot_cut_into(tmp_path: Path) -> None:
