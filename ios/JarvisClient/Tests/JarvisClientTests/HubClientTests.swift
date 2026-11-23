@@ -654,6 +654,22 @@ func actualTransportOutcomesDetermineConnectionState(_ error: HubTransportError)
     await client.stop(); reader.cancel()
 }
 
+@Test(arguments: [#""reply_id":"r","cue":"chime","#, ""])
+func speechBeginNamesItsReplyOrItsCueAndNeverBoth(names: String) async throws {
+    let transport = FakeTransport()
+    let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }))
+    await client.start()
+    try await eventually { await transport.socket(0) != nil }
+    let socket = try #require(await transport.socket(0))
+    await socket.ready(through: 0)
+    try await eventually { await client.state == .ready }
+    let cursor = await client.cursor
+    await socket.text(event(2, "speech_begin", #"{"speech_id":"s",\#(names)"sample_rate":24000,"channels":1,"sample_width":2}"#))
+    try await eventually { await socket.closed }
+    #expect(await client.cursor == cursor)
+    await client.stop()
+}
+
 @Test func speechDownlinkDoesNotInheritUploadDurationLimit() async throws {
     let transport = FakeTransport()
     let client = HubClient(transport: HubTransport(connect: { await transport.connect($0) }))

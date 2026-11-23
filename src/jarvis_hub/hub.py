@@ -814,6 +814,7 @@ class Hub:
         player = self._client_players.get(client_id)
         if not isinstance(player, RemotePlayer) or not self._client_can_speak(client_id):
             raise ValueError("Client cannot speak")
+        self.clients.begin_stream(client_id, floor=False)
         return self._speech.replay(text, "it" if lang == "it" else "en", destination=player, reply_id=reply_id,
                                    allowed=lambda: self._client_can_speak(client_id)
                                    and self._client_players.get(client_id) is player)
@@ -897,7 +898,8 @@ class Hub:
         if self.clients.focus == TERMINAL:
             return self.clients.remote_activity
         client = self.clients.get(self.clients.focus)
-        return bool(client is not None and (client.talking or client.playing))
+        # The floor waits out its own speech on a Live mode Focus, and stops waiting on a phone that never reports.
+        return bool(client is not None and (client.talking or client.playing and not client.floor_speech))
 
     def _news_delivery_told(self, delivery: _NewsDelivery) -> bool:
         return delivery.reply is not None and (
@@ -2196,6 +2198,9 @@ class Hub:
         speech = self._speech if audible else _Silent()
         if audible:
             self._speech_client_id = destination_id
+            if destination_id != TERMINAL:
+                self.clients.begin_stream(destination_id, floor=owner is not None and self._floor is not None
+                                          and self._floor.owns(owner))
         player = self._client_players.get(destination_id)
         receipt = speech.begin(self._lang, reply_id=self._output.reply_id, turn=turn, heard_at=arrived if kind == "user" else None, owner=owner,
                      destination=player, client=destination_id,

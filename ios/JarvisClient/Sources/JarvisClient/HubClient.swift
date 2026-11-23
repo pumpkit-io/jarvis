@@ -492,7 +492,7 @@ public actor HubClient {
                         case .speechBegin:
                             guard event.integer("sample_rate") == 24_000, event.integer("channels") == 1,
                                   event.integer("sample_width") == 2, let id = event.string("speech_id"),
-                                  event.string("reply_id") != nil || event.string("cue") != nil else { throw HubProtocolError.malformedAudio }
+                                  (event.string("reply_id") == nil) != (event.string("cue") == nil) else { throw HubProtocolError.malformedAudio }
                             if !foreground, id != drainingSpeechID { await retire(); return }
                             speechID = id; speechReplyID = event.string("reply_id"); activeSpeechID = id; nextClip = 0
                         case .speechClip:

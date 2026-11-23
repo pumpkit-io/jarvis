@@ -108,6 +108,11 @@ class _Related:
         return self.fragments[-1].heard
 
 
+# A phone reports each clip finished as it plays it. Half a minute with no report, longer than a sentence takes to say,
+# means it stopped reporting; a phone that stopped answering at all is disconnected within that time.
+REMOTE_STALLED = 30.0
+
+
 class _ObservedSpeech:
     """The Hub's speech, telling the machine when each reply has finished playing.
 
@@ -133,6 +138,7 @@ class _ObservedSpeech:
         self._dropping = False
         self._remote = False
         self._destination: Player | None = None
+        self._client: str | None = None
         self._waits: set[asyncio.Task[None]] = set()
 
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
@@ -142,6 +148,7 @@ class _ObservedSpeech:
         # The reply to the floor's own turn is the floor's speech on whichever Client's player it plays.
         self._remote = destination is not None and not (owner is not None and self._owns(owner))
         self._destination = destination
+        self._client = client
         self._dropping = not self._remote and self._moved_on(heard_at, owner)
         if self._dropping:
             return
@@ -192,6 +199,11 @@ class _ObservedSpeech:
             self._stopped = self._replies
         self._speech.retire(destination)
 
+    def stop_on(self, client: str) -> None:
+        """Stops the floor's own reply if it plays on `client`, leaving speech elsewhere alone."""
+        if not self._remote and self._client == client and self._destination is not None:
+            self.retire(self._destination)
+
     def played(self) -> str:
         return self._speech.played()
 
@@ -203,8 +215,8 @@ class _ObservedSpeech:
         if destination is None:
             await self._speech.idle()
         else:
-            # A phone's clip has played only once the phone reports it finished, however long it runs.
-            await self._speech.idle(destination=destination, stall_timeout=None)
+            # A phone's clip has played only once the phone reports it finished.
+            await self._speech.idle(destination=destination, stall_timeout=REMOTE_STALLED)
         # A reply begun since has the floor; its own end reports.
         if reply == self._replies and reply > self._stopped:
             await self._done(heard_at, owner)
@@ -370,7 +382,24 @@ class VoiceMode:
         self._views.pop(client, None)
         if (task := self._listening.pop(client, None)) is not None:
             task.cancel()
+        if client == self._exchange and client != TERMINAL:
+            self._end_exchange(client)
         audio.close()
+
+    def _end_exchange(self, client: str) -> None:
+        """`client`'s exchange lost its input: its reply stops there, and with no closing sound, since nothing is
+        left there to hear it, the voice idles until a Wake word elsewhere."""
+        self._exchange = TERMINAL
+        if self._voice.state == "idle":
+            return
+        self.speech.stop_on(client)
+        before = self._voice.state
+        self._voice = Voice()
+        self._retire()
+        self._barge_in_from = None
+        for audio in self._inputs.values():
+            audio.barge_in(None)
+        self._transition(before, "idle", EndConversation(self._clock.now()), client)
 
     def voice_state(self, client: str) -> str:
         """The machine as `client` sees it: the exchange's Client sees its state, with an Announcement as
