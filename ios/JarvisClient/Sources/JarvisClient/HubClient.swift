@@ -5,6 +5,8 @@ public enum SocketMessage: Sendable { case text(Data), binary(Data) }
 public protocol HubSocket: Sendable {
     func receive() async throws -> SocketMessage
     func send(_ data: Data) async throws
+    /// Sends one binary message, the uplink audio of Live mode.
+    func sendBinary(_ data: Data) async throws
     func close() async
     func closeForProtocolError() async
     /// Throws when the Hub does not answer a ping in time.
@@ -47,7 +49,7 @@ public actor HubClient {
     public private(set) var unansweredCommands: Set<String> = []
     public private(set) var results: [String: CommandResult] = [:]
     /// Commands that a reconnect never resends: a reset arriving long after the User asked would surprise them.
-    static let socketBoundTypes: Set<String> = ["reset_context"]
+    static let socketBoundTypes: Set<String> = ["reset_context", "set_live"]
     public nonisolated let updates: AsyncStream<HubClientUpdate>
     private let continuation: AsyncStream<HubClientUpdate>.Continuation
     private let transport: HubTransport
@@ -82,6 +84,10 @@ public actor HubClient {
     private var presenceTimeout: Task<Void, Never>?
     private var keepalive: Task<Void, Never>?
     private var liveWrite: Task<Void, Never>?
+    /// Counts opened sockets: a reconnect inside one run keeps its generation but is a new socket.
+    private var socketSerial: UInt64 = 0
+    /// The socket the Hub turned Live mode on for; a new socket starts with it off.
+    private var liveSocket: UInt64?
     private var waitingToRetry = false
 
     /// The cache closure may write later but must keep events and cursor together, and throw once storage fails. A nil event commits a replay watermark.
@@ -225,6 +231,7 @@ public actor HubClient {
         guard running, foreground, handover, displayReady, state.canSend, let socket else { throw HubProtocolError.notConnected }
         let data = try encodedCommand(command)
         try retain(command, data: data)
+        if command.type == "set_live" { liveSocket = nil }
         // A successful send only reaches the local kernel. Keep the original command until its result.
         let owner = generation
         do {
@@ -254,6 +261,18 @@ public actor HubClient {
             try? await socket.send(data)
         }
         return true
+    }
+
+    /// Sends uplink PCM only on the socket Live mode is on for: any other socket would close on it, so the audio is dropped.
+    @discardableResult public func sendAudio(_ pcm: Data) async -> Bool {
+        guard running, handover, liveSocket == socketSerial, let socket,
+              !pcm.isEmpty, pcm.count <= LiveFrameChunker.maximumBytes, pcm.count.isMultiple(of: LiveFrameChunker.frameBytes) else { return false }
+        let serial = socketSerial
+        do { try await socket.sendBinary(pcm); return true }
+        catch {
+            if socketSerial == serial { await socket.close() }
+            return false
+        }
     }
 
     private func removePendingCommand(_ id: String) {
@@ -409,6 +428,7 @@ public actor HubClient {
                 current = opened
                 guard generation == owner, foreground, running else { await opened.close(); return }
                 startKeepalive(opened, owner: owner)
+                socketSerial &+= 1
                 socket = opened; handover = false; displayReady = false; status = nil; silenceConfirmed = false; initialSettingsReady = false
                 var header: HubEvent?
                 var speechID: String?
@@ -450,7 +470,10 @@ public actor HubClient {
                                 guard generation == owner, foreground else { return }
                                 displayReady = true; refreshState()
                             }
-                        } else if let id = result.id, pendingCommands.contains(where: { $0.id == id }) {
+                        } else if let id = result.id, let command = pendingCommands.first(where: { $0.id == id }) {
+                            if command.type == "set_live" {
+                                liveSocket = result.ok && result.result?["on"] == .bool(true) ? socketSerial : nil
+                            }
                             pendingCommands.removeAll { $0.id == id }
                             pendingData.removeValue(forKey: id)
                             retryTimers.removeValue(forKey: id)?.1.cancel()

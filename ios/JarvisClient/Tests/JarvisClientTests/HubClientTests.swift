@@ -7,6 +7,7 @@ actor FakeSocket: HubSocket {
     nonisolated let input: AsyncThrowingStream<SocketMessage, any Error>.Continuation
     var sent: [HubCommand] = []
     var rawSent: [Data] = []
+    var binarySent: [Data] = []
     var closed = false
     var holdClose = false
     var closeWaiter: CheckedContinuation<Void, Never>?
@@ -30,6 +31,7 @@ actor FakeSocket: HubSocket {
             input.yield(.text(Data("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(command.id)\",\"ok\":true,\"result\":{\"can_show_text\":true}}".utf8)))
         }
     }
+    func sendBinary(_ data: Data) async throws { binarySent.append(data) }
     var pings = 0
     var pingFails = false
     func ping() async throws {

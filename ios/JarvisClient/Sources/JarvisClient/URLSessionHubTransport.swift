@@ -92,6 +92,11 @@ final class URLSessionHubSocket: NSObject, HubSocket, URLSessionWebSocketDelegat
         try await task.send(.string(text))
     }
 
+    func sendBinary(_ data: Data) async throws {
+        guard lock.withLock({ opened && !ended }) else { throw HubProtocolError.notConnected }
+        try await task.send(.data(data))
+    }
+
     func receive() async throws -> SocketMessage {
         do {
             let message: URLSessionWebSocketTask.Message

@@ -122,6 +122,7 @@ struct NativeReceiveSocket: HubSocket {
 
     func receive() async throws -> SocketMessage { try await native.receive() }
     func send(_ data: Data) async throws { try await wire.send(data) }
+    func sendBinary(_ data: Data) async throws { try await wire.sendBinary(data) }
     func close() async { await wire.close(); await native.close() }
 }
 

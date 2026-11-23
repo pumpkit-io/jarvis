@@ -33,7 +33,7 @@ targets:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        NSMicrophoneUsageDescription: Jarvis records only while you use the Talk key.
+        NSMicrophoneUsageDescription: 'Jarvis records while you use the Talk key, and listens for “Jarvis” while Live mode is on.'
         NSCameraUsageDescription: Scan the pairing code shown by Jarvis on your Mac.
         UIBackgroundModes:
           - audio

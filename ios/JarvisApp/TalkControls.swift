@@ -10,6 +10,7 @@ struct MessageInputBar: View {
     @State private var visible = false
     @State private var pillHeight: CGFloat = 56
     @State private var preview = TalkPreview()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private let barBottomPadding: CGFloat = 8
     private let theme = JarvisTheme()
     private var recording: Bool { session.talk.state == .recording }
@@ -30,6 +31,7 @@ struct MessageInputBar: View {
                 }
                 .modifier(StatusBackground())
             }
+            if let message = session.liveMode.message { status(Text(message)).transition(.opacity) }
             HStack(alignment: .bottom, spacing: 8) {
                 if paused {
                     Button { preview.stop(); Task { await session.talk.discard() } } label: {
@@ -52,6 +54,7 @@ struct MessageInputBar: View {
             }
             .animation(.spring(response: 0.3, dampingFraction: 0.85), value: paused)
         }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.3), value: session.liveMode.message)
         .font(.system(size: controlSize))
         .foregroundStyle(theme.haze)
         .padding(.horizontal, 20)
@@ -74,6 +77,10 @@ struct MessageInputBar: View {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             #endif
             AccessibilityNotification.Announcement("Too short to send").post()
+        }
+        .onChange(of: session.liveMode.message) { _, message in
+            guard visible, let message else { return }
+            AccessibilityNotification.Announcement(message).post()
         }
         .onChange(of: session.talk.state) { _, state in
             if state != .paused { preview.stop() }

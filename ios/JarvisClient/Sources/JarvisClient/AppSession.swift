@@ -54,6 +54,7 @@ import Observation
     public private(set) var replayMessages: [String: String] = [:]
     private var replayCommands: [String: HubCommand] = [:]
     public let talk: TalkController
+    public let liveMode: LiveModeController
     public private(set) var speechID: String?
     private var lastCompletedClip: Int64 = -1
     private let stopPlayback: @MainActor () -> Void
@@ -162,6 +163,7 @@ import Observation
             if resetCommand?.id == result.id {
                 resetCommand = nil; contextReset = ContextReset(result)
             }
+            liveMode.receive(result)
             if let entry = replayCommands.first(where: { $0.value.id == result.id }) {
                 replayCommands.removeValue(forKey: entry.key)
                 replayMessages[entry.key] = result.ok ? nil : result.error?.message ?? "Jarvis could not play this reply."
@@ -178,6 +180,7 @@ import Observation
             if replay.history_pruned == true { historyMessage = "Some older history is no longer available on the Mac." }
         case .commandDropped(let id):
             if resetCommand?.id == id { resetCommand = nil; contextReset = .unsure }
+            liveMode.dropped(commandID: id)
         case .speechConnectionEnded(let id):
             playback.stop(speechID: id, reportStopped: false)
         case .failure:
@@ -208,7 +211,7 @@ import Observation
                 makeTransport: @escaping (PairingCredentials) throws -> HubTransport = {
                     try .urlSession(origin: $0.origin, token: $0.deviceToken)
                 }, makePaths: @escaping () -> HubNetworkPaths? = { HubNetworkPaths() },
-                talk: TalkController? = nil, playback: SpeechPlayer? = nil,
+                talk: TalkController? = nil, playback: SpeechPlayer? = nil, liveMode: LiveModeController? = nil,
                 makeOutboxTransport: (@MainActor () -> any OutboxTransport)? = nil,
                 outboxDirectory: URL? = nil,
                 noticeSleep: @escaping @Sendable (Double) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
@@ -223,8 +226,12 @@ import Observation
         self.sendCommand = sendCommand
         self.historyDirectory = historyDirectory; self.historyNow = historyNow; self.makeTransport = makeTransport
         let audioSession = NativeTalkAudioSession()
-        self.playback = playback ?? SpeechPlayer(session: audioSession)
+        let liveCapture = NativeLiveCaptureSource(session: audioSession)
+        self.playback = playback ?? SpeechPlayer(session: audioSession,
+                                                 output: LiveSpeechRoute(standard: NativeSpeechOutput(), capture: liveCapture))
         self.talk = talk ?? TalkController(recorder: NativeTalkRecorder(session: audioSession), permission: { await NativeTalkRecorder.requestPermission() })
+        self.liveMode = liveMode ?? LiveModeController(capture: liveCapture,
+                                                       permission: { await NativeTalkRecorder.requestPermission() }, sleep: noticeSleep)
         // An injected Client means a test: its Outbox must never reach a real network or the app's folders.
         let background: @MainActor () -> any OutboxTransport = { BackgroundOutboxTransport.shared }
         let held: @MainActor () -> any OutboxTransport = { HeldOutboxTransport() }
@@ -543,6 +550,10 @@ import Observation
             Task { _ = await client.sendLive(HubCommand(type: "talk_cancel", payload: ["talk_id": .string(id)])) }
             outbox.enqueueTalk(talkID: UUID().uuidString, pcm: pcm, recordedAt: recordedAt)
         }, stopSpeech: { [weak self] in await self?.interruptSpeech() })
+        liveMode.configure(send: { [weak self] command in
+            guard let self, self.client === client, self.generation == owner else { throw HubProtocolError.notConnected }
+            try await self.sendCommand(client, command)
+        }, sendAudio: { await client.sendAudio($0) }, permissionAnswered: { [weak self] in self?.talk.microphonePermission(granted: $0) })
         await outbox.resume()
         guard generation == owner else { await client.stop(); return }
         paths = makePaths()
