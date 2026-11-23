@@ -65,6 +65,8 @@ public actor HubClient {
     private var task: Task<Void, Never>?
     private var generation: UInt64 = 0
     private var foreground = true
+    private var backgroundLive = false
+    private var connectionWanted: Bool { foreground || backgroundLive }
     private var running = false
     private var playing = false
     private var activeSpeechID: String?
@@ -72,7 +74,7 @@ public actor HubClient {
     private var drainingSpeechID: String?
     private var pathTask: Task<Void, Never>?
     private var handover = false
-    private var displayReady = false
+    private var presenceReady = false
     private var presenceDesired = false
     private var status: HubStatus?
     private var desiredSilence: Bool?
@@ -131,9 +133,9 @@ public actor HubClient {
     }
 
     private func beginDisplay(_ socket: any HubSocket, owner: UInt64) async throws {
-        guard generation == owner, foreground, presenceID == nil, !displayReady else { return }
-        let presence = HubCommand(type: "set_presence", payload: ["can_show_text": .bool(true)])
-        presenceID = presence.id; presenceDesired = true
+        guard generation == owner, connectionWanted, presenceID == nil, !presenceReady else { return }
+        let presence = HubCommand(type: "set_presence", payload: ["can_show_text": .bool(foreground)])
+        presenceID = presence.id; presenceDesired = foreground
         startPresenceDeadline(presence.id, owner: owner)
         try await socket.send(JSONEncoder().encode(presence))
     }
@@ -149,7 +151,7 @@ public actor HubClient {
                 }
             }
         }
-        if foreground { await replace() }
+        if connectionWanted { await replace() }
     }
 
     public func stop() async {
@@ -161,8 +163,8 @@ public actor HubClient {
 
     /// A network change only matters to a connection that is down or may have died: a working socket is checked, not replaced.
     public func pathChanged() async {
-        guard running, foreground else { return }
-        if displayReady, let socket { probe(socket, owner: generation) } else { await replace() }
+        guard running, connectionWanted else { return }
+        if presenceReady, let socket { probe(socket, owner: generation) } else { await replace() }
     }
 
     private func probe(_ socket: any HubSocket, owner: UInt64) {
@@ -187,8 +189,11 @@ public actor HubClient {
         }
     }
 
-    /// Call before surrendering foreground time. Only already-playing audio may drain in the background.
-    public func setForeground(_ value: Bool, playingSpeechID: String? = nil) async {
+    /// Live listening retains the socket for new exchanges; otherwise only already-playing audio may drain.
+    public func setForeground(_ value: Bool, playingSpeechID: String? = nil, keepListening: Bool = false) async {
+        let liveConnection = backgroundLive && socket != nil && handover
+        backgroundLive = keepListening
+        if !value, !foreground, backgroundLive, presenceID == nil, socket != nil, handover { return }
         if !value, !foreground, playing, let playingSpeechID,
            playingSpeechID == drainingSpeechID, playingSpeechID == activeSpeechID,
            socket != nil, handover { return }
@@ -196,20 +201,20 @@ public actor HubClient {
         foreground = value
         playing = resumePlaying || playingSpeechID != nil && playingSpeechID == activeSpeechID
         drainingSpeechID = value ? nil : playingSpeechID
-        if !value { cancelRetries(); setState(.suspended) }
+        if !value, !backgroundLive { cancelRetries(); setState(.suspended) }
         if value {
-            if resumePlaying, silenceCommand == nil, let socket { await setPresence(true, socket: socket) }
+            if resumePlaying || liveConnection, silenceCommand == nil, let socket { await setPresence(true, socket: socket) }
             else if running { await replace() }
-        } else if playing, handover, let socket {
+        } else if playing || backgroundLive, handover, let socket {
             await setPresence(false, socket: socket)
-        } else { await retire() }
+        } else if !backgroundLive { await retire() }
     }
 
     private func setPresence(_ value: Bool, socket: any HubSocket) async {
         presenceTimeout?.cancel()
         presenceWaiter?.resume(); presenceWaiter = nil
         let command = HubCommand(type: "set_presence", payload: ["can_show_text": .bool(value)])
-        presenceID = command.id; presenceDesired = value; displayReady = false
+        presenceID = command.id; presenceDesired = value; presenceReady = false
         let owner = generation
         await withCheckedContinuation { waiter in
             presenceWaiter = waiter
@@ -225,11 +230,11 @@ public actor HubClient {
     public func playbackDrained(speechID: String) async {
         guard speechID == drainingSpeechID || foreground && speechID == activeSpeechID else { return }
         playing = false; drainingSpeechID = nil
-        if !foreground { await retire() }
+        if !foreground && !backgroundLive { await retire() }
     }
 
     public func send(_ command: HubCommand) async throws {
-        guard running, foreground, handover, displayReady, state.canSend, let socket else { throw HubProtocolError.notConnected }
+        guard running, foreground || backgroundLive && command.type == "set_live", handover, presenceReady, state.canSend, let socket else { throw HubProtocolError.notConnected }
         let data = try encodedCommand(command)
         try retain(command, data: data)
         if command.type == "set_live" { liveSocket = nil }
@@ -254,7 +259,7 @@ public actor HubClient {
 
     /// Sends a command that only means something on this socket, such as a Talk starting; it is never retained or resent.
     public func sendLive(_ command: HubCommand) -> Bool {
-        guard running, foreground, handover, displayReady, state.canSend, let socket,
+        guard running, foreground, handover, presenceReady, state.canSend, let socket,
               let data = try? encodedCommand(command) else { return false }
         let previous = liveWrite
         liveWrite = Task {
@@ -286,7 +291,7 @@ public actor HubClient {
     public func reportPlayback(_ command: HubCommand) async throws {
         guard command.type == "playback_report", handover, let socket,
               case .string(let speechID) = command.payload["speech_id"],
-              foreground ? speechID == activeSpeechID || speechID == cueSpeechID
+              foreground || backgroundLive ? speechID == activeSpeechID || speechID == cueSpeechID
                          : playing && speechID == drainingSpeechID else { throw HubProtocolError.notConnected }
         guard results[command.id] == nil else { return }
         let data = try encodedCommand(command)
@@ -322,7 +327,7 @@ public actor HubClient {
 
     private func retryUnanswered(_ id: String, owner: UInt64, token: UUID, expired: Bool) async -> Bool {
         guard generation == owner, retryTimers[id]?.0 == token, let data = pendingData[id],
-              handover, let socket, foreground || pendingCommands.contains(where: {
+              handover, let socket, foreground || backgroundLive || pendingCommands.contains(where: {
                   $0.id == id && $0.type == "playback_report" && playing
               }) else { return false }
         if expired {
@@ -375,7 +380,7 @@ public actor HubClient {
 
     private func presenceExpired(_ id: String, owner: UInt64) async {
         guard presenceID == id, generation == owner else { return }
-        if foreground, running, presenceDesired {
+        if connectionWanted, running {
             presenceID = nil
             continuation.yield(.failure("The Hub did not acknowledge display presence. Reconnecting."))
             await socket?.close()
@@ -404,7 +409,7 @@ public actor HubClient {
         cancelRetries(); dropSocketBoundCommands()
         keepalive?.cancel(); keepalive = nil; waitingToRetry = false
         if let activeSpeechID { continuation.yield(.speechConnectionEnded(activeSpeechID)) }
-        let old = socket; socket = nil; handover = false; displayReady = false; presenceID = nil; activeSpeechID = nil; cueSpeechID = nil
+        let old = socket; socket = nil; handover = false; presenceReady = false; presenceID = nil; activeSpeechID = nil; cueSpeechID = nil
         presenceTimeout?.cancel(); presenceTimeout = nil
         presenceWaiter?.resume(); presenceWaiter = nil
         await old?.close()
@@ -413,7 +418,7 @@ public actor HubClient {
 
     private func replace() async {
         let owner = await retire()
-        guard generation == owner, running, foreground else { return }
+        guard generation == owner, running, connectionWanted else { return }
         setState(.connecting)
         task = Task { await self.run(owner) }
     }
@@ -424,7 +429,7 @@ public actor HubClient {
 
     private func run(_ owner: UInt64) async {
         var failures = 0
-        while running, foreground, generation == owner, !Task.isCancelled {
+        while running, connectionWanted, generation == owner, !Task.isCancelled {
             var current: (any HubSocket)?
             // Replayed events are already cached, so a socket ending mid-replay still shows what arrived.
             var replayed: [HubEvent] = []
@@ -433,10 +438,10 @@ public actor HubClient {
                 continuation.yield(.replayStarted)
                 let opened = try await transport.connect(cursor)
                 current = opened
-                guard generation == owner, foreground, running else { await opened.close(); return }
+                guard generation == owner, connectionWanted, running else { await opened.close(); return }
                 startKeepalive(opened, owner: owner)
                 socketSerial &+= 1
-                socket = opened; handover = false; displayReady = false; status = nil; silenceConfirmed = false; initialSettingsReady = false
+                socket = opened; handover = false; presenceReady = false; status = nil; silenceConfirmed = false; initialSettingsReady = false
                 var header: HubEvent?
                 var speechID: String?
                 var speechReplyID: String?
@@ -463,19 +468,19 @@ public actor HubClient {
                             let accepted = result.ok && result.result?["can_show_text"] == .bool(presenceDesired)
                             if !accepted { await retire(); return }
                             presenceWaiter?.resume(); presenceWaiter = nil
-                            if presenceDesired {
-                                guard foreground else { await retire(); return }
+                            if presenceDesired || backgroundLive {
+                                guard connectionWanted else { await retire(); return }
                                 failures = 0
                                 var resent: Set<String> = []
-                                while let command = pendingCommands.first(where: { !resent.contains($0.id) }) {
-                                    guard generation == owner, foreground else { return }
+                                while let command = pendingCommands.first(where: { !resent.contains($0.id) && (foreground || ["set_live", "set_silence", "playback_report"].contains($0.type)) }) {
+                                    guard generation == owner, connectionWanted else { return }
                                     guard let data = pendingData[command.id] else { throw HubProtocolError.invalidFrame }
                                     try await opened.send(data)
                                     resent.insert(command.id)
                                     if generation == owner { startRetryDeadline(command.id, owner: owner) }
                                 }
-                                guard generation == owner, foreground else { return }
-                                displayReady = true; refreshState()
+                                guard generation == owner, connectionWanted else { return }
+                                presenceReady = true; refreshState()
                             }
                         } else if let id = result.id, let command = pendingCommands.first(where: { $0.id == id }) {
                             if command.type == "set_live" {
@@ -507,7 +512,7 @@ public actor HubClient {
                         cursor = replay.through_seq; handover = true
                         if !replayed.isEmpty { continuation.yield(.events(replayed)); replayed = [] }
                         continuation.yield(.replay(replay))
-                        guard foreground else { await retire(); return }
+                        guard connectionWanted else { await retire(); return }
                         if desiredSilence != nil {
                             if let value = desiredSilence { continuation.yield(.silence(value, pending: true, revision: silenceRevision)) }
                             try await sendSilence(opened, owner: owner)
@@ -522,7 +527,7 @@ public actor HubClient {
                         case .speechBegin:
                             guard event.integer("sample_rate") == 24_000, event.integer("channels") == 1,
                                   event.integer("sample_width") == 2, let id = event.string("speech_id") else { throw HubProtocolError.malformedAudio }
-                            if !foreground, id != drainingSpeechID { await retire(); return }
+                            if !foreground, !backgroundLive, id != drainingSpeechID { await retire(); return }
                             speechID = id; speechReplyID = event.string("reply_id"); activeSpeechID = id; nextClip = 0
                             if event.string("cue") != nil { cueSpeechID = id }
                         case .speechClip:
@@ -554,7 +559,7 @@ public actor HubClient {
                 cancelRetries(); dropSocketBoundCommands()
                 keepalive?.cancel(); keepalive = nil
                 if let activeSpeechID { continuation.yield(.speechConnectionEnded(activeSpeechID)) }
-                socket = nil; handover = false; displayReady = false; presenceID = nil; activeSpeechID = nil; cueSpeechID = nil
+                socket = nil; handover = false; presenceReady = false; presenceID = nil; activeSpeechID = nil; cueSpeechID = nil
                 presenceTimeout?.cancel(); presenceTimeout = nil
                 presenceWaiter?.resume(); presenceWaiter = nil
                 if error is DecodingError || (error as? HubProtocolError) == .malformedAudio {
@@ -567,12 +572,12 @@ public actor HubClient {
                 if (error as? HubProtocolError) == .unsupportedVersion || (error as? HubTransportError) == .incompatibleProtocol {
                     running = false; setState(.incompatibleProtocol); return
                 }
-                guard foreground else { setState(.suspended); return }
+                guard connectionWanted else { setState(.suspended); return }
                 if case HubTransportError.http(let code) = error, [502, 503, 504].contains(code) {
                     setState(.hubStopped)
                 } else { setState(.unreachable) }
                 continuation.yield(.failure("The connection ended. Unanswered commands retain their original IDs."))
-                guard foreground, running else { return }
+                guard connectionWanted, running else { return }
                 let base = min(15.0, pow(2, Double(min(failures, 4))))
                 failures += 1
                 waitingToRetry = true
@@ -589,8 +594,8 @@ public actor HubClient {
     }
 
     private func refreshState() {
-        guard foreground else { setState(.suspended); return }
-        guard displayReady else { return }
+        guard connectionWanted else { setState(.suspended); return }
+        guard presenceReady else { return }
         guard initialSettingsReady || desiredSilence == nil || silenceConfirmed else { setState(.connecting); return }
         initialSettingsReady = true
         if let status {

@@ -124,7 +124,7 @@ import Observation
                 focusHere = status.focus_client_id == credentials?.clientID
             }
         case .speechBegin:
-            guard foreground, let id = event.string("speech_id") else { break }
+            guard foreground || liveMode.isOn, let id = event.string("speech_id") else { break }
             // A cue is how a locked phone tells the User it heard the Wake word or stopped listening, so Silence keeps it.
             if event.string("cue") != nil { playback.begin(speechID: id, replyID: nil) }
             else if voiceOn, let reply = event.string("reply_id") {
@@ -153,7 +153,7 @@ import Observation
         switch update {
         case .audio(let event, let pcm):
             let cue = event.string("cue") != nil
-            if voiceOn || cue, foreground || backgroundSpeechID == playback.speechID && playback.activeSpeechID != nil,
+            if voiceOn || cue, foreground || liveMode.isOn || backgroundSpeechID == playback.speechID && playback.activeSpeechID != nil,
                let id = event.string("speech_id"), let index = event.integer("index"), let text = event.string("text") {
                 playback.append(speechID: id, replyID: event.string("reply_id"), index: index, text: text, pcm: pcm)
                 if !cue { talk.speaking = playback.playingSpeechID != nil }
@@ -449,9 +449,19 @@ import Observation
 
     public func showError(_ error: PairingError) { self.error = error }
 
+    public func audioInterrupted(_ began: Bool) {
+        liveMode.audioInterrupted(began)
+        if began, liveMode.isOn {
+            playback.stop(); stopPlayback(); talk.speaking = false
+            let owner = generation
+            Task { if generation == owner { await talk.cancel() } }
+        }
+    }
+
     /// Invalidates in-flight pairing before clearing the sole durable credential record.
     public func unpair() async {
         generation &+= 1
+        liveMode.unpair()
         let owner = generation, old = client, oldHistory = history
         let oldCredentials = credentials
         history = nil
@@ -502,6 +512,7 @@ import Observation
 
     public func setForeground(_ value: Bool) async {
         foreground = value
+        liveMode.setForeground(value)
         if value { startOrbFrames() }
         else { orbFrames?.cancel(); orbFrames = nil; orb.reset(); streamingReply = nil }
         foregroundGeneration &+= 1
@@ -515,7 +526,7 @@ import Observation
         let playing = playback.activeSpeechID ?? pendingPlaybackDrain?.speechID ?? backgroundSpeechID
         backgroundSpeechID = value ? nil : playing
         if !value && playing == nil { playback.stop(reportStopped: false) }
-        await client?.setForeground(value, playingSpeechID: value ? nil : playing)
+        await client?.setForeground(value, playingSpeechID: value ? nil : playing, keepListening: liveMode.isOn)
     }
 
     private func connect(_ credentials: PairingCredentials, owner: UInt64) async throws {
@@ -582,6 +593,7 @@ import Observation
                 if case .state(let state) = update {
                     if state == .unpaired { await self.unpair(); return }
                     self.setConnection(state)
+                    await self.liveMode.connectionChanged(ready: state.canSend)
                     if state.canSend { self.outbox?.nudge() }
                 } else {
                     self.receive(update)

@@ -112,6 +112,13 @@ struct JarvisRootView: View {
         .foregroundStyle(JarvisTheme().frost)
         .preferredColorScheme(.dark)
         .task { await session.launch() }
+        #if os(iOS)
+        .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification).receive(on: RunLoop.main)) { notification in
+            guard let value = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let type = AVAudioSession.InterruptionType(rawValue: value) else { return }
+            session.audioInterrupted(type == .began)
+        }
+        #endif
         .onChange(of: phase) { _, value in
             Task { await session.setForeground(value == .active) }
             #if os(iOS)
