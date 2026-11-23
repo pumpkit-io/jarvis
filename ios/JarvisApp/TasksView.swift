@@ -276,7 +276,7 @@ struct WorkspaceTopBar: View {
     private var liveModeButton: some View {
         let on = session.liveMode.isOn
         return Button { Task { await session.liveMode.toggle() } } label: {
-            Image(systemName: "ear")
+            Image(systemName: "dot.radiowaves.left.and.right")
                 .foregroundStyle(on ? theme.void : theme.haze)
                 .frame(width: controlSize * 2.2, height: controlSize * 2.2)
                 .background(on ? theme.cyan : .clear, in: Circle())
