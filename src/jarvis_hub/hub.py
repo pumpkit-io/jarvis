@@ -564,6 +564,7 @@ class Hub:
         self._last_input_client = TERMINAL
         self._remote_interrupted: str | None = None
         self._speech_client_id: str | None = None
+        self._speech_turn: int | None = None
         self._client_players: dict[str, Player] = {}
         self._metrics = metrics
         self._orchestrator_timeout = orchestrator_timeout
@@ -940,8 +941,10 @@ class Hub:
         goes on. Returns whether a Talker turn was interrupted."""
         if self._news_delivery is not None and not self._news_delivery_told(self._news_delivery):
             self._hold_news_delivery(self._news_delivery)
+        # A reply the Talker silenced with `stand_by` was not cut off, so the next request says nothing of it.
+        silenced = self._silenced_turn is not None and self._speech_turn == self._silenced_turn
         for client_id, player in self._client_players.items():
-            if client_id != TERMINAL and player.pending() > 0:
+            if client_id != TERMINAL and player.pending() > 0 and not silenced:
                 self._remote_interrupted = player.played()
                 break
         self._speech.stop()
@@ -2198,6 +2201,7 @@ class Hub:
         speech = self._speech if audible else _Silent()
         if audible:
             self._speech_client_id = destination_id
+            self._speech_turn = turn
             if destination_id != TERMINAL:
                 self.clients.begin_stream(destination_id, floor=owner is not None and self._floor is not None
                                           and self._floor.owns(owner))

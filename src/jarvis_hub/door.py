@@ -108,6 +108,9 @@ class _SpeechTransport:
 
     def stop(self, speech_id: str) -> None:
         self.publish("speech_stop", {"speech_id": speech_id, "reason": "silence" if self._silenced() else "interrupted"})
+        self.idle(speech_id)
+
+    def idle(self, speech_id: str) -> None:
         self._playing(False)
 
 
