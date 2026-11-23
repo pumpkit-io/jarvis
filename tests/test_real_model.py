@@ -309,7 +309,8 @@ async def test_talker_interprets_approval_in_context_without_a_phrase_list(heard
 
     tools = talker_tools(delegate=noop, status=noop, cancel=noop, show=noop, end_conversation=noop,
                          stand_by=noop, quiet_mode=noop, approve=approve, present_approval=present,
-                         authorize=noop, revoke_authorization=noop, recall=noop)
+                         authorize=noop, revoke_authorization=noop, recall=noop,
+                         start_afresh=noop)
     settings = load_settings(Path(__file__).parents[1], {})
     session = await open_session(replace(talker_spec(settings), tools=tools))
     try:
@@ -345,7 +346,8 @@ async def test_talker_records_advance_permission_when_delegating(utterance: str,
 
     tools = talker_tools(delegate=delegate, status=noop, cancel=noop, show=noop, end_conversation=noop,
                          stand_by=noop, quiet_mode=noop, approve=noop, present_approval=noop,
-                         authorize=noop, revoke_authorization=noop, recall=noop)
+                         authorize=noop, revoke_authorization=noop, recall=noop,
+                         start_afresh=noop)
     settings = load_settings(Path(__file__).parents[1], {})
     session = await open_session(replace(talker_spec(settings), tools=tools))
     try:
@@ -370,7 +372,8 @@ async def test_talker_preserves_conditions_and_exclusions_in_advance_permission(
 
     tools = talker_tools(delegate=delegate, status=noop, cancel=noop, show=noop, end_conversation=noop,
                          stand_by=noop, quiet_mode=noop, approve=noop, present_approval=noop,
-                         authorize=noop, revoke_authorization=noop, recall=noop)
+                         authorize=noop, revoke_authorization=noop, recall=noop,
+                         start_afresh=noop)
     session = await open_session(replace(talker_spec(load_settings(Path(__file__).parents[1], {})), tools=tools))
     try:
         await collect(session, '<user lang="en" typed="true">Deploy the Terms change after checks pass; '
@@ -411,7 +414,8 @@ async def test_talker_narrows_permission_instead_of_approving_a_broader_action()
 
     tools = talker_tools(delegate=delegate, status=present, cancel=noop, show=noop, end_conversation=noop,
                          stand_by=noop, quiet_mode=noop, approve=approve, present_approval=present,
-                         authorize=authorize, revoke_authorization=noop, recall=noop)
+                         authorize=authorize, revoke_authorization=noop, recall=noop,
+                         start_afresh=noop)
     session = await open_session(replace(talker_spec(load_settings(Path(__file__).parents[1], {})), tools=tools))
     try:
         await collect(session, '<event source="orchestrator" task="T1" needs_user="true" approval="A1">'
@@ -441,7 +445,8 @@ async def test_talker_selects_only_the_named_action_among_multiple_pending_appro
 
     tools = talker_tools(delegate=noop, status=present, cancel=noop, show=noop, end_conversation=noop,
                          stand_by=noop, quiet_mode=noop, approve=approve, present_approval=present,
-                         authorize=noop, revoke_authorization=noop, recall=noop)
+                         authorize=noop, revoke_authorization=noop, recall=noop,
+                         start_afresh=noop)
     session = await open_session(replace(talker_spec(load_settings(Path(__file__).parents[1], {})), tools=tools))
     try:
         await collect(session, '<event source="orchestrator" task="T1" needs_user="true" approval="A1">'

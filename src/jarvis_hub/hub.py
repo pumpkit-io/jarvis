@@ -254,6 +254,7 @@ ORCHESTRATOR_TIMEOUT = 600.0
 # How long an interrupted turn has to end before the Hub gives up on its session.
 INTERRUPT_GRACE = 10.0
 RECALL_DATES = "from and to are dates such as 2026-11-15."
+AFRESH_FAILED = "Could not start afresh: Memory could not be written, so the conversation goes on as it was."
 
 
 def user_message(text: str, lang: Lang, *, typed: bool = True, delayed: float | None = None) -> str:
@@ -338,6 +339,8 @@ class _Fold:
 
     folded: tuple[Entry, ...]
     running: "asyncio.Task[str | None]"
+    # The User asked for it with start_afresh, so its failure is told.
+    afresh: bool = False
     # The summary once it passed the checks, and its saved version once a swap has kept it.
     summary: str | None = None
     version: int | None = None
@@ -493,6 +496,7 @@ class Hub:
             authorize=self._authorize,
             revoke_authorization=self._revoke_authorization,
             recall=self._recall,
+            start_afresh=self._start_afresh,
             resolve_scope=self._resolve_scope,
         )
         self._talker_spec = replace(talker, tools=tuple(replace(tool, handler=self._owned_tool(tool.handler)) for tool in tools))
@@ -1877,9 +1881,11 @@ class Hub:
         if (self._fold is not None or tokens < self._memory.fold_at or self._closing
                 or self._scopes.pending() or self._limit.blocks(SUMMARISER)):
             return
-        if not (folded := self._conversation.foldable(self._memory.tail)):
-            return
-        fold = _Fold(folded, asyncio.create_task(self._summarise(self._conversation.summary, folded)))
+        if folded := self._conversation.foldable(self._memory.tail):
+            self._start_fold(folded)
+
+    def _start_fold(self, folded: tuple[Entry, ...], *, afresh: bool = False) -> None:
+        fold = _Fold(folded, asyncio.create_task(self._summarise(self._conversation.summary, folded)), afresh=afresh)
         fold.running.add_done_callback(lambda _: self._fold_ended(fold))
         self._fold = fold
         self._fold_started.set()
@@ -1894,7 +1900,9 @@ class Hub:
         fold.ended.set()
 
     def _fold_failed(self) -> None:
-        """The old summary and session stay, and the User hears nothing of it."""
+        """The old summary and session stay. The User hears of it only when they asked to start afresh."""
+        if self._fold is not None and self._fold.afresh:
+            self._output.notice(AFRESH_FAILED)
         self._fold = None
         self._fold_wait = FOLD_RETRY_AFTER
 
@@ -2717,11 +2725,36 @@ class Hub:
         return f"Cancelled {task.id}."
 
     async def _show(self, args: dict[str, Any]) -> str:
+        if args.get("memory") in (True, "true"):
+            return self._show_memory()
         markdown = str(args.get("markdown") or "")
         if not markdown.strip():
             return "markdown is required."
         self._output.show(markdown)
         return "Shown on screen."
+
+    def _show_memory(self) -> str:
+        if (summary := self._conversation.summary) is None:
+            if self._conversation.summary_lost:
+                return "The saved Memory could not be read, so there is none to show: say so."
+            return "Nothing has been folded yet, so there is no Memory to show: say so."
+        self._output.show(summary)
+        return "Your Memory is on screen."
+
+    async def _start_afresh(self, args: dict[str, Any]) -> str:
+        """Folds every saved entry, which is all that came before the current message: its own entry is saved when
+        the turn ends, so it and everything after it stay verbatim. Any Fold under way is superseded."""
+        if self._limit.blocks(SUMMARISER):
+            return ("Memory cannot be written until the usage limit resets, so nothing was folded: say so, and that "
+                    "the conversation goes on as it is.")
+        if self._scopes.pending():
+            return "Resolve the pending spoken scope before starting afresh."
+        if not (folded := self._conversation.entries):
+            return "There is nothing before this message to fold: the Conversation already starts here."
+        self._cancel_fold()
+        self._start_fold(folded, afresh=True)
+        return ("Started: everything before the User's message folds into Memory in the background, and a new "
+                "session takes over once Jarvis is quiet. Answer the rest of the message as normal.")
 
     async def _recall(self, args: dict[str, Any]) -> str:
         log = self._output.log

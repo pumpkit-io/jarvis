@@ -100,6 +100,10 @@ _Avoid_: compaction, compact, summarisation, restart
 The newest part of the Conversation, kept word for word after a Fold, beginning at a pause between two exchanges.
 _Avoid_: recent messages, window, buffer
 
+**Start afresh**:
+The User asking, in one sentence and with no confirmation, for a Fold of everything said before that sentence, so a new subject begins with only the Memory behind it. The sentence and everything after it stay word for word, Jarvis keeps talking while the Memory is written, and Tasks, Authorizations and Approvals are untouched.
+_Avoid_: reset, clear, new chat, forget
+
 **Recall**:
 Jarvis looking up the exact words of the last 30 days when the User asks what was said: the User's lines, Jarvis's replies, details shown on screen and Task reports, found by word or phrase, with the date of each. It reaches nothing older than 30 days or from before the last reset, and it is a record of what was said, never of what a Task or a permission is now.
 _Avoid_: search, history lookup
