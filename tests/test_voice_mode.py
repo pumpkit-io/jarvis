@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from jarvis_hub.agents.backend import Context, SessionSpec
+from jarvis_hub.clients import Client
 from jarvis_hub.subagents import Subagent
 from jarvis_hub.hub import Hub
 from jarvis_hub.voice.assessment import Verdict
@@ -2728,10 +2729,17 @@ async def test_voice_rows_name_the_client_whose_input_was_heard(rig_for: MakeRig
     ]
 
 
+def a_phone(rig: Rig) -> tuple[ScriptedAudio, RecordingPlayer]:
+    """A phone listening alongside the Mac, with the player its replies and cues play on."""
+    phone, speaker = ScriptedAudio(rig.clock), RecordingPlayer()
+    rig.hub.attach_client(Client("phone", "iphone", connected=True, can_speak=True, live=True), player=speaker)
+    rig.voice.add_input("phone", phone, cues=speaker)
+    return phone, speaker
+
+
 async def test_a_second_input_comes_and_goes_while_the_mac_listens_as_before(rig_for: MakeRig) -> None:
     rig: Rig = await rig_for([Text("Opened, sir.")], [Text("Green, sir.")], [Text("Merged, sir.")], [Text("Done, sir.")])
-    phone = ScriptedAudio(rig.clock)
-    rig.voice.add_input("phone", phone)
+    phone, speaker = a_phone(rig)
 
     rig.audio.wake()
     rig.audio.say("Open a PR for the login bug")
@@ -2766,8 +2774,9 @@ async def test_a_second_input_comes_and_goes_while_the_mac_listens_as_before(rig
         '<user lang="en">Open a PR for the login bug</user>', '<user lang="en">And is the CI green?</user>',
         '<user lang="en">Merge it</user>', '<user lang="en">Deploy it</user>',
     ]
-    assert [t for t in rig.player.texts if t] == ["Opened, sir.", "Green, sir.", "Merged, sir.", "Done, sir."]
-    assert rig.player.voices.count("chime") == 3 and rig.player.voices.count("closing") == 3
+    assert [t for t in rig.player.texts if t] == ["Opened, sir.", "Green, sir.", "Done, sir."]
+    assert rig.player.voices.count("chime") == 2 and rig.player.voices.count("closing") == 2
+    assert speaker.texts == ["", "Merged, sir.", ""] and speaker.voices[::2] == ["chime", "closing"]
     exchange = ["listening", "thinking", "speaking", "follow_up", "idle"]
     assert rig.states() == [*exchange[:4], *exchange[:4], "idle", *exchange, *exchange]
     clients = [r["client"] for r in rig.metrics.records if r["kind"] == "voice"]
@@ -2776,8 +2785,7 @@ async def test_a_second_input_comes_and_goes_while_the_mac_listens_as_before(rig
 
 async def test_rows_after_a_phone_exchange_name_the_phone_despite_a_stray_mac_event(rig_for: MakeRig) -> None:
     rig: Rig = await rig_for([Text("Merged, sir.")])
-    phone = ScriptedAudio(rig.clock)
-    rig.voice.add_input("phone", phone)
+    phone, _ = a_phone(rig)
 
     phone.wake()
     phone.say("Merge it")

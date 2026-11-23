@@ -205,6 +205,7 @@ async def exchanges(root: Path) -> dict[str, Any]:
         cases.update(await reset_exchange(root / "reset"))
         cases.update(await uploaded_exchange(root / "upload"))
         cases.update(await speech_exchange(root / "speech"))
+        cases.update(await live_exchange(root / "live"))
         return normalize(artifact)
 
 
@@ -602,3 +603,117 @@ async def speech_exchange(root: Path) -> dict[str, Any]:
             await door.close()
             await hub.close()
             await speech.close()
+
+
+async def live_exchange(root: Path) -> dict[str, Any]:
+    """Live mode on a phone: `set_live`, the phone's uplink PCM, and what comes down for one exchange opened there."""
+    import base64
+    import numpy as np
+    from jarvis_hub.voice.engines import NoEchoCancellation
+    from jarvis_hub.voice.input import Engines, Listening
+    from jarvis_hub.voice.live import LiveInputs
+    from jarvis_hub.voice.player import Samples
+    from jarvis_hub.voice.state import Timing
+    from jarvis_hub.voice.voice_mode import VoiceMode
+    from tests.fakes import FakeTts, RecordingPlayer, ScriptedAudio
+    from tests.test_input_pipeline import SPEECH, WAKE, Everyone, LoudVad, MarkerWake, ScriptedStt, ScriptedTurn
+
+    class PcmTts(FakeTts):
+        def synthesize(self, text: str, voice: str) -> Samples:
+            return np.array([-1, -.5, 0, .5, 1, 2], dtype=np.float32)
+
+    def engines() -> Engines:
+        return Engines(echo=NoEchoCancellation(), wake=MarkerWake(), vad=LoudVad(), turn=ScriptedTurn(),
+                       stt=ScriptedStt(), gate=Everyone())
+
+    def pcm(frames: int, value: int = 0) -> bytes:
+        return np.full(frames * 160, value, "<i2").tobytes()
+
+    def binary(data: bytes) -> dict[str, str]:
+        return {"binary_base64": base64.b64encode(data).decode("ascii")}
+
+    root.mkdir(parents=True, exist_ok=True)
+    with PairingStore(root / 'pairing.db') as pairing, EventLog(root / 'events.db', wall=lambda: 1000) as log:
+        phone = pairing.exchange(pairing.create_code('https://mac.example.ts.net'), 'Phone', 'iphone')
+        clock, metrics = FakeClock(), RecordingMetrics()
+        output = EventOutput(log, RecordingOutput())
+        voice = VoiceMode(audio=ScriptedAudio(clock), tts=PcmTts(), player=RecordingPlayer(), clock=clock,
+                          metrics=metrics, notice=lambda text: None, timing=Timing(6, 4, 6, .5, tail_s=0))
+        hub = make_hub(FakeBackend(clock, [[Text('Opened.')]]), output, metrics, speech=voice.speech, floor=voice)
+        live = LiveInputs(voice, engines, Listening(), metrics.record, lambda text: None, clock=clock.now)
+        door = Door(enabled=True, port=0, health=hub.health, pairing=pairing, hub=hub, log=log, live=live)
+        voice.start()
+        await voice.idle()
+        await hub.start()
+        await door.start()
+        running = asyncio.create_task(hub.run(voice.lines(hub.interrupt, hub.woke, hub.admit_spoken_revision)))
+        uplink: list[dict[str, Any]] = []
+        downlink: list[dict[str, Any]] = []
+        commands: list[dict[str, Any]] = []
+        seen = 0
+        try:
+            async with aiohttp.ClientSession() as session, connect(session, door, phone.token) as socket:
+
+                async def read(done: Callable[[dict[str, Any]], bool]) -> dict[str, Any]:
+                    """The first frame since the last event returned that `done` accepts, reading on until one comes.
+                    Command results go to `commands`, not to the downlink."""
+                    nonlocal seen
+                    for index in range(seen, len(downlink)):
+                        if 'type' in downlink[index] and done(downlink[index]):
+                            seen = index + 1
+                            return downlink[index]
+                    while True:
+                        frame = await receive(socket)
+                        kept = frame['type'] not in SNAPSHOTS and frame['type'] != 'command_result'
+                        if kept:
+                            downlink.append(frame)
+                        if frame['type'] == 'speech_clip':
+                            downlink.append(binary((await socket.receive()).data))
+                        if done(frame):
+                            if kept:
+                                seen = len(downlink)
+                            return frame
+
+                async def control(id: str, kind: str, **payload: Any) -> None:
+                    sent = command(id, kind, **payload)
+                    await socket.send_json(sent)
+                    commands.append({'command': sent, 'result': await read(lambda frame: frame.get('id') == id)})
+
+                async def send(frames: int, value: int = 0) -> None:
+                    """Uplinks `frames` in real time; the answer to a `set_live` after each message means it arrived."""
+                    for _ in range(frames // 10):
+                        clock.advance(0.1)
+                        await socket.send_bytes(data := pcm(10, value))
+                        uplink.append(binary(data))
+                        heard = f'heard-{len(uplink)}'
+                        await socket.send_json(command(heard, 'set_live', on=True))
+                        await read(lambda frame: frame.get('id') == heard)
+
+                while (await receive(socket))['type'] != 'replay_complete':
+                    pass
+                await socket.send_json(command('presence', 'set_presence', can_show_text=True))
+                while (await receive(socket)).get('id') != 'presence':
+                    pass
+                await control('live-on', 'set_live', on=True)
+                await read(lambda frame: frame['type'] == 'voice_state')
+                await until(lambda: any(row['kind'] == 'ears_loaded' for row in metrics.records))
+                await socket.send_bytes(data := pcm(8, WAKE))
+                uplink.append(binary(data))
+                await until(lambda: voice.state == 'listening')
+                await send(50, SPEECH)
+                await send(80)
+                end = await read(lambda frame: frame['type'] == 'speech_end' and 'reply_id' in frame['payload'])
+                await control('played', 'playback_report', speech_id=end['payload']['speech_id'], clip_index=0,
+                              state='finished')
+                await send(10)
+                await until(lambda: voice.state == 'follow_up')
+                clock.advance(6)
+                await read(lambda frame: frame['type'] == 'speech_end' and frame['payload'].get('cue') == 'closing')
+                await control('live-off', 'set_live', on=False)
+            return {'live_mode': {'commands': commands, 'uplink': uplink, 'downlink': downlink}}
+        finally:
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+            await door.close()
+            await hub.close()
+            await voice.close()
