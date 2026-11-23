@@ -105,33 +105,46 @@ import Observation
         switch update {
         case .event(let event):
             conversation.ingest(event)
-            if event.kind == .taskSnapshot && !tasksReplaying { tasksNeedRefresh = false }
-            if event.kind == .heard, let request = event.string("request_id") { outbox?.heard(requestID: request) }
-            switch event.kind {
-            case .status:
-                if let status = try? event.decodePayload(HubStatus.self) {
-                    focusHere = status.focus_client_id == credentials?.clientID
-                }
-            case .speechBegin:
-                if voiceOn, let id = event.string("speech_id"), let reply = event.string("reply_id"), foreground {
-                    playback.begin(speechID: id, replyID: reply)
-                    speechID = id; lastCompletedClip = -1
-                }
-            case .speechEnd:
-                if let id = event.string("speech_id"), let reply = event.string("reply_id"), let last = event.integer("last_clip_index") {
-                    playback.end(speechID: id, replyID: reply, lastIndex: last)
-                }
-            case .speechStop:
-                if let id = event.string("speech_id") { playback.stop(speechID: id, reportStopped: false) }
-            case .replyDelta:
-                if foreground, !tasksReplaying, let id = event.string("reply_id"), streamingReply?.id != id {
-                    streamingReply = (id, orbNow())
-                }
-            case .replyEnd:
-                if streamingReply?.id == event.string("reply_id") { streamingReply = nil }
-                if let reply = event.string("reply_id"), playback.replyID != reply { playback.markMissed(replyID: reply) }
-            default: break
+            react(to: event)
+        case .events(let events):
+            conversation.ingest(contentsOf: events)
+            for event in events { react(to: event) }
+        default: receiveControl(update)
+        }
+    }
+
+    private func react(to event: HubEvent) {
+        if event.kind == .taskSnapshot && !tasksReplaying { tasksNeedRefresh = false }
+        if event.kind == .heard, let request = event.string("request_id") { outbox?.heard(requestID: request) }
+        switch event.kind {
+        case .status:
+            if let status = try? event.decodePayload(HubStatus.self) {
+                focusHere = status.focus_client_id == credentials?.clientID
             }
+        case .speechBegin:
+            if voiceOn, let id = event.string("speech_id"), let reply = event.string("reply_id"), foreground {
+                playback.begin(speechID: id, replyID: reply)
+                speechID = id; lastCompletedClip = -1
+            }
+        case .speechEnd:
+            if let id = event.string("speech_id"), let reply = event.string("reply_id"), let last = event.integer("last_clip_index") {
+                playback.end(speechID: id, replyID: reply, lastIndex: last)
+            }
+        case .speechStop:
+            if let id = event.string("speech_id") { playback.stop(speechID: id, reportStopped: false) }
+        case .replyDelta:
+            if foreground, !tasksReplaying, let id = event.string("reply_id"), streamingReply?.id != id {
+                streamingReply = (id, orbNow())
+            }
+        case .replyEnd:
+            if streamingReply?.id == event.string("reply_id") { streamingReply = nil }
+            if let reply = event.string("reply_id"), playback.replyID != reply { playback.markMissed(replyID: reply) }
+        default: break
+        }
+    }
+
+    private func receiveControl(_ update: HubClientUpdate) {
+        switch update {
         case .audio(let event, let pcm):
             if voiceOn, foreground || backgroundSpeechID == playback.speechID && playback.activeSpeechID != nil,
                let id = event.string("speech_id"), let reply = event.string("reply_id"),
@@ -399,7 +412,7 @@ import Observation
             }
             try await history?.merge(page.events)
             guard generation == owner, self.client === client else { return }
-            for event in page.events { conversation.ingest(event) }
+            conversation.ingest(contentsOf: page.events)
             historyBefore = page.next_before
             hasOlderHistory = page.has_more
         } catch {
@@ -508,7 +521,7 @@ import Observation
         if let explicitSilence { await client.setSilence(explicitSilence, revision: voiceRevision) }
         guard generation == owner else { await client.stop(); return }
         self.history = history
-        for event in cached.events { conversation.ingest(event) }
+        conversation.ingest(contentsOf: cached.events)
         historyBefore = cached.events.first?.seq
         for row in conversation.rows where row.id.hasPrefix("reply:") {
             playback.markMissed(replyID: String(row.id.dropFirst(6)))

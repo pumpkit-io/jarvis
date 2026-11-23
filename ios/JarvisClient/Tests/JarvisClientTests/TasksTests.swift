@@ -121,9 +121,9 @@ import Testing
     let second = try #require(await transport.socket(1))
     #expect(session.openTasks.map(\.title) == ["Write tests"])
     await second.text(event(3, "task_snapshot", #"{"tasks":[{"id":"working","title":"Write tests","state":"working","last_report":"Still running.","approval_question":null}]}"#))
-    try await eventuallySession { session.openTasks.first?.lastReport == "Still running." }
     await second.ready(through: 3)
     try await eventuallySession { session.connection.canSend }
+    #expect(session.openTasks.first?.lastReport == "Still running.")
     #expect(session.updatingTasks)
     await second.text(event(5, "task_snapshot", #"{"tasks":[]}"#))
     try await eventuallySession { !session.updatingTasks }
