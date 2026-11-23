@@ -466,6 +466,22 @@ async def test_voice_state_follows_set_live_and_another_live_phone_sees_only_idl
             other.close()
 
 
+async def test_a_wake_word_on_the_mac_while_the_phone_listens_moves_the_exchange_and_the_phone_sees_idle(
+    tmp_path: Path,
+) -> None:
+    async with live_phone(tmp_path) as (rig, phone):
+        await phone.wake()
+        await until(lambda: phone.states()[-1] == "listening")
+        # Past the chime, when a Wake word is no longer its echo.
+        rig.clock.advance(1)
+
+        rig.mac.wake()
+
+        await until(lambda: phone.states()[-1] == "idle")
+        assert rig.voice.state == "listening"
+        assert rig.voice.voice_state(TERMINAL) == "listening"
+
+
 async def test_a_second_exchange_on_the_phone_stops_no_stream_but_the_one_playing(tmp_path: Path) -> None:
     async with live_phone(tmp_path) as (rig, phone):
         await phone.wake()
@@ -585,6 +601,24 @@ async def test_turning_live_mode_off_mid_reply_stops_the_reply_there_and_leaves_
 
         await until(lambda: any(frame["type"] == "speech_stop" for frame in phone.frames))
         assert rig.voice.state == "idle"
+        assert not rig.hub.clients.remote_activity
+        await mac_still_listens(rig, "Status of the Mac")
+
+
+async def test_a_reply_to_a_phone_exchange_ended_by_leaving_live_mode_does_not_play_there(tmp_path: Path) -> None:
+    released = asyncio.Event()
+    async with live_phone(tmp_path, [[Gate(released), Text("Opened.")]]) as (rig, phone):
+        await phone.wake()
+        await phone.ask()
+        await until(lambda: phone.states()[-1] == "thinking")
+
+        assert (await phone.command("set_live", on=False))["result"] == {"on": False}
+        await until(lambda: rig.voice.state == "idle")
+        released.set()
+
+        await until(lambda: any(frame["type"] == "reply_end" for frame in phone.frames))
+        await asyncio.sleep(0.05)
+        assert phone.streams() == [("chime", [""])]
         assert not rig.hub.clients.remote_activity
         await mac_still_listens(rig, "Status of the Mac")
 

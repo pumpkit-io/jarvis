@@ -21,6 +21,12 @@ class Client:
     # The stream last begun here is the voice floor's own exchange speech, which is not remote activity.
     floor_speech: bool = False
 
+    @property
+    def remote_activity(self) -> bool:
+        """Its Talk or its playback, which the voice floor must not talk over. Playback of a Live mode exchange is
+        the floor's own speech, so it is not."""
+        return self.talking or (self.playing and not self.floor_speech)
+
 
 class Clients:
     def __init__(self, *, terminal_speech: bool, on_focus: Callable[[], None], on_change: Callable[[], None] = lambda: None,
@@ -75,10 +81,8 @@ class Clients:
 
     @property
     def remote_activity(self) -> bool:
-        """A phone's Talk or its playback, which the voice floor must not talk over. Playback of a Live mode
-        exchange is the floor's own speech, so it is not."""
-        return any(client.id != TERMINAL and client.connected
-                   and (client.talking or client.playing and not client.floor_speech)
+        """Whether any connected phone has remote activity."""
+        return any(client.id != TERMINAL and client.connected and client.remote_activity
                    for client in self._clients.values())
 
     def set_live(self, client_id: str, live: bool) -> None:

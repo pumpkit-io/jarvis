@@ -882,7 +882,7 @@ class Hub:
             self._settled.set()
         self._persist()
 
-    def _live(self, client_id: str) -> bool:
+    def _is_live(self, client_id: str) -> bool:
         """Whether `client_id` is a phone in Live mode, whose voice is the voice floor's."""
         client = self.clients.get(client_id)
         return client is not None and client.live
@@ -898,8 +898,8 @@ class Hub:
         if self.clients.focus == TERMINAL:
             return self.clients.remote_activity
         client = self.clients.get(self.clients.focus)
-        # The floor waits out its own speech on a Live mode Focus, and stops waiting on a phone that never reports.
-        return bool(client is not None and (client.talking or client.playing and not client.floor_speech))
+        # A Live mode Focus's exchange speech is the floor's, which _focus_quiet waits out as the floor's quiet.
+        return bool(client is not None and client.remote_activity)
 
     def _news_delivery_told(self, delivery: _NewsDelivery) -> bool:
         return delivery.reply is not None and (
@@ -928,7 +928,7 @@ class Hub:
             self._remote_interrupted = player.played()
         if client_id == self._speech_client_id:
             await self.interrupt()
-            if self._floor is not None and self._live(client_id):
+            if self._floor is not None and self._is_live(client_id):
                 # Stopped by hand, the voice floor's reply ends with no Follow-up window, as a typed line ends one.
                 self._floor.typed_input()
         elif (player := self._client_players.get(client_id)) is not None:
@@ -1812,7 +1812,7 @@ class Hub:
         while self._focus_busy():
             self._clients_updated.clear()
             await self._clients_updated.wait()
-        if self._floor is not None and (self.clients.focus == TERMINAL or self._live(self.clients.focus)):
+        if self._floor is not None and (self.clients.focus == TERMINAL or self._is_live(self.clients.focus)):
             await self._quiet()
         elif self._client_can_speak(self.clients.focus):
             await self._speech.idle(stall_timeout=None, destination=self._client_players.get(self.clients.focus))

@@ -766,6 +766,9 @@ class VoiceMode:
             self._debug_notice("voice: speech over Jarvis was no interruption")
         if after != before:
             self._transition(before, after, event, client)
+        else:
+            # A Wake word from another input moves the exchange there with no change of state.
+            self._publish_views()
         # After capture: a turn that starts now keeps the speech of the Barge-in that stopped Jarvis.
         if (since := barge_in_from(self._voice, self._timing)) != self._barge_in_from:
             self._barge_in_from = since
