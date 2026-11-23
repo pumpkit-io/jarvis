@@ -18,43 +18,34 @@ struct MessageInputBar: View {
     private var hasDraft: Bool { !session.draft.isEmpty }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let message = session.draftValidationMessage ?? session.inputMessage { status(Text(message)) }
-            if let message = session.voiceMessage { status(Text(message)) }
-            if let message = session.talk.message {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(message).fixedSize(horizontal: false, vertical: true)
-                    if session.talk.microphoneRefused {
-                        Link("Open Settings", destination: microphoneSettingsURL)
-                            .underline().frame(minHeight: 44)
-                    }
+        HStack(alignment: .bottom, spacing: 8) {
+            if paused {
+                Button { preview.stop(); Task { await session.talk.discard() } } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundStyle(theme.signal)
+                        .frame(width: 56, height: 56)
+                        .background(theme.deep, in: Circle())
+                        .overlay { Circle().strokeBorder(theme.rim, lineWidth: 1) }
                 }
-                .modifier(StatusBackground())
+                .buttonStyle(.plain)
+                .transition(.scale.combined(with: .opacity))
+                .accessibilityLabel("Discard Talk")
+            } else if discarded {
+                DiscardBin().transition(.scale.combined(with: .opacity))
             }
-            if let message = session.liveMode.message { status(Text(message)).transition(.opacity) }
-            HStack(alignment: .bottom, spacing: 8) {
-                if paused {
-                    Button { preview.stop(); Task { await session.talk.discard() } } label: {
-                        Image(systemName: "trash")
-                            .font(.system(size: 20, weight: .medium))
-                            .foregroundStyle(theme.signal)
-                            .frame(width: 56, height: 56)
-                            .background(theme.deep, in: Circle())
-                            .overlay { Circle().strokeBorder(theme.rim, lineWidth: 1) }
-                    }
-                    .buttonStyle(.plain)
-                    .transition(.scale.combined(with: .opacity))
-                    .accessibilityLabel("Discard Talk")
-                } else if discarded {
-                    DiscardBin().transition(.scale.combined(with: .opacity))
-                }
-                pill
-                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { pillHeight = $0 }
-                    .background { keyboardDismissPadding }
-            }
-            .animation(.spring(response: 0.3, dampingFraction: 0.85), value: paused)
+            pill
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { pillHeight = $0 }
+                .background { keyboardDismissPadding }
         }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.3), value: session.liveMode.message)
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: paused)
+        .overlay(alignment: .topLeading) {
+            messages
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.bottom, 8)
+                .alignmentGuide(.top) { $0[.bottom] }
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.3), value: session.liveMode.message)
+        }
         .font(.system(size: controlSize))
         .foregroundStyle(theme.haze)
         .padding(.horizontal, 20)
@@ -88,6 +79,24 @@ struct MessageInputBar: View {
         .onChange(of: typing) { typingChanged(typing) }
         .onAppear { visible = true }
         .onDisappear { visible = false; typingChanged(false) }
+    }
+
+    private var messages: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let message = session.draftValidationMessage ?? session.inputMessage { status(Text(message)) }
+            if let message = session.voiceMessage { status(Text(message)) }
+            if let message = session.talk.message {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(message).fixedSize(horizontal: false, vertical: true)
+                    if session.talk.microphoneRefused {
+                        Link("Open Settings", destination: microphoneSettingsURL)
+                            .underline().frame(minHeight: 44)
+                    }
+                }
+                .modifier(StatusBackground())
+            }
+            if let message = session.liveMode.message { status(Text(message)).transition(.opacity) }
+        }
     }
 
     @ViewBuilder private var keyboardDismissPadding: some View {
