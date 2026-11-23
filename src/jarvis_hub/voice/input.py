@@ -590,12 +590,16 @@ class Microphone:
 
 # Arriving later than this after its frames were due means the stream paused, not network jitter.
 UPLINK_GAP_S = 0.5
+# Arriving earlier than this before its frames were due is network jitter; more is a released backlog.
+UPLINK_JITTER_S = 0.1
 
 
 class UplinkFrames:
     """An iPhone Client's microphone, fed with the 16 kHz mono PCM16 its socket uplinks.
 
-    Frames are stamped by sample count, so arrival jitter does not stretch or squeeze turns, and never after arrival.
+    Frames are stamped by sample count from an anchor, so arrival jitter does not stretch or squeeze turns.
+    A message over UPLINK_GAP_S late or UPLINK_JITTER_S early re-anchors on its arrival, so stamps never run more
+    than UPLINK_JITTER_S ahead of arrival. Stamps never decrease, even when a re-anchor moves the anchor back.
     """
 
     def __init__(self, clock: Callable[[], float] = time.perf_counter) -> None:
@@ -621,8 +625,8 @@ class UplinkFrames:
         frames = len(samples) // FRAME
         arrived = self._clock()
         late = None if self._anchor is None else arrived - self._anchor - (self._samples + frames * FRAME) / SAMPLE_RATE
-        # Ahead means a backlog released by a stall or a phone clock running fast; both re-anchor, as a pause does.
-        if late is None or late > UPLINK_GAP_S or late < 0:
+        # Far ahead means a backlog released by a stall or a phone clock running fast; both re-anchor, as a pause does.
+        if late is None or late > UPLINK_GAP_S or late < -UPLINK_JITTER_S:
             self._anchor, self._samples = arrived - frames * FRAME / SAMPLE_RATE, 0
         assert self._anchor is not None
         for i in range(frames):

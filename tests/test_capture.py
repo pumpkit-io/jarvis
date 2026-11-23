@@ -12,7 +12,7 @@ import pytest
 
 from jarvis_hub.voice.clips import ClipSettings, ClipStore
 from jarvis_hub.voice.engines import NoEchoCancellation, ReferenceBuffer, WebRtcEchoCancellation
-from jarvis_hub.voice.input import Capture, Engines, Listening, Push, UplinkFrames
+from jarvis_hub.voice.input import UPLINK_JITTER_S, Capture, Engines, Listening, Push, UplinkFrames
 from jarvis_hub.voice.player import Samples
 from jarvis_hub.voice.state import Heard, WakeWord
 from tests.fakes import until
@@ -1448,7 +1448,19 @@ async def test_uplinked_frames_are_stamped_by_sample_count_until_a_gap_re_anchor
         capture.close()
 
 
-async def test_uplinked_frames_are_never_stamped_after_they_arrive_when_a_stall_releases_a_backlog() -> None:
+def test_uplinked_frames_keep_sample_count_spacing_when_on_time_messages_follow_a_delayed_one() -> None:
+    now, stamps = [10.05], list[float]()
+    source = UplinkFrames(clock=lambda: now[0])
+    source.open(lambda pcm, at: stamps.append(at))
+    # The anchoring message was delayed, so the on-time ones after it arrive early, within the tolerance.
+    source.feed(uplinked(8))
+    for arrival in (10.08, 10.16, 10.26, 10.32, 10.40, 10.56):
+        now[0] = arrival
+        source.feed(uplinked(8))
+    assert np.diff(stamps) == pytest.approx([0.01] * (len(stamps) - 1))
+
+
+async def test_uplinked_frames_run_at_most_the_jitter_tolerance_ahead_when_a_stall_releases_a_backlog() -> None:
     now = [10.0]
     source = UplinkFrames(clock=lambda: now[0])
     capture = Capture(lambda: engines(CountingEcho()), Listening(min_speech_db=0), lambda row: None,
@@ -1461,10 +1473,10 @@ async def test_uplinked_frames_are_never_stamped_after_they_arrive_when_a_stall_
         now[0] = 11.08
         for _ in range(12):
             source.feed(uplinked(8))
-        # The stream goes on in time: its frames are stamped as they arrive, not a backlog's length later.
+        # The stream goes on in time: its frames are stamped near arrival, not a backlog's length later.
         now[0] = 11.16
         source.feed(uplinked(8, value=2000))
-        assert await wake_at(capture) == pytest.approx(11.16)
+        assert 11.16 <= await wake_at(capture) <= 11.16 + UPLINK_JITTER_S
     finally:
         capture.close()
 
