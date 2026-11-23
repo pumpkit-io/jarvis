@@ -42,6 +42,14 @@ def test_a_reply_with_at_most_one_address_is_unchanged(text: str) -> None:
     assert guarded(text) == text
 
 
+@pytest.mark.parametrize(
+    "pieces",
+    [["Pardon, sir", "loin is on. Very good, sir."], ["Yes, sir", "ius is bright. Done, sir."]],
+)
+def test_a_word_that_begins_with_sir_across_deltas_does_not_use_up_the_address(pieces: list[str]) -> None:
+    assert guarded(*pieces) == "".join(pieces)
+
+
 def test_text_is_held_only_while_it_may_become_a_second_address() -> None:
     guard = AddressGuard()
 

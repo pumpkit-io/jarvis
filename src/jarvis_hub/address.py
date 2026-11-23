@@ -32,7 +32,11 @@ class AddressGuard:
         out = ""
         if not self._used:
             whole = self._said + self._held
-            first = next((m for m in _ADDRESS.finditer(whole) if m.end() > len(self._said)), None)
+            # A ", sir" at the text's end counts only at a block's end: later deltas may turn it into "sirloin".
+            first = next(
+                (m for m in _ADDRESS.finditer(whole) if m.end() >= len(self._said) and (final or m.end() < len(whole))),
+                None,
+            )
             if first is None:
                 out, self._held = self._held, ""
                 self._said += out
