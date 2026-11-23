@@ -202,6 +202,7 @@ async def exchanges(root: Path) -> dict[str, Any]:
         cases.update(await concurrent_restart(root / "restart"))
         cases.update(await snapshot_exchanges(root / "snapshots"))
         cases.update(await large_event_exchanges(root / "large-events"))
+        cases.update(await reset_exchange(root / "reset"))
         cases.update(await uploaded_exchange(root / "upload"))
         cases.update(await speech_exchange(root / "speech"))
         return normalize(artifact)
@@ -223,6 +224,7 @@ class DelayedAdmission:
         self.set_client_talking = hub.set_client_talking
         self.set_client_playing = hub.set_client_playing
         self.replay_speech = hub.replay_speech
+        self.reset_context = hub.reset_context
         self.focus_entered = asyncio.Event()
         self.interrupt_client = hub.interrupt_client
         self.admitted = asyncio.Event()
@@ -425,6 +427,39 @@ async def large_event_exchanges(root: Path) -> dict[str, Any]:
                     await capture.until(resumed, "replay_complete")
                     await capture.until(resumed, "pending_approval")
             return {"large_event_replay": {"command": say, "after": after, "live": live, "replay": capture.frames()[1]}}
+        finally:
+            await door.close()
+            await hub.close()
+
+
+async def reset_exchange(root: Path) -> dict[str, Any]:
+    """Reset context and its retry: the result is its status alone, and no event reaches either screen."""
+    root.mkdir(parents=True, exist_ok=True)
+    capture = WireCapture()
+    clock = FakeClock()
+    backend = FakeBackend(clock)
+    with PairingStore(root / "pairing.db") as pairing, EventLog(root / "events.db", wall=clock.now) as log:
+        phone = pairing.exchange(pairing.create_code("https://mac.example.ts.net"), "Reset phone", "iphone")
+        hub = make_hub(backend, EventOutput(log, RecordingOutput()), RecordingMetrics(),
+                       conversation_path=root / "conversation.json")
+        door = Door(enabled=True, port=0, health=hub.health, pairing=pairing, hub=hub, log=log, now=clock.now)
+        await hub.start()
+        await door.start()
+        reset = command("reset-1", "reset_context")
+        try:
+            async with aiohttp.ClientSession() as session, connect(session, door, phone.token) as socket:
+                await capture.receive(socket)
+                await socket.send_json(reset)
+                result = await capture.receive(socket)
+                await socket.send_json(reset)
+                repeated = await capture.receive(socket)
+                await socket.send_json(command("reset-2", "reset_context", everything=True))
+                refused = await capture.receive(socket)
+                assert result["result"] == {"status": "reset"} and repeated == result
+                assert refused["error"]["code"] == "invalid_payload"
+                assert [e for e in log.after(0) if e.type not in SNAPSHOTS] == []
+            return {"reset_context": {"command": reset, "result": result, "retry_result": repeated,
+                                      "refused_payload": refused}}
         finally:
             await door.close()
             await hub.close()

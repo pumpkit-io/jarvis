@@ -9,8 +9,6 @@ from pathlib import Path
 from typing import Literal, TypeGuard, TypeVar, get_args
 
 DEFAULT_ORG = "pumpkit-io"
-# Of the Talker's context window: a long conversation keeps its speed by restarting well before it fills.
-DEFAULT_TALKER_RESTART_AT = 0.40
 
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 _Choice = TypeVar("_Choice", bound=str)
@@ -32,6 +30,20 @@ class RoleModel:
     model: str
     effort: Effort
     thinking: bool = False
+
+
+@dataclass(frozen=True)
+class MemorySettings:
+    """The Fold's sizes in tokens and the Summariser's model (ADR 0028)."""
+
+    # The Talker's context, as the CLI reports it, at which a Fold starts.
+    fold_at: int = 200_000
+    # How much of the newest Conversation a Fold leaves verbatim, not counting the summary.
+    tail: int = 40_000
+    # The context at which the Talker restarts from the last good summary, when Folds keep failing.
+    ceiling: int = 300_000
+    model: str = "sonnet"
+    effort: Effort = "low"
 
 
 @dataclass(frozen=True)
@@ -77,7 +89,7 @@ class Settings:
     talker: RoleModel
     orchestrator: RoleModel
     voice: VoiceSettings = VoiceSettings()
-    talker_restart_at: float = DEFAULT_TALKER_RESTART_AT
+    memory: MemorySettings = MemorySettings()
     # No Subagent runs above this effort, whatever the User or the Orchestrator asks.
     max_effort: Effort = "max"
     max_subagents: int = 3
@@ -213,21 +225,25 @@ def load_settings(
         except ConfigError:
             voice = VoiceSettings()
 
-    def fraction(name: str, default: float) -> float:
-        raw = get(name, str(default))
-        try:
-            value = float(raw)
-        except ValueError:
-            value = math.nan
-        if not 0 < value <= 1:
-            raise ConfigError(f"{name}={raw!r} is not a fraction of the window above 0 and up to 1")
-        return value
-
     def count(name: str, default: int) -> int:
         value = get(name, str(default))
         if not value.isdigit() or int(value) < 1:
             raise ConfigError(f"{name}={value!r} is not a whole number of at least 1")
         return int(value)
+
+    def memory_settings() -> MemorySettings:
+        fold_at = count("JARVIS_MEMORY_FOLD_AT", MemorySettings.fold_at)
+        tail = count("JARVIS_MEMORY_TAIL", MemorySettings.tail)
+        ceiling = count("JARVIS_MEMORY_CEILING", MemorySettings.ceiling)
+        if tail > fold_at // 2:
+            raise ConfigError(
+                f"JARVIS_MEMORY_TAIL={tail} must be at most half of JARVIS_MEMORY_FOLD_AT={fold_at}, or each Fold "
+                "leaves the context close to the trigger and the next one starts at once"
+            )
+        if ceiling <= fold_at:
+            raise ConfigError(f"JARVIS_MEMORY_CEILING={ceiling} must be above JARVIS_MEMORY_FOLD_AT={fold_at}")
+        return MemorySettings(fold_at, tail, ceiling, model=get("JARVIS_MEMORY_MODEL", MemorySettings.model),
+                              effort=effort("JARVIS_MEMORY_EFFORT", MemorySettings.effort))
 
     remote_port = count("JARVIS_REMOTE_PORT", 8765)
     if remote_port > 65535:
@@ -248,7 +264,7 @@ def load_settings(
             thinking=True,
         ),
         voice=voice,
-        talker_restart_at=fraction("JARVIS_TALKER_RESTART_AT", DEFAULT_TALKER_RESTART_AT),
+        memory=memory_settings(),
         max_effort=effort("JARVIS_MAX_EFFORT", "max"),
         max_subagents=count("JARVIS_MAX_SUBAGENTS", 3),
         remote=choice("JARVIS_REMOTE", "off", ("off", "on")) == "on",

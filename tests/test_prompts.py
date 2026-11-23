@@ -77,3 +77,10 @@ def test_the_orchestrator_uses_grill_with_docs_only_when_the_user_asks() -> None
     assert "`grill-with-docs` only when the User asks for it" in section
     assert "does not trigger it" in section and 'Leave the word "grill" out' in section
     assert "not set up, say so in your report" in section
+
+
+def test_the_summariser_prompt_asks_for_the_sections_the_hub_checks() -> None:
+    from jarvis_hub.memory import SECTIONS
+
+    prompt = (ROOT / "prompts" / "memory.md").read_text()
+    assert re.findall(r"^## (.+)$", prompt, flags=re.MULTILINE) == list(SECTIONS)

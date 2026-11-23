@@ -51,6 +51,19 @@ def test_totals_add_up_per_role() -> None:
     assert stats.first_sentence == [600, 800]
 
 
+def test_hidden_seed_turns_count_as_turns_but_not_toward_the_first_sentence_latency() -> None:
+    rows = [
+        row("talker", 5, first_sentence_ms=600),
+        row("talker", 4, kind="event", first_sentence_ms=700),
+        *(row("talker", 3, kind=kind, first_sentence_ms=9000) for kind in ("warm_up", "restart", "fold")),
+    ]
+
+    stats = summarise(rows)
+
+    assert stats.roles["talker"].turns == 5
+    assert stats.first_sentence == [600, 700]
+
+
 def test_rows_that_are_not_a_session_result_are_not_counted_as_turns() -> None:
     rows = [
         {"at": NOW.isoformat(), "kind": "voice", "from": "idle", "to": "listening"},
@@ -167,6 +180,29 @@ def test_the_report_has_a_row_per_role_a_total_and_latency_percentiles() -> None
     assert any(l.split() == ["talker", "turn", "duration", "2", "1,000", "3,000"] for l in lines)
     assert any(l.split() == ["subagent", "turn", "duration", "1", "3,725,000", "3,725,000"] for l in lines)
     assert "$" not in text and "cost" not in text.lower()
+
+
+def test_the_summariser_has_its_own_row_and_every_row_shows_its_cache_hit_rate() -> None:
+    rows = [
+        row("talker", 5, usage=(10, 20, 30, 40)),
+        row("talker", 4, usage=(1, 2, 3, 4)),
+        row("summariser", 3, usage=(100, 50, 300, 100), kind="fold", duration_ms=40_000),
+        row("orchestrator", 2, usage=(0, 5, 0, 0)),
+    ]
+
+    text = render(summarise(rows), None, None)
+
+    lines = text.splitlines()
+    header = next(l for l in lines if l.startswith("role"))
+    assert header.split()[-3:] == ["cache", "hit", "duration"]
+    usage = lines[lines.index(header):lines.index("Latency (ms)")]
+    cells = {l.split()[0]: l.split() for l in usage if l.startswith(("talker", "summariser", "orchestrator", "total"))}
+    # Cache reads over every prompt token: input, cache reads and cache writes.
+    assert cells["talker"][1] == "2" and "38%" in cells["talker"]
+    assert cells["summariser"][1] == "1" and "60%" in cells["summariser"]
+    assert "-" in cells["orchestrator"]
+    assert "57%" in cells["total"]
+    assert any(l.split() == ["summariser", "turn", "duration", "1", "40,000", "40,000"] for l in lines)
 
 
 def barge(

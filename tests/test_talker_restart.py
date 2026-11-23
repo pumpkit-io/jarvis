@@ -1,10 +1,12 @@
-"""The Talker restarts between turns once its context passes the threshold, seeded by the Hub from its own records."""
+"""The Talker restarts between turns once its context reaches the ceiling, which only Folds that keep failing let it
+reach, seeded with Memory, the Tail of the saved Conversation and the Hub's own records."""
 
 import asyncio
 
 import pytest
 
 from jarvis_hub.agents.backend import Context
+from jarvis_hub.config import MemorySettings
 from jarvis_hub.hub import RESTART_RETRY_AFTER
 from tests.fakes import (
     Fail,
@@ -22,11 +24,17 @@ from tests.fakes import (
     until,
 )
 
-WINDOW = 200_000
+WINDOW = 1_000_000
 
 
-def at(percent: int) -> Context:
-    return Context(WINDOW * percent // 100, WINDOW)
+def at(tokens: int) -> Context:
+    return Context(tokens, WINDOW)
+
+
+# The default ceiling, which is past the Fold's trigger too.
+FULL = at(300_000)
+# A context well below the Fold's trigger.
+SMALL = at(30_000)
 
 
 @pytest.fixture
@@ -48,16 +56,16 @@ def user_messages(*sessions: object) -> list[str]:
     return [m for s in sessions for m in s.received if m.startswith("<user")]  # type: ignore[attr-defined]
 
 
-async def test_context_past_the_threshold_restarts_the_talker_with_the_tasks_and_recent_exchanges(
+async def test_context_at_the_ceiling_restarts_the_talker_with_the_recent_exchanges_then_the_tasks(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
 ) -> None:
     hold_task = asyncio.Event()
     backend = FakeBackend(
         clock,
         [
-            [Text("Evening, sir."), at(10)],
-            [Text("Right away, sir."), Tool("delegate", {"request": "Check the open PRs"}), at(45)],
-            [Text("Still on it, sir."), at(3)],
+            [Text("Evening, sir."), SMALL],
+            [Text("Right away, sir."), Tool("delegate", {"request": "Check the open PRs"}), FULL],
+            [Text("Still on it, sir."), SMALL],
         ],
         orchestrator=[[Gate(hold_task)]],
     )
@@ -77,6 +85,7 @@ async def test_context_past_the_threshold_restarts_the_talker_with_the_tasks_and
     assert "T1" in seed and "Check the open PRs" in seed
     assert "Hello" in seed and "Evening, sir." in seed
     assert "Look at the open PRs" in seed and "Right away, sir." in seed
+    assert seed.index("</conversation>") < seed.index("<open_tasks>\n")
     assert old.closed
     assert new.spec.system_prompt == old.spec.system_prompt
     assert user_messages(new) == ['<user lang="en" typed="true">How is it going?</user>']
@@ -92,7 +101,7 @@ async def test_context_past_the_threshold_restarts_the_talker_with_the_tasks_and
 async def test_no_turn_is_lost_or_doubled_across_the_restart(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
 ) -> None:
-    backend = FakeBackend(clock, [[Text("One."), at(50)], [Text("Two.")], [Text("Three."), at(50)], [Text("Four.")]])
+    backend = FakeBackend(clock, [[Text("One."), FULL], [Text("Two.")], [Text("Three."), FULL], [Text("Four.")]])
     hub = make_hub(backend, output, metrics)
 
     await hub.start()
@@ -110,7 +119,7 @@ async def test_a_line_typed_during_the_restart_waits_for_the_new_session(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
 ) -> None:
     release = asyncio.Event()
-    backend = FakeBackend(clock, [[Text("One."), at(50)], [Text("Two.")]], seed_reply=[Gate(release), Text("Ready.")])
+    backend = FakeBackend(clock, [[Text("One."), FULL], [Text("Two.")]], seed_reply=[Gate(release), Text("Ready.")])
     hub = make_hub(backend, output, metrics)
     typist = Typist(clock)
 
@@ -132,10 +141,10 @@ async def test_a_line_typed_during_the_restart_waits_for_the_new_session(
     assert output.replies == ["One.", "Two."]
 
 
-async def test_context_below_the_threshold_keeps_the_session(
+async def test_context_below_the_ceiling_keeps_the_session(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
 ) -> None:
-    backend = FakeBackend(clock, [[Text("One."), at(39)], [Text("Two."), at(39)]])
+    backend = FakeBackend(clock, [[Text("One."), at(299_999)], [Text("Two."), at(299_999)]])
     hub = make_hub(backend, output, metrics)
 
     await hub.start()
@@ -158,9 +167,9 @@ async def test_a_turn_without_a_context_report_never_restarts(
     assert len(backend.all_sessions("talker")) == 1
 
 
-async def test_the_threshold_is_a_setting(clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics) -> None:
-    backend = FakeBackend(clock, [[Text("One."), at(30)], [Text("Two.")]])
-    hub = make_hub(backend, output, metrics, talker_restart_at=0.25)
+async def test_the_ceiling_is_a_setting(clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics) -> None:
+    backend = FakeBackend(clock, [[Text("One."), at(250_000)], [Text("Two.")]])
+    hub = make_hub(backend, output, metrics, memory=MemorySettings(ceiling=250_000))
 
     await hub.start()
     await hub.run(lines(clock, "a", "b"))
@@ -174,7 +183,7 @@ async def test_a_finished_task_is_not_an_open_task(
 ) -> None:
     backend = FakeBackend(
         clock,
-        [[Text("On it."), Tool("delegate", {"request": "Old job"})], [Text("Done, sir."), at(50)]],
+        [[Text("On it."), Tool("delegate", {"request": "Old job"})], [Text("Done, sir."), FULL]],
         orchestrator=[[Tool("report", {"task_id": "T1", "spoken": "Finished."})]],
     )
     hub = make_hub(backend, output, metrics)
@@ -189,27 +198,38 @@ async def test_a_finished_task_is_not_an_open_task(
     assert "<you>Done, sir.</you>" in seed
 
 
-async def test_only_the_last_few_exchanges_are_in_the_seed(
+async def test_the_seed_holds_the_newest_exchanges_up_to_40000_tokens(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
 ) -> None:
-    words = [f"word{i}" for i in range(10)]
-    scripts = [[Text(f"reply{i}.")] for i in range(9)] + [[Text("reply9."), at(50)], [Text("after.")]]
-    backend = FakeBackend(clock, scripts)
+    # Each line is about 16,000 tokens at 3.5 characters a token, so the newest two fit and three do not.
+    words = ["alpha", "bravo", "charlie", "delta"]
+    said = [(word + " ") * (56_000 // (len(word) + 1)) for word in words]
+    # The Fold starts and fails a turn before the ceiling, so no two readings calibrate the estimate in between.
+    scripts = [[Text("Noted.")], [Text("Noted.")], [Text("Noted."), at(200_000)], [Text("Noted.")], [Text("Full."), FULL]]
+    backend = FakeBackend(clock, scripts, summaries=[[Fail("overloaded")], [Fail("overloaded")]])
     hub = make_hub(backend, output, metrics)
+    typist = Typist(clock)
 
     await hub.start()
-    await hub.run(lines(clock, *words, "last"))
+    running = asyncio.create_task(hub.run(typist.lines()))
+    for text in said:
+        typist.type(text)
+    await until(lambda: len(backend.all_sessions("summariser")) == 2
+                and all(s.closed for s in backend.all_sessions("summariser")))
+    typist.type("last")
+    await until(lambda: len(backend.all_sessions("talker")) == 2)
+    typist.end()
+    await asyncio.wait_for(running, timeout=1)
     await hub.close()
 
     seed = backend.all_sessions("talker")[1].received[0]
-    assert "word9" in seed and "reply9." in seed
-    assert "word0" not in seed and "reply0." not in seed
+    assert [word for word in words if f"{word} {word}" in seed] == ["charlie", "delta"]
 
 
 async def test_a_restart_that_cannot_open_keeps_the_session_and_the_conversation_goes_on(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
 ) -> None:
-    backend = FakeBackend(clock, [[Text("One."), at(50)], [Text("Two."), at(50)]], restart_error=RuntimeError("no CLI"))
+    backend = FakeBackend(clock, [[Text("One."), FULL], [Text("Two."), FULL]], restart_error=RuntimeError("no CLI"))
     hub = make_hub(backend, output, metrics)
 
     await hub.start()
@@ -225,7 +245,7 @@ async def test_a_failed_restart_waits_some_turns_before_trying_again_and_tells_t
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
 ) -> None:
     turns = RESTART_RETRY_AFTER + 2
-    backend = FakeBackend(clock, [[Text(f"{i}."), at(50)] for i in range(turns)], restart_error=RuntimeError("no CLI"))
+    backend = FakeBackend(clock, [[Text(f"{i}."), FULL] for i in range(turns)], restart_error=RuntimeError("no CLI"))
     hub = make_hub(backend, output, metrics)
 
     await hub.start()
@@ -240,7 +260,7 @@ async def test_a_failed_restart_waits_some_turns_before_trying_again_and_tells_t
 async def test_a_failed_seed_is_one_notice_and_waits_like_a_failed_open(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
 ) -> None:
-    backend = FakeBackend(clock, [[Text("One."), at(50)], [Text("Two."), at(50)]], seed_reply=[Fail("overloaded")])
+    backend = FakeBackend(clock, [[Text("One."), FULL], [Text("Two."), FULL]], seed_reply=[Fail("overloaded")])
     hub = make_hub(backend, output, metrics)
 
     await hub.start()
@@ -255,7 +275,7 @@ async def test_a_turn_whose_context_is_unknown_is_logged_and_never_restarts_on_a
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
 ) -> None:
     turns = RESTART_RETRY_AFTER + 2
-    scripts = [[Text("0."), at(50)]] + [[Text(f"{i}."), NoContext("no entry")] for i in range(1, turns)]
+    scripts = [[Text("0."), FULL]] + [[Text(f"{i}."), NoContext("no entry")] for i in range(1, turns)]
     backend = FakeBackend(clock, scripts, restart_error=RuntimeError("no CLI"))
     hub = make_hub(backend, output, metrics)
 
@@ -272,7 +292,7 @@ async def test_closing_the_hub_while_a_restart_opens_closes_the_session_once_it_
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
 ) -> None:
     opened = asyncio.Event()
-    backend = FakeBackend(clock, [[Text("One."), at(50)]], restart_open_gate=opened)
+    backend = FakeBackend(clock, [[Text("One."), FULL]], restart_open_gate=opened)
     hub = make_hub(backend, output, metrics)
 
     await hub.start()
@@ -300,7 +320,7 @@ async def test_the_seed_lists_each_open_tasks_subagents(
     )
     backend = FakeBackend(
         clock,
-        [[Text("On it."), Tool("delegate", {"request": "Fix typo X", "context": ""})], [Text("Working."), at(50)]],
+        [[Text("On it."), Tool("delegate", {"request": "Fix typo X", "context": ""})], [Text("Working."), FULL]],
         orchestrator=[[spawn], [Tool("report", {"task_id": "T1", "spoken": "Fixed."})]],
         subagents={brief: [Gate(release), Text("Done.")]},
     )
@@ -326,7 +346,7 @@ async def test_the_seed_lists_each_open_tasks_subagents(
 async def test_a_seed_the_new_session_fails_on_keeps_the_old_session_and_closes_the_new_one(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics
 ) -> None:
-    backend = FakeBackend(clock, [[Text("One."), at(50)], [Text("Two.")]], seed_reply=[Fail("overloaded")])
+    backend = FakeBackend(clock, [[Text("One."), FULL], [Text("Two.")]], seed_reply=[Fail("overloaded")])
     hub = make_hub(backend, output, metrics)
 
     await hub.start()

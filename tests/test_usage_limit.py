@@ -1016,6 +1016,26 @@ async def test_the_notice_names_the_latest_reset_among_the_held_roles_and_drops_
     await limit.close()
 
 
+async def test_an_unseen_role_holds_only_itself(clock: FakeClock) -> None:
+    hits: list[tuple[str, bool]] = []
+    resets: list[None] = []
+    limit = UsageLimit(clock, clock.now, lambda role, news: hits.append((role, news)), lambda roles: None,
+                       lambda: resets.append(None), unseen=frozenset({"summariser"}))
+
+    limit.observe("summariser", TurnEnd("limited", resets_at=clock.now() + 3600))
+    assert limit.blocks("summariser") and not limit.active and not limit.recovery_pending
+    assert hits == [("summariser", False)] and limit.tell_news() is None and limit.latest() is None
+    await asyncio.wait_for(limit.wait_clear(asyncio.Event()), timeout=1)
+
+    limit.observe("talker", TurnEnd("limited", resets_at=clock.now() + 600))
+    assert limit.tell_news() == Notice(clock.now() + 600, update=False)
+    clock.advance(600)
+    await until(lambda: not limit.active)
+    limit.observe("talker", TurnEnd("completed"))
+    assert resets == [None] and limit.blocks("summariser")
+    await limit.close()
+
+
 async def test_a_reset_is_announced_when_a_held_role_completes_and_a_hit_after_it_is_news_again(
     clock: FakeClock,
 ) -> None:

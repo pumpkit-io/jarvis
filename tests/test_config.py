@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from jarvis_hub.config import ConfigError, VoiceSettings, load_settings, parse_env
+from jarvis_hub.memory import summariser_spec
 
 
 @pytest.mark.parametrize(
@@ -224,21 +225,48 @@ def test_text_mode_warns_about_a_bad_voice_setting_and_starts_on_the_defaults(ch
     assert len(warnings) == 1 and "JARVIS_AEC" in warnings[0]
 
 
+def test_memory_defaults_fold_at_200000_tokens_keep_a_40000_tail_and_stop_at_300000(checkout: Path) -> None:
+    memory = load_settings(checkout, environ={}).memory
+    assert (memory.fold_at, memory.tail, memory.ceiling) == (200_000, 40_000, 300_000)
+    assert (memory.model, memory.effort) == ("sonnet", "low")
+
+
+def test_memory_settings_come_from_dotenv(checkout: Path) -> None:
+    (checkout / ".env").write_text(
+        "JARVIS_MEMORY_FOLD_AT=120000\nJARVIS_MEMORY_TAIL=30000\nJARVIS_MEMORY_CEILING=180000\n"
+        "JARVIS_MEMORY_MODEL=haiku\nJARVIS_MEMORY_EFFORT=medium\n"
+    )
+    settings = load_settings(checkout, environ={})
+    memory = settings.memory
+    assert (memory.fold_at, memory.tail, memory.ceiling) == (120_000, 30_000, 180_000)
+    spec = summariser_spec(settings)
+    assert (spec.role, spec.model, spec.effort) == ("summariser", "haiku", "medium")
+
+
 @pytest.mark.parametrize(
-    ("value", "expected"),
-    [(None, 0.40), ("0.5", 0.5), ("0.25", 0.25), ("1", 1.0), (" 0.6 ", 0.6), ("", 0.40)],
-    ids=["default", "half", "a quarter", "the whole window", "spaces trimmed", "empty falls back"],
+    ("text", "name"),
+    [
+        ("JARVIS_MEMORY_FOLD_AT=0", "JARVIS_MEMORY_FOLD_AT"),
+        ("JARVIS_MEMORY_TAIL=lots", "JARVIS_MEMORY_TAIL"),
+        ("JARVIS_MEMORY_CEILING=1.5", "JARVIS_MEMORY_CEILING"),
+        ("JARVIS_MEMORY_EFFORT=extreme", "JARVIS_MEMORY_EFFORT"),
+        ("JARVIS_MEMORY_TAIL=200000", "JARVIS_MEMORY_TAIL"),
+        ("JARVIS_MEMORY_TAIL=190000", "JARVIS_MEMORY_TAIL"),
+        ("JARVIS_MEMORY_TAIL=100001", "JARVIS_MEMORY_TAIL"),
+        ("JARVIS_MEMORY_CEILING=150000", "JARVIS_MEMORY_CEILING"),
+    ],
+    ids=["zero trigger", "not a number", "not whole", "unknown effort", "tail as big as the trigger",
+         "tail nearly as big as the trigger", "tail over half the trigger", "ceiling below the trigger"],
 )
-def test_talker_restart_threshold(checkout: Path, value: str | None, expected: float) -> None:
-    environ = {} if value is None else {"JARVIS_TALKER_RESTART_AT": value}
-    assert load_settings(checkout, environ=environ).talker_restart_at == expected
-
-
-@pytest.mark.parametrize("value", ["0", "-0.2", "1.5", "40%", "abc", "nan", "inf"])
-def test_talker_restart_threshold_must_be_a_fraction_of_the_window(checkout: Path, value: str) -> None:
-    (checkout / ".env").write_text(f"JARVIS_TALKER_RESTART_AT={value}\n")
-    with pytest.raises(ConfigError, match="JARVIS_TALKER_RESTART_AT"):
+def test_a_bad_memory_setting_is_refused(checkout: Path, text: str, name: str) -> None:
+    (checkout / ".env").write_text(text + "\n")
+    with pytest.raises(ConfigError, match=name):
         load_settings(checkout, environ={})
+
+
+def test_a_tail_of_half_the_trigger_is_accepted(checkout: Path) -> None:
+    (checkout / ".env").write_text("JARVIS_MEMORY_TAIL=100000\n")
+    assert load_settings(checkout, environ={}).memory.tail == 100_000
 
 
 def test_subagent_limits_default_to_max_effort_and_three_at_once(checkout: Path) -> None:

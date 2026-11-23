@@ -62,53 +62,87 @@ def numbered(record_id: object, prefix: str) -> int:
     return int(record_id[1:])
 
 
-class UnreadableState(Exception):
-    """The state file could not be used and was moved aside; the message says where, for the User."""
+def write_atomically(path: Path, data: dict[str, Any], *, indent: int | None = 1) -> None:
+    """Written to a temporary file and renamed over the old one, so a crash mid-write leaves the old file whole."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}-", suffix=path.suffix)
+    try:
+        # A lone surrogate from a Client's JSON becomes a \uXXXX escape, which reads back as the same string.
+        with os.fdopen(fd, "w", encoding="utf-8", errors="backslashreplace") as f:
+            json.dump(data, f, ensure_ascii=False, indent=indent, allow_nan=False)
+            # Without it a power cut after the rename can leave an empty file in place of both versions.
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
 
 
-class StateFile:
-    def __init__(self, path: Path) -> None:
+class UnreadableFile(Exception):
+    """A saved file could not be used; the message tells the User what became of it."""
+
+
+def _no_constant(name: str) -> None:
+    raise ValueError(f"{name} is not a JSON number")
+
+
+class SavedFile:
+    """A versioned JSON file in the runtime folder. One that cannot be used is moved aside, never saved over."""
+
+    def __init__(self, path: Path, version: int, *, name: str, fallback: str, indent: int | None = 1) -> None:
         self._path = path
+        self._version = version
+        self._indent = indent
+        # How the notices name the file and say what the Hub does without it.
+        self._name = name
+        self._fallback = fallback
+        self._blocked = False
 
     def load(self) -> dict[str, Any] | None:
-        """The saved state, or None when there is none. A corrupt file or one of another version is moved aside
-        and raises UnreadableState, so the Hub starts fresh instead of failing."""
+        """The saved data, or None when there is none; raises UnreadableFile after moving an unusable file aside."""
         try:
-            text = self._path.read_text()
+            raw = self._path.read_bytes()
         except FileNotFoundError:
             return None
         except OSError as e:
-            raise UnreadableState(f"Could not read {self._path}: {e}; starting with nothing restored.") from e
+            raise UnreadableFile(self.set_aside(f"could not be read ({e})")) from e
         try:
-            data: object = json.loads(text)
-        except ValueError:
-            raise UnreadableState(self.set_aside("is not valid JSON")) from None
+            data: object = json.loads(raw.decode(), parse_constant=_no_constant)
+        except UnicodeDecodeError:
+            raise UnreadableFile(self.set_aside("is not UTF-8 text")) from None
+        except (ValueError, RecursionError):
+            raise UnreadableFile(self.set_aside("is not valid JSON")) from None
         version = cast(dict[str, Any], data).get("version") if isinstance(data, dict) else None
-        if version != VERSION:
-            raise UnreadableState(self.set_aside(f"has version {version!r}, not {VERSION}"))
+        if version != self._version:
+            raise UnreadableFile(self.set_aside(f"has version {version!r}, not {self._version}"))
         return cast(dict[str, Any], data)
 
     def save(self, data: dict[str, Any]) -> None:
-        """Written to a temporary file and renamed over the old one, so a crash mid-write leaves the old state whole."""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(dir=self._path.parent, prefix=".state-", suffix=".json")
-        try:
-            with os.fdopen(fd, "w") as f:
-                json.dump({"version": VERSION, **data}, f, ensure_ascii=False, indent=1)
-                # Without it a power cut after the rename can leave an empty file in place of both states.
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(temporary, self._path)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(temporary)
-            raise
+        if not self._blocked:
+            write_atomically(self._path, {"version": self._version, **data}, indent=self._indent)
+
+    def unblock(self) -> None:
+        """Lets saves write over a file that could not be moved aside, once what it held may be lost."""
+        self._blocked = False
 
     def set_aside(self, problem: str) -> str:
         """Moves the file out of the way, so the next save starts clean; returns the notice saying where it went."""
         aside = self._path.with_name(f"{self._path.stem}.unreadable{self._path.suffix}")
+        n = 1
+        while os.path.lexists(aside):
+            n += 1
+            aside = self._path.with_name(f"{self._path.stem}.unreadable-{n}{self._path.suffix}")
         try:
             os.replace(self._path, aside)
         except OSError as e:
-            return f"The state file {self._path} {problem} and could not be moved aside ({e}); nothing was restored."
-        return f"The state file {self._path} {problem}, so nothing was restored; it was moved to {aside}."
+            self._blocked = True
+            return (f"{self._name} {self._path} {problem} and could not be moved aside ({e}); "
+                    f"{self._fallback}, and nothing will be saved over it.")
+        return f"{self._name} {self._path} {problem}, so {self._fallback}; it was moved to {aside}."
+
+
+class StateFile(SavedFile):
+    def __init__(self, path: Path) -> None:
+        super().__init__(path, VERSION, name="The state file", fallback="nothing was restored")

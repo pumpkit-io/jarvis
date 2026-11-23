@@ -1,4 +1,5 @@
-"""A Hub restart through the one seam: what was waited on comes back from the runtime folder's state file."""
+"""A Hub restart through the one seam: what was waited on comes back from the runtime folder's state file, and the
+Conversation from the saved conversation."""
 
 import asyncio
 import json
@@ -56,6 +57,7 @@ def a_hub(clock: FakeClock, state: Path, output: RecordingOutput, **options: Any
     scripts = options.pop("scripts", ())
     orchestrator = options.pop("orchestrator", ())
     backend = FakeBackend(clock, scripts, orchestrator=orchestrator, subagents=options.pop("subagents", None))
+    options.setdefault("conversation_path", state.with_name("conversation.json"))
     return make_hub(backend, output, RecordingMetrics(), state_path=state, **options), backend
 
 
@@ -481,6 +483,22 @@ async def test_an_unreadable_state_file_is_moved_aside_with_a_notice_and_the_hub
     assert json.loads(state.read_text())["version"] == 1
 
 
+async def test_a_state_file_that_cannot_be_read_is_moved_aside_before_the_next_save(clock: FakeClock, state: Path) -> None:
+    state.mkdir(parents=True)
+    output = RecordingOutput()
+    hub, _ = a_hub(clock, state, output)
+
+    await hub.start()
+    await hub.run(lines(clock, "Hello"))
+    await hub.close()
+
+    aside = state.with_name("state.unreadable.json")
+    [notice] = output.notices
+    assert notice.startswith(f"The state file {state} could not be read (")
+    assert notice.endswith(f"so nothing was restored; it was moved to {aside}.")
+    assert aside.is_dir() and json.loads(state.read_text())["version"] == 1
+
+
 async def interrupted_task(clock: FakeClock, state: Path, request: str = "How many PRs are open?") -> None:
     """A launch that leaves one Task open, its Orchestrator turn cut off by the close."""
     gate = asyncio.Event()
@@ -548,3 +566,32 @@ async def test_backlog_not_yet_attached_survives_another_restart(clock: FakeCloc
     [_, first_turn] = talker_received(backend)
     assert BACKLOG_OPENER.format(n=1) in first_turn and "Three PRs are open." in first_turn
     assert backend.all_sessions("orchestrator") == []
+
+
+async def test_the_talker_continues_the_conversation_and_the_backlog_still_waits_for_the_user(
+    clock: FakeClock, state: Path
+) -> None:
+    await interrupted_task(clock, state, request="Count the open PRs on pumpkit")
+
+    output = RecordingOutput()
+    second, backend = a_hub(
+        clock, state, output, scripts=[[Text("Three, sir, as you asked before.")]],
+        orchestrator=[[report("T1", "Three PRs are open.")]],
+    )
+    typist = Typist(clock)
+    await second.start()
+    running = asyncio.create_task(second.run(typist.lines()))
+    await until(lambda: "Three PRs are open." in state.read_text())
+    await asyncio.sleep(0.02)
+    assert output.replies == []
+    typist.type("What did I ask you before?")
+    typist.end()
+    await running
+    await second.close()
+
+    [seed, first_turn] = talker_received(backend)
+    assert seed.startswith('<event source="hub" reason="launch">')
+    assert "Count the open PRs on pumpkit</user>" in seed and "<you>Let me look.</you>" in seed
+    assert "Three PRs are open." not in seed
+    assert first_turn.startswith(BACKLOG_OPENER.format(n=1)) and "Three PRs are open." in first_turn
+    assert output.replies == ["Three, sir, as you asked before."]

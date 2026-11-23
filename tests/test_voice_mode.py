@@ -12,7 +12,7 @@ import pytest
 
 from jarvis_hub.agents.backend import Context, SessionSpec
 from jarvis_hub.subagents import Subagent
-from jarvis_hub.hub import WARM_UP, Hub
+from jarvis_hub.hub import Hub
 from jarvis_hub.voice.assessment import Verdict
 from jarvis_hub.voice.state import Heard, SpeechStarted, SpokenWake, Timing
 from jarvis_hub.voice.voice_mode import VoiceMode, merge
@@ -86,7 +86,7 @@ MakeRig = Callable[..., Awaitable[Rig]]
 async def rig_for() -> AsyncIterator[MakeRig]:
     rigs: list[tuple[Rig, asyncio.Task[None]]] = []
 
-    async def make(*scripts: list[Step], state_path: Path | None = None, recognition: Any = None, workspace: FakeWorkspace | None = None, subagent_session: Callable[[Subagent], SessionSpec] = subagent_spec, **backend_options: Any) -> Rig:
+    async def make(*scripts: list[Step], state_path: Path | None = None, recognition: Any = None, workspace: FakeWorkspace | None = None, subagent_session: Callable[[Subagent], SessionSpec] = subagent_spec, hub_options: dict[str, Any] | None = None, **backend_options: Any) -> Rig:
         clock = FakeClock()
         backend = FakeBackend(clock, list(scripts), **backend_options)
         audio, player, output, metrics = ScriptedAudio(clock), RecordingPlayer(), RecordingOutput(), RecordingMetrics()
@@ -106,6 +106,7 @@ async def rig_for() -> AsyncIterator[MakeRig]:
             on_stand_by=voice.stand_by,
             floor=voice,
             state_path=state_path,
+            **(hub_options or {}),
         )
         typist = Typist(clock)
         await hub.start()
@@ -352,7 +353,7 @@ async def test_capture_is_on_only_while_listening_for_a_turn(rig_for: MakeRig) -
     assert rig.audio.capturing == [True, False, True, False]
 
 
-FULL = Context(100_000, 200_000)
+FULL = Context(300_000, 1_000_000)
 
 
 def talker_kinds(rig: Rig) -> list[str]:
@@ -1397,7 +1398,7 @@ async def speaking(rig: Rig) -> None:
 
 
 def talker_got(rig: Rig) -> list[str]:
-    return [m for m in rig.backend.session("talker").received if m != WARM_UP]
+    return [m for m in rig.backend.session("talker").received if not m.startswith('<event source="hub" reason="launch"')]
 
 
 async def test_okay_over_jarvis_is_judged_while_it_talks_on_without_a_gap(rig_for: MakeRig) -> None:

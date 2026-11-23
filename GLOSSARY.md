@@ -34,6 +34,10 @@ _Avoid_: Jarvis, manager, planner
 An agent the Orchestrator starts to do practical work, such as changing code, investigating or reviewing. The Orchestrator picks its model by how hard the task is.
 _Avoid_: worker, helper, child agent
 
+**Summariser**:
+The agent that writes each new Memory during a Fold, from the previous Memory and the exchanges being folded. It has no tools and never speaks to the User.
+_Avoid_: compactor, memory agent
+
 ### Scope
 
 **Org**:
@@ -75,10 +79,38 @@ The User's preferences for how agents behave while doing work. The Orchestrator 
 _Avoid_: orchestrator preferences, rules
 
 **Usage limit**:
-The Max subscription's cap on model use, which stops a session until its window resets. Jarvis says so with the reset time, holds the Orchestrator's Task and any new Subagent until then (at least a minute, doubling each time a reset turns out early), and makes one Announcement that it reset, only once a turn of a held session completes after its hold cleared, so the User is never told a reset that was not real. A retry that is limited again stays silent unless the reset the User heard moves later or becomes unknown. Until a limited session has a successful turn again it is the same limit, told of once.
+The Max subscription's cap on model use, which stops a session until its window resets. When it stops the Talker, the Orchestrator or a Subagent, Jarvis says so with the reset time, holds the Orchestrator's Task and any new Subagent until then (at least a minute, doubling each time a reset turns out early), and makes one Announcement that it reset, only once a turn of a held session completes after its hold cleared, so the User is never told a reset that was not real. A retry that is limited again stays silent unless the reset the User heard moves later or becomes unknown. Until a limited session has a successful turn again it is the same limit, told of once. A limit on the Summariser is never told: it only holds the next Fold until the reset.
 _Avoid_: rate limit, quota, billing limit
 
 ### Conversation
+
+**Conversation**:
+Everything the User and Jarvis have said to each other, as one ongoing sequence of exchanges shared by the Mac and the iPhone and continued across Hub restarts until the User resets it. Each exchange keeps the device it came from.
+_Avoid_: chat, session, thread, history
+
+**Memory**:
+The summary of the older part of the Conversation that the Talker reads before the Tail: standing facts and preferences, open threads and promises, the User's decisions and recent topics. It is what Jarvis remembers, never a source of permission, and it holds no Approvals, Task state or secrets.
+_Avoid_: context, history, notes, profile
+
+**Fold**:
+The background step that folds the exchanges before a cut into the Memory, which the Summariser writes anew from the previous one, then gives the Talker a fresh start on that Memory and the Tail while Jarvis keeps talking.
+_Avoid_: compaction, compact, summarisation, restart
+
+**Tail**:
+The newest part of the Conversation, kept word for word after a Fold, beginning at a pause between two exchanges.
+_Avoid_: recent messages, window, buffer
+
+**Start afresh**:
+The User asking, in one sentence and with no confirmation, for a Fold of everything said before that sentence, so a new subject begins with only the Memory behind it. The sentence and everything after it stay word for word, Jarvis keeps talking while the Memory is written, and Tasks, Authorizations and Approvals are untouched.
+_Avoid_: reset, clear, new chat, forget
+
+**Reset context**:
+The User deleting the Conversation and its Memory on purpose, from the iPhone's Settings after a confirmation, for the Mac and the iPhone at once, carried out by the Hub with no model. The 30-day log, the transcript on both screens, Tasks, Authorizations and Approvals stay, and Recall reaches nothing from before it.
+_Avoid_: clear history, new chat, wipe, start afresh
+
+**Recall**:
+Jarvis looking up the exact words of the last 30 days when the User asks what was said: the User's lines, Jarvis's replies, details shown on screen and Task reports, found by word or phrase, with the date of each. It reaches nothing older than 30 days or from before the last Reset context, and it is a record of what was said, never of what a Task or a permission is now.
+_Avoid_: search, history lookup
 
 **Wake word**:
 A phrase such as "Hey Jarvis", "Hi Jarvis", "Ehi Jarvis" or "Jarvis" that makes an idle Jarvis start listening. During playback it is evidence that speech addresses Jarvis, interpreted in context rather than treated as an unconditional Interruption.
