@@ -273,6 +273,7 @@ def settings_hub(
         waits=WaitSetup(org=settings.org),
         talker_restart_at=settings.talker_restart_at,
         state_path=settings.runtime_dir / "state.json",
+        conversation_path=settings.runtime_dir / "conversation.json",
         **options,
     )
 

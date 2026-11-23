@@ -36,10 +36,19 @@ from jarvis_hub.authorizations import Authorization, Authorizations
 from jarvis_hub.approvals import EXPIRES_AFTER, HUB_ACTIONS, Approval, Approvals, approval_event
 from jarvis_hub.clients import Client, Clients, TERMINAL
 from jarvis_hub.config import DEFAULT_TALKER_RESTART_AT
+from jarvis_hub.conversation import (
+    LAUNCH_TOKENS,
+    RESTART_TOKENS,
+    Conversation,
+    Device,
+    EntryKind,
+    SeedReason,
+    seed_message,
+)
 from jarvis_hub.limits import SavedLimit, UsageLimit, reset_sentence, update_sentence
 from jarvis_hub.news import Leaf, News, backlog_message, fresh
 from jarvis_hub.orchestrator import orchestrator_tools
-from jarvis_hub.state import Fields, StateFile, UnreadableState
+from jarvis_hub.state import Fields, StateFile, UnreadableFile
 from jarvis_hub.spoken import SpokenScopes
 from jarvis_hub.subagent_rules import connector_check
 from jarvis_hub.subagents import Subagent, SubagentSetup, Subagents, ended_event, kept_line, over_time_event
@@ -226,16 +235,11 @@ class Line:
     delayed: float | None = None
 
 
-# Sent once at launch, in the background, so the first real turn finds the prompt cached (ADR 0006); never shown.
-WARM_UP = '<event source="hub">Session start. Reply with one word.</event>'
-
 # The Phase 0 definition, kept so Hub numbers compare with the spike's: the end of a delta counts too.
 _SENTENCE_END = re.compile(r"[.?!](\s|$)")
 
 TalkerKind = Literal["warm_up", "restart", "user", "event"]
 
-# How many of the latest exchanges a restarted Talker is told about.
-RECENT_EXCHANGES = 6
 # Turns a failed restart waits before trying again: each try costs a model call.
 RESTART_RETRY_AFTER = 5
 # How long a closing Hub lets a Talker open run on, so the session it opens can be closed and not left running.
@@ -294,22 +298,6 @@ def approval_brief(approval: Approval) -> str:
     )
 
 
-def restart_message(open_tasks: str, exchanges: "deque[tuple[str, str]]") -> str:
-    """The seed of a fresh Talker, written from the Hub's own records. The exchanges reuse the messages as sent."""
-    recent = "\n".join(
-        f"<exchange>\n{message}\n<you>{escape(reply, quote=False)}</you>\n</exchange>" for message, reply in exchanges
-    )
-    return (
-        '<event source="hub" reason="restart">\n'
-        "Your session was restarted to keep it fast, and what you said before it is gone. This is context for you, "
-        "not the User speaking: do not answer it. Carry on from it in the User's next message.\n"
-        f"<open_tasks>\n{open_tasks}\n</open_tasks>\n"
-        f"<recent_exchanges>\n{recent or 'None yet.'}\n</recent_exchanges>\n"
-        "Reply with one word.\n"
-        "</event>"
-    )
-
-
 def _needs_user_key(spoken: str) -> str:
     return " ".join(spoken.casefold().split())
 
@@ -320,6 +308,15 @@ def task_message(task: Task, request: str, context: str, *, continues: bool) -> 
     if context:
         parts.append(f"<context>{escape(context, quote=False)}</context>")
     return "\n".join([*parts, "</task>"])
+
+
+@dataclass(frozen=True)
+class _ContextReading:
+    """A completed Talker turn's context size and reply length, the baseline for checking the next turn's growth."""
+
+    session: AgentSession
+    tokens: int
+    reply_chars: int
 
 
 @dataclass(frozen=True)
@@ -452,6 +449,7 @@ class Hub:
         talker_restart_at: float = DEFAULT_TALKER_RESTART_AT,
         floor: Floor | None = None,
         state_path: Path | None = None,
+        conversation_path: Path | None = None,
         wall: Callable[[], float] = time.time,
         preconnect_orchestrator: bool = False,
     ) -> None:
@@ -525,8 +523,10 @@ class Hub:
         self._restart_at = talker_restart_at
         # In voice mode a restart and news wait for Jarvis to be quiet, so they never delay or talk over the User.
         self._floor = floor
-        # The exchanges a restarted Talker is seeded with.
-        self._exchanges: deque[tuple[str, str]] = deque(maxlen=RECENT_EXCHANGES)
+        # Every exchange, saved so the next Talker session, in this launch or the next, continues it (ADR 0028).
+        self._conversation = Conversation(conversation_path)
+        self._conversation_failing = False
+        self._last_reading: _ContextReading | None = None
         # The language of the latest line read, and of the latest User turn the Talker took: replies follow it.
         self._read_lang: Lang = "en"
         self._lang: Lang = "en"
@@ -692,9 +692,13 @@ class Hub:
             self._client_snapshots[key] = payload
 
     async def start(self) -> None:
-        """Open the Talker and warm it in the background (ADR 0006); a line typed meanwhile waits for it.
-        What the last launch left pending is restored first, and the Orchestrator hears of it in the background."""
+        """Restores what the last launch left pending, then seeds a new Talker with the saved Conversation in the
+        background (ADRs 0006 and 0028); a line typed meanwhile waits for it."""
         recovering = self._restore()
+        try:
+            self._conversation.load()
+        except UnreadableFile as e:
+            self._output.notice(str(e))
         self.publish_client_snapshots()
         self._loops = [asyncio.create_task(self._talk()), asyncio.create_task(self._orchestrate())]
         if recovering is not None:
@@ -1250,7 +1254,7 @@ class Hub:
         }
         try:
             self._state.save(data)
-        except OSError as e:
+        except (OSError, ValueError) as e:
             if not self._save_failing:
                 self._output.notice(f"Could not save the Hub's state, so a restart would lose it: {e}")
             self._save_failing = True
@@ -1293,7 +1297,7 @@ class Hub:
             return None
         try:
             data = self._state.load()
-        except UnreadableState as e:
+        except UnreadableFile as e:
             self._output.notice(str(e))
             return None
         if data is None:
@@ -1426,7 +1430,7 @@ class Hub:
     async def _talk(self) -> None:
         try:
             self._talker = await self._open_talker()
-            await self._turn(WARM_UP, kind="warm_up", arrived=self._clock.now())
+            await self._turn(self._seed("launch"), kind="warm_up", arrived=self._clock.now())
         except Exception as e:
             self._output.notice(f"Model unavailable: could not start the Talker: {e}. Check Claude sign-in or connection, then restart Jarvis.")
             return
@@ -1632,7 +1636,8 @@ class Hub:
             raise
 
     async def _restart_if_full(self, context: Context | None) -> _TalkerInput | None:
-        """Between turns, swap in a fresh Talker once the context passes the threshold (ADR 0006's warm-up, again).
+        """Between turns, swap in a new Talker session once the context passes the threshold, seeded like the launch
+        with the Conversation's newest exchanges (ADR 0028).
 
         Only this turn's context decides: an older reading may be stale. The new session reads the seed in the
         background like the launch warm-up, so a line typed meanwhile waits for it in the inbox. Whatever fails
@@ -1654,12 +1659,7 @@ class Hub:
             self._restart_failed(str(e))
             return None
         try:
-            status = self._tasks.open_status(self._clock.now(), self._task_lines)
-            permissions = self._authorizations.context()
-            if permissions:
-                status += "\n" + permissions
-            seed = restart_message(status, self._exchanges)
-            end = await self._turn(seed, kind="restart", arrived=self._clock.now(), session=session)
+            end = await self._turn(self._seed("restart"), kind="restart", arrived=self._clock.now(), session=session)
         except BaseException:
             with contextlib.suppress(Exception):
                 await session.close()
@@ -1674,6 +1674,47 @@ class Hub:
             with contextlib.suppress(Exception):
                 await old.close()
         return None
+
+    def _seed(self, reason: SeedReason) -> str:
+        """A new Talker's hidden first message: the Conversation's newest exchanges, then the Hub's own records."""
+        now = self._clock.now()
+        return seed_message(
+            reason,
+            self._conversation.newest(LAUNCH_TOKENS if reason == "launch" else RESTART_TOKENS),
+            open_tasks=self._tasks.open_status(now, self._task_lines),
+            authorizations=self._authorizations.context(),
+            approvals="\n".join(approval.line(now) for approval in self._approvals.pending()),
+            scopes="\n".join(scope.context() for scope in self._scopes.pending()),
+        )
+
+    def _device(self, client_id: str) -> Device:
+        # The reference Client stands in for the iPhone in protocol tests.
+        return "Mac" if client_id == TERMINAL else "iPhone"
+
+    def _save_exchange(self, message: str, reply: str, *, tools: list[str], client_id: str, kind: EntryKind,
+                       arrived: float) -> None:
+        now, wall = self._clock.now(), self._wall()
+        try:
+            self._conversation.add(message, reply, tools=tools, device=self._device(client_id), kind=kind,
+                                   at=wall - (now - arrived), ended=wall)
+        except (OSError, ValueError) as e:
+            if not self._conversation_failing:
+                self._output.notice(f"Could not save the conversation, so a restart would lose it: {e}")
+            self._conversation_failing = True
+        else:
+            self._conversation_failing = False
+
+    def _measure(self, session: AgentSession, message: str, shown: str, tools: list[str], end: TurnEnd) -> None:
+        """Checks the token estimate against the context the CLI reports: between two tool-free turns of one session
+        the context grows by the earlier reply and the later message."""
+        # Tool calls and their results enter the context too, so a turn with them would inflate the reading.
+        if end.outcome != "completed" or tools or end.context is None:
+            self._last_reading = None
+            return
+        last = self._last_reading
+        if last is not None and last.session is session:
+            self._conversation.calibrate(last.reply_chars + len(message), end.context.tokens - last.tokens)
+        self._last_reading = _ContextReading(session, end.context.tokens, len(shown))
 
     async def _quiet_or_next(self) -> _TalkerInput | None:
         """Waits for voice mode to go quiet (or the input to end), unless the inbox's next item comes first; then
@@ -1815,8 +1856,9 @@ class Hub:
                 and turn not in (self._interrupted_turn, self._silenced_turn)):
             self._approvals.record_question(shown)
         self.publish_client_snapshots()
-        if show and (shown.strip() or end.outcome != "failed"):
-            self._exchanges.append((message, shown))
+        self._measure(session, message, shown, tools, end)
+        if kind in ("user", "event") and (shown.strip() or end.outcome != "failed"):
+            self._save_exchange(message, shown, tools=tools, client_id=destination_id, kind=kind, arrived=arrived)
         if delivery is not None and end.outcome == "completed":
             delivery.reply = shown
 

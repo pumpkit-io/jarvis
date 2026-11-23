@@ -1,5 +1,7 @@
 # One Hub serves several Clients, and one of them has Focus
 
+> ADR 0028 supersedes "a restart still starts a fresh Talker" below: the Talker continues the saved Conversation after a restart. The event log still never seeds it.
+
 The User wants to reach Jarvis from an iPhone as well as from the terminal, on the same conversation and the same Tasks. We keep one Hub and let it serve several Clients: the terminal Client and the iPhone Client. There is no second Jarvis and no split into services. The Hub's input and its output, speech and floor are already injected, so a Client attaches at those seams and the Talker, Orchestrator and Approval logic do not change.
 
 Requests from every Client join the one Talker inbox in arrival order. Input from any Client stops speech on every Client. A reply is spoken only on the Client that made the request; text goes to all of them. A typed line gets a text-only reply on the phone as it does on the Mac in voice mode.
