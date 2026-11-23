@@ -583,7 +583,12 @@ import Observation
         liveMode.configure(send: { [weak self] command in
             guard let self, self.client === client, self.generation == owner else { throw HubProtocolError.notConnected }
             try await self.sendCommand(client, command)
-        }, sendAudio: { await client.sendAudio($0) }, permissionAnswered: { [weak self] in self?.talk.microphonePermission(granted: $0) })
+        }, sendAudio: { await client.sendAudio($0) }, permissionAnswered: { [weak self] in self?.talk.microphonePermission(granted: $0) },
+        captureFailed: { [weak self] in
+            guard let self, self.client === client, self.generation == owner else { return }
+            self.playback.stop(reportStopped: false); self.stopPlayback()
+            self.speechID = nil; self.talk.speaking = false
+        })
         await outbox.resume()
         guard generation == owner else { await client.stop(); return }
         paths = makePaths()

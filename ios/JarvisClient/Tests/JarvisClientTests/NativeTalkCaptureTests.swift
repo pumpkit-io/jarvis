@@ -3,6 +3,23 @@ import Foundation
 import Testing
 @testable import JarvisClient
 
+@Test @MainActor func nativeLiveConfigurationChangeFromAudioQueueReachesMainActor() async throws {
+    let engine = AVAudioEngine(), changes = CaptureLimit()
+    let observer = NativeLiveCaptureSource.observeConfigurationChanges(of: engine) {
+        MainActor.preconditionIsolated()
+        changes.calls += 1
+    }
+    defer { observer.cancel() }
+    let notification = EngineConfigurationChange(engine: engine)
+    await withCheckedContinuation { continuation in
+        DispatchQueue.global().async {
+            notification.post()
+            continuation.resume()
+        }
+    }
+    try await eventuallySession { changes.calls == 1 }
+}
+
 @Test @MainActor func nativeTapConvertsPcmOnBackgroundThread() async throws {
     let format = try #require(AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000,
                                           channels: 1, interleaved: false))
@@ -58,4 +75,10 @@ private struct TapInvocation: @unchecked Sendable {
     let handler: AVAudioNodeTapBlock
     let pcm: AVAudioPCMBuffer
     func call() { handler(pcm, AVAudioTime(sampleTime: 0, atRate: pcm.format.sampleRate)) }
+}
+
+// Only the engine's identity crosses queues; this does not read or change its audio graph.
+private struct EngineConfigurationChange: @unchecked Sendable {
+    let engine: AVAudioEngine
+    func post() { NotificationCenter.default.post(name: .AVAudioEngineConfigurationChange, object: engine) }
 }

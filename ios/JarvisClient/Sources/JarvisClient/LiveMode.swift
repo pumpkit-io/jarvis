@@ -1,4 +1,5 @@
 import AVFoundation
+import Combine
 import Foundation
 import Observation
 
@@ -6,6 +7,7 @@ import Observation
     /// `frames` runs on the audio thread with 16 kHz mono PCM16LE, each a whole number of 10 ms frames and at most 100 ms.
     func start(frames: @escaping @Sendable (Data) -> Void) throws
     func stop()
+    var onFailure: (@MainActor () -> Void)? { get set }
     /// Plays through the capture's voice-processing engine, so iOS cancels it as echo; nil while capture is stopped.
     var speechOutput: (any SpeechOutput)? { get }
 }
@@ -64,6 +66,7 @@ private struct LiveFrame: Sendable {
     private var send: @MainActor (HubCommand) async throws -> Void = { _ in throw HubProtocolError.notConnected }
     private var sendAudio: @Sendable (Data) async -> Void = { _ in }
     private var permissionAnswered: @MainActor (Bool) -> Void = { _ in }
+    private var onCaptureFailure: @MainActor () -> Void = {}
     private var frames: AsyncStream<LiveFrame>.Continuation?
     private var streaming: Task<Void, Never>?
     private var notice: Task<Void, Never>?
@@ -71,13 +74,16 @@ private struct LiveFrame: Sendable {
     public init(capture: any LiveCaptureSource, permission: @escaping @MainActor () async -> Bool,
                 sleep: @escaping @Sendable (Double) async throws -> Void = { try await Task.sleep(for: .seconds($0)) }) {
         self.capture = capture; self.permission = permission; self.sleep = sleep
+        capture.onFailure = { [weak self] in self?.captureFailed() }
     }
 
     /// `send` delivers a `set_live` command whose result comes back through `receive`; `sendAudio` drops audio it cannot send.
     public func configure(send: @escaping @MainActor (HubCommand) async throws -> Void,
                           sendAudio: @escaping @Sendable (Data) async -> Void,
-                          permissionAnswered: @escaping @MainActor (Bool) -> Void = { _ in }) {
+                          permissionAnswered: @escaping @MainActor (Bool) -> Void = { _ in },
+                          captureFailed: @escaping @MainActor () -> Void = {}) {
         self.send = send; self.sendAudio = sendAudio; self.permissionAnswered = permissionAnswered
+        self.onCaptureFailure = captureFailed
         paired = true
     }
 
@@ -186,8 +192,7 @@ private struct LiveFrame: Sendable {
         let (stream, continuation) = AsyncStream<LiveFrame>.makeStream(bufferingPolicy: .bufferingNewest(10))
         do { try capture.start { continuation.yield(LiveFrame(pcm: $0, captured: .now)) } }
         catch {
-            continuation.finish(); isOn = false; voiceState = .idle; show(Self.microphoneFailedMessage)
-            Task { try? await send(HubCommand(type: "set_live", payload: ["on": .bool(false)])) }
+            continuation.finish(); captureFailed()
             return false
         }
         frames = continuation
@@ -205,6 +210,18 @@ private struct LiveFrame: Sendable {
             }
         }
         return true
+    }
+
+    private func captureFailed() {
+        guard isOn else { return }
+        request = nil; isOn = false; audioReadyAt = nil; voiceState = .idle
+        pauseCapture(); onCaptureFailure(); show(Self.microphoneFailedMessage)
+        let pending = streaming, owner = generation
+        Task {
+            await pending?.value
+            guard generation == owner, !isOn, request == nil else { return }
+            try? await send(HubCommand(type: "set_live", payload: ["on": .bool(false)]))
+        }
     }
 
     /// Frames captured but not yet sent are dropped: the Talk or the end of Live mode replaces them.
@@ -231,20 +248,31 @@ private struct LiveFrame: Sendable {
     private var engine: AVAudioEngine?
     private var speech: NativeSpeechOutput?
     private var capturing = false
+    private var frames: (@Sendable (Data) -> Void)?
+    private var configurationObserver: AnyCancellable?
+    private var generation = UUID()
+    public var onFailure: (@MainActor () -> Void)?
     public init(session: NativeTalkAudioSession) { self.session = session }
     public var speechOutput: (any SpeechOutput)? { capturing ? speech : nil }
 
     public func start(frames: @escaping @Sendable (Data) -> Void) throws {
         guard !capturing else { throw HubProtocolError.invalidFrame }
         let handler = try Self.makeTapHandler(frames: frames)
+        self.frames = frames
         if let engine {
             // The last capture's engine is still playing a reply, so capture resumes on it.
             speech?.whenStopped = nil
             engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: nil, block: handler)
-            capturing = true; return
+            capturing = true
+            if !engine.isRunning { engine.prepare(); try engine.start() }
+            return
         }
         try session.activateLive()
-        let engine = AVAudioEngine()
+        let engine = AVAudioEngine(), owner = UUID()
+        self.engine = engine; generation = owner
+        configurationObserver = Self.observeConfigurationChanges(of: engine) { [weak self] in
+            self?.configurationChanged(owner: owner)
+        }
         do {
             try engine.inputNode.setVoiceProcessingEnabled(true)
             speech = NativeSpeechOutput(sharing: engine)
@@ -252,10 +280,33 @@ private struct LiveFrame: Sendable {
             engine.prepare()
             try engine.start()
         } catch {
-            engine.inputNode.removeTap(onBus: 0); engine.stop(); speech = nil; session.releaseLive()
+            engine.inputNode.removeTap(onBus: 0); shutDown()
             throw error
         }
-        self.engine = engine; capturing = true
+        capturing = true
+    }
+
+    // The notification's sink must not inherit the main actor: the engine calls it on its own queue.
+    nonisolated static func observeConfigurationChanges(of engine: AVAudioEngine,
+                                                       changed: @escaping @MainActor @Sendable () -> Void) -> AnyCancellable {
+        NotificationCenter.default.publisher(for: .AVAudioEngineConfigurationChange, object: engine)
+            .sink { _ in
+                Task { @MainActor in changed() }
+            }
+    }
+
+    private func configurationChanged(owner: UUID) {
+        guard generation == owner, capturing, let engine, !engine.isRunning, let frames else { return }
+        // iOS stops the engine on a hardware format change; a fresh tap also resets the PCM converter's format.
+        engine.inputNode.removeTap(onBus: 0)
+        do {
+            let handler = try Self.makeTapHandler(frames: frames)
+            engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: nil, block: handler)
+            engine.prepare()
+            try engine.start()
+        } catch {
+            shutDown(); onFailure?()
+        }
     }
 
     // Core Audio invokes this closure on its render thread, outside the main actor.
@@ -267,13 +318,15 @@ private struct LiveFrame: Sendable {
 
     public func stop() {
         guard capturing, let engine, let speech else { return }
-        capturing = false
+        capturing = false; frames = nil
         engine.inputNode.removeTap(onBus: 0)
         // A reply playing on this engine keeps it running until the reply stops, so turning Live mode off does not cut it.
         if speech.playing { speech.whenStopped = { [weak self] in self?.shutDown() } } else { shutDown() }
     }
 
     private func shutDown() {
+        capturing = false; frames = nil; generation = UUID()
+        configurationObserver?.cancel(); configurationObserver = nil
         engine?.stop(); engine = nil; speech = nil
         session.releaseLive()
     }
