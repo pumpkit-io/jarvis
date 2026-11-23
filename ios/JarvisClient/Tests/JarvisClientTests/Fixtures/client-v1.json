@@ -3191,7 +3191,7 @@
         },
         {
           "version": 1,
-          "seq": 7,
+          "seq": 8,
           "time": "1970-01-01T00:16:40Z",
           "type": "speech_begin",
           "client_id": "client-8",
@@ -3205,7 +3205,7 @@
         },
         {
           "version": 1,
-          "seq": 8,
+          "seq": 9,
           "time": "1970-01-01T00:16:40Z",
           "type": "speech_clip",
           "client_id": "client-8",
@@ -3222,7 +3222,7 @@
         },
         {
           "version": 1,
-          "seq": 9,
+          "seq": 10,
           "time": "1970-01-01T00:16:40Z",
           "type": "speech_end",
           "client_id": "client-8",
@@ -3234,7 +3234,7 @@
         },
         {
           "version": 1,
-          "seq": 10,
+          "seq": 11,
           "time": "1970-01-01T00:16:40Z",
           "type": "voice_state",
           "client_id": "client-8",

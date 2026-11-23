@@ -189,14 +189,14 @@ async def test_italian_and_mac_floor_use_remote_spoken_scope(tmp_path: Path) -> 
     class MacFloor:
         def owns(self, owner: tuple[str, int]) -> bool:
             return False
-        def typed_input(self):
+        def typed_input(self, *, client: str | None = None):
             pass
         async def quiet(self):
             await asyncio.Event().wait()
-        def announce(self):
+        def announce(self, client: str = "terminal"):
             return False
 
-        def text_reply(self, owner: tuple[str, int]) -> None:
+        def text_reply(self, owner: tuple[str, int] | None, *, client: str = "terminal") -> None:
             pass
     async with rig(tmp_path, Transcriber('Buonasera, come stai?'), floor=MacFloor()) as (session, socket, door, _hub, _log, backend, _asr, phone, _clock, _pairing):
         await socket.send_json(command('begin', 'talk_begin', talk_id='spoken-1'))

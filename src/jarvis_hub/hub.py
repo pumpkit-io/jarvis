@@ -139,7 +139,7 @@ class Speech(Protocol):
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
               destination: Player | None = None, allowed: Callable[[], bool] | None = None,
               can_start: Callable[[], bool] | None = None, reply_id: str | None = None,
-              client: str | None = None) -> Callable[[], bool] | None: ...
+              client: str | None = None, floor: bool = False) -> Callable[[], bool] | None: ...
 
     def replay(self, text: str, lang: Lang, *, destination: RemotePlayer, reply_id: str,
                allowed: Callable[[], bool]) -> str: ...
@@ -172,16 +172,16 @@ class Floor(Protocol):
 
     def owns(self, owner: tuple[str, int]) -> bool: ...
 
-    def typed_input(self) -> None: ...
+    def typed_input(self, *, client: str | None = None) -> None: ...
 
     def semantic_context(self, owner: tuple[str, int], start: int) -> None: ...
 
-    def announce(self) -> bool:
+    def announce(self, client: str = TERMINAL) -> bool:
         """Claims the voice for news if Jarvis is still idle, so a Wake word interrupts it; False if not idle."""
         ...
 
-    def text_reply(self, owner: tuple[str, int]) -> None:
-        """The reply to the floor's spoken turn `owner` was text only, and its text has ended."""
+    def text_reply(self, owner: tuple[str, int] | None, *, client: str = TERMINAL) -> None:
+        """The reply to the floor's spoken request or Announcement was text only, and its text has ended."""
         ...
 
 
@@ -189,7 +189,7 @@ class _Silent:
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
               destination: Player | None = None, allowed: Callable[[], bool] | None = None,
               can_start: Callable[[], bool] | None = None, reply_id: str | None = None,
-              client: str | None = None) -> None:
+              client: str | None = None, floor: bool = False) -> None:
         pass
 
     def replay(self, text: str, lang: Lang, *, destination: RemotePlayer, reply_id: str,
@@ -828,8 +828,8 @@ class Hub:
     def _focus_available(self) -> bool:
         client = self.clients.get(self.clients.focus)
         return bool(client is not None and client.connected
-                    and (client.can_show_text if client.id != TERMINAL else
-                         client.can_show_text or self._client_can_speak(client.id)))
+                    and (client.can_show_text or (client.id == TERMINAL or client.live)
+                         and self._client_can_speak(client.id)))
 
     def _clients_changed(self) -> None:
         if self._floor is not None and (activity := getattr(self._floor, "remote_activity", None)) is not None:
@@ -850,8 +850,8 @@ class Hub:
             told = self._news_delivery_told(delivery)
             if delivery.speaks and (retargeted or not can_speak or not player_current):
                 self._speech.retire(delivery.player)
-                if delivery.client_id == TERMINAL and self._floor is not None:
-                    self._floor.typed_input()
+                if self._floor is not None and (retargeted or not player_current or delivery.client_id == TERMINAL):
+                    self._floor.typed_input(client=delivery.client_id)
             if not retargeted and visible and not can_speak:
                 delivery.speaks = False
                 if delivery.reply is not None:
@@ -1262,8 +1262,10 @@ class Hub:
             news = through
         self._news.append(news)
 
-    def woke(self) -> None:
-        """A Wake word opened listening: it ends Quiet mode, and the news it held opens the User's next turn."""
+    def woke(self, client_id: str | None = None) -> None:
+        """A Wake word moves Focus; the news Quiet mode held opens the User's next turn."""
+        if client_id is not None:
+            self.clients.take_focus(client_id)
         self._release_held()
 
     def _release_held(self, *, arrived: float | None = None) -> None:
@@ -1707,9 +1709,7 @@ class Hub:
                 self._floor is not None or not self._client_can_speak(TERMINAL)
             ):
                 return replace(_told(self._news.popleft(), ready=True), spoken=False)
-            if self._news and quiet and not self._focus_busy() and (
-                self.clients.focus != TERMINAL or self._floor is None or self._floor.announce()
-            ):
+            if self._news and quiet and not self._focus_busy() and self._announce_focus():
                 # Everything waiting goes as one Announcement rather than one Follow-up window each.
                 news = News.joined(self._news)
                 self._news.clear()
@@ -1808,6 +1808,13 @@ class Hub:
                 self._resets.stale = self._resets.failing = False
                 await self._swap_talker(session)
                 return
+
+    def _announce_focus(self) -> bool:
+        if self._floor is None:
+            return True
+        if self.clients.focus == TERMINAL:
+            return self._floor.announce()
+        return not self._is_live(self.clients.focus) or self._floor.announce(self.clients.focus)
 
     async def _focus_quiet(self) -> None:
         """Returns once no Client that can speak is talking or playing, and Jarvis is quiet on the Focus Client."""
@@ -2197,22 +2204,25 @@ class Hub:
         if self._news_delivery is not None and self._news_delivery is not delivery and self._news_delivery_told(self._news_delivery):
             self._news_delivery = None
         audible = self._turn_spoken and self._client_can_speak(destination_id)
+        floor = self._floor is not None and (
+            owner is not None and self._floor.owns(owner)
+            or kind == "event" and (destination_id == TERMINAL or self._is_live(destination_id))
+        )
         speech = self._speech if audible else _Silent()
         if audible:
             self._speech_client_id = destination_id
             if destination_id != TERMINAL:
-                floor = owner is not None and self._floor is not None and self._floor.owns(owner)
                 # A phone's spoken line that is not the floor's is a Talk.
                 self.clients.begin_stream(destination_id, floor=floor, talk_reply=kind == "user" and not floor)
         player = self._client_players.get(destination_id)
         receipt = speech.begin(self._lang, reply_id=self._output.reply_id, turn=turn, heard_at=arrived if kind == "user" else None, owner=owner,
-                     destination=player, client=destination_id,
+                     destination=player, client=destination_id, floor=floor,
                      allowed=lambda: (audio_generation is None or audio_generation == self._audio_generation)
                      and self._client_can_speak(destination_id)
                      and self._client_players.get(destination_id) is player
                      and (kind != "event" or self.clients.focus == destination_id),
                      can_start=lambda: destination_id == TERMINAL or bool(
-                         (client := self.clients.get(destination_id)) is not None and client.can_show_text))
+                         (client := self.clients.get(destination_id)) is not None and (client.can_show_text or client.live)))
         if delivery is not None:
             delivery.receipt = receipt
         self._replying = show
@@ -2270,6 +2280,8 @@ class Hub:
             if not audible and owner is not None and kind == "user" and self._floor is not None:
                 # The floor waits for its spoken turn's reply to end, which here was text only.
                 self._floor.text_reply(owner)
+            elif not audible and floor and kind == "event" and self._floor is not None:
+                self._floor.text_reply(None, client=destination_id)
             if show:
                 # The language of the reply, not of the User's turn: a replay speaks it with that voice.
                 if self._output.log is not None and self._output.reply_id is not None:
