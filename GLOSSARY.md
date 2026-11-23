@@ -125,19 +125,23 @@ The Hub's pending decision about which existing Tasks an already locally admitte
 _Avoid_: treating a local floor decision as a Task selection
 
 **Talk**:
-One push-to-talk capture on the iPhone Client, from press until the User sends or discards it. The User holds to speak and may lock the Talk to speak hands-free. The iPhone Client listens at no other time, and each sent Talk is a new Spoken request.
+One push-to-talk capture on the iPhone Client, from press until the User sends or discards it. The User holds to speak and may lock the Talk to speak hands-free. Each sent Talk is a new Spoken request. Outside a Talk, the iPhone Client listens only in Live mode.
 _Avoid_: recording, voice message, push
+
+**Live mode**:
+A setting of one iPhone Client, off at every launch, under which the iPhone listens for the Wake word and holds a spoken conversation the way the Mac does, Follow-up window included. The Mac does the listening on audio the phone sends it.
+_Avoid_: always-on, hands-free mode, wake mode
 
 **Outbox**:
 The iPhone Client's saved queue of Talks and typed lines the Hub has not yet accepted. Every one goes through it, sent oldest first whenever the Mac is reachable, so a Talk never waits on the connection.
 _Avoid_: offline mode, pending messages
 
 **Follow-up window**:
-The ten seconds after Jarvis finishes speaking when the User can go on without the Wake word. When it passes in silence, Jarvis plays a short falling closing sound and goes idle.
+The ten seconds after Jarvis finishes speaking when the User can go on without the Wake word, on the Client the exchange came from. When it passes in silence, Jarvis plays a short falling closing sound and goes idle.
 _Avoid_: grace period, listening timeout
 
 **Stand by**:
-The User telling Jarvis to be quiet, in any words. The Talker answers with the `stand_by` tool and no speech; Jarvis stops any reply, plays the closing sound and waits for the Wake word. On the iPhone Client it only stops the reply, since that Client listens only during a Talk.
+The User telling Jarvis to be quiet, in any words. The Talker answers with the `stand_by` tool and no speech; Jarvis stops any reply, plays the closing sound and waits for the Wake word. On an iPhone Client without Live mode it only stops the reply, since that Client listens only during a Talk.
 _Avoid_: mute, dismiss
 
 **Announcement**:
