@@ -10,6 +10,8 @@ The User decided this on 2026-11-18.
 
 Since ADR 0029, "Kokoro" here means whichever speech engine is configured. Qwen3-TTS sends each sentence as several clips, which the phone plays back to back like the sentences before them.
 
+Since ADR 0031, an iPhone Client in Live mode streams its microphone to the Hub continuously, and the Hub runs the Mac's Wake word and voice pipeline on it. A Talk is unchanged.
+
 ## Considered Options
 
 - On-device recognition and Apple's built-in voices. Rejected: the phone would get a different voice, different transcripts and a second copy of the speech logic, in exchange for less bandwidth.
