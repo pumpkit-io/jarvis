@@ -31,7 +31,10 @@ actor FakeSocket: HubSocket {
             input.yield(.text(Data("{\"version\":1,\"type\":\"command_result\",\"id\":\"\(command.id)\",\"ok\":true,\"result\":{\"can_show_text\":true}}".utf8)))
         }
     }
-    func sendBinary(_ data: Data) async throws { binarySent.append(data) }
+    func sendBinary(_ data: Data) async throws {
+        binarySent.append(data)
+        if heldSendType == "binary" { await withCheckedContinuation { sendWaiter = $0 } }
+    }
     var pings = 0
     var pingFails = false
     func ping() async throws {
@@ -64,9 +67,11 @@ actor FakeTransport {
     var sockets: [FakeSocket] = []
     var cursors: [Int64] = []
     let autoPresence: Bool
-    init(autoPresence: Bool = true) { self.autoPresence = autoPresence }
+    private var first: FakeSocket?
+    init(autoPresence: Bool = true, first: FakeSocket? = nil) { self.autoPresence = autoPresence; self.first = first }
     func connect(_ after: Int64) -> any HubSocket {
-        let socket = FakeSocket(autoPresence: autoPresence); sockets.append(socket); cursors.append(after); return socket
+        let socket = first ?? FakeSocket(autoPresence: autoPresence)
+        first = nil; sockets.append(socket); cursors.append(after); return socket
     }
     func socket(_ index: Int) -> FakeSocket? { sockets.indices.contains(index) ? sockets[index] : nil }
 }
