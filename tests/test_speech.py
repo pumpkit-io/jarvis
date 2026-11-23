@@ -994,3 +994,24 @@ async def test_stopping_mid_sentence_drops_the_pieces_not_yet_synthesised(
     assert player.texts == ["Half"]
     assert not played()
     await speech.close()
+
+
+async def test_dropping_a_destinations_cues_skips_those_still_queued_and_keeps_later_ones() -> None:
+    clock, tts, mac, phone = FakeClock(), FakeTts(), RecordingPlayer(), RecordingPlayer()
+    speech = Speech(tts, mac, clock, metrics=RecordingMetrics(), notice=lambda text: None)
+    speech.start()
+    await speech.idle()
+    tts.hold.clear()
+    speech.begin("en", turn=1, heard_at=None)
+    speech.feed("Still synthesising. ")
+    speech.say("closing", "en", destination=phone)
+    speech.say("closing", "en")
+
+    speech.drop_cues(phone)
+    speech.say("chime", "en", destination=phone)
+    tts.hold.set()
+    speech.end()
+    await speech.idle()
+
+    assert phone.voices == ["chime"]
+    assert mac.voices[-1] == "closing"

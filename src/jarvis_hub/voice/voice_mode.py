@@ -136,6 +136,8 @@ class _ObservedSpeech:
         self._heard_at: float | None = None
         self._owner: tuple[str, int] | None = None
         self._dropping = False
+        # A reply begun and not yet ended.
+        self._open = False
         self._remote = False
         self._destination: Player | None = None
         self._client: str | None = None
@@ -149,10 +151,12 @@ class _ObservedSpeech:
         self._remote = destination is not None and not (owner is not None and self._owns(owner))
         self._destination = destination
         self._client = client
+        self._open = False
         self._dropping = not self._remote and self._moved_on(heard_at, owner)
         if self._dropping:
             return
         self._replies += 1
+        self._open = True
         self._heard_at = heard_at
         self._owner = owner
         return self._speech.begin(lang, turn=turn, heard_at=heard_at, owner=owner, destination=destination, allowed=allowed,
@@ -178,10 +182,14 @@ class _ObservedSpeech:
             self._speech.block_end()
 
     def end(self) -> None:
+        was_open, self._open = self._open, False
         if self._dropping:
             self._dropping = False
-            return
-        self._speech.end()
+            # Only a retired spoken turn's reply goes on, as text, so its end still moves the floor on.
+            if not was_open or self._replies <= self._stopped:
+                return
+        else:
+            self._speech.end()
         if self._remote:
             return
         wait = asyncio.create_task(self._played(self._replies, self._heard_at, self._owner, self._destination))
@@ -196,7 +204,9 @@ class _ObservedSpeech:
     def retire(self, destination: Player | None) -> None:
         if self._destination is destination:
             self._dropping = True
-            self._stopped = self._replies
+            # The floor's own turn waits on its reply, which, like a reply under Silence, ends with its text.
+            if self._remote or self._owner is None or not self._owns(self._owner):
+                self._stopped = self._replies
         self._speech.retire(destination)
 
     def stop_on(self, client: str) -> None:
@@ -351,9 +361,8 @@ class VoiceMode:
 
     def add_input(self, client: str, audio: AudioInput, *, cues: Player | None = None,
                   on_state: Callable[[str], None] | None = None) -> None:
-        """Starts listening to `client`'s audio alongside the other inputs. It starts with the capture, Barge-in
-        and suppression settings the other inputs have now. An exchange `client` opens plays its chime and closing
-        sound on `cues`, and `on_state` hears each change of `voice_state(client)`."""
+        """Listens to `client`'s audio with the other inputs' current settings. An exchange it opens plays its cues
+        on `cues`; `on_state` hears each change of `voice_state(client)`."""
         if client in self._inputs:
             raise ValueError(f"Client {client} already has an audio input")
         self._inputs[client] = audio
@@ -377,7 +386,8 @@ class VoiceMode:
         audio = self._inputs.pop(client, None)
         if audio is None:
             return
-        self._cues.pop(client, None)
+        if (cues := self._cues.pop(client, None)) is not None:
+            self._speech.drop_cues(cues)
         self._watchers.pop(client, None)
         self._views.pop(client, None)
         if (task := self._listening.pop(client, None)) is not None:
@@ -608,6 +618,8 @@ class VoiceMode:
     def typed_input(self) -> None:
         if self._owned is None and self._voice.in_turn and self._voice.state in CAPTURING:
             return
+        if (cues := self._cues.get(self._exchange)) is not None:
+            self._speech.drop_cues(cues)
         before = self._voice.state
         self._voice = Voice()
         self._retire()

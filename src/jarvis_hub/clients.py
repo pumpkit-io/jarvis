@@ -81,7 +81,6 @@ class Clients:
 
     @property
     def remote_activity(self) -> bool:
-        """Whether any connected phone has remote activity."""
         return any(client.id != TERMINAL and client.connected and client.remote_activity
                    for client in self._clients.values())
 

@@ -139,7 +139,8 @@ class _Cached:
     name: ClipName
     lang: Lang
     reply: _Reply | None = None
-    cue_generation: int | None = None
+    # A cue outside a reply plays only while its destination's cues have not been dropped since it was queued.
+    epoch: object | None = None
     # Where a cue outside a reply plays; None for the Mac.
     player: Player | None = None
 
@@ -189,7 +190,7 @@ class Speech:
         self._replay_turn = 0
         self._replays: dict[RemotePlayer, _Reply] = {}
         self._generation = 0
-        self._local_cue_generation = 0
+        self._cue_epochs: dict[Player, object] = {}
         self._worker: asyncio.Task[None] | None = None
         self._loading: asyncio.Future[None] | None = None
 
@@ -206,10 +207,15 @@ class Speech:
         reply = self._reply if in_reply else None
         if in_reply and reply is None:
             return
-        generation = None
-        if reply is None and destination is None:
-            generation = self._local_cue_generation
-        self._enqueue(_Cached(name, lang, reply, generation, None if reply is not None else destination))
+        if reply is not None:
+            self._enqueue(_Cached(name, lang, reply))
+            return
+        epoch = self._cue_epochs.setdefault(destination if destination is not None else self._player, object())
+        self._enqueue(_Cached(name, lang, None, epoch, destination))
+
+    def drop_cues(self, destination: Player | None) -> None:
+        """Cues queued outside a reply for `destination`, or the Mac, are skipped; later ones play."""
+        self._cue_epochs.pop(destination if destination is not None else self._player, None)
 
     def begin(self, lang: Lang, *, turn: int, heard_at: float | None, owner: tuple[str, int] | None = None,
               destination: Player | None = None, allowed: Callable[[], bool] | None = None,
@@ -306,7 +312,7 @@ class Speech:
         """Stop this output and its playback waits until a new reply or local cue reactivates it."""
         player = destination if destination is not None else self._player
         if player is self._player:
-            self._local_cue_generation += 1
+            self.drop_cues(None)
         self._prune_replies()
         for reply in self._replies.values():
             if reply.player is player:
@@ -483,8 +489,8 @@ class Speech:
                 finally:
                     # Closed on the synthesis thread: the engine's cleanup may touch MLX.
                     await run(self._thread, pieces.close)
-            case _Cached(name, lang, reply, cue_generation, player):
-                if cue_generation is not None and cue_generation != self._local_cue_generation:
+            case _Cached(name, lang, reply, epoch, player):
+                if epoch is not None and epoch is not self._cue_epochs.get(player if player is not None else self._player):
                     return
                 if reply is not None and reply.stopped:
                     return
