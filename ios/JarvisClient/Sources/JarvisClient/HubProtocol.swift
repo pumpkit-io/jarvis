@@ -123,9 +123,11 @@ public struct ShownText: Decodable, Equatable, Sendable {
     public let text: String
 }
 
+/// A reply's speech names its `reply_id`; a Live mode cue, the chime or the closing sound, names its `cue` instead.
 public struct SpeechBegin: Decodable, Equatable, Sendable {
     public let speech_id: String
-    public let reply_id: String
+    public let reply_id: String?
+    public let cue: String?
     public let sample_rate: Int
     public let channels: Int
     public let sample_width: Int
@@ -133,7 +135,8 @@ public struct SpeechBegin: Decodable, Equatable, Sendable {
 
 public struct SpeechClip: Decodable, Equatable, Sendable {
     public let speech_id: String
-    public let reply_id: String
+    public let reply_id: String?
+    public let cue: String?
     public let index: Int64
     public let text: String
     public let byte_length: Int64
@@ -141,7 +144,8 @@ public struct SpeechClip: Decodable, Equatable, Sendable {
 
 public struct SpeechEnd: Decodable, Equatable, Sendable {
     public let speech_id: String
-    public let reply_id: String
+    public let reply_id: String?
+    public let cue: String?
     public let last_clip_index: Int64
 }
 
@@ -181,7 +185,7 @@ public struct HubEvent: Codable, Equatable, Sendable {
     }
 
     public var replayable: Bool {
-        !["speech_begin", "speech_clip", "speech_end", "speech_stop"].contains(type)
+        !["speech_begin", "speech_clip", "speech_end", "speech_stop", "voice_state"].contains(type)
     }
 
     public func decodePayload<T: Decodable>(_ type: T.Type) throws -> T {
@@ -229,7 +233,9 @@ public enum HubFrame: Equatable, Sendable {
                 guard reply.reason != nil else { throw HubProtocolError.invalidFrame }
             case .notice: _ = try event.decodePayload(Notice.self)
             case .show: _ = try event.decodePayload(ShownText.self)
-            case .speechBegin: _ = try event.decodePayload(SpeechBegin.self)
+            case .speechBegin:
+                let begin = try event.decodePayload(SpeechBegin.self)
+                guard (begin.reply_id == nil) != (begin.cue == nil) else { throw HubProtocolError.invalidFrame }
             case .speechClip: _ = try event.decodePayload(SpeechClip.self)
             case .speechEnd: _ = try event.decodePayload(SpeechEnd.self)
             case .speechStop: _ = try event.decodePayload(SpeechStop.self)

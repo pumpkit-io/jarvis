@@ -851,6 +851,9 @@ class AlwaysQuiet:
     def announce(self) -> bool:
         return True
 
+    def text_reply(self, owner: tuple[str, int]) -> None:
+        pass
+
 
 async def test_an_approval_request_gets_through_quiet_mode_and_the_same_request_again_waits(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh

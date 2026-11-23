@@ -195,6 +195,9 @@ async def test_italian_and_mac_floor_use_remote_spoken_scope(tmp_path: Path) -> 
             await asyncio.Event().wait()
         def announce(self):
             return False
+
+        def text_reply(self, owner: tuple[str, int]) -> None:
+            pass
     async with rig(tmp_path, Transcriber('Buonasera, come stai?'), floor=MacFloor()) as (session, socket, door, _hub, _log, backend, _asr, phone, _clock, _pairing):
         await socket.send_json(command('begin', 'talk_begin', talk_id='spoken-1'))
         await result(socket, 'begin')

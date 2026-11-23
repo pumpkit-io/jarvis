@@ -16,6 +16,8 @@ class Client:
     silence: bool = False
     talking: bool = False
     playing: bool = False
+    # In Live mode the phone is one of the voice floor's inputs and speakers (ADR 0031).
+    live: bool = False
 
 
 class Clients:
@@ -52,7 +54,7 @@ class Clients:
 
     def disconnect(self, client_id: str) -> None:
         client = self._clients[client_id]
-        self._clients[client_id] = replace(client, connected=False, talking=False, playing=False)
+        self._clients[client_id] = replace(client, connected=False, talking=False, playing=False, live=False)
         self._on_change()
 
     def take_focus(self, client_id: str) -> None:
@@ -70,7 +72,9 @@ class Clients:
 
     @property
     def remote_activity(self) -> bool:
-        return any(client.id != TERMINAL and client.connected and (client.talking or client.playing)
+        """A phone's Talk or its playback, which the voice floor must not talk over. A Live mode phone's playback is
+        the floor's own speech, so it is not."""
+        return any(client.id != TERMINAL and client.connected and (client.talking or client.playing and not client.live)
                    for client in self._clients.values())
 
     def set_talking(self, client_id: str, talking: bool) -> None:
