@@ -590,17 +590,13 @@ class Microphone:
 
 # Arriving later than this after its frames were due means the stream paused, not network jitter.
 UPLINK_GAP_S = 0.5
-# Arriving earlier than this before its frames were due is network jitter; more is a released backlog.
+# Arriving earlier than this before its frames were due is a held-back burst, not network jitter.
 UPLINK_JITTER_S = 0.1
 
 
 class UplinkFrames:
-    """An iPhone Client's microphone, fed with the 16 kHz mono PCM16 its socket uplinks.
-
-    Frames are stamped by sample count from an anchor, so arrival jitter does not stretch or squeeze turns.
-    A message over UPLINK_GAP_S late or UPLINK_JITTER_S early re-anchors on its arrival, so stamps never run more
-    than UPLINK_JITTER_S ahead of arrival. Stamps never decrease, even when a re-anchor moves the anchor back.
-    """
+    """An iPhone Client's microphone, fed with the 16 kHz mono PCM16 its socket uplinks, stamped by sample count
+    from an anchor set on the first message and after a pause. A held-back burst is dropped, not heard late."""
 
     def __init__(self, clock: Callable[[], float] = time.perf_counter) -> None:
         self._clock = clock
@@ -625,13 +621,14 @@ class UplinkFrames:
         frames = len(samples) // FRAME
         arrived = self._clock()
         late = None if self._anchor is None else arrived - self._anchor - (self._samples + frames * FRAME) / SAMPLE_RATE
-        # Far ahead means a backlog released by a stall or a phone clock running fast; both re-anchor, as a pause does.
-        if late is None or late > UPLINK_GAP_S or late < -UPLINK_JITTER_S:
+        if late is None or late > UPLINK_GAP_S:
             self._anchor, self._samples = arrived - frames * FRAME / SAMPLE_RATE, 0
+        elif late < -UPLINK_JITTER_S:
+            return
         assert self._anchor is not None
         for i in range(frames):
             self._samples += FRAME
-            # A re-anchor moves stamps back; the ring and turn timings need them never to decrease.
+            # A reopened stream may anchor just before the last stamp of the one it follows.
             self._last = max(self._last, self._anchor + self._samples / SAMPLE_RATE)
             push(samples[i * FRAME:(i + 1) * FRAME], self._last)
 

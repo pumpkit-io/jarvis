@@ -1460,36 +1460,49 @@ def test_uplinked_frames_keep_sample_count_spacing_when_on_time_messages_follow_
     assert np.diff(stamps) == pytest.approx([0.01] * (len(stamps) - 1))
 
 
-async def test_uplinked_frames_run_at_most_the_jitter_tolerance_ahead_when_a_stall_releases_a_backlog() -> None:
-    now = [10.0]
+def test_uplinked_frames_drop_a_backlog_a_stall_releases_and_keep_the_stream_on_schedule() -> None:
+    now, stamps = [10.0], list[float]()
     source = UplinkFrames(clock=lambda: now[0])
-    capture = Capture(lambda: engines(CountingEcho()), Listening(min_speech_db=0), lambda row: None,
-                      lambda text: None, source=source, backlog_s=10)
-    capture.start()
-    try:
-        await until(capture.ready.is_set)
+    source.open(lambda pcm, at: stamps.append(at))
+    source.feed(uplinked(8))
+    # A network stall held a second of audio, which then arrives at once.
+    now[0] = 11.08
+    for _ in range(12):
         source.feed(uplinked(8))
-        # A network stall held a second of audio, which then arrives at once.
-        now[0] = 11.08
-        for _ in range(12):
-            source.feed(uplinked(8))
-        # The stream goes on in time: its frames are stamped near arrival, not a backlog's length later.
-        now[0] = 11.16
-        source.feed(uplinked(8, value=2000))
-        assert 11.16 <= await wake_at(capture) <= 11.16 + UPLINK_JITTER_S
-    finally:
-        capture.close()
+    now[0] = 11.16
+    source.feed(uplinked(8))
+    # The burst's first message re-anchors; what lies beyond the tolerance is dropped, and the stream goes on in time.
+    expected = [9.93 + 0.01 * i for i in range(8)] + [11.01 + 0.01 * i for i in range(24)]
+    assert stamps == pytest.approx(expected)
+
+
+def test_uplinked_frames_from_a_fast_phone_clock_drop_one_message_at_a_time() -> None:
+    now, stamps, pushed = [10.0], list[float](), list[int]()
+    source = UplinkFrames(clock=lambda: now[0])
+    source.open(lambda pcm, at: stamps.append(at))
+    # Each 80 ms message arrives 70 ms after the last.
+    for i in range(100):
+        now[0] = 10.0 + 0.07 * i
+        before = len(stamps)
+        source.feed(uplinked(8))
+        pushed.append(len(stamps) - before)
+        assert stamps[-1] <= now[0] + UPLINK_JITTER_S + 1e-9
+    assert 0 in pushed
+    assert all(a or b for a, b in zip(pushed, pushed[1:]))
+    assert np.diff(stamps) == pytest.approx([0.01] * (len(stamps) - 1))
 
 
 async def test_uplinked_frames_are_dropped_rather_than_queued_while_the_capture_thread_falls_behind() -> None:
     notices, wake = list[str](), BlockingWake()
-    source = UplinkFrames(clock=lambda: 10.0)
+    now = [10.0]
+    source = UplinkFrames(clock=lambda: now[0])
     capture = Capture(lambda: engines(CountingEcho(), wake), Listening(), lambda row: None, notices.append,
                       source=source, backlog_s=0.5)
     capture.start()
     try:
         await until(capture.ready.is_set)
         for _ in range(50):
+            now[0] += 0.1
             source.feed(uplinked(10, value=3))
         await until(lambda: any("falling behind" in n for n in notices))
         wake.release.set()
