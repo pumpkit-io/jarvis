@@ -242,3 +242,87 @@ async def test_voice_launcher_remote_replay_and_interrupt(tmp_path: Path, monkey
     assert player.texts == ['']
     assert microphone.closed and player.closed
     assert all(session.closed for session in backend.sessions)
+
+
+async def test_live_mode_hears_the_phone_through_its_own_engines_and_keeps_no_clip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from dataclasses import replace
+
+    import aiohttp
+    import numpy as np
+
+    import jarvis_hub.main as entry
+    import jarvis_hub.voice.engines as engines
+    from jarvis_hub.door import Door
+    from jarvis_hub.pairing import PairingStore
+    from jarvis_hub.voice.input import Engines
+    from jarvis_hub.voice.transcription import TranscriptionService
+    from tests.protocol_exchanges import connect
+    from tests.test_input_pipeline import SPEECH, WAKE, Everyone, LoudVad, MarkerWake, ScriptedTurn
+    from tests.test_remote_speech import control, foreground
+
+    class Transcriber:
+        def transcribe(self, audio: Samples, *, after: float = 0.0) -> str:
+            return 'Hello from the phone'
+
+    class Transcription(TranscriptionService):
+        def __init__(self) -> None:
+            super().__init__(Transcriber)
+
+    doors: list[Door] = []
+
+    class ListeningDoor(Door):
+        def __init__(self, **options: Any) -> None:
+            super().__init__(**options)
+            doors.append(self)
+
+    loaded: list[tuple[EngineChoice, TranscriptionService]] = []
+
+    def load_engines(choice: EngineChoice, *, transcription: TranscriptionService) -> Engines:
+        loaded.append((choice, transcription))
+        return Engines(echo=engines.NoEchoCancellation(), wake=MarkerWake(), vad=LoudVad(), turn=ScriptedTurn(),
+                       stt=transcription, gate=Everyone())
+
+    monkeypatch.setattr(entry, 'TranscriptionService', Transcription)
+    monkeypatch.setattr(entry, 'Door', ListeningDoor)
+    monkeypatch.setattr(engines, 'load_engines', load_engines)
+    config = replace(settings(tmp_path, VoiceSettings(audio_clips=True)), remote=True, remote_port=0)
+    with PairingStore(config.runtime_dir / 'events.sqlite3') as pairing:
+        phone = pairing.exchange(pairing.create_code('https://mac.example.ts.net'), 'Phone', 'iphone')
+    clock = FakeClock()
+    backend = FakeBackend(clock, [[Text('Heard you.')]])
+    microphone, player, stdin, stderr = ScriptedMicrophone(clock), RecordingPlayer(), HeldStdin(), io.StringIO()
+
+    def open_player(rate: int, on_played: Callable[[Samples, int], None]) -> RecordingPlayer:
+        return player
+
+    def open_listener(choice: EngineChoice, listening: Listening, record: Any, notice: Any, clips: Any) -> ScriptedMicrophone:
+        return microphone
+
+    def pcm(frames: int, value: int = 0) -> bytes:
+        return np.full(frames * 160, value, '<i2').tobytes()
+
+    running = asyncio.create_task(entry.voice_mode(
+        settings=config, environ={}, backend=backend, clock=clock, stdin=stdin,
+        stdout=io.StringIO(), stderr=stderr, ears=Ears(FakeTts(), open_player, open_listener),
+    ))
+    try:
+        await until(lambda: microphone.started and player.voices == ['ready'])
+        async with aiohttp.ClientSession() as session, connect(session, doors[0], phone.token) as socket:
+            await foreground(socket)
+            assert (await control(socket, 'live', 'set_live', on=True))['result'] == {'on': True}
+            await until(lambda: 'Listening ready' in stderr.getvalue())
+            await socket.send_bytes(pcm(8, WAKE))
+            await until(lambda: microphone.capturing[-1:] == [True])
+            for value, messages in ((SPEECH, 8), (0, 10)):
+                for _ in range(messages):
+                    await socket.send_bytes(pcm(10, value))
+            await until(lambda: any('Hello from the phone' in m for s in backend.all_sessions('talker') for m in s.received))
+    finally:
+        stdin.done.set()
+        await asyncio.wait_for(running, 5)
+    [(choice, transcription)] = loaded
+    assert choice.aec == 'off'
+    assert isinstance(transcription, Transcription)
+    assert not any(path.is_file() for path in (config.runtime_dir / 'clips').rglob('*'))
+    rows = [json.loads(line) for line in (config.runtime_dir / 'metrics.jsonl').read_text().splitlines()]
+    assert {r['client'] for r in rows if r['kind'] == 'turn'} == {phone.client.id}
