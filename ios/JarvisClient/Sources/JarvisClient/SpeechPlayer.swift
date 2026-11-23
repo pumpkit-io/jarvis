@@ -122,6 +122,8 @@ import Observation
 }
 
 @MainActor public final class NativeSpeechOutput: SpeechOutput {
+    private static let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 24_000, channels: 1, interleaved: false)
+    private let shared: AVAudioEngine?
     private var engine: AVAudioEngine?
     private var node: AVAudioPlayerNode?
     private struct MeterClip {
@@ -132,6 +134,10 @@ import Observation
     private var meterClips: [MeterClip] = []
     private var scheduledFrames: Int64 = 0
     private static let meterFrames = 480
+    /// Runs once at the next `stop()`.
+    var whenStopped: (() -> Void)?
+    /// True from the first clip until `stop()`.
+    var playing: Bool { scheduledFrames > 0 }
     private var playedFrames: Int64? {
         guard let node, let renderTime = node.lastRenderTime else { return nil }
         return node.playerTime(forNodeTime: renderTime)?.sampleTime
@@ -143,9 +149,16 @@ import Observation
         guard let clip = meterClips.first(where: { frame >= $0.start && frame < $0.start + $0.frames }) else { return 0 }
         return clip.levels[Int(frame - clip.start) / Self.meterFrames]
     }
-    public init() {}
+    public init() { shared = nil }
+    /// Plays through `engine`, which its owner starts and stops; the player is attached before the engine starts.
+    init(sharing engine: AVAudioEngine) {
+        shared = engine
+        let node = AVAudioPlayerNode()
+        engine.attach(node); engine.connect(node, to: engine.mainMixerNode, format: Self.format)
+        self.node = node
+    }
     public func play(_ pcm: Data, finished: @escaping @MainActor @Sendable () -> Void) throws {
-        guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 24_000, channels: 1, interleaved: false),
+        guard let format = Self.format,
               let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(pcm.count / 2)),
               let samples = buffer.floatChannelData?[0] else { throw HubProtocolError.malformedAudio }
         buffer.frameLength = buffer.frameCapacity
@@ -153,12 +166,13 @@ import Observation
             let value = UInt16(pcm[index * 2]) | UInt16(pcm[index * 2 + 1]) << 8
             samples[index] = Float(Int16(bitPattern: value)) / 32768
         }
-        if engine == nil {
+        if shared == nil, engine == nil {
             let engine = AVAudioEngine(), node = AVAudioPlayerNode()
             engine.attach(node); engine.connect(node, to: engine.mainMixerNode, format: format)
             self.engine = engine; self.node = node
-            try engine.start(); node.play()
+            try engine.start()
         }
+        if node?.isPlaying == false { node?.play() }
         let start = max(scheduledFrames, playedFrames ?? 0)
         var levels: [Double] = []
         for offset in stride(from: 0, to: Int(buffer.frameLength), by: Self.meterFrames) {
@@ -174,7 +188,10 @@ import Observation
         }
     }
     public func stop() {
-        node?.stop(); engine?.stop(); node = nil; engine = nil
+        node?.stop()
+        if shared == nil { engine?.stop(); node = nil; engine = nil }
         meterClips = []; scheduledFrames = 0
+        let stopped = whenStopped; whenStopped = nil
+        stopped?()
     }
 }

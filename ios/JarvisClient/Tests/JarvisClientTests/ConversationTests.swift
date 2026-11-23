@@ -73,6 +73,7 @@ actor UncertainTypedSocket: HubSocket {
         try await socket.send(data)
         if try JSONDecoder().decode(HubCommand.self, from: data).type == "say_text" { throw URLError(.networkConnectionLost) }
     }
+    func sendBinary(_ data: Data) async throws { try await socket.sendBinary(data) }
     func close() async { await socket.close() }
 }
 

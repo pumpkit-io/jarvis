@@ -273,14 +273,13 @@ struct WorkspaceTopBar: View {
         .fixedSize()
     }
 
-    /// Off is Haze like the other top bar icons; on reuses the app's one active treatment, Void on a Cyan circle.
     private var liveModeButton: some View {
         let on = session.liveMode.isOn
         return Button { Task { await session.liveMode.toggle() } } label: {
             Image(systemName: "ear")
                 .foregroundStyle(on ? theme.void : theme.haze)
                 .frame(width: controlSize * 2.2, height: controlSize * 2.2)
-                .background { if on { Circle().fill(theme.cyan) } }
+                .background(on ? theme.cyan : .clear, in: Circle())
                 .frame(minWidth: 44, minHeight: 44)
                 .contentShape(Rectangle())
         }

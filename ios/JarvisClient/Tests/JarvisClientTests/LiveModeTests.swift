@@ -7,6 +7,8 @@ import Testing
     var starts = 0
     var active = false
     var fails = false
+    let speech = FakeSpeechOutput()
+    var speechOutput: (any SpeechOutput)? { active ? speech : nil }
     private var sink: (@Sendable (Data) -> Void)?
     func start(frames: @escaping @Sendable (Data) -> Void) throws {
         if fails { throw HubProtocolError.invalidFrame }
@@ -56,6 +58,44 @@ import Testing
 }
 
 private let tenMilliseconds = Data(repeating: 7, count: 320)
+
+@MainActor @Test func whileLiveModeCapturesRepliesPlayThroughTheCaptureEngine() async throws {
+    let rig = try LiveRig()
+    let standard = FakeSpeechOutput()
+    let player = SpeechPlayer(session: SpeechSession(), output: LiveSpeechRoute(standard: standard, capture: rig.capture))
+    func reply(_ id: String) {
+        player.begin(speechID: id, replyID: id)
+        player.append(speechID: id, replyID: id, index: 0, text: "Hi.", pcm: Data([1, 0]))
+        player.stop()
+    }
+    try await rig.connect()
+    reply("before")
+    try await rig.turnOn()
+    reply("live")
+    await rig.session.liveMode.toggle()
+    reply("after")
+    #expect(standard.bytes.count == 2 && rig.capture.speech.bytes.count == 1)
+    #expect(rig.capture.speech.stops == 1)
+    await rig.session.unpair()
+}
+
+@MainActor @Test func aReplyStaysOnTheOutputItStartedOnWhenLiveModeChanges() async throws {
+    let rig = try LiveRig()
+    let standard = FakeSpeechOutput()
+    let player = SpeechPlayer(session: SpeechSession(), output: LiveSpeechRoute(standard: standard, capture: rig.capture))
+    try await rig.connect()
+    try await rig.turnOn()
+    player.begin(speechID: "s", replyID: "r")
+    player.append(speechID: "s", replyID: "r", index: 0, text: "One.", pcm: Data([1, 0]))
+    rig.capture.speech.level = 0.5
+    #expect(player.level == 0.5)
+    await rig.session.liveMode.toggle()
+    player.append(speechID: "s", replyID: "r", index: 1, text: "Two.", pcm: Data([2, 0]))
+    #expect(rig.capture.speech.bytes == [Data([1, 0]), Data([2, 0])] && standard.bytes.isEmpty)
+    player.stop()
+    #expect(rig.capture.speech.stops == 1 && standard.stops == 0)
+    await rig.session.unpair()
+}
 
 @MainActor @Test func liveModeIsOffAtLaunchAndStreamsOnlyOnceTheHubTurnsItOn() async throws {
     let rig = try LiveRig()

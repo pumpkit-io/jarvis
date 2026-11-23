@@ -6,6 +6,26 @@ import Observation
     /// `frames` runs on the audio thread with 16 kHz mono PCM16LE, each a whole number of 10 ms frames and at most 100 ms.
     func start(frames: @escaping @Sendable (Data) -> Void) throws
     func stop()
+    /// Plays through the capture's voice-processing engine, so iOS cancels it as echo; nil while capture is stopped.
+    var speechOutput: (any SpeechOutput)? { get }
+}
+
+/// Starts each reply on the Live mode capture's output while capture runs, and on `standard` otherwise.
+@MainActor public final class LiveSpeechRoute: SpeechOutput {
+    private let standard: any SpeechOutput
+    private let capture: any LiveCaptureSource
+    private var current: (any SpeechOutput)?
+    public init(standard: any SpeechOutput, capture: any LiveCaptureSource) {
+        self.standard = standard; self.capture = capture
+    }
+    public var level: Double { current?.level ?? 0 }
+    // A reply keeps the output it started on until stopped: moving it mid-reply would overlap two engines.
+    public func play(_ pcm: Data, finished: @escaping @MainActor @Sendable () -> Void) throws {
+        let output = current ?? capture.speechOutput ?? standard
+        current = output
+        try output.play(pcm, finished: finished)
+    }
+    public func stop() { (current ?? standard).stop(); current = nil }
 }
 
 /// Live mode on this iPhone: the Mac listens for the Wake word on the microphone audio streamed to it.
@@ -114,27 +134,37 @@ import Observation
     }
 }
 
-/// Captures with iOS voice processing on, so Jarvis's own voice from the speaker is cancelled before the Mac hears it.
+/// Captures with iOS voice processing on and plays replies through the same engine, whose output is the echo reference.
 @MainActor public final class NativeLiveCaptureSource: LiveCaptureSource {
     private let session: NativeTalkAudioSession
     private var engine: AVAudioEngine?
+    private var speech: NativeSpeechOutput?
+    private var capturing = false
     public init(session: NativeTalkAudioSession) { self.session = session }
+    public var speechOutput: (any SpeechOutput)? { capturing ? speech : nil }
 
     public func start(frames: @escaping @Sendable (Data) -> Void) throws {
-        guard engine == nil else { throw HubProtocolError.invalidFrame }
+        guard !capturing else { throw HubProtocolError.invalidFrame }
         let handler = try Self.makeTapHandler(frames: frames)
+        if let engine {
+            // The last capture's engine is still playing a reply, so capture resumes on it.
+            speech?.whenStopped = nil
+            engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: nil, block: handler)
+            capturing = true; return
+        }
         try session.activateLive()
         let engine = AVAudioEngine()
         do {
             try engine.inputNode.setVoiceProcessingEnabled(true)
+            speech = NativeSpeechOutput(sharing: engine)
             engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: nil, block: handler)
             engine.prepare()
             try engine.start()
         } catch {
-            engine.inputNode.removeTap(onBus: 0); engine.stop(); session.releaseLive()
+            engine.inputNode.removeTap(onBus: 0); engine.stop(); speech = nil; session.releaseLive()
             throw error
         }
-        self.engine = engine
+        self.engine = engine; capturing = true
     }
 
     // Core Audio invokes this closure on its render thread, outside the main actor.
@@ -145,9 +175,15 @@ import Observation
     }
 
     public func stop() {
-        guard let engine else { return }
-        self.engine = nil
-        engine.inputNode.removeTap(onBus: 0); engine.stop()
+        guard capturing, let engine, let speech else { return }
+        capturing = false
+        engine.inputNode.removeTap(onBus: 0)
+        // A reply playing on this engine keeps it running until the reply stops, so turning Live mode off does not cut it.
+        if speech.playing { speech.whenStopped = { [weak self] in self?.shutDown() } } else { shutDown() }
+    }
+
+    private func shutDown() {
+        engine?.stop(); engine = nil; speech = nil
         session.releaseLive()
     }
 }

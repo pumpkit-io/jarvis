@@ -226,9 +226,11 @@ import Observation
         self.sendCommand = sendCommand
         self.historyDirectory = historyDirectory; self.historyNow = historyNow; self.makeTransport = makeTransport
         let audioSession = NativeTalkAudioSession()
-        self.playback = playback ?? SpeechPlayer(session: audioSession)
+        let liveCapture = NativeLiveCaptureSource(session: audioSession)
+        self.playback = playback ?? SpeechPlayer(session: audioSession,
+                                                 output: LiveSpeechRoute(standard: NativeSpeechOutput(), capture: liveCapture))
         self.talk = talk ?? TalkController(recorder: NativeTalkRecorder(session: audioSession), permission: { await NativeTalkRecorder.requestPermission() })
-        self.liveMode = liveMode ?? LiveModeController(capture: NativeLiveCaptureSource(session: audioSession),
+        self.liveMode = liveMode ?? LiveModeController(capture: liveCapture,
                                                        permission: { await NativeTalkRecorder.requestPermission() }, sleep: noticeSleep)
         // An injected Client means a test: its Outbox must never reach a real network or the app's folders.
         let background: @MainActor () -> any OutboxTransport = { BackgroundOutboxTransport.shared }

@@ -16,7 +16,6 @@ public protocol HubSocket: Sendable {
 public extension HubSocket {
     func closeForProtocolError() async { await close() }
     func ping() async throws {}
-    func sendBinary(_ data: Data) async throws { throw HubProtocolError.notConnected }
 }
 
 public struct HubTransport: Sendable {
@@ -267,7 +266,7 @@ public actor HubClient {
     /// Sends uplink PCM only on the socket Live mode is on for: any other socket would close on it, so the audio is dropped.
     @discardableResult public func sendAudio(_ pcm: Data) async -> Bool {
         guard running, handover, liveSocket == socketSerial, let socket,
-              !pcm.isEmpty, pcm.count <= 3_200, pcm.count.isMultiple(of: 320) else { return false }
+              !pcm.isEmpty, pcm.count <= LiveFrameChunker.maximumBytes, pcm.count.isMultiple(of: LiveFrameChunker.frameBytes) else { return false }
         let serial = socketSerial
         do { try await socket.sendBinary(pcm); return true }
         catch {
