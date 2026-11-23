@@ -100,3 +100,19 @@ actor UncertainTypedSocket: HubSocket {
     #expect(await transport.cursors == [0, 2])
     await session.unpair()
 }
+
+@Test func olderEventsArrivingTogetherBuildTheSameScriptAsOneByOne() throws {
+    let live = try [conversationEvent(10, "heard", #"{"request_id":"now","text":"Now","spoken":false}"#),
+                    conversationEvent(11, "reply_end", #"{"reply_id":"now-reply","request_id":"now","text":"Done","reason":"complete"}"#)]
+    let older = try [conversationEvent(1, "heard", #"{"request_id":"then","text":"Then","spoken":false}"#),
+                     conversationEvent(2, "reply_delta", #"{"reply_id":"then-reply","request_id":"then","text":"Par"}"#),
+                     conversationEvent(3, "reply_end", #"{"reply_id":"then-reply","request_id":"then","text":"Partial done","reason":"complete"}"#),
+                     conversationEvent(10, "heard", #"{"request_id":"now","text":"Now","spoken":false}"#)]
+    var batched = ConversationProjection(), oneByOne = ConversationProjection()
+    batched.ingest(contentsOf: live); oneByOne.ingest(contentsOf: live)
+    batched.ingest(contentsOf: older.reversed())
+    for event in older.reversed() { oneByOne.ingest(event) }
+    #expect(batched.rows == oneByOne.rows)
+    #expect(batched.events.map(\.seq) == [1, 2, 3, 10, 11])
+    #expect(batched.rows.map(\.text) == ["Then", "Partial done", "Now", "Done"])
+}

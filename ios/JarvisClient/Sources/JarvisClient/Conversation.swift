@@ -27,16 +27,22 @@ public struct ConversationProjection: Sendable {
     public init() {}
 
     public mutating func ingest(_ event: HubEvent) {
-        guard event.replayable, sequences.insert(event.seq).inserted else { return }
-        if let last = events.last, event.seq < last.seq {
-            events.append(event); events.sort { $0.seq < $1.seq }
-            rows = []; positions = [:]
-            for event in events { apply(event) }
-        } else { events.append(event); apply(event) }
+        ingest(contentsOf: [event])
     }
 
-    public mutating func ingest(contentsOf events: [HubEvent]) {
-        for event in events { ingest(event) }
+    /// Takes a whole replay or history page, rebuilding the rows once however many events arrive out of order.
+    public mutating func ingest(contentsOf batch: [HubEvent]) {
+        var outOfOrder = false
+        for event in batch {
+            guard event.replayable, sequences.insert(event.seq).inserted else { continue }
+            if let last = events.last, event.seq < last.seq { outOfOrder = true }
+            events.append(event)
+            if !outOfOrder { apply(event) }
+        }
+        guard outOfOrder else { return }
+        events.sort { $0.seq < $1.seq }
+        rows = []; positions = [:]
+        for event in events { apply(event) }
     }
 
     private mutating func apply(_ event: HubEvent) {

@@ -412,7 +412,7 @@ import Observation
             }
             try await history?.merge(page.events)
             guard generation == owner, self.client === client else { return }
-            for event in page.events { conversation.ingest(event) }
+            conversation.ingest(contentsOf: page.events)
             historyBefore = page.next_before
             hasOlderHistory = page.has_more
         } catch {
