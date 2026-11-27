@@ -275,3 +275,11 @@ public struct HistoryPage: Decodable, Sendable {
     public let next_before: Int64?
     public let has_more: Bool
 }
+
+/// The iPhone's time zone, sent with every request so Jarvis tells the time where the User is.
+public enum HubTimeZone {
+    public static let header = "X-Jarvis-Time-Zone"
+
+    /// `autoupdatingCurrent`, since `TimeZone.current` can keep the zone the app started in.
+    @Sendable public static func current() -> String { TimeZone.autoupdatingCurrent.identifier }
+}

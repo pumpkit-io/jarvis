@@ -32,7 +32,8 @@ SeedReason = Literal["launch", "restart", "fold", "reset"]
 
 @dataclass(frozen=True)
 class Entry:
-    """One exchange: the message exactly as the Talker got it, and its reply. Times are wall-clock seconds."""
+    """One exchange: the message as the Talker got it, less the live context of that turn, and its reply. Times are
+    wall-clock seconds."""
 
     message: str
     reply: str

@@ -14,6 +14,7 @@ import numpy as np
 from jarvis_hub.agents.backend import (
     AgentEvent,
     Context,
+    PlanUsage,
     SessionSpec,
     TextDelta,
     TextEnd,
@@ -259,6 +260,10 @@ class FakeSession:
         outcome: Literal["completed", "interrupted"] = "interrupted" if self._interrupted.is_set() else "completed"
         yield TurnEnd(outcome, usage, context=context, no_context=no_context)
 
+    async def plan_usage(self) -> PlanUsage | None:
+        self.backend.usage_reads += 1
+        return self.backend.plan_usage
+
     async def interrupt(self) -> None:
         # Like the CLI: the interrupt lands on whatever turn runs when it arrives, or on none.
         if self.backend.interrupt_gate is not None:
@@ -324,6 +329,9 @@ class FakeBackend:
         self.subagent_close_gate = subagent_close_gate
         # Opens of a Subagent's session begun, counted before the gate holds them.
         self.subagent_opens = 0
+        # What every session reports of the plan's usage, which a test may change between reads.
+        self.plan_usage: PlanUsage | None = None
+        self.usage_reads = 0
 
     def wall(self) -> float:
         """Unix seconds for the Hub's usage limit: the fake clock, so a reset comes when a test advances it."""

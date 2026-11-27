@@ -27,7 +27,7 @@ private let credentials = try! PairingCredentials(origin: URL(string: "https://m
 
 @MainActor private func makeOutbox(_ directory: URL, _ transport: FakeOutboxTransport, delays: SleepLog = SleepLog()) -> Outbox {
     Outbox(store: OutboxStore(directory: directory, credentials: credentials), transport: transport, credentials: credentials,
-           now: { Date(timeIntervalSince1970: 1_000) }, sleep: { await delays.record($0) })
+           now: { Date(timeIntervalSince1970: 1_000) }, timeZone: { "Asia/Tokyo" }, sleep: { await delays.record($0) })
 }
 
 actor SleepLog {
@@ -60,6 +60,7 @@ private extension OutboxDelivery {
     #expect(talk.request.value(forHTTPHeaderField: "Authorization") == "Bearer token")
     #expect(talk.request.value(forHTTPHeaderField: "X-Jarvis-Audio-Format") == "pcm_s16le_16000_mono")
     #expect(talk.request.value(forHTTPHeaderField: "X-Jarvis-Recorded-At") == "1970-01-01T00:06:40Z")
+    #expect(talk.request.value(forHTTPHeaderField: "X-Jarvis-Time-Zone") == "Asia/Tokyo")
     #expect(try Data(contentsOf: talk.body) == pcm)
     #expect(outbox.items.map(\.status) == [.sending, .waiting])
 
@@ -67,6 +68,7 @@ private extension OutboxDelivery {
     #expect(transport.started.count == 2)
     let line = transport.started[1]
     #expect(line.path == "/v1/lines")
+    #expect(line.request.value(forHTTPHeaderField: "X-Jarvis-Time-Zone") == "Asia/Tokyo")
     let body = try JSONSerialization.jsonObject(with: Data(contentsOf: line.body)) as? [String: Any]
     #expect(body?["text"] as? String == "Ciao" && body?["recorded_at"] as? String == "1970-01-01T00:06:40Z" && body?["version"] as? Int == 1)
     #expect(outbox.items.map(\.status) == [.sent(requestID: "r1"), .sending])

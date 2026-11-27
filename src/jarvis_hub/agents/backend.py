@@ -121,6 +121,22 @@ class TurnEnd:
 AgentEvent = TextDelta | TextEnd | ToolCall | TurnEnd
 
 
+@dataclass(frozen=True)
+class UsageWindow:
+    """How much of one window of the User's Claude plan is used, and when it resets as Unix seconds, if known."""
+
+    percent: float
+    resets_at: float | None = None
+
+
+@dataclass(frozen=True)
+class PlanUsage:
+    """The Claude plan's five-hour and weekly windows; one the backend did not report is None."""
+
+    five_hour: UsageWindow | None
+    weekly: UsageWindow | None
+
+
 class AgentSession(Protocol):
     def send(self, message: str) -> AsyncIterator[AgentEvent]:
         """Send one user-role message and stream the turn it starts."""
@@ -128,6 +144,10 @@ class AgentSession(Protocol):
 
     async def interrupt(self) -> None:
         """Stop the current turn. Deltas may still arrive before its TurnEnd."""
+        ...
+
+    async def plan_usage(self) -> PlanUsage | None:
+        """The User's plan usage, without a model call and even during a turn; None when it cannot be had."""
         ...
 
     async def close(self) -> None: ...

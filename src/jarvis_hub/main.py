@@ -30,6 +30,7 @@ from jarvis_hub.agents.sdk import SdkBackend
 from jarvis_hub.clients import TERMINAL
 from jarvis_hub.config import ConfigError, Settings, VoiceSettings, load_settings
 from jarvis_hub.hub import Clock, Hub, Line, Metrics, Output
+from jarvis_hub.live import LiveContext
 from jarvis_hub.memory import summariser_spec
 from jarvis_hub.orchestrator import orchestrator_spec
 from jarvis_hub.subagents import Subagent, SubagentSetup, subagent_session
@@ -278,6 +279,7 @@ def settings_hub(
         memory=settings.memory,
         state_path=settings.runtime_dir / "state.json",
         conversation_path=settings.runtime_dir / "conversation.json",
+        live=LiveContext(),
         **options,
     )
 

@@ -124,6 +124,7 @@ public struct OutboxStore: Sendable {
     private let transport: any OutboxTransport
     private let credentials: PairingCredentials
     private let now: () -> Date
+    private let timeZone: () -> String
     private let sleep: @Sendable (Double) async throws -> Void
     private var failures = 0
     private var retryAt: Date?
@@ -132,9 +133,10 @@ public struct OutboxStore: Sendable {
     private var retired = false
 
     public init(store: OutboxStore, transport: any OutboxTransport, credentials: PairingCredentials,
-                now: @escaping () -> Date = { Date() },
+                now: @escaping () -> Date = { Date() }, timeZone: @escaping () -> String = HubTimeZone.current,
                 sleep: @escaping @Sendable (Double) async throws -> Void = { try await Task.sleep(for: .seconds($0)) }) {
-        self.store = store; self.transport = transport; self.credentials = credentials; self.now = now; self.sleep = sleep
+        self.store = store; self.transport = transport; self.credentials = credentials; self.now = now
+        self.timeZone = timeZone; self.sleep = sleep
         items = (try? store.load()) ?? []
         transport.onResponse { [weak self] id, response in self?.receive(id, response) }
     }
@@ -264,6 +266,8 @@ public struct OutboxStore: Sendable {
         request.httpMethod = "POST"
         request.setValue("Bearer \(credentials.deviceToken)", forHTTPHeaderField: "Authorization")
         request.setValue(item.commandID, forHTTPHeaderField: "Idempotency-Key")
+        // Read when sent, so a line queued offline reaches Jarvis with the zone the User is in by then.
+        request.setValue(timeZone(), forHTTPHeaderField: HubTimeZone.header)
         return request
     }
 

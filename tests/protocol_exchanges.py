@@ -223,6 +223,7 @@ class DelayedAdmission:
         self.begin_entered = asyncio.Event()
         self.cancel_remote_talk = hub.cancel_remote_talk
         self.set_client_talking = hub.set_client_talking
+        self.note_time_zone = hub.note_time_zone
         self.set_client_playing = hub.set_client_playing
         self.replay_speech = hub.replay_speech
         self.reset_context = hub.reset_context

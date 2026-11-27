@@ -49,6 +49,8 @@ class Conversation(Protocol):
 
     def set_client_talking(self, client_id: str, talking: bool) -> None: ...
 
+    def note_time_zone(self, client_id: str, name: str | None) -> None: ...
+
     def attach_client(self, client: Client, *, player: Player | None = None) -> None: ...
 
     def set_client_playing(self, client_id: str, playing: bool) -> None: ...
@@ -289,7 +291,11 @@ class Door:
         scheme, separator, token = request.headers.get("Authorization", "").partition(" ")
         if scheme.lower() != "bearer" or not separator or not token or self._pairing is None:
             return None
-        return await asyncio.to_thread(self._pairing.authenticate, token)
+        client = await asyncio.to_thread(self._pairing.authenticate, token)
+        # Every request may carry the phone's zone, so a line said after landing abroad has the new one.
+        if client is not None and self._hub is not None and (name := request.headers.get("X-Jarvis-Time-Zone")):
+            self._hub.note_time_zone(client.id, name)
+        return client
 
     def _current(self, connection: _Connection) -> bool:
         return self._connections.get(connection.client.id) is connection and not connection.closing and not self._closing

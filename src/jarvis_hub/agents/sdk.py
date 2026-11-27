@@ -1,11 +1,13 @@
 """The real agent backend: Claude Agent SDK sessions on the installed `claude` CLI and the User's Max login."""
 
 import json
+import math
 import re
 import shlex
 import time
 from collections.abc import AsyncIterator, Callable, Sequence
-from typing import Any
+from datetime import datetime
+from typing import Any, cast
 
 from claude_agent_sdk import (
     ClaudeAgentOptions,
@@ -38,6 +40,7 @@ from jarvis_hub.agents.backend import (
     Context,
     HubTool,
     McpGuard,
+    PlanUsage,
     Refused,
     SessionSpec,
     TextDelta,
@@ -46,6 +49,7 @@ from jarvis_hub.agents.backend import (
     ToolLease,
     TurnEnd,
     Usage,
+    UsageWindow,
 )
 from jarvis_hub.limits import UNKNOWN_RESET_WAIT
 
@@ -53,6 +57,10 @@ TOOL_SERVER = "jarvis"
 # How the CLI reports a turn stopped by interrupt(); is_error is set for these too, so it cannot tell them apart.
 INTERRUPTED_REASONS = {"aborted_streaming", "aborted_tools"}
 HTTP_TOO_MANY_REQUESTS = 429
+# The CLI's structured /usage, read from Anthropic with the CLI's own sign-in. `skip_behaviors` skips its scan of
+# local transcripts; `detached` lets a prompt sent meanwhile go ahead of the answer. No model call either way.
+GET_USAGE = {"subtype": "get_usage", "skip_behaviors": True, "detached": True}
+USAGE_TIMEOUT = 30.0
 
 
 def _sdk_tool(hub_tool: HubTool) -> SdkMcpTool[Any]:
@@ -268,6 +276,30 @@ def turn_end(
     return TurnEnd("completed", usage, context=context, no_context=no_context)
 
 
+def plan_usage(reply: dict[str, Any]) -> PlanUsage | None:
+    """The five-hour and weekly windows of a get_usage reply; None when it has neither, as for an API key login."""
+    limits = reply.get("rate_limits")
+    if not isinstance(limits, dict):
+        return None
+    windows = cast(dict[str, Any], limits)
+    usage = PlanUsage(_usage_window(windows.get("five_hour")), _usage_window(windows.get("seven_day")))
+    return usage if usage.five_hour or usage.weekly else None
+
+
+def _usage_window(window: Any) -> UsageWindow | None:
+    if not isinstance(window, dict):
+        return None
+    fields = cast(dict[str, Any], window)
+    percent, resets = fields.get("utilization"), fields.get("resets_at")
+    if isinstance(percent, bool) or not isinstance(percent, int | float) or not math.isfinite(percent):
+        return None
+    try:
+        resets_at = datetime.fromisoformat(resets).timestamp() if isinstance(resets, str) else None
+    except ValueError:
+        resets_at = None
+    return UsageWindow(float(percent), resets_at)
+
+
 class SdkSession:
     def __init__(self, client: ClaudeSDKClient, model: str, wall: Callable[[], float] = time.time) -> None:
         self._client = client
@@ -302,6 +334,17 @@ class SdkSession:
 
     async def interrupt(self) -> None:
         await self._client.interrupt()
+
+    async def plan_usage(self) -> PlanUsage | None:
+        # get_usage is in the CLI's control protocol but has no SDK method yet, so it goes through the SDK's own sender.
+        query: Any = getattr(self._client, "_query", None)
+        if query is None:
+            return None
+        try:
+            reply = await getattr(query, "_send_control_request")(GET_USAGE, USAGE_TIMEOUT)
+        except Exception:
+            return None
+        return plan_usage(cast(dict[str, Any], reply)) if isinstance(reply, dict) else None
 
     async def close(self) -> None:
         await self._client.disconnect()
