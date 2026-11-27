@@ -19,6 +19,7 @@ public extension HubTransport {
             var request = URLRequest(url: url)
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             request.setValue("jarvis.v1", forHTTPHeaderField: "Sec-WebSocket-Protocol")
+            request.setValue(HubTimeZone.current(), forHTTPHeaderField: HubTimeZone.header)
             let socket = URLSessionHubSocket(request: request)
             do { try await socket.open(); return socket }
             catch { await socket.close(); throw error }
@@ -27,6 +28,7 @@ public extension HubTransport {
                   url.host == root.host, url.scheme == root.scheme, url.port == root.port else { throw HubProtocolError.invalidOrigin }
             var request = URLRequest(url: url)
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            request.setValue(HubTimeZone.current(), forHTTPHeaderField: HubTimeZone.header)
             let delegate = RefuseRedirects()
             let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
             defer { session.invalidateAndCancel() }

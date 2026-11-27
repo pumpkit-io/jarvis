@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import re
 from collections.abc import MutableMapping
 from pathlib import Path
 from typing import TextIO
@@ -50,6 +51,13 @@ async def converse(
     return stdout.getvalue(), stderr.getvalue()
 
 
+def user_lines(backend: FakeBackend) -> list[str]:
+    """The User's lines as the Talker got them, each checked to open with the local time the Hub adds."""
+    received = backend.sessions[0].received[1:]
+    assert all(re.match(r"<now>\d{4}-\d\d-\d\d \d\d:\d\d \w+, .+ \(UTC[+-]\d\d:\d\d\)</now>\n", m) for m in received)
+    return [message.split("\n", 1)[1] for message in received]
+
+
 async def test_typed_lines_get_streamed_replies_on_the_terminal(tmp_path: Path) -> None:
     backend = FakeBackend(FakeClock(), [[Wait(0.2), Text("Good evening, "), Text("sir.")], [Text("Indeed, sir.")]])
 
@@ -57,7 +65,7 @@ async def test_typed_lines_get_streamed_replies_on_the_terminal(tmp_path: Path) 
 
     assert stdout == "› Good evening\nGood evening, sir.\n› All well?\nIndeed, sir.\n"
     assert stderr == "[hub] Model loading.\n[hub] Model ready.\n"
-    assert backend.sessions[0].received[1:] == [
+    assert user_lines(backend) == [
         '<user lang="en" typed="true">Good evening</user>',
         '<user lang="en" typed="true">All well?</user>',
     ]
@@ -150,7 +158,7 @@ async def test_bytes_that_are_not_utf8_do_not_stop_the_conversation(tmp_path: Pa
 
     await converse(backend, stdin, config=settings(tmp_path))
 
-    assert backend.sessions[0].received[1:] == [
+    assert user_lines(backend) == [
         '<user lang="en" typed="true">Hello</user>',
         '<user lang="en" typed="true">Caf�?</user>',
         '<user lang="en" typed="true">Still there?</user>',
@@ -169,7 +177,7 @@ async def test_input_that_fails_ends_the_conversation(tmp_path: Path) -> None:
 
     await converse(backend, BrokenStdin("Hello\nNever read\n"), config=settings(tmp_path))
 
-    assert backend.sessions[0].received[1:] == ['<user lang="en" typed="true">Hello</user>']
+    assert user_lines(backend) == ['<user lang="en" typed="true">Hello</user>']
     assert backend.sessions[0].closed
 
 

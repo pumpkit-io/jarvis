@@ -7,7 +7,7 @@ import pytest
 
 from jarvis_hub.event_log import EventLog, EventOutput
 from tests.fakes import FakeBackend, FakeClock, RecordingOutput, Text, Tool
-from tests.test_text_mode import converse, settings
+from tests.test_text_mode import converse, settings, user_lines
 
 
 
@@ -66,7 +66,7 @@ async def test_terminal_conversation_logs_output_and_does_not_rehydrate_the_talk
     assert stderr == "[hub] Model loading.\n[hub] Model ready.\n"
     restarted = FakeBackend(FakeClock(), [[Text("Morning, sir.")]])
     await converse(restarted, io.StringIO("Hello\n"), config=config)
-    assert restarted.session("talker").received[1:] == ['<user lang="en" typed="true">Hello</user>']
+    assert user_lines(restarted) == ['<user lang="en" typed="true">Hello</user>']
 
 
 @pytest.mark.parametrize("kind", ["heard", "reply", "reply_end", "notice", "show"])

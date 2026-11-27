@@ -49,6 +49,7 @@ from jarvis_hub.conversation import (
 from jarvis_hub import memory
 from jarvis_hub.memory import ROLE as SUMMARISER
 from jarvis_hub.limits import SavedLimit, UsageLimit, reset_sentence, update_sentence
+from jarvis_hub.live import USAGE_EVERY, LiveContext
 from jarvis_hub.news import Leaf, News, backlog_message, fresh
 from jarvis_hub.orchestrator import orchestrator_tools
 from jarvis_hub.state import Fields, StateFile, UnreadableFile
@@ -510,6 +511,7 @@ class Hub:
         conversation_path: Path | None = None,
         wall: Callable[[], float] = time.time,
         preconnect_orchestrator: bool = False,
+        live: LiveContext | None = None,
     ) -> None:
         tools = talker_tools(
             delegate=self._delegate,
@@ -659,6 +661,7 @@ class Hub:
         self._state = StateFile(state_path) if state_path is not None else None
         # Persisted times are wall-clock; the Hub's own clock is monotonic and restarts with the process.
         self._wall = wall
+        self._live = live
         self._closing = False
         self._save_failing = False
         # Subagents stopped by this Hub's close, for the next launch's recovery message.
@@ -825,6 +828,10 @@ class Hub:
         return self._speech.replay(text, "it" if lang == "it" else "en", destination=player, reply_id=reply_id,
                                    allowed=lambda: self._client_can_speak(client_id)
                                    and self._client_players.get(client_id) is player)
+
+    def note_time_zone(self, client_id: str, name: str | None) -> None:
+        if self._live is not None:
+            self._live.note_zone(client_id, name)
 
     def set_client_talking(self, client_id: str, talking: bool) -> None:
         self.clients.set_talking(client_id, talking)
@@ -1558,6 +1565,9 @@ class Hub:
     async def _talk(self) -> None:
         try:
             self._talker = await self._open_talker()
+            if self._live is not None:
+                # Read alongside the warm-up, so the User's first line already has it.
+                self._loops.append(asyncio.create_task(self._watch_usage(self._live)))
             seed = self._seed("launch", self._conversation.newest(self._memory.fold_at), self._conversation.summary)
             await self._turn(seed, kind="warm_up", arrived=self._clock.now())
         except Exception as e:
@@ -1651,6 +1661,7 @@ class Hub:
                     scope_context = self._scopes.context() if authority else ""
                     message = "\n".join(part for part in (item.message, scope_context) if part)
                     end = await self._turn(message, kind=item.kind, arrived=item.arrived, spoken=item.spoken,
+                                           live=self._live_lines(item),
                                            owner=owner, scope_authority=authority, news_delivery=delivery, audio_generation=item.audio_generation)
                 self._approvals.turn_ended(completed=end.outcome == "completed")
                 if delivery is not None and self._news_delivery is delivery:
@@ -1679,6 +1690,22 @@ class Hub:
             if self._resets.stale:
                 # A new Talker that failed to start after a reset is tried again before the next turn.
                 self._resets.due.set()
+
+    def _live_lines(self, item: _TalkerInput) -> str:
+        """The time and plan usage a User's turn opens with; nothing for news."""
+        if self._live is None or item.kind != "user":
+            return ""
+        return self._live.lines(item.client_id, self._wall(), self._talker)
+
+    async def _watch_usage(self, live: LiveContext) -> None:
+        """Reads the plan's usage through the current Talker every USAGE_EVERY, never with a model call."""
+        while True:
+            if (session := self._talker) is not None:
+                try:
+                    live.note_usage(await session.plan_usage(), self._wall())
+                except Exception as e:
+                    self._write({"kind": "plan_usage", "error": repr(e)})
+            await self._clock.sleep(USAGE_EVERY)
 
     async def _news_delivery_finished(self, delivery: _NewsDelivery) -> None:
         await self._speech.idle(stall_timeout=None)
@@ -2186,7 +2213,10 @@ class Hub:
         scope_authority: dict[str, tuple[int, int]] | None = None,
         news_delivery: _NewsDelivery | None = None,
         audio_generation: int | None = None,
+        live: str = "",
     ) -> TurnEnd:
+        """`live` opens the message the Talker gets but is never saved: each saved exchange keeps its own time."""
+        sent = f"{live}\n{message}" if live else message
         session = session or self._talker
         assert session is not None
         self._turn_count += 1
@@ -2254,7 +2284,7 @@ class Hub:
             speech.feed(text)
 
         try:
-            async for event in self._guarded(session.send(message)):
+            async for event in self._guarded(session.send(sent)):
                 match event:
                     case TextDelta(text):
                         if turn in (self._interrupted_turn, self._silenced_turn):
@@ -2318,7 +2348,7 @@ class Hub:
                 and turn not in (self._interrupted_turn, self._silenced_turn)):
             self._approvals.record_question(shown)
         self.publish_client_snapshots()
-        self._measure(session, message, shown, tools, end)
+        self._measure(session, sent, shown, tools, end)
         if (kind in ("user", "event") and (shown.strip() or end.outcome != "failed")
                 and saving and no_reset_since()):
             self._save_exchange(message, shown, tools=tools, client_id=destination_id, kind=kind, arrived=arrived)
