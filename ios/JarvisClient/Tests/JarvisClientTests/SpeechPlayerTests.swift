@@ -16,8 +16,12 @@ import Testing
 @MainActor final class SpeechSession: TalkAudioSession {
     var active = false
     var activations = 0
-    func activate() throws { active = true; activations += 1 }
-    func release() { active = false }
+    func activatePlayback() throws { active = true; activations += 1 }
+    func releasePlayback() { active = false }
+    func beginRecording(_ start: @escaping @Sendable () throws -> Void, failed: @escaping @MainActor @Sendable () -> Void) throws {
+        active = true; activations += 1; try start()
+    }
+    func endRecording(_ stop: @escaping @Sendable () -> Void) { stop(); active = false }
 }
 
 @MainActor @Test func playbackReportsOnlyFinishedContiguousClipsAndDrainsAfterOutput() throws {
@@ -89,12 +93,12 @@ actor SpeechWait {
     #if os(macOS)
     let session = NativeTalkAudioSession()
     try session.activatePlayback()
-    #expect(throws: HubProtocolError.invalidFrame) { try session.activate() }
+    #expect(throws: HubProtocolError.invalidFrame) { try session.beginRecording({}, failed: {}) }
     session.releasePlayback()
-    try session.activate()
+    try session.beginRecording({}, failed: {})
     session.releasePlayback()
     #expect(throws: HubProtocolError.invalidFrame) { try session.activatePlayback() }
-    session.release()
+    session.endRecording {}
     try session.activatePlayback()
     session.releasePlayback()
     #endif
@@ -518,6 +522,7 @@ actor SpeechWait {
     try await eventuallySession { output.bytes.count == 2 }
     output.callbacks[0]()
     await talk.press()
+    audio.drain()
     #expect(source.active)
     #expect(player.playingSpeechID == nil && output.stops > 0)
     try await eventuallySession { await socket.sent.contains { $0.type == "interrupt" } }
@@ -526,9 +531,11 @@ actor SpeechWait {
     #expect(wire.commands.isEmpty)
     #expect(await socket.sent.contains { $0.payload["state"] == .string("stopped") } == false)
     output.callbacks[1]()
+    audio.drain()
     #expect(source.active)
     #expect(throws: HubProtocolError.invalidFrame) { try audio.activatePlayback() }
     await session.unpair()
+    audio.drain()
     #expect(!source.active)
     #endif
 }

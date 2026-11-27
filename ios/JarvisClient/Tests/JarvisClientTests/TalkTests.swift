@@ -9,11 +9,14 @@ import Testing
     var active = false
     var pcm = Data(repeating: 1, count: 32_000)
     var fails = false
-    func start(limitReached: @escaping @MainActor @Sendable () -> Void) throws {
+    /// Fails the microphone after `start` has returned, as the audio queue reports it.
+    var failed: (@MainActor @Sendable () -> Void)?
+    func start(limitReached: @escaping @MainActor @Sendable () -> Void, failed: @escaping @MainActor @Sendable () -> Void) throws {
         if fails { throw CocoaError(.featureUnsupported) }
-        starts += 1; active = true
+        starts += 1; active = true; self.failed = failed
     }
     func stop() -> Data { stops += 1; active = false; return pcm }
+    func failLater() { active = false; failed?() }
 }
 
 /// Stands in for the Hub socket and the Outbox around a TalkController.
@@ -397,32 +400,41 @@ import Testing
     #expect(!recorder.active && wire.deliveries.count == 1)
 }
 
+/// Runs a Talk's start and stop at once, where the native session would run them on its audio queue.
 @MainActor final class FakeTalkSession: TalkAudioSession {
     var active = false
     var activations = 0
     var releases = 0
-    func activate() throws { active = true; activations += 1 }
-    func release() { active = false; releases += 1 }
+    func beginRecording(_ start: @escaping @Sendable () throws -> Void, failed: @escaping @MainActor @Sendable () -> Void) throws {
+        active = true; activations += 1
+        do { try start() } catch { active = false; releases += 1; failed() }
+    }
+    func endRecording(_ stop: @escaping @Sendable () -> Void) { stop(); active = false; releases += 1 }
+    func activatePlayback() throws { active = true; activations += 1 }
+    func releasePlayback() { active = false; releases += 1 }
 }
 
-@MainActor final class FakeCaptureSource: TalkCaptureSource {
+/// The native session calls it on its audio queue; tests read it on the main actor after draining that queue.
+final class FakeCaptureSource: TalkCaptureSource, @unchecked Sendable {
     var buffer: TalkPCMBuffer?
     var limit: (@MainActor @Sendable () -> Void)?
     var active = false
     var fails = false
+    var startedOnMainThread = false
     func start(buffer: TalkPCMBuffer, limitReached: @escaping @MainActor @Sendable () -> Void) throws {
+        startedOnMainThread = Thread.isMainThread
         if fails { throw HubProtocolError.invalidFrame }
         self.buffer = buffer; limit = limitReached; active = true
     }
     func stop() { active = false }
-    func frames(_ bytes: Data) { if buffer?.append(bytes) == true { limit?() } }
+    @MainActor func frames(_ bytes: Data) { if buffer?.append(bytes) == true { limit?() } }
 }
 
 @MainActor @Test func recorderReleasesAudioSessionBeforeReturningPcmAndBoundsDelayedTimer() throws {
     let session = FakeTalkSession(), source = FakeCaptureSource()
     let recorder = NativeTalkRecorder(session: session, source: source)
     var reached = 0
-    try recorder.start { reached += 1 }
+    try recorder.start(limitReached: { reached += 1 }, failed: {})
     #expect(session.active && source.active)
     source.frames(Data(repeating: 9, count: 9_600_008))
     source.frames(Data(repeating: 8, count: 100))
@@ -433,9 +445,34 @@ import Testing
     #expect(session.releases == 1)
     #expect(recorder.stop().isEmpty)
     source.fails = true
-    #expect(throws: HubProtocolError.self) { try recorder.start {} }
-    #expect(!session.active)
-    #expect(session.releases == 2)
+    var failures = 0
+    try recorder.start(limitReached: {}, failed: { failures += 1 })
+    #expect(failures == 1 && !session.active && session.releases == 2)
+    #expect(recorder.stop().isEmpty && session.releases == 2)
+}
+
+@MainActor @Test func aMicrophoneThatFailsAfterThePressEndsTheTalkAsFailedAndTellsTheHub() async throws {
+    let recorder = FakeTalkRecorder()
+    let (talk, wire) = wired(recorder)
+    talk.holdBegan(interaction: UUID())
+    try await eventuallySession { talk.state == .recording && wire.begins.count == 1 }
+    recorder.failLater()
+    try await eventuallySession { talk.state == .failed }
+    try await eventuallySession { wire.cancels == wire.begins }
+    #expect(talk.talkID == nil && talk.message != nil && wire.deliveries.isEmpty)
+}
+
+@MainActor @Test func aMicrophoneThatFailsToResumeLeavesThePausedTalkReadyToSend() async throws {
+    let recorder = FakeTalkRecorder()
+    let (talk, wire) = try await lockedTalk(recorder)
+    talk.pause()
+    await talk.resume()
+    #expect(talk.state == .recording)
+    recorder.failLater()
+    try await eventuallySession { talk.state == .paused }
+    #expect(talk.recorded.count == 32_000)
+    await talk.send()
+    #expect(wire.deliveries.count == 1 && wire.deliveries[0].pcm.count == 32_000)
 }
 
 @MainActor @Test func slidingUpLocksAndReleasingKeepsTheTalkUntilExplicitSend() async throws {

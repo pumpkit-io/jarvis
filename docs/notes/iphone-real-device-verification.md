@@ -94,7 +94,7 @@ Restart between rows after changing `.env`; do not run concurrent Hubs against t
 | E5: [20 Wi-Fi + 20 LTE real-provider runs](iphone-latency-e5.md), medians/spread, upload and physical first-audio boundaries. Target median release-to-first-audio ≤2.5 s; a miss requires a compression/streaming decision, not an invented passing number. | Waiting on User |
 | Physical Voice off, interruption and playback completion behavior through the cases above; preserve actual routes and observations. | Waiting on User |
 | ADR 0032 music ducking, -16 LUFS speech level, AirPods A2DP with the iPhone's microphone, and Live mode echo at the new level, using the [music and speech level checks](../../ios/README.md#music-and-speech-level-device-checks). | Waiting on User |
-| ADR 0033 per-use session: music never stops on a Talk's press or release and returns by itself, using the matching check in the same list; note any remaining short gap. | Waiting on User |
+| ADR 0033 per-use session: music never stops on a Talk's press, release or cancel and returns by itself, and the orb never freezes, using the matching checks in the same list; for any remaining short gap, record its length and the `TalkAudio` Console timings. | Waiting on User |
 
 ## Automated evidence and its limits
 

@@ -6,17 +6,36 @@ The cause is how iOS ties ducking to activation. Apple documents `duckOthers` th
 
 `NativeTalkAudioSession` therefore has one lifecycle for every use. A Talk, a reply and Live mode each set their category and options while the session is inactive and then activate it, which starts the duck. When the use ends, after its microphone or speech output has stopped, the session deactivates with `notifyOthersOnDeactivation`, which ends the duck and lets any app the session interrupted resume. Nothing changes the options of an active session, and nothing holds the session between uses. Every option set is mixable: `mixWithOthers` is written out next to `duckOthers` and `interruptSpokenAudioAndMixWithOthers`, which already imply it. While Live mode is on, a Talk and a reply use its active session and make no session call of their own. The options themselves are ADR 0032's.
 
+## The Talk's audio work runs off the main thread
+
+The same iPhone tested this lifecycle. A reply ducked music smoothly and brought it back. A Talk's press, its release and its cancel each still stopped music for a fraction of a second before the gradual duck, and on the press the orb on the home screen froze for about as long.
+
+The orb draws on the main thread, and the Talk path did all its audio work there in one synchronous call: `setCategory(.playAndRecord)`, `setActive(true)`, a new `AVAudioEngine`, its input node, `prepare()` and `start()`; on a release and a cancel, `engine.stop()` and `setActive(false)`. Each of these returns only when the audio hardware has finished reconfiguring. A reply also activated on the main thread and did not stall music, but it activates `playback`, which needs no microphone. Turning the microphone on and off is what reconfigures the shared hardware, and music from another app cannot play while it does. The orb's freeze is the main thread waiting out that reconfiguration; it cannot be what stopped music, which plays in another process.
+
+Two changes follow, one for each symptom:
+
+- `NativeTalkAudioSession` runs a Talk's activation, microphone start, microphone stop and every deactivation on one serial audio queue. A press shows recording at once; the queue activates the session and starts the microphone after. A release or a cancel returns the recorded audio at once; the queue stops the microphone and deactivates after. If the microphone fails on the queue, the session deactivates there and the Talk ends as failed, or a resumed Talk returns to paused. A Talk released before the queue reaches its start never activates. A reply and Live mode still activate synchronously, because their output starts right after, but through the same queue, so neither can overtake a Talk still stopping. This removes the orb's freeze; it does not by itself shorten the hardware's reconfiguration.
+- Every activation first asks for the sample rate and IO buffer duration the hardware already runs at, read from `AVAudioSession` before the category changes. The microphone joining the hardware cannot be avoided while recording, but a rate or buffer change on top of it would restart other apps' audio at a new format and lengthen the gap. This was the next experiment the first version of this decision named. It is now applied because the device isolated the gap to the press and release of `playAndRecord`, while the reply's `playback` activation, which changes nothing on the hardware, ducks smoothly. Asking for the current format is at worst a no-op.
+
+Each activation logs how long it took and the sample rate and IO buffer before and after it; the microphone logs how long its engine took to start and stop and when its first buffer arrived; the audio queue logs how long a press waited for it. The logs use subsystem `io.pumpkit.jarvis`, category `TalkAudio`, with signpost intervals for Instruments. They tell a device check whether the hardware still changed format and how long each step takes.
+
+Nothing is prepared before the press. An `AVAudioEngine` whose input node is read before the session is `playAndRecord` takes the format of an inactive route and must be rebuilt, and keeping an engine or the microphone running between Talks is the held session this decision rejects. Microphone permission already granted is read synchronously instead of awaited.
+
 ## Considered Options
 
 - Hold the session active and switch only `duckOthers` on a press and a release (the first fix). Rejected: undocumented, and on the device it ducked through silence and stopped music for good.
 - Hold the session active and deactivate it only on a release. Rejected: each release would then deactivate and reactivate a `playAndRecord` session, two hardware changes instead of one.
 - Record without ducking, so a press and a release need no session change. Rejected: the User wants music lower while they speak.
-- Pin the hardware sample rate and buffer to their current values before activating, in case the short gap is the hardware switching format when the microphone starts. Not done: it is a guess no document supports, and it would mix with this fix in one device check. It is the next experiment if the gap remains.
+- Pin the hardware sample rate and buffer to their current values before activating. Done in the second device round, as above; the logs separate its effect from the audio queue's.
+- Keep the Talk's audio work on the main thread and only prepare the engine ahead of the press. Rejected: the waits are the hardware reconfiguring, which preparing cannot remove, and the orb would still freeze.
+- Keep the microphone engine running while the app is in the foreground, so a press only starts writing. Rejected: it holds the session active between uses, which this decision rejects, and keeps the microphone indicator on.
 
 ## Consequences
 
 - Music always keeps playing and returns to its own level by itself after a Talk, a reply and Live mode.
-- A press and a release may still make the fraction-of-a-second gap that came before the first fix. Starting and stopping recording reconfigures the shared audio hardware, and no documented API avoids that while still ducking. Whether the gap remains, and how long it is, is a device check in `ios/README.md`.
+- The orb and the Talk controls no longer wait for the audio hardware on a press, a release or a cancel.
+- A press and a release may still make a short music gap. Turning the microphone on and off reconfigures the shared audio hardware, and no documented API avoids that while still ducking. If the logs show an unchanged sample rate and IO buffer and the gap remains, that reconfiguration is all of it; the remaining option is a microphone held open between Talks, a product choice for the User. The device check is in `ios/README.md`.
+- A Talk's clock starts at the press, slightly before the microphone records. Audio from that moment was never captured before either, since the main thread was blocked until the engine ran.
 - Apple asks for `duckOthers` to be used for a few seconds at a time. Live mode keeps music ducked for as long as it is on, as ADR 0032 decided.
 - Starting Live mode while a reply plays changes the active `playback` session to `playAndRecord`, as it did before the first fix. Turning Live mode on mid-reply is rare, and its first device check will show whether it disturbs music.
-- Package tests check the sequence of session calls through a fake driver: one activation per use, deactivation only after the audio object stops, and no activation of an already active session.
+- Package tests check the sequence of session calls through a fake driver: one activation per use, deactivation only after the audio object stops, no activation of an already active session, no Talk call on the main thread, a press and a release returning while the hardware is still busy, and a quick tap that never turns the microphone on.
