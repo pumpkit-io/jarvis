@@ -567,7 +567,7 @@ class StubRunner:
         self._ends[self.started[index]].set_result((code, output))
 
 
-def ruleset_rule(kind: str) -> dict[str, Any]:
+def ruleset_rule(kind: str, contexts: tuple[str, ...] = ()) -> dict[str, Any]:
     """One rule as the rules API returns it; pumpkit's main had deletion, non_fast_forward, pull_request and
     required_status_checks from repository ruleset 24429983, while the GraphQL ref read showed no rule at all."""
     rule: dict[str, Any] = {
@@ -578,6 +578,9 @@ def ruleset_rule(kind: str) -> dict[str, Any]:
     }
     if kind == "pull_request":
         rule["parameters"] = {"required_approving_review_count": 0, "allowed_merge_methods": ["merge", "squash"]}
+    if kind == "required_status_checks":
+        checks = [{"context": context, "integration_id": 15368} for context in contexts]
+        rule["parameters"] = {"strict_required_status_checks_policy": False, "required_status_checks": checks}
     return rule
 
 
@@ -605,6 +608,10 @@ class StubGh(StubRunner):
         self.rules_result: tuple[int, str] | None = None
         # GitHub's page size for the rules; without --paginate gh reads the first page only.
         self.rules_per_page = 30
+        # GitHub's merge state of a PR, keyed like `prs`; a PR not listed is CLEAN.
+        self.merge_states: dict[str, str] = {}
+        # The checks that ran on a PR, keyed like `prs`, as name -> conclusion or status.
+        self.checks: dict[str, dict[str, str]] = {}
         self.reads: list[tuple[str, ...]] = []
         self.actions: list[tuple[str, ...]] = []
         self.action_result: tuple[int, str] = (0, "")
@@ -619,7 +626,9 @@ class StubGh(StubRunner):
             if key not in self.prs:
                 return 1, f"GraphQL: Could not resolve to a PullRequest with the number of {argv[3]}."
             state, head = self.prs[key]
-            return 0, f"{state} {head}"
+            if "statusCheckRollup" in argv:
+                return 0, "\n".join(f"{name}\t{result}" for name, result in self.checks.get(key, {}).items())
+            return 0, f"{state} {head} {self.merge_states.get(key, 'CLEAN')} main feat/pr-{argv[3]}"
         path = next((word for word in argv[2:] if "/rules/branches/" in word), None)
         if argv[1] == "api" and path is not None:
             self.reads.append(argv)
@@ -627,6 +636,10 @@ class StubGh(StubRunner):
                 return self.rules_result
             repo, branch = path.removeprefix("repos/").split("/rules/branches/", 1)
             rules = self.rulesets.get(f"{repo}:{branch}", [])
+            if "required_status_checks" in argv[-1]:
+                required = [c["context"] for r in rules if r["type"] == "required_status_checks"
+                            for c in r["parameters"]["required_status_checks"]]
+                return 0, "\n".join(required)
             pages = [rules[i : i + self.rules_per_page] for i in range(0, len(rules), self.rules_per_page)] or [[]]
             # gh applies --jq to each page and prints one line per page.
             read = pages if "--paginate" in argv else pages[:1]
