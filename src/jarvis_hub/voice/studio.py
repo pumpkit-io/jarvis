@@ -4,14 +4,16 @@ Every model import is inside a factory, so the tests and `voice list` never load
 """
 
 import argparse
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import re
+import shutil
 import tempfile
 import time
-from typing import Any, Protocol, TextIO, cast, get_args
+from typing import Any, Protocol, TextIO, cast
 import wave
 
 import numpy as np
@@ -21,12 +23,14 @@ from jarvis_hub.voice.language import Lang
 from jarvis_hub.voice.loudness import integrated_lufs
 from jarvis_hub.voice.packs import (
     LANGUAGE_NAMES,
+    LANGUAGES,
     SHIPPED_VOICES,
-    VOICE_NAME,
     VoicePack,
     VoicePackError,
+    check_new_name,
     find_pack,
     list_packs,
+    parse_language,
     save_pack,
 )
 from jarvis_hub.voice.player import Samples
@@ -64,7 +68,6 @@ SAMPLE_LINES: dict[Lang, tuple[str, ...]] = {
         "Fatto. Ho unito il branch e l'ho cancellato.",
     ),
 }
-LANGS: tuple[Lang, ...] = get_args(Lang)
 
 
 class Designer(Protocol):
@@ -95,11 +98,19 @@ def read_take(clip: Path) -> Take:
     if not sidecar.is_file():
         raise VoicePackError(f"{clip} is not a take from ./jarvis voice design; for any other recording use "
                              "./jarvis voice add <clip> --lang en|it --transcript \"...\" --name <name>")
-    data = json.loads(sidecar.read_text(encoding="utf-8"))
-    language: Lang | None = next((lang for lang in LANGS if lang == data.get("language")), None)
-    if language is None or not isinstance(data.get("transcript"), str):
+    try:
+        data: object = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        data = None
+    if not isinstance(data, dict):
         raise VoicePackError(f"{sidecar} is not a take record")
-    return Take(clip, language, data["transcript"], data.get("description"), data.get("model"))
+    record = cast(dict[str, Any], data)
+    language, transcript = parse_language(record.get("language")), record.get("transcript")
+    if language is None or not isinstance(transcript, str):
+        raise VoicePackError(f"{sidecar} is not a take record")
+    description, model = record.get("description"), record.get("model")
+    return Take(clip, language, transcript, description if isinstance(description, str) else None,
+                model if isinstance(model, str) else None)
 
 
 def write_wav(path: Path, samples: Samples, rate: int) -> None:
@@ -112,25 +123,31 @@ def write_wav(path: Path, samples: Samples, rate: int) -> None:
 
 
 def set_env(path: Path, key: str, value: str) -> None:
-    """Sets `key` in `.env`, leaving every other line as it was."""
+    """Puts `KEY=value` where the first assignment of `key` was, or at the end, and drops any later ones."""
     assignment = re.compile(rf"^\s*(?:export\s+)?{re.escape(key)}\s*=")
     lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
     kept: list[str] = []
+    placed = False
     for line in lines:
-        if assignment.match(line):
-            if f"{key}={value}" not in kept:
-                kept.append(f"{key}={value}")
-        else:
+        if not assignment.match(line):
             kept.append(line)
-    if f"{key}={value}" not in kept:
+        elif not placed:
+            kept.append(f"{key}={value}")
+            placed = True
+    if not placed:
         kept.append(f"{key}={value}")
-    path.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    # `.env` may hold secrets: replace it whole, so a crash never leaves it half written, and keep its permissions.
+    staging = path.with_name(f".{path.name}.partial")
+    staging.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    if path.is_file():
+        shutil.copymode(path, staging)
+    os.replace(staging, path)
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     commands = parser.add_subparsers(dest="voice_command", required=True, metavar="{design,try,use,add,list}")
     design = commands.add_parser("design", help="generate candidate voices from a description and play each")
-    design.add_argument("--lang", choices=LANGS, default="en")
+    design.add_argument("--lang", choices=LANGUAGES, default="en")
     design.add_argument("--takes", type=int, default=5, help="how many candidates (default 5)")
     design.add_argument("--describe", default=DESCRIPTION, help="the voice in plain words; a native accent is added")
     design.add_argument("--text", help="what each take says instead of the standard reference sentence")
@@ -142,7 +159,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     use.add_argument("--name", required=True, help="lowercase letters, digits and hyphens")
     add = commands.add_parser("add", help="make your own recording a voice and choose it for its language")
     add.add_argument("clip", type=Path, help="about 10 seconds of clean, neutral speech by one speaker")
-    add.add_argument("--lang", choices=LANGS, required=True)
+    add.add_argument("--lang", choices=LANGUAGES, required=True)
     add.add_argument("--transcript", required=True, help="exactly what the clip says, word for word")
     add.add_argument("--name", required=True, help="lowercase letters, digits and hyphens")
     commands.add_parser("list", help="show the voices and the one each language speaks")
@@ -152,9 +169,10 @@ class Studio:
     def __init__(
         self, voice: VoiceSettings, takes: Path, env: Path, out: TextIO,
         designer: Callable[[], Designer], cloner: Callable[[], Cloner], play: Play,
-        *, stamp: Callable[[], str] = lambda: time.strftime("%Y%m%d-%H%M%S"),
+        *, environ: Mapping[str, str] | None = None, stamp: Callable[[], str] = lambda: time.strftime("%Y%m%d-%H%M%S"),
     ) -> None:
         self._voice, self._takes, self._env, self._out = voice, takes, env, out
+        self._environ = environ or {}
         self._designer, self._cloner, self._play, self._stamp = designer, cloner, play, stamp
 
     def run(self, args: argparse.Namespace) -> None:
@@ -218,6 +236,7 @@ class Studio:
             gain = 10 ** (trim / 20)
             for line in lines:
                 self._play(np.clip(line * gain, -1.0, 1.0).astype(np.float32), Qwen3Synthesizer.sample_rate)
+            self._say(f"Make it Jarvis's voice: ./jarvis voice use {path} --name <name>")
             return
         pack = find_pack(voice, self._voice.user_voices)
         self._say(f"Speaking as {pack.name} ({LANGUAGE_NAMES[pack.language]})…")
@@ -225,14 +244,13 @@ class Studio:
         synth.load()
         for line in SAMPLE_LINES[pack.language]:
             self._play(np.concatenate([audio for _, audio in synth.stream(line, pack.name)]), synth.sample_rate)
+        self._say(f"To speak with it, set JARVIS_VOICE_{pack.language.upper()}={pack.name} in {self._env} and restart.")
 
     def choose(self, take: Take, name: str) -> None:
-        if not VOICE_NAME.match(name):
-            raise VoicePackError(f"{name!r} is not a voice name: use lowercase letters, digits and hyphens")
-        if any(listed == name for listed, _ in list_packs(self._voice.user_voices)):
-            raise VoicePackError(f"a voice named {name!r} already exists; pick another name")
         if self._voice.user_voices is None:
             raise VoicePackError("no folder for your own voices")
+        # Before the measurement, which takes minutes, so a bad name fails at once.
+        check_new_name(name, self._voice.user_voices)
         self._say(f"Measuring {take.clip.name}'s level with Jarvis's own model…")
         _, trim = self._audition(take)
         pack = save_pack(self._voice.user_voices, name, take.clip, take.language, take.transcript, trim,
@@ -241,6 +259,8 @@ class Studio:
         set_env(self._env, key, name)
         self._say(f"Saved {pack.folder} at a {pack.trim_db:+.1f} dB trim.\n"
                   f"Set {key}={name} in {self._env}. Restart Jarvis to hear it.")
+        if self._environ.get(key, name) != name:
+            self._say(f"Your shell sets {key}={self._environ[key]}, which overrides .env: unset it to hear this voice.")
 
     def show(self) -> None:
         chosen = {self._voice.voice_en: "en", self._voice.voice_it: "it"}
@@ -251,7 +271,8 @@ class Studio:
                 self._say(f"{mark} {name:<24} {pack.language}  {pack.trim_db:+.1f} dB  {where}")
             else:
                 self._say(f"! {name:<24} unusable: {pack}")
-        self._say("* marks the voice each language speaks (JARVIS_VOICE_EN, JARVIS_VOICE_IT).")
+        self._say("* marks the voice each language speaks (JARVIS_VOICE_EN, JARVIS_VOICE_IT).\n"
+                  "Hear one: ./jarvis voice try <name>. Make a new one: ./jarvis voice design --lang en|it")
 
 
 class MlxDesigner:

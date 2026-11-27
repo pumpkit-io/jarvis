@@ -8,7 +8,6 @@ import numpy as np
 import pytest
 
 from jarvis_hub.config import VoiceSettings
-from jarvis_hub.voice.loudness import integrated_lufs
 from jarvis_hub.voice.packs import VoicePackError, find_pack, load_pack
 from jarvis_hub.voice.player import Samples
 from jarvis_hub.voice.studio import Studio, add_arguments, set_env
@@ -60,12 +59,14 @@ class Rig:
         self.played: list[Samples] = []
         self.out = io.StringIO()
         self.voice = VoiceSettings(user_voices=self.user_voices)
+        self.environ: dict[str, str] = {}
 
     def run(self, *argv: str) -> str:
         parser = argparse.ArgumentParser()
         add_arguments(parser)
         studio = Studio(self.voice, self.takes, self.env, self.out, lambda: self.designer, lambda: self.cloner,
-                        lambda samples, rate: self.played.append(samples), stamp=lambda: "20261127-2200")
+                        lambda samples, rate: self.played.append(samples), environ=self.environ,
+                        stamp=lambda: "20261127-2200")
         studio.run(parser.parse_args(list(argv)))
         return self.out.getvalue()
 
@@ -150,16 +151,18 @@ def test_try_plays_a_take_at_the_level_jarvis_would_speak_it(rig: Rig) -> None:
     output = rig.run("try", str(take))
 
     assert len(rig.played) >= 3
-    assert integrated_lufs(np.concatenate(rig.played), RATE) == pytest.approx(-25.0, abs=0.1)
+    # The fake clone's 0.1 tone reads -23.01 LUFS, so -25 LUFS needs it 1.99 dB down.
+    assert float(np.max(np.abs(np.concatenate(rig.played)))) == pytest.approx(0.1 * 10 ** (-1.99 / 20), rel=0.01)
     assert rig.cloner.clips[0] == take.read_bytes()
-    assert "-2.0 dB" in output
+    assert "-2.0 dB" in output and f"voice use {take}" in output
 
 
 def test_try_plays_a_saved_voice_by_name_with_its_own_trim(rig: Rig) -> None:
-    rig.run("try", "jarvis-it")
+    output = rig.run("try", "jarvis-it")
 
     assert rig.cloner.voices[0].language == "Italian" and rig.cloner.voices[0].trim_db == -4.3
-    assert integrated_lufs(np.concatenate(rig.played), RATE) == pytest.approx(-23.01 - 4.3, abs=0.1)
+    assert float(np.max(np.abs(np.concatenate(rig.played)))) == pytest.approx(0.1 * 10 ** (-4.3 / 20), rel=0.01)
+    assert "JARVIS_VOICE_IT=jarvis-it" in output
 
 
 def test_list_marks_the_voice_each_language_speaks_and_why_a_broken_one_cannot_be_used(rig: Rig) -> None:
@@ -170,6 +173,27 @@ def test_list_marks_the_voice_each_language_speaks_and_why_a_broken_one_cannot_b
 
     assert any("jarvis-en" in line and "*" in line and "en" in line for line in lines)
     assert any("broken" in line and "voice.toml" in line for line in lines)
+    assert any("voice try" in line for line in lines) and any("voice design" in line for line in lines)
+
+
+def test_use_warns_when_the_shell_overrides_the_setting_it_writes(rig: Rig) -> None:
+    rig.environ["JARVIS_VOICE_EN"] = "from-shell"
+    rig.run("design", "--lang", "en", "--takes", "1", "--no-play")
+    [take] = rig.takes.glob("*.wav")
+
+    output = rig.run("use", str(take), "--name", "my-butler")
+
+    assert "JARVIS_VOICE_EN=from-shell" in output and "unset" in output
+
+
+@pytest.mark.parametrize("record", ["[]", "not json", '{"language": "en"}'])
+def test_a_malformed_take_record_is_refused_cleanly(rig: Rig, tmp_path: Path, record: str) -> None:
+    clip = tmp_path / "take.wav"
+    clip.write_bytes(b"RIFF")
+    clip.with_suffix(".json").write_text(record)
+
+    with pytest.raises(VoicePackError, match="take record"):
+        rig.run("use", str(clip), "--name", "taken")
 
 
 def test_set_env_replaces_every_assignment_keeps_comments_and_appends_when_absent(tmp_path: Path) -> None:
@@ -180,3 +204,13 @@ def test_set_env_replaces_every_assignment_keeps_comments_and_appends_when_absen
     set_env(env, "JARVIS_VOICE_IT", "d")
 
     assert env.read_text() == "# JARVIS_VOICE_EN=commented\nJARVIS_VOICE_EN=c\nJARVIS_X=1\nJARVIS_VOICE_IT=d\n"
+
+
+def test_set_env_keeps_the_files_permissions(tmp_path: Path) -> None:
+    env = tmp_path / ".env"
+    env.write_text("JARVIS_X=1\n")
+    env.chmod(0o600)
+
+    set_env(env, "JARVIS_VOICE_EN", "c")
+
+    assert env.stat().st_mode & 0o777 == 0o600

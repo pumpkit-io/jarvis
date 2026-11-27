@@ -549,6 +549,10 @@ async def _follow_devices(listener: Any, player: Any, notice: Callable[[str], No
     await DeviceRoute([listener, player], notice).follow()
 
 
+def _ignored_by_voice(error: str) -> None:
+    sys.stderr.write(f"jarvis-hub: {error}; the voice command uses the default instead.\n")
+
+
 def _ignored_in_text(error: str) -> None:
     sys.stderr.write(f"jarvis-hub: {error}; using default listening settings with --text.\n")
 
@@ -617,11 +621,11 @@ def main() -> None:
     if args.command == "voice":
         try:
             repo = Path(__file__).resolve().parents[2]
-            settings = load_settings(repo, os.environ, ignore_voice=lambda error: None)
+            settings = load_settings(repo, os.environ, ignore_voice=_ignored_by_voice)
             voices = settings.voice.user_voices or settings.runtime_dir / "voices"
             Studio(settings.voice, voices.parent / "voice-takes", main_checkout(repo) / ".env", sys.stdout,
-                   MlxDesigner, MlxQwen3, play_on_speakers).run(args)
-        except (ConfigError, ValueError) as e:
+                   MlxDesigner, MlxQwen3, play_on_speakers, environ=os.environ).run(args)
+        except (ConfigError, ValueError, OSError) as e:
             sys.exit(f"jarvis-hub: {e}")
         return
 

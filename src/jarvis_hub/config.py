@@ -195,12 +195,24 @@ def load_settings(
             raise ConfigError(f"{name}={value!r} is not a voice name; ./jarvis voice list shows them")
         return value
 
-    def speaking() -> VoiceSettings:
+    user_voices = main / ".jarvis" / "voices"
+
+    def speaking(*, lenient: bool = False) -> VoiceSettings:
+        """What speech needs; leniently, each invalid setting falls back to its own default and no other."""
+
+        def read(parse: Callable[[], _Choice], default: _Choice) -> _Choice:
+            if not lenient:
+                return parse()
+            try:
+                return parse()
+            except ConfigError:
+                return default
+
         return VoiceSettings(
-            tts_engine=tts_engine(),
-            voice_en=voice_name("JARVIS_VOICE_EN", DEFAULT_VOICES["en"]),
-            voice_it=voice_name("JARVIS_VOICE_IT", DEFAULT_VOICES["it"]),
-            user_voices=main / ".jarvis" / "voices",
+            tts_engine=read(tts_engine, "qwen3"),
+            voice_en=read(lambda: voice_name("JARVIS_VOICE_EN", DEFAULT_VOICES["en"]), DEFAULT_VOICES["en"]),
+            voice_it=read(lambda: voice_name("JARVIS_VOICE_IT", DEFAULT_VOICES["it"]), DEFAULT_VOICES["it"]),
+            user_voices=user_voices,
         )
 
     def voice_settings() -> VoiceSettings:
@@ -244,10 +256,7 @@ def load_settings(
         if values.get("JARVIS_REMOTE") == "on" and configured_voice is not None:
             voice = configured_voice
         else:
-            try:
-                voice = speaking()
-            except ConfigError:
-                voice = VoiceSettings(user_voices=main / ".jarvis" / "voices")
+            voice = speaking(lenient=True)
 
     def count(name: str, default: int) -> int:
         value = get(name, str(default))

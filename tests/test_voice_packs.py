@@ -39,8 +39,9 @@ def test_a_pack_carries_its_clip_language_transcript_and_trim(tmp_path: Path) ->
     ('language = "fr"\ntranscript = "Bien sûr."\ntrim_db = 0\n', True, "en, it"),
     ('language = "en"\ntrim_db = 0\n', True, "transcript"),
     ('language = "en"\ntranscript = "Yes."\ntrim_db = "loud"\n', True, "trim_db"),
+    ('language = "en"\ntranscript = "Yes."\ntrim_db = nan\n', True, "trim_db"),
     ('language = "en"\ntranscript = "Yes.\n', True, "voice.toml"),
-], ids=["no clip", "unsupported language", "no transcript", "trim not a number", "broken toml"])
+], ids=["no clip", "unsupported language", "no transcript", "trim not a number", "trim not finite", "broken toml"])
 def test_a_broken_pack_is_refused_naming_what_is_wrong(tmp_path: Path, manifest: str, clip: bool, message: str) -> None:
     folder = make_pack(tmp_path, "broken", manifest, clip=clip)
 

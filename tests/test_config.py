@@ -393,3 +393,13 @@ def test_text_mode_keeps_the_chosen_voices_for_speak_and_the_iphone(checkout: Pa
 
     assert settings.voice.voice_it == "maggiordomo" and settings.voice.user_voices is not None
     assert ignored and "JARVIS_AEC" in ignored[0]
+
+
+def test_text_mode_keeps_the_chosen_engine_when_a_voice_name_is_bad(checkout: Path) -> None:
+    ignored: list[str] = []
+    environ = {"JARVIS_TTS_ENGINE": "kokoro", "JARVIS_VOICE_IT": "Butler"}
+
+    settings = load_settings(checkout, environ=environ, ignore_voice=ignored.append)
+
+    assert settings.voice.tts_engine == "kokoro" and settings.voice.voice_it == "jarvis-it"
+    assert ignored and "JARVIS_VOICE_IT" in ignored[0]

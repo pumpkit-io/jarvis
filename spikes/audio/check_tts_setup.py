@@ -29,7 +29,10 @@ PROBES: list[tuple[Lang, str]] = [
 
 
 def check(engine: TtsEngine) -> dict[str, object]:
-    voice = load_settings(Path(__file__).resolve().parents[2], os.environ, ignore_voice=lambda error: None).voice
+    def warn(error: str) -> None:
+        print(f'{error}; checking the default instead.', file=sys.stderr)
+
+    voice = load_settings(Path(__file__).resolve().parents[2], os.environ, ignore_voice=warn).voice
     synth = make_synthesizer(replace(voice, tts_engine=engine))
     began = time.perf_counter()
     synth.load()

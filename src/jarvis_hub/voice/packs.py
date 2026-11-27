@@ -5,6 +5,7 @@ The shipped packs live in `assets/voice/`; the User's own live in `.jarvis/voice
 
 from dataclasses import dataclass
 import json
+import math
 from pathlib import Path
 import re
 import shutil
@@ -23,8 +24,22 @@ MANIFEST = "voice.toml"
 VOICE_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 
 
+LANGUAGES: tuple[Lang, ...] = get_args(Lang)
+
+
 class VoicePackError(ValueError):
     pass
+
+
+def parse_language(value: object) -> Lang | None:
+    return next((lang for lang in LANGUAGES if lang == value), None)
+
+
+def check_new_name(name: str, user_voices: Path | None) -> None:
+    if not VOICE_NAME.match(name):
+        raise VoicePackError(f"{name!r} is not a voice name: use lowercase letters, digits and hyphens")
+    if name in _folders(user_voices):
+        raise VoicePackError(f"a voice named {name!r} already exists; pick another name")
 
 
 @dataclass(frozen=True)
@@ -53,13 +68,12 @@ def load_pack(folder: Path) -> VoicePack:
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as e:
         raise VoicePackError(f"{where} has an unreadable {MANIFEST}: {e}") from None
     transcript, trim = data.get("transcript"), data.get("trim_db")
-    languages: tuple[Lang, ...] = get_args(Lang)
-    language: Lang | None = next((lang for lang in languages if lang == data.get("language")), None)
+    language = parse_language(data.get("language"))
     if language is None:
-        raise VoicePackError(f"{where}: language {data.get('language')!r} is not one Jarvis speaks ({', '.join(languages)})")
+        raise VoicePackError(f"{where}: language {data.get('language')!r} is not one Jarvis speaks ({', '.join(LANGUAGES)})")
     if not isinstance(transcript, str) or not transcript.strip():
         raise VoicePackError(f"{where}: {MANIFEST} needs the clip's exact transcript")
-    if isinstance(trim, bool) or not isinstance(trim, int | float):
+    if isinstance(trim, bool) or not isinstance(trim, int | float) or not math.isfinite(trim):
         raise VoicePackError(f"{where}: trim_db must be a number of dB")
     if not (folder / CLIP).is_file():
         raise VoicePackError(f"{where} has no {CLIP}")
@@ -98,10 +112,7 @@ def save_pack(
     user_voices: Path, name: str, clip: Path, language: Lang, transcript: str, trim_db: float, *,
     description: str | None = None, model: str | None = None,
 ) -> VoicePack:
-    if not VOICE_NAME.match(name):
-        raise VoicePackError(f"{name!r} is not a voice name: use lowercase letters, digits and hyphens")
-    if name in _folders(user_voices):
-        raise VoicePackError(f"a voice named {name!r} already exists; pick another name")
+    check_new_name(name, user_voices)
     fields: dict[str, object] = {"language": language, "transcript": " ".join(transcript.split()),
                                  "trim_db": round(trim_db, 1), "description": description, "model": model}
     # A JSON string or number is valid TOML for these values.
