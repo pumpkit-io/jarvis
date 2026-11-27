@@ -58,7 +58,6 @@ import Observation
     public private(set) var speechID: String?
     private var lastCompletedClip: Int64 = -1
     private let stopPlayback: @MainActor () -> Void
-    private let audioSession: NativeTalkAudioSession
 
     var playbackDrainPending: Bool { pendingPlaybackDrain != nil }
 
@@ -233,7 +232,6 @@ import Observation
         self.sendCommand = sendCommand
         self.historyDirectory = historyDirectory; self.historyNow = historyNow; self.makeTransport = makeTransport
         let audioSession = NativeTalkAudioSession()
-        self.audioSession = audioSession
         let liveCapture = NativeLiveCaptureSource(session: audioSession)
         self.playback = playback ?? SpeechPlayer(session: audioSession,
                                                  output: LiveSpeechRoute(standard: NativeSpeechOutput(), capture: liveCapture))
@@ -481,7 +479,6 @@ import Observation
         // Foreground can restart metering while Talk cancellation waits.
         orbFrames?.cancel(); orbFrames = nil
         client = nil; credentials = nil; pairing = false; loading = false
-        syncAudioStandby()
         do {
             if let oldCredentials { try voiceStore?.clear(oldCredentials) }
         } catch { historyClearFailed = true }
@@ -514,15 +511,9 @@ import Observation
         }
     }
 
-    /// The audio session idles in standby only while the app is in the foreground and paired (ADR 0033).
-    private func syncAudioStandby() {
-        if foreground && credentials != nil { audioSession.standby() } else { audioSession.endStandby() }
-    }
-
     public func setForeground(_ value: Bool) async {
         foreground = value
         liveMode.setForeground(value)
-        syncAudioStandby()
         if value { startOrbFrames() }
         else { orbFrames?.cancel(); orbFrames = nil; orb.reset(); streamingReply = nil }
         foregroundGeneration &+= 1
@@ -574,7 +565,6 @@ import Observation
             playback.markMissed(replyID: String(row.id.dropFirst(6)))
         }
         self.credentials = credentials; self.client = client; setConnection(.connecting)
-        syncAudioStandby()
         startOrbFrames()
         let outbox = Outbox(store: OutboxStore(directory: outboxDirectory, credentials: credentials),
                             transport: makeOutboxTransport(), credentials: credentials, now: historyNow)
