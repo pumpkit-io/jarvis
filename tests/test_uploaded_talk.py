@@ -414,7 +414,7 @@ async def test_remote_text_launch_transcribes_without_any_mac_audio_device(tmp_p
     monkeypatch.setattr(engines, 'load_engines', no_audio)
     from tests.fakes import FakeTts
     synthesizers: list[FakeTts] = []
-    def tts(engine: str) -> FakeTts:
+    def tts(voice: object) -> FakeTts:
         fake = FakeTts()
         synthesizers.append(fake)
         return fake
@@ -906,7 +906,7 @@ async def test_interactive_terminal_echoes_remote_typing_once_and_preserves_loca
             super().__init__(**options)
             doors.append(self)
     monkeypatch.setattr(entry, 'Door', CaptureDoor)
-    def tts(engine: str) -> FakeTts:
+    def tts(voice: object) -> FakeTts:
         return FakeTts()
     monkeypatch.setattr(entry, 'make_synthesizer', tts)
     config = replace(settings(tmp_path), remote=True, remote_port=0)

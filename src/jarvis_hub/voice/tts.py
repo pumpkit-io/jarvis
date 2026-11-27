@@ -1,10 +1,10 @@
-"""Text-to-speech in the Hub's own process, on MLX: Qwen3-TTS cloning one reference clip per language (ADR 0029),
+"""Text-to-speech in the Hub's own process, on MLX: Qwen3-TTS cloning one voice pack per language (ADR 0029, 0035),
 or Kokoro, the Phase 0 engine kept as the fallback (docs/notes/phase-0-spikes.md, `## Audio`).
 
 Every engine import is inside `load()`, so text mode never pays for them.
 """
 
-from collections.abc import Callable, Generator, Iterable, Iterator
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 import math
 from pathlib import Path
@@ -14,8 +14,9 @@ from typing import Any, Protocol, cast
 
 import numpy as np
 
-from jarvis_hub.config import TtsEngine
+from jarvis_hub.config import TtsEngine, VoiceSettings
 from jarvis_hub.voice.language import Lang
+from jarvis_hub.voice.packs import DEFAULT_VOICES, LANGUAGE_NAMES, VoicePackError, find_pack
 from jarvis_hub.voice.player import Samples
 
 KOKORO_MODEL = "mlx-community/Kokoro-82M-bf16"
@@ -109,7 +110,6 @@ class KokoroSynthesizer:
 
 # 8-bit: bf16 put the audio stack over its 4 GB budget and was slower (ADR 0029).
 QWEN3_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit"
-VOICE_ASSETS = Path(__file__).resolve().parents[3] / "assets" / "voice"
 # Whole sentences take over a second; the first half-second piece is ready in about 0.4 s.
 STREAM_INTERVAL_S = 0.5
 # Kokoro's English voice speaks at this level, on which the speech gate, barge-in thresholds and echo measurements
@@ -133,25 +133,6 @@ class ClonedVoice:
     trim_db: float
 
 
-QWEN3_VOICES: dict[Lang, ClonedVoice] = {
-    "en": ClonedVoice(
-        "jarvis-en", VOICE_ASSETS / "jarvis-en.wav",
-        "Of course. I've checked the three repositories, and everything is running smoothly. "
-        "The only open question is whether we ship the new release tonight or wait until Monday.",
-        "English",
-        -2.0,
-    ),
-    "it": ClonedVoice(
-        "jarvis-it", VOICE_ASSETS / "jarvis-it.wav",
-        "Certo. Ho controllato i tre repository e funziona tutto senza problemi. "
-        "L'unica domanda aperta è se pubblichiamo la nuova versione stasera o aspettiamo lunedì.",
-        "Italian",
-        # The Italian reference clip is 2.5 LU louder than the English one, and its clone follows it.
-        -4.3,
-    ),
-}
-
-
 class Cloner(Protocol):
     @property
     def sample_rate(self) -> int: ...
@@ -160,28 +141,35 @@ class Cloner(Protocol):
 
 
 class Qwen3Synthesizer:
-    """Streams each sentence in pieces of about `STREAM_INTERVAL_S`, cloning the voice of its language."""
+    """Streams each sentence in pieces of about `STREAM_INTERVAL_S`, cloning the voice pack chosen for its language."""
 
     sample_rate = 24_000
 
     def __init__(
-        self, voices: dict[Lang, ClonedVoice] = QWEN3_VOICES, load_model: Callable[[], Cloner] | None = None
+        self, voices: Mapping[Lang, str] = DEFAULT_VOICES, user_voices: Path | None = None,
+        load_model: Callable[[], Cloner] | None = None,
     ) -> None:
-        self._voices = voices
-        self._by_name = {voice.name: voice for voice in voices.values()}
-        self._load_model = load_model or _MlxQwen3
+        self._names = dict(voices)
+        self.user_voices = user_voices
+        self._by_name: dict[str, ClonedVoice] = {}
+        self._load_model = load_model or MlxQwen3
         self._model: Cloner | None = None
 
     def load(self) -> None:
-        missing = [str(voice.clip) for voice in self._voices.values() if not voice.clip.is_file()]
-        if missing:
-            raise FileNotFoundError(
-                f"missing reference clip {', '.join(missing)}; restore it from git or set JARVIS_TTS_ENGINE=kokoro"
-            )
+        for lang, name in self._names.items():
+            setting = f"JARVIS_VOICE_{lang.upper()}={name}"
+            try:
+                pack = find_pack(name, self.user_voices)
+            except VoicePackError as e:
+                raise VoicePackError(f"{setting}: {e} Or set JARVIS_TTS_ENGINE=kokoro.") from None
+            if pack.language != lang:
+                raise VoicePackError(f"{setting}: voice {name!r} speaks {LANGUAGE_NAMES[pack.language]}, "
+                                     f"not {LANGUAGE_NAMES[lang]}")
+            self._by_name[name] = ClonedVoice(name, pack.clip, pack.transcript, LANGUAGE_NAMES[lang], pack.trim_db)
         self._model = self._load_model()
 
     def voice_for(self, lang: Lang) -> str:
-        return self._voices[lang].name
+        return self._names[lang]
 
     def stream(self, text: str, voice: str) -> Generator[Piece]:
         if self._model is None:
@@ -215,7 +203,7 @@ def _resample(audio: Samples, src: int, dst: int) -> Samples:
     return np.asarray(cast(Any, signal).resample_poly(audio, dst // g, src // g), dtype=np.float32)
 
 
-class _MlxQwen3:
+class MlxQwen3:
     """mlx-audio's Qwen3-TTS, which caches each clip's encoded speech after its first use."""
 
     def __init__(self) -> None:
@@ -235,18 +223,27 @@ class _MlxQwen3:
     def stream(self, text: str, voice: ClonedVoice) -> Iterator[Samples]:
         from mlx_audio.utils import load_audio  # pyright: ignore[reportMissingTypeStubs, reportUnknownVariableType]
 
-        if voice.name not in self._references:
-            self._references[voice.name] = load_audio(str(voice.clip), sample_rate=self.sample_rate)
+        # By clip, not name: `./jarvis voice` auditions every take under the same name.
+        if str(voice.clip) not in self._references:
+            self._references[str(voice.clip)] = load_audio(str(voice.clip), sample_rate=self.sample_rate)
         # Newlines would split the text into separately generated segments.
         for chunk in self._model.generate(
-            text=" ".join(text.split()), ref_audio=self._references[voice.name], ref_text=voice.transcript,
+            text=" ".join(text.split()), ref_audio=self._references[str(voice.clip)], ref_text=voice.transcript,
             lang_code=voice.language, stream=True, streaming_interval=STREAM_INTERVAL_S,
         ):
             yield np.asarray(chunk.audio, dtype=np.float32)
 
 
-TTS_ENGINES: dict[TtsEngine, Callable[[], Synthesizer]] = {"qwen3": Qwen3Synthesizer, "kokoro": KokoroSynthesizer}
+def _qwen3(voice: VoiceSettings) -> Synthesizer:
+    return Qwen3Synthesizer({"en": voice.voice_en, "it": voice.voice_it}, voice.user_voices)
 
 
-def make_synthesizer(engine: TtsEngine) -> Synthesizer:
-    return TTS_ENGINES[engine]()
+def _kokoro(voice: VoiceSettings) -> Synthesizer:
+    return KokoroSynthesizer()
+
+
+TTS_ENGINES: dict[TtsEngine, Callable[[VoiceSettings], Synthesizer]] = {"qwen3": _qwen3, "kokoro": _kokoro}
+
+
+def make_synthesizer(voice: VoiceSettings) -> Synthesizer:
+    return TTS_ENGINES[voice.tts_engine](voice)

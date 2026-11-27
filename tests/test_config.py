@@ -220,7 +220,7 @@ def test_text_mode_warns_about_a_bad_voice_setting_and_starts_on_the_defaults(ch
     (checkout / ".env").write_text("JARVIS_AEC=maybe\nJARVIS_FOLLOWUP_SECONDS=8\nJARVIS_MAX_SUBAGENTS=2\n")
     warnings: list[str] = []
     settings = load_settings(checkout, environ={}, ignore_voice=warnings.append)
-    assert settings.voice == VoiceSettings()
+    assert settings.voice == VoiceSettings(user_voices=checkout.resolve() / ".jarvis" / "voices")
     assert settings.max_subagents == 2
     assert len(warnings) == 1 and "JARVIS_AEC" in warnings[0]
 
@@ -363,3 +363,53 @@ def test_text_mode_reports_an_unknown_tts_engine_and_falls_back_to_the_default(c
 
     assert settings.voice.tts_engine == "qwen3"
     assert ignored and "JARVIS_TTS_ENGINE" in ignored[0]
+
+
+def test_jarvis_speaks_the_shipped_voices_and_finds_the_users_own_in_the_runtime_folder(checkout: Path) -> None:
+    voice = load_settings(checkout, environ={}).voice
+
+    assert (voice.voice_en, voice.voice_it) == ("jarvis-en", "jarvis-it")
+    assert voice.user_voices == checkout.resolve() / ".jarvis" / "voices"
+
+
+def test_each_language_can_speak_a_voice_of_the_users_choosing(checkout: Path) -> None:
+    (checkout / ".env").write_text("JARVIS_VOICE_EN=my-butler\n")
+
+    voice = load_settings(checkout, environ={"JARVIS_VOICE_IT": "maggiordomo-2"}).voice
+
+    assert (voice.voice_en, voice.voice_it) == ("my-butler", "maggiordomo-2")
+
+
+def test_a_voice_name_that_is_not_a_plain_name_is_refused(checkout: Path) -> None:
+    with pytest.raises(ConfigError, match="JARVIS_VOICE_EN"):
+        load_settings(checkout, environ={"JARVIS_VOICE_EN": "../../etc"})
+
+
+def test_text_mode_keeps_the_chosen_voices_for_speak_and_the_iphone(checkout: Path) -> None:
+    ignored: list[str] = []
+    environ = {"JARVIS_VOICE_IT": "maggiordomo", "JARVIS_AEC": "maybe"}
+
+    settings = load_settings(checkout, environ=environ, ignore_voice=ignored.append)
+
+    assert settings.voice.voice_it == "maggiordomo" and settings.voice.user_voices is not None
+    assert ignored and "JARVIS_AEC" in ignored[0]
+
+
+def test_text_mode_keeps_the_chosen_engine_when_a_voice_name_is_bad(checkout: Path) -> None:
+    ignored: list[str] = []
+    environ = {"JARVIS_TTS_ENGINE": "kokoro", "JARVIS_VOICE_IT": "Butler"}
+
+    settings = load_settings(checkout, environ=environ, ignore_voice=ignored.append)
+
+    assert settings.voice.tts_engine == "kokoro" and settings.voice.voice_it == "jarvis-it"
+    assert ignored and "JARVIS_VOICE_IT" in ignored[0]
+
+
+def test_text_mode_reports_every_invalid_speech_setting_not_just_the_first(checkout: Path) -> None:
+    ignored: list[str] = []
+    environ = {"JARVIS_TTS_ENGINE": "kokro", "JARVIS_VOICE_EN": "Bad"}
+
+    settings = load_settings(checkout, environ=environ, ignore_voice=ignored.append)
+
+    assert (settings.voice.tts_engine, settings.voice.voice_en) == ("qwen3", "jarvis-en")
+    assert [any(key in e for e in ignored) for key in ("JARVIS_TTS_ENGINE", "JARVIS_VOICE_EN")] == [True, True]

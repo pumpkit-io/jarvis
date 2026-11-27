@@ -1,0 +1,5 @@
+language = "en"
+transcript = "Of course. I've checked the three repositories, and everything is running smoothly. The only open question is whether we ship the new release tonight or wait until Monday."
+trim_db = -2.0
+description = "A calm, composed, deep adult male voice, mid-low pitch, precise diction, dry, like a refined AI butler. Medium pace, warm but understated. Native speaker of American English, neutral accent."
+model = "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16"
