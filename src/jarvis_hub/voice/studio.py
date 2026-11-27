@@ -140,10 +140,15 @@ def set_env(path: Path, key: str, value: str) -> None:
     target = path.resolve()
     mode = target.stat().st_mode & 0o777 if target.is_file() else 0o600
     staging = target.with_name(f".{target.name}.partial")
-    with os.fdopen(os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode), "w", encoding="utf-8") as out:
-        os.fchmod(out.fileno(), mode)
-        out.write("\n".join(kept) + "\n")
-    os.replace(staging, target)
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+        with os.fdopen(os.open(staging, flags, mode), "w", encoding="utf-8") as out:
+            os.fchmod(out.fileno(), mode)
+            out.write("\n".join(kept) + "\n")
+        os.replace(staging, target)
+    except BaseException:
+        staging.unlink(missing_ok=True)
+        raise
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
