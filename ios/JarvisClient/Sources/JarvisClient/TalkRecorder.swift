@@ -13,25 +13,73 @@ public extension TalkAudioSession {
     func releasePlayback() { release() }
 }
 
+/// The audio session setups the app uses; each maps to one category, mode and option set.
+enum AudioSessionSetup: Equatable { case standby, recording, playback }
+
+/// The seam to `AVAudioSession`, so tests can check which calls a press, a release and a reply make.
+@MainActor protocol AudioSessionDriver: AnyObject {
+    /// Applies `setup`; `activate` also activates the session. A setup applied to an active session leaves it active.
+    func apply(_ setup: AudioSessionSetup, activate: Bool) throws
+    func deactivate()
+}
+
+@MainActor final class NativeAudioSessionDriver: AudioSessionDriver {
+    func apply(_ setup: AudioSessionSetup, activate: Bool) throws {
+        #if os(iOS)
+        let session = AVAudioSession.sharedInstance()
+        switch setup {
+        case .standby: try session.setCategory(.playAndRecord, mode: .default, options: NativeTalkAudioSession.standbyOptions)
+        case .recording: try session.setCategory(.playAndRecord, mode: .default, options: NativeTalkAudioSession.recordingOptions)
+        case .playback: try session.setCategory(.playback, mode: .spokenAudio, options: NativeTalkAudioSession.playbackOptions)
+        }
+        if activate { try session.setActive(true) }
+        #endif
+    }
+    func deactivate() {
+        #if os(iOS)
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        #endif
+    }
+}
+
 @MainActor public final class NativeTalkAudioSession: TalkAudioSession {
     private enum Owner { case recording, playback }
     private var owner: Owner?
     /// While Live mode captures, replies play in its play-and-record session instead of switching it to playback.
     private var live = false
+    /// While the app is in the foreground and paired, the session idles in `standby` between uses (ADR 0033).
+    private var armed = false
+    /// True while the session is active in the `standby` setup.
+    private var standingBy = false
+    private let driver: any AudioSessionDriver
     #if os(iOS)
     /// Music ducks instead of stopping, AirPods stay in A2DP, and the iPhone's microphone records (ADR 0032).
     public static let recordingOptions: AVAudioSession.CategoryOptions = [.duckOthers, .defaultToSpeaker, .allowBluetoothA2DP]
+    /// The recording setup without the duck: the session is active and music plays at its own level.
+    public static let standbyOptions: AVAudioSession.CategoryOptions = [.mixWithOthers, .defaultToSpeaker, .allowBluetoothA2DP]
     /// Music ducks under speech and a podcast pauses; music returns when the session deactivates, and the podcast may resume.
     public static let playbackOptions: AVAudioSession.CategoryOptions = [.duckOthers, .interruptSpokenAudioAndMixWithOthers]
     #endif
-    public init() {}
+    public init() { driver = NativeAudioSessionDriver() }
+    init(driver: any AudioSessionDriver) { self.driver = driver }
+
+    /// Holds the session active, mixing and not ducking, so a Talk's press and release only change the duck.
+    /// Activating or deactivating a play-and-record session reconfigures the audio hardware, which briefly cuts music.
+    public func standby() {
+        armed = true
+        guard owner == nil, !live, !standingBy else { return }
+        enterStandby()
+    }
+    /// Gives the audio session back, so other apps' audio and a paused podcast are fully restored.
+    public func endStandby() {
+        armed = false
+        guard standingBy, owner == nil, !live else { return }
+        deactivate()
+    }
     public func activateLive() throws {
         guard owner != .recording else { throw HubProtocolError.invalidFrame }
-        #if os(iOS)
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .default, options: Self.recordingOptions)
-        try session.setActive(true)
-        #endif
+        try driver.apply(.recording, activate: true)
+        standingBy = false
         live = true
     }
     public func releaseLive() {
@@ -41,22 +89,16 @@ public extension TalkAudioSession {
     }
     public func activate() throws {
         guard owner == nil || owner == .recording else { throw HubProtocolError.invalidFrame }
-        #if os(iOS)
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .default, options: Self.recordingOptions)
-        try session.setActive(true)
-        #endif
+        try driver.apply(.recording, activate: !standingBy)
+        standingBy = false
         owner = .recording
     }
     public func activatePlayback() throws {
         if owner == .playback { return }
         guard owner == nil || owner == .playback else { throw HubProtocolError.invalidFrame }
         if live { owner = .playback; return }
-        #if os(iOS)
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playback, mode: .spokenAudio, options: Self.playbackOptions)
-        try session.setActive(true)
-        #endif
+        try driver.apply(.playback, activate: true)
+        standingBy = false
         owner = .playback
     }
     public func releasePlayback() {
@@ -65,14 +107,20 @@ public extension TalkAudioSession {
     }
     public func release() {
         guard owner == .recording else { return }
-        deactivate()
+        // Staying active and only dropping the duck lets the music rise without the hardware reconfiguring.
+        if armed, !live, (try? driver.apply(.standby, activate: false)) != nil {
+            owner = nil; standingBy = true
+        } else { deactivate() }
     }
     private func deactivate() {
         owner = nil
         guard !live else { return }
-        #if os(iOS)
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        #endif
+        driver.deactivate()
+        standingBy = false
+        if armed { enterStandby() }
+    }
+    private func enterStandby() {
+        standingBy = (try? driver.apply(.standby, activate: true)) != nil
     }
 }
 
