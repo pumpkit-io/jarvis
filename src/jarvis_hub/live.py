@@ -24,7 +24,8 @@ def zone(name: str | None) -> ZoneInfo | None:
         return None
     try:
         return ZoneInfo(name)
-    except (ZoneInfoNotFoundError, ValueError):
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        # OSError: a name that is a folder of zones, such as "America", or one the database cannot read.
         return None
 
 

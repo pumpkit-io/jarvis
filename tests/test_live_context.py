@@ -34,6 +34,8 @@ async def test_a_mac_line_carries_the_macs_local_time_and_zone() -> None:
 @pytest.mark.parametrize(("header", "now"), [
     ({"X-Jarvis-Time-Zone": "Asia/Tokyo"}, "<now>2026-11-27 22:05 Friday, Asia/Tokyo (UTC+09:00)</now>"),
     ({"X-Jarvis-Time-Zone": "../../etc/passwd"}, "<now>2026-11-27 14:05 Friday, Europe/Rome (UTC+01:00)</now>"),
+    # A folder of zones, not a zone: the zone database refuses it with an OSError, not a missing-zone error.
+    ({"X-Jarvis-Time-Zone": "America"}, "<now>2026-11-27 14:05 Friday, Europe/Rome (UTC+01:00)</now>"),
     ({}, "<now>2026-11-27 14:05 Friday, Europe/Rome (UTC+01:00)</now>"),
 ])
 async def test_a_phone_line_carries_the_zone_the_phone_reports_else_the_macs(
