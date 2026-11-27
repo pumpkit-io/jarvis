@@ -18,12 +18,18 @@ public extension TalkAudioSession {
     private var owner: Owner?
     /// While Live mode captures, replies play in its play-and-record session instead of switching it to playback.
     private var live = false
+    #if os(iOS)
+    /// Music ducks instead of stopping, AirPods stay in A2DP, and the iPhone's microphone records (ADR 0032).
+    public static let recordingOptions: AVAudioSession.CategoryOptions = [.duckOthers, .defaultToSpeaker, .allowBluetoothA2DP]
+    /// Music ducks under speech and a podcast pauses; both return when the session deactivates with a notification.
+    public static let playbackOptions: AVAudioSession.CategoryOptions = [.duckOthers, .interruptSpokenAudioAndMixWithOthers]
+    #endif
     public init() {}
     public func activateLive() throws {
         guard owner != .recording else { throw HubProtocolError.invalidFrame }
         #if os(iOS)
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
+        try session.setCategory(.playAndRecord, mode: .default, options: Self.recordingOptions)
         try session.setActive(true)
         #endif
         live = true
@@ -37,7 +43,7 @@ public extension TalkAudioSession {
         guard owner == nil || owner == .recording else { throw HubProtocolError.invalidFrame }
         #if os(iOS)
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
+        try session.setCategory(.playAndRecord, mode: .default, options: Self.recordingOptions)
         try session.setActive(true)
         #endif
         owner = .recording
@@ -48,7 +54,7 @@ public extension TalkAudioSession {
         if live { owner = .playback; return }
         #if os(iOS)
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playback, mode: .spokenAudio, options: [])
+        try session.setCategory(.playback, mode: .spokenAudio, options: Self.playbackOptions)
         try session.setActive(true)
         #endif
         owner = .playback

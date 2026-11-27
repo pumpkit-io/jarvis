@@ -8,6 +8,8 @@ This changes ADR 0025 in one respect: while Live mode is on, audio goes up conti
 
 The User decided this on 2026-11-23.
 
+Since ADR 0032, Live mode's session ducks other audio instead of stopping it, and records from the iPhone's microphone while AirPods stay in A2DP.
+
 ## Considered Options
 
 - Wake word detection and the voice state machine on the phone, sending only the speech that follows. Rejected: it is a second copy of the speech logic that ADR 0025 kept on the Mac, and the two would drift in timing and behaviour.

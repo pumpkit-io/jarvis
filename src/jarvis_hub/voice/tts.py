@@ -112,9 +112,9 @@ QWEN3_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit"
 VOICE_ASSETS = Path(__file__).resolve().parents[3] / "assets" / "voice"
 # Whole sentences take over a second; the first half-second piece is ready in about 0.4 s.
 STREAM_INTERVAL_S = 0.5
-# Both cloned voices measured about 2 dB louder than Kokoro, whose level the speech gate, barge-in thresholds and
-# echo measurements were tuned on. A fixed gain, so pieces of one sentence keep their relative level.
-GAIN = 10 ** (-2.0 / 20)
+# Kokoro's English voice speaks at this level, on which the speech gate, barge-in thresholds and echo measurements
+# were tuned. Every cloned voice is trimmed to it, and the iPhone raises it to its own target (ADR 0032).
+SPEECH_LUFS = -25.0
 # Within the 15 to 18.5 both voices speak, so a piece's words are seldom early or late.
 CHARS_PER_SECOND = 17.0
 # Carries words the estimate had not reached when the audio ended.
@@ -129,6 +129,8 @@ class ClonedVoice:
     clip: Path
     transcript: str
     language: str
+    # Brings this voice to SPEECH_LUFS; fixed, so pieces of one sentence keep their relative level.
+    trim_db: float
 
 
 QWEN3_VOICES: dict[Lang, ClonedVoice] = {
@@ -137,12 +139,15 @@ QWEN3_VOICES: dict[Lang, ClonedVoice] = {
         "Of course. I've checked the three repositories, and everything is running smoothly. "
         "The only open question is whether we ship the new release tonight or wait until Monday.",
         "English",
+        -2.0,
     ),
     "it": ClonedVoice(
         "jarvis-it", VOICE_ASSETS / "jarvis-it.wav",
         "Certo. Ho controllato i tre repository e funziona tutto senza problemi. "
         "L'unica domanda aperta è se pubblichiamo la nuova versione stasera o aspettiamo lunedì.",
         "Italian",
+        # The Italian reference clip is 2.5 LU louder than the English one, and its clone follows it.
+        -4.3,
     ),
 }
 
@@ -184,6 +189,7 @@ class Qwen3Synthesizer:
         if voice not in self._by_name:
             raise ValueError(f"unknown voice {voice!r}; this engine speaks {', '.join(self._by_name)}")
         model = self._model
+        gain = 10 ** (self._by_name[voice].trim_db / 20)
         words = text.split()
         said, spoken_s = 0, 0.0
         for piece in model.stream(text, self._by_name[voice]):
@@ -194,7 +200,7 @@ class Qwen3Synthesizer:
             upto = said
             while upto < len(words) and len(" ".join(words[: upto + 1])) <= spoken_s * CHARS_PER_SECOND:
                 upto += 1
-            yield " ".join(words[said:upto]), np.clip(audio * GAIN, -1.0, 1.0).astype(np.float32)
+            yield " ".join(words[said:upto]), np.clip(audio * gain, -1.0, 1.0).astype(np.float32)
             said = upto
         if said < len(words):
             yield " ".join(words[said:]), np.zeros(round(TAIL_S * self.sample_rate), dtype=np.float32)

@@ -204,7 +204,7 @@ struct DiscardBin: View {
             loadedBytes = pcm.count
         }
         if !ownsSession {
-            try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+            try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio, options: NativeTalkAudioSession.playbackOptions)
             ownsSession = (try? AVAudioSession.sharedInstance().setActive(true)) != nil
         }
         playing = player?.play() ?? false

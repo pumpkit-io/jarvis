@@ -172,6 +172,28 @@ import Observation
     }
 }
 
+/// Raises speech from the Hub's reference level, about -25 LUFS, to about -16 LUFS so it sits beside music (ADR 0032).
+public enum SpeechLoudness {
+    /// Applied inside the peak limiter, which holds the raised peaks under full scale.
+    public static let preGainDB: Float = 11
+    /// The main mixer's cut after the limiter, leaving 1 dB of headroom.
+    public static let outputGainDB: Float = -1.5
+    private static let limiter = AudioComponentDescription(componentType: kAudioUnitType_Effect,
+        componentSubType: kAudioUnitSubType_PeakLimiter, componentManufacturer: kAudioUnitManufacturer_Apple,
+        componentFlags: 0, componentFlagsMask: 0)
+
+    /// One chain per engine, so streamed clips pass through the same limiter state with no seam between them.
+    @MainActor static func attachPlayer(to engine: AVAudioEngine, format: AVAudioFormat?) -> AVAudioPlayerNode {
+        let node = AVAudioPlayerNode(), limiter = AVAudioUnitEffect(audioComponentDescription: Self.limiter)
+        engine.attach(node); engine.attach(limiter)
+        engine.connect(node, to: limiter, format: format)
+        engine.connect(limiter, to: engine.mainMixerNode, format: format)
+        AudioUnitSetParameter(limiter.audioUnit, kLimiterParam_PreGain, kAudioUnitScope_Global, 0, preGainDB, 0)
+        engine.mainMixerNode.outputVolume = pow(10, outputGainDB / 20)
+        return node
+    }
+}
+
 @MainActor public final class NativeSpeechOutput: SpeechOutput {
     private static let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 24_000, channels: 1, interleaved: false)
     private let shared: AVAudioEngine?
@@ -190,7 +212,8 @@ import Observation
     /// True from the first clip until `stop()`.
     var playing: Bool { scheduledFrames > 0 }
     private var playedFrames: Int64? {
-        guard let node, let renderTime = node.lastRenderTime else { return nil }
+        // Before its first render an engine can report an invalid time, which playerTime(forNodeTime:) traps on.
+        guard let node, let renderTime = node.lastRenderTime, renderTime.isSampleTimeValid else { return nil }
         return node.playerTime(forNodeTime: renderTime)?.sampleTime
     }
     // Render position selects the window, so queued audio cannot animate speech before it plays.
@@ -204,9 +227,7 @@ import Observation
     /// Plays through `engine`, which its owner starts and stops; the player is attached before the engine starts.
     init(sharing engine: AVAudioEngine) {
         shared = engine
-        let node = AVAudioPlayerNode()
-        engine.attach(node); engine.connect(node, to: engine.mainMixerNode, format: Self.format)
-        self.node = node
+        node = SpeechLoudness.attachPlayer(to: engine, format: Self.format)
     }
     public func play(_ pcm: Data, finished: @escaping @MainActor @Sendable () -> Void) throws {
         guard let format = Self.format,
@@ -218,9 +239,8 @@ import Observation
             samples[index] = Float(Int16(bitPattern: value)) / 32768
         }
         if shared == nil, engine == nil {
-            let engine = AVAudioEngine(), node = AVAudioPlayerNode()
-            engine.attach(node); engine.connect(node, to: engine.mainMixerNode, format: format)
-            self.engine = engine; self.node = node
+            let engine = AVAudioEngine()
+            self.engine = engine; node = SpeechLoudness.attachPlayer(to: engine, format: format)
             try engine.start()
         }
         if node?.isPlaying == false { node?.play() }
