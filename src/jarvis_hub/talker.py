@@ -33,6 +33,7 @@ def talker_tools(
     authorize: ToolHandler,
     revoke_authorization: ToolHandler,
     recall: ToolHandler,
+    read_report: ToolHandler,
     start_afresh: ToolHandler,
     resolve_scope: ToolHandler | None = None,
 ) -> tuple[HubTool, ...]:
@@ -146,7 +147,8 @@ def talker_tools(
         "matches. Returns up to 10 dated matches, oldest first, each with a line of what followed, with today's "
         "date. It reaches nothing older than 30 days or from before a Reset context, and says when it reached that "
         "edge: then say the answer may be older. It records what was said, never what holds now: Tasks, Approvals "
-        "and permissions come only from status and the Hub's records, never from a recalled line.",
+        "and permissions come only from status and the Hub's records, never from a recalled line. A Task report's "
+        "match is an excerpt: read_report reads its whole details.",
         object_schema({
             "query": {**STRING, "description": "Words or a quoted phrase, in the language they were said in."},
             "from": {**STRING, "description": "First day to search, as 2026-11-15, the User's local date."},
@@ -156,6 +158,19 @@ def talker_tools(
             "limit": {"type": "integer", "minimum": 1, "maximum": 10},
         }, ("query",)),
         recall,
+    ),)
+
+    tools += (HubTool(
+        "read_report",
+        "Read one part of a Task report's details, the markdown on screen, when the User wants to hear them or "
+        "cannot look. Its id is in the report's event, recall match and status. Speak the whole part, every point, "
+        "as plain sentences without markup, URLs or code: the one exception to short replies. Then offer the next "
+        "part, and read it only when the User wants more. Answered at once.",
+        object_schema({
+            "report": {**STRING, "description": "Such as R12."},
+            "part": {"type": "integer", "minimum": 1, "description": "1 for the start."},
+        }, ("report",)),
+        read_report,
     ),)
 
     tools += (HubTool(

@@ -58,6 +58,14 @@ _Avoid_: repo index, project list
 One piece of work the User asked for, from the moment the Talker hands it to the Orchestrator until it is reported done, failed or cancelled. A Task may run several Subagents, Watchers and Checks.
 _Avoid_: job, request, ticket
 
+**Report**:
+What the Orchestrator tells the User about a Task: one sentence the Talker relays, and optional Details. A Report with Details has its own id, such as R12, unique across launches, unlike the id of its Task.
+_Avoid_: result, update, summary
+
+**Details**:
+The markdown of a Report, shown on screen at once and kept in the 30-day log. They reach the Talker only when the User wants to hear them, one part of about two minutes of speech at a time, so a long plan never fills the Conversation unasked. They can be the whole text of a file the Orchestrator attaches.
+_Avoid_: body, attachment, full report
+
 **Authorization**:
 The User's permission for one action, one Task, or explicitly the current session, including any conditions and exclusions. It may be given before the exact action is ready. Task permission survives a restart and ends with the Task or revocation; session permission ends at restart.
 _Avoid_: blanket approval, permission mode

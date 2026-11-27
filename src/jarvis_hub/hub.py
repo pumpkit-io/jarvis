@@ -56,7 +56,8 @@ from jarvis_hub.spoken import SpokenScopes
 from jarvis_hub.subagent_rules import connector_check
 from jarvis_hub.subagents import Subagent, SubagentSetup, Subagents, ended_event, kept_line, over_time_event
 from jarvis_hub.talker import talker_tools
-from jarvis_hub.event_log import EventOutput, recall
+from jarvis_hub.details import file_details, read_report, spoken_parts
+from jarvis_hub.event_log import EventOutput, recall, report_id
 from jarvis_hub.tasks import Task, Tasks, no_task
 from jarvis_hub.voice.language import Lang, detect_language
 from jarvis_hub.voice.speech import ClipName
@@ -293,9 +294,12 @@ def interrupted_message(spoken: str) -> str:
 
 
 def event_message(
-    source: str, text: str, task: str, *, needs_user: bool = False, details: bool = False, approval: str | None = None
+    source: str, text: str, task: str, *, needs_user: bool = False, details: bool = False, approval: str | None = None,
+    report: str | None = None, parts: int = 0,
 ) -> str:
     on_screen = ' details="on screen"' if details else ""
+    if report:
+        on_screen += f' report="{report}" parts="{parts}"'
     flag = "true" if needs_user else "false"
     asks = f' approval="{approval}"' if approval else ""
     return (
@@ -520,6 +524,7 @@ class Hub:
             authorize=self._authorize,
             revoke_authorization=self._revoke_authorization,
             recall=self._recall,
+            read_report=self._read_report,
             start_afresh=self._start_afresh,
             resolve_scope=self._resolve_scope,
         )
@@ -1181,9 +1186,11 @@ class Hub:
         details: str | None = None,
         approval: str | None = None,
         backlog: bool = False,
+        report: str | None = None,
     ) -> None:
         message = event_message(
-            source, text, task, needs_user=needs_user, details=details is not None, approval=approval
+            source, text, task, needs_user=needs_user, details=details is not None, approval=approval,
+            report=report, parts=len(spoken_parts(details)) if report and details else 0,
         )
         urgent = False
         if self._floor is not None or self.clients.focus != TERMINAL:
@@ -2937,6 +2944,11 @@ class Hub:
             return "Recall needs the event log, which this Hub does not keep."
         return recall(log, args)
 
+    async def _read_report(self, args: dict[str, Any]) -> str:
+        if (log := self._output.log) is None:
+            return "Reading a report needs the event log, which this Hub does not keep."
+        return read_report(log, args)
+
     def _answers_floor(self) -> bool:
         """Whether this turn answers the voice floor's spoken turn, on the Mac or a Live mode phone."""
         owner = self._active_spoken_owner
@@ -2986,6 +2998,14 @@ class Hub:
         if not spoken:
             return "spoken is required."
         details = str(args.get("details_markdown") or "").strip() or None
+        if args.get("details_file"):
+            try:
+                attached = file_details(args["details_file"])
+            except ValueError as e:
+                return str(e)
+            except OSError as e:
+                return f"Could not read {args['details_file']}: {e}."
+            details = f"{details}\n\n{attached}" if details else attached
         needs_user = args.get("needs_user") in (True, "true")
         approval: Approval | None = None
         authorization = None
@@ -3018,14 +3038,15 @@ class Hub:
             # The screen names the exact action in the Hub's words, whatever the sentence says.
             exact = f"**Approval {approval.id}:** {approval.text}"
             details = f"{exact}\n\n{details}" if details else exact
-        task.report(spoken, needs_user=needs_user, live=self._has_pending(task.id))
-        self._output.task_report(task.id, spoken, details)
+        seq = self._output.task_report(task.id, spoken, details)
+        report = report_id(seq) if seq is not None and details else None
+        task.report(spoken, needs_user=needs_user, live=self._has_pending(task.id), details=report)
         news = spoken
         if approval is not None:
             news += f" Call present_approval for this event's Approval, then ask about this action naturally: {approval.text}"
         self._post_news(
             "orchestrator", news, task.id, needs_user=needs_user, details=details, approval=approval and approval.id,
-            backlog=self._turn_restart,
+            backlog=self._turn_restart, report=report,
         )
         if approval is not None:
             return f"Reported to the User, asking for Approval {approval.id}: {approval.text}."

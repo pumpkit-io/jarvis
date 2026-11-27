@@ -461,6 +461,7 @@ async def test_each_role_gets_only_its_own_hub_tools(
         "authorize",
         "revoke_authorization",
         "recall",
+        "read_report",
         "start_afresh",
         "resolve_scope",
     ]

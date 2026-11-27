@@ -86,7 +86,7 @@ def talker(settings: Settings, recall: ToolHandler = _noop) -> SessionSpec:
     """The real Talker prompt and tool schemas, so the fixed prefix is the one the Hub sends."""
     tools = talker_tools(delegate=_noop, status=_noop, cancel=_noop, show=_noop, end_conversation=_noop,
                          stand_by=_noop, quiet_mode=_noop, approve=_noop, present_approval=_noop, authorize=_noop,
-                         revoke_authorization=_noop, recall=recall, start_afresh=_noop)
+                         revoke_authorization=_noop, recall=recall, read_report=_noop, start_afresh=_noop)
     return replace(talker_spec(settings), tools=tools)
 
 

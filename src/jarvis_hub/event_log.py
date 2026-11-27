@@ -58,6 +58,11 @@ FOLLOWED_CHARS = 160
 FOLLOWED_WITHIN = 10 * 60
 
 
+def report_id(seq: int) -> str:
+    """A Task report's id for `read_report`: its seq in the log, unique across launches unlike its Task's id."""
+    return f"R{seq}"
+
+
 def _sql_words(row: str) -> str:
     return (f"json_extract({row}.payload, '$.text') || "
             f"COALESCE(char(10, 10) || json_extract({row}.payload, '$.details'), '')")
@@ -100,6 +105,8 @@ class Match:
     text: str
     task_id: str | None = None
     followed: Match | None = None
+    # A Task report with details: the id `read_report` reads them whole by.
+    report: str | None = None
 
 
 @dataclass(frozen=True)
@@ -120,6 +127,7 @@ class Recall:
         lines = [f'<recall today="{_day(self.today)}" from="{_stamp(self.since)}" to="{until}">']
         for match in self.matches:
             task = f' task="{escape(match.task_id)}"' if match.task_id else ""
+            task += f' report="{match.report}"' if match.report else ""
             lines.append(f'<match at="{_stamp(match.time)}" from="{match.source}"{task}>')
             lines.append(escape(match.text, quote=False))
             if match.followed is not None:
@@ -379,8 +387,10 @@ class EventLog:
             for seq, at, kind, encoded in rows[:limit]:
                 payload = json.loads(encoded)
                 followed = self._followed(seq, at, kind, payload, dropped)
+                reported = kind == "task_report"
                 found = Match(at, SOURCES[kind], self._excerpts.cut(_words(payload), phrases),
-                              payload.get("task_id") if kind == "task_report" else None, followed)
+                              payload.get("task_id") if reported else None, followed,
+                              report_id(seq) if reported and payload.get("details") else None)
                 spent += sum(len(escape(shown.text, quote=False)) for shown in (found, followed) if shown)
                 if spent > RECALL_CHARS:
                     break
@@ -388,6 +398,14 @@ class EventLog:
             indexing = self._db.execute("SELECT through FROM recall_backfill WHERE singleton = 1").fetchone()[0] > 0
         shown = tuple(kept for _, kept in sorted(matches, key=lambda pair: pair[0]))
         return Recall(now, since, end, shown, edge if since == floor else None, len(rows) > len(matches), indexing)
+
+    def report_details(self, seq: int) -> tuple[str, str] | None:
+        """The Task id and details of the Task report logged as `seq`, or None when it has none or has expired."""
+        with self._lock:
+            row = self._db.execute("SELECT payload FROM events WHERE seq = ? AND type = 'task_report' AND time >= ?",
+                                   (seq, self._wall() - RETENTION)).fetchone()
+        payload: dict[str, Any] = json.loads(row[0]) if row else {}
+        return (str(payload.get("task_id") or ""), str(payload["details"])) if payload.get("details") else None
 
     def _followed(self, seq: int, at: float, kind: str, payload: dict[str, Any], dropped: str | None) -> Match | None:
         """The reply to the same request, the reply a detail was shown with, the Announcement after a Task report, or
@@ -554,9 +572,8 @@ class EventOutput:
             self._client_id = client_id
             self._text = ""
 
-    def _append(self, kind: str, payload: dict[str, Any], client_id: str | None) -> None:
-        if self.log is not None:
-            self.log.append(kind, payload, client_id=client_id)
+    def _append(self, kind: str, payload: dict[str, Any], client_id: str | None) -> int | None:
+        return self.log.append(kind, payload, client_id=client_id).seq if self.log is not None else None
 
     def snapshot(self, kind: str, payload: dict[str, Any], *, client_id: str | None = None) -> None:
         with self._lock:
@@ -597,7 +614,8 @@ class EventOutput:
             self._append("show", {"reply_id": self._reply_id, "title": "Details", "text": markdown}, self._client_id)
             self.destination.show(markdown)
 
-    def task_report(self, task_id: str, spoken: str, details: str | None) -> None:
-        """Logged for `recall` only: the Announcement that tells it is the Talker's own words."""
+    def task_report(self, task_id: str, spoken: str, details: str | None) -> int | None:
+        """Logged for `recall` and `read_report`: the Announcement that tells it is the Talker's own words. Its seq, or
+        None without a log."""
         with self._lock:
-            self._append("task_report", {"task_id": task_id, "text": spoken, "details": details}, None)
+            return self._append("task_report", {"task_id": task_id, "text": spoken, "details": details}, None)
