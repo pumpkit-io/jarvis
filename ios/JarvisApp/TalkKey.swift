@@ -136,7 +136,7 @@ struct TalkKey: View {
             Image(systemName: symbol)
                 .font(.system(size: controlSize, weight: .semibold))
                 .foregroundStyle(theme.frost)
-                .frame(width: 44, height: 44)
+                .frame(width: Self.diameter, height: Self.diameter)
                 .background(theme.deep, in: Circle())
                 .overlay { Circle().strokeBorder(theme.rim, lineWidth: 1) }
         }

@@ -12,6 +12,10 @@ struct MessageInputBar: View {
     @State private var preview = TalkPreview()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private let barBottomPadding: CGFloat = 8
+    private static let edgeMargin: CGFloat = 20
+    private static let keyInset: CGFloat = 6
+    /// Where the Talk key's trailing edge sits from the screen's, so controls above the pill can line up with it.
+    static let keyTrailingInset = edgeMargin + keyInset
     private let theme = JarvisTheme()
     private var recording: Bool { session.talk.state == .recording }
     private var paused: Bool { session.talk.state == .paused }
@@ -48,7 +52,7 @@ struct MessageInputBar: View {
         }
         .font(.system(size: controlSize))
         .foregroundStyle(theme.haze)
-        .padding(.horizontal, 20)
+        .padding(.horizontal, Self.edgeMargin)
         .padding(.top, 8)
         .padding(.bottom, barBottomPadding)
         .task(id: TalkFeedbackKey(discards: session.talk.discards, visible: visible)) {
@@ -131,7 +135,7 @@ struct MessageInputBar: View {
                     TalkKey(talk: session.talk, controlSize: controlSize, level: session.orb.level, beforeResume: preview.stop)
                 }
             }
-            .padding([.trailing, .bottom], 6)
+            .padding([.trailing, .bottom], Self.keyInset)
         }
         // The rim sits behind the contents, so the held mic covers the pill instead of being crossed by it.
         .background {
@@ -161,6 +165,14 @@ struct MessageInputBar: View {
         #else
         URL(string: "app-settings:")!
         #endif
+    }
+}
+
+extension AppSession {
+    /// Whether the input bar shows a status line above its pill; `MessageInputBar.messages` draws these.
+    var hasComposerNotice: Bool {
+        draftValidationMessage != nil || inputMessage != nil || voiceMessage != nil
+            || talk.message != nil || liveMode.message != nil
     }
 }
 

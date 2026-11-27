@@ -14,6 +14,7 @@ struct ConversationView: View {
     @State private var detailsRevision = 0
     @State private var position = ScrollPosition(idType: String.self)
     @State private var scrollPhase: ScrollPhase = .idle
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var olderHistoryVisible = false
     @State var expandedDetails: Set<String> = []
     private var theme: JarvisTheme { JarvisTheme() }
@@ -84,7 +85,7 @@ struct ConversationView: View {
             .scrollBounceBehavior(.always, axes: .vertical)
             .scrollDismissesKeyboard(.interactively)
             .onScrollGeometryChange(for: Bool.self) { geometry in
-                geometry.contentSize.height - geometry.visibleRect.maxY <= 60
+                geometry.distanceFromLatest <= Self.latestTolerance
             } action: { _, atBottom in
                 isAtBottom = atBottom
                 // Streamed layout changes cannot reclaim a reader who has scrolled up.
@@ -92,14 +93,37 @@ struct ConversationView: View {
             }
             .onScrollPhaseChange { _, phase, context in
                 scrollPhase = phase
-                isAtBottom = context.geometry.contentSize.height - context.geometry.visibleRect.maxY <= 60
+                isAtBottom = context.geometry.distanceFromLatest <= Self.latestTolerance
                 if phase == .idle && !detailsChanging { followsLatest = isAtBottom }
             }
         }
         .background(theme.void)
+        // The conversation ends where the input bar starts and follows the keyboard, so the button rides above both.
+        .overlay(alignment: .bottomTrailing) {
+            if showsScrollToLatest {
+                ScrollToLatestButton(action: scrollToLatest)
+                    .padding(.trailing, MessageInputBar.keyTrailingInset)
+                    .padding(.bottom, 8)
+                    .transition(reduceMotion ? .opacity : .scale(scale: 0.5).combined(with: .opacity))
+            }
+        }
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: showsScrollToLatest)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if showsInputBar { MessageInputBar(session: session, typingChanged: typingChanged) }
         }
+    }
+
+    /// Roughly a line of text: scrolling up further than this counts as leaving the latest text.
+    private static let latestTolerance: CGFloat = 32
+
+    /// A held Talk's lock capsule and the composer's notices fill the corner above the pill, so the button steps aside for them.
+    private var showsScrollToLatest: Bool {
+        !isAtBottom && session.talk.state != .recording && session.talk.state != .paused && !session.hasComposerNotice
+    }
+
+    private func scrollToLatest() {
+        followsLatest = true
+        withAnimation(.easeInOut(duration: 0.3)) { position.scrollTo(edge: .bottom) }
     }
 
     /// A message still on this phone, shown where the User's line will appear once Jarvis hears it.
@@ -255,6 +279,32 @@ struct ConversationView: View {
         return AttributedString(row.text[..<range.lowerBound]) + marked + AttributedString(row.text[range.upperBound...])
     }
 
+}
+
+/// Telegram's scroll-to-bottom button: a round, blurred dark disc with a down chevron, the size of the Talk key at rest.
+private struct ScrollToLatestButton: View {
+    let action: () -> Void
+    private let theme = JarvisTheme()
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "chevron.down")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(theme.frost)
+                .frame(width: TalkKey.diameter, height: TalkKey.diameter)
+                .background(.ultraThinMaterial, in: Circle())
+                .background(theme.deep.opacity(0.8), in: Circle())
+                .overlay { Circle().strokeBorder(theme.rim, lineWidth: 1) }
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Scroll to latest message")
+    }
+}
+
+private extension ScrollGeometry {
+    /// How far the reader is above the end of the script. The visible rectangle runs under the bottom inset (the input bar, the keyboard), so the inset is added back; without it the distance reads as negative by the inset's height at rest.
+    var distanceFromLatest: CGFloat { contentSize.height + contentInsets.bottom - visibleRect.maxY }
 }
 
 private struct OlderHistoryTrigger: Equatable {
