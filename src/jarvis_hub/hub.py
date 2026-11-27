@@ -427,6 +427,8 @@ class _NewsDelivery:
     receipt: Callable[[], bool] | None = None
     held: bool = False
     reply: str | None = None
+    # The completed reply reached an open screen on its Client, so the news is told even if its speech is cut.
+    seen: bool = False
 
 
 def recovery_message(
@@ -853,7 +855,7 @@ class Hub:
         if not self._loops:
             return
         delivery = self._news_delivery
-        if delivery is not None and self._news_delivery_told(delivery):
+        if delivery is not None and self._news_delivery_heard(delivery):
             self._news_delivery = None
         elif delivery is not None:
             client = self.clients.get(delivery.client_id)
@@ -861,6 +863,9 @@ class Hub:
             can_speak = self._client_can_speak(delivery.client_id)
             player_current = self._client_players.get(delivery.client_id) is delivery.player
             retargeted = delivery.follows_focus and delivery.client_id != self.clients.focus
+            if retargeted:
+                # The User moved Focus away mid-announcement, so the news follows them rather than counting as seen.
+                delivery.seen = False
             told = self._news_delivery_told(delivery)
             if delivery.speaks and (retargeted or not can_speak or not player_current):
                 self._speech.retire(delivery.player)
@@ -915,10 +920,21 @@ class Hub:
         # A Live mode Focus's exchange speech is the floor's, which _focus_quiet waits out as the floor's quiet.
         return bool(client is not None and client.remote_activity)
 
-    def _news_delivery_told(self, delivery: _NewsDelivery) -> bool:
+    def _news_delivery_heard(self, delivery: _NewsDelivery) -> bool:
         return delivery.reply is not None and (
             not delivery.speaks or (delivery.receipt is not None and delivery.receipt())
         )
+
+    def _shows_news(self, delivery: _NewsDelivery) -> bool:
+        """Whether the User reads the news where it goes: on a phone with its screen open that still has Focus. In
+        voice mode the Mac's terminal is not where the User looks."""
+        client = self.clients.get(delivery.client_id)
+        return bool(client is not None and client.id != TERMINAL and client.connected and client.can_show_text
+                    and not (delivery.follows_focus and delivery.client_id != self.clients.focus))
+
+    def _news_delivery_told(self, delivery: _NewsDelivery) -> bool:
+        """Heard, or shown whole on an open screen: the Talker already told it, so telling it again only repeats it."""
+        return delivery.seen or self._news_delivery_heard(delivery)
 
     def _hold_news_delivery(self, delivery: _NewsDelivery) -> None:
         self._news_delivery = None
@@ -952,7 +968,7 @@ class Hub:
     async def interrupt(self) -> bool:
         """Stop whatever is being said, and the Talker turn under way if its reply is spoken; a typed line's reply
         goes on. Returns whether a Talker turn was interrupted."""
-        if self._news_delivery is not None and not self._news_delivery_told(self._news_delivery):
+        if self._news_delivery is not None and not self._news_delivery_heard(self._news_delivery):
             self._hold_news_delivery(self._news_delivery)
         for client_id, player in self._client_players.items():
             # The voice floor's own speech, on the Mac or a Live mode phone, reports its cut-off with its next turn.
@@ -1133,7 +1149,7 @@ class Hub:
                 await self.interrupt()
             elif self._floor is None and self._news_delivery is not None and (
                 self._news_delivery.follows_focus and self._news_delivery.speaks
-                and not self._news_delivery_told(self._news_delivery)
+                and not self._news_delivery_heard(self._news_delivery)
             ):
                 await self.interrupt()
             if not allowed():
@@ -1296,13 +1312,17 @@ class Hub:
         self._persist()
 
     def _drop_reset_news(self) -> None:
-        """A new hit makes the news that the limit reset untrue: it is dropped wherever it waits, held, in the news
-        or parked, and no longer counted as pending or among the updates."""
+        """A new hit makes the news that the limit reset untrue."""
+        self._drop_news(lambda leaf: leaf.reset)
+
+    def _drop_news(self, remove: Callable[[Leaf], bool]) -> None:
+        """Drops the news `remove` picks wherever it waits, held, in the news or parked; it is no longer counted as
+        pending or among the updates."""
         dropped = len(self._held)
-        self._held = fresh(self._held)
+        self._held = [leaf for leaf in self._held if not remove(leaf)]
         dropped -= len(self._held)
-        news, from_news = self._less_reset(self._news)
-        parked, from_parked = self._less_reset(self._parked_news)
+        news, from_news = self._less(self._news, remove)
+        parked, from_parked = self._less(self._parked_news, remove)
         self._news, self._parked_news = deque(news), parked
         dropped += from_news + from_parked
         if not dropped:
@@ -1313,12 +1333,12 @@ class Hub:
         self._persist()
 
     @staticmethod
-    def _less_reset(items: "Iterable[News]") -> tuple[list[News], int]:
-        """`items` less the news that the limit reset, and how many posted items that took out."""
+    def _less(items: "Iterable[News]", remove: Callable[[Leaf], bool]) -> tuple[list[News], int]:
+        """`items` less the news `remove` picks, and how many posted items that took out."""
         kept: list[News] = []
         dropped = 0
         for item in items:
-            rest = item.without_reset()
+            rest = item.without(remove)
             dropped += item.count - (rest.count if rest else 0)
             if rest:
                 kept.append(rest)
@@ -1643,7 +1663,7 @@ class Hub:
                 self._user_client_id = item.client_id
                 self._telling = item.news.away_leaves() if item.news else ()
                 if item.news:
-                    if self._news_delivery is not None and not self._news_delivery_told(self._news_delivery):
+                    if self._news_delivery is not None and not self._news_delivery_heard(self._news_delivery):
                         self._hold_news_delivery(self._news_delivery)
                     destination = item.client_id if item.kind == "user" else self.clients.focus
                     delivery = _NewsDelivery(item.news, destination,
@@ -1664,6 +1684,10 @@ class Hub:
                                            live=self._live_lines(item),
                                            owner=owner, scope_authority=authority, news_delivery=delivery, audio_generation=item.audio_generation)
                 self._approvals.turn_ended(completed=end.outcome == "completed")
+                if delivery is not None and delivery.held and delivery.seen:
+                    # Held while its reply was under way, the news was still shown whole: it is not told again.
+                    told = {id(leaf) for leaf in delivery.news.leaves()}
+                    self._drop_news(lambda leaf: id(leaf) in told)
                 if delivery is not None and self._news_delivery is delivery:
                     if end.outcome == "completed" and delivery.speaks:
                         finishing = asyncio.create_task(self._news_delivery_finished(delivery))
@@ -1710,7 +1734,7 @@ class Hub:
     async def _news_delivery_finished(self, delivery: _NewsDelivery) -> None:
         await self._speech.idle(stall_timeout=None)
         if self._news_delivery is delivery:
-            if self._news_delivery_told(delivery):
+            if self._news_delivery_heard(delivery):
                 self._news_delivery = None
             else:
                 self._hold_news_delivery(delivery)
@@ -2240,7 +2264,7 @@ class Hub:
         self._turn_answers_user = self._turn_spoken and kind == "user"
         destination_id = self._user_client_id if kind == "user" else self.clients.focus
         delivery = news_delivery
-        if self._news_delivery is not None and self._news_delivery is not delivery and self._news_delivery_told(self._news_delivery):
+        if self._news_delivery is not None and self._news_delivery is not delivery and self._news_delivery_heard(self._news_delivery):
             self._news_delivery = None
         audible = self._turn_spoken and self._client_can_speak(destination_id)
         floor = self._floor is not None and (
@@ -2354,6 +2378,7 @@ class Hub:
             self._save_exchange(message, shown, tools=tools, client_id=destination_id, kind=kind, arrived=arrived)
         if delivery is not None and end.outcome == "completed":
             delivery.reply = shown
+            delivery.seen = turn not in (self._interrupted_turn, self._silenced_turn) and self._shows_news(delivery)
 
         def ms(t: float | None) -> int | None:
             return None if t is None else round((t - arrived) * 1000)

@@ -21,7 +21,7 @@ async def test_news_in_user_reply_keeps_its_requesting_client_and_delivery(actio
     arrival, reported, speak, end = (asyncio.Event() for _ in range(4))
     reply = "One update, sir, and your answer."
     backend = FakeBackend(clock, [[Tool("delegate", {"request": "Fix typo", "context": ""})],
-                                  [Text(reply)], [Text("One retained update, sir.")]],
+                                  [Text(reply)], [Text("One repeated update, sir.")]],
                           orchestrator=[[Gate(arrival), Tool("report", {"task_id": "T1", "spoken": "Ready"}), Set(reported)]])
     speech = Speech(FakeTts(), local, clock, metrics=metrics, notice=output.notice)
     hub = make_hub(backend, output, metrics, speech=speech)
@@ -62,18 +62,12 @@ async def test_news_in_user_reply_keeps_its_requesting_client_and_delivery(actio
                 assert transport.stops == [transport.clips[0][0]]
                 assert remote.pending() == 0
             hub.attach_client(client)
-        if action == "disconnect":
-            await until(lambda: len(transport.clips) == 2)
-            new_id, new_index, clip = transport.clips[1]
-            assert clip.text == "One retained update, sir."
-            assert remote.report(new_id, new_index, "finished")
-            message = backend.all_sessions("talker")[0].received[-1]
-            assert message.startswith('<event source="hub" away="1">')
-            assert message.count('task="T1"') == 1
+        # Cut off by the disconnect, the reply was still shown whole on the phone's open screen: it is not told again.
+        await asyncio.sleep(0.01)
         end.set()
         await running
-        assert len(backend.all_sessions("talker")[0].received) == (4 if action == "disconnect" else 3)
-        assert len(transport.clips) == (0 if action == "silent" else 2 if action == "disconnect" else 1)
+        assert len(backend.all_sessions("talker")[0].received) == 3
+        assert len(transport.clips) == (0 if action == "silent" else 1)
         assert local.texts == []
     finally:
         running.cancel()
@@ -133,8 +127,12 @@ async def test_new_spoken_input_retains_news_from_interrupted_user_reply_once(st
             interrupt.set()
         await until(lambda: "One update and the new answer." in output.replies)
         message = backend.all_sessions("talker")[0].received[-1]
-        assert message.startswith('<event source="hub" away="1">')
-        assert message.count('task="T1"') == 1
+        if stopped_by_client:
+            # Stopped on the phone after it showed the whole reply on its open screen: the news was told.
+            assert 'task="T1"' not in message
+        else:
+            assert message.startswith('<event source="hub" away="1">')
+            assert message.count('task="T1"') == 1
         assert "And this new question" in message
         assert len(backend.all_sessions("talker")[0].received) == 4
         end.set()

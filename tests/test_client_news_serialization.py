@@ -20,7 +20,7 @@ class Transport:
         self.stops.append(speech_id)
 
 
-async def test_prequeued_terminal_reports_batch_on_connected_focus_without_replacing_unheard_audio() -> None:
+async def test_prequeued_terminal_reports_batch_on_connected_focus_and_are_not_retold_after_reconnect() -> None:
     clock, output, metrics = FakeClock(), RecordingOutput(), RecordingMetrics()
     local, transport = RecordingPlayer(), Transport()
     remote = RemotePlayer(transport)
@@ -63,20 +63,14 @@ async def test_prequeued_terminal_reports_batch_on_connected_focus_without_repla
         hub.clients.disconnect("phone")
         assert transport.stops == [speech_id]
         hub.attach_client(client)
-        await until(lambda: len(transport.clips) == 2)
-        next_id, next_index, next_clip = transport.clips[1]
-        assert next_id != speech_id
-        assert next_clip.text == "Two held updates, sir."
+        await asyncio.sleep(0.01)
+        # The phone's open screen showed the whole reply before the disconnect cut its speech.
         assert not remote.report(speech_id, index, "finished")
-        assert remote.report(next_id, next_index, "finished")
-        assert remote.played() == "Two held updates, sir."
-        message = backend.all_sessions("talker")[0].received[-1]
-        assert message.startswith('<event source="hub" away="2">')
-        assert message.count('task="T1"') == 2
+        assert len(backend.all_sessions("talker")[0].received) == 3
         assert local.texts == []
         end.set()
         await running
-        assert len(transport.clips) == 2
+        assert len(transport.clips) == 1
     finally:
         running.cancel()
         await hub.close()
