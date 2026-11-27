@@ -21,7 +21,7 @@ public extension TalkAudioSession {
     #if os(iOS)
     /// Music ducks instead of stopping, AirPods stay in A2DP, and the iPhone's microphone records (ADR 0032).
     public static let recordingOptions: AVAudioSession.CategoryOptions = [.duckOthers, .defaultToSpeaker, .allowBluetoothA2DP]
-    /// Music ducks under speech and a podcast pauses; both return when the session deactivates with a notification.
+    /// Music ducks under speech and a podcast pauses; music returns when the session deactivates, and the podcast may resume.
     public static let playbackOptions: AVAudioSession.CategoryOptions = [.duckOthers, .interruptSpokenAudioAndMixWithOthers]
     #endif
     public init() {}
