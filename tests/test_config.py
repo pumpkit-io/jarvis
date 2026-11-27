@@ -403,3 +403,13 @@ def test_text_mode_keeps_the_chosen_engine_when_a_voice_name_is_bad(checkout: Pa
 
     assert settings.voice.tts_engine == "kokoro" and settings.voice.voice_it == "jarvis-it"
     assert ignored and "JARVIS_VOICE_IT" in ignored[0]
+
+
+def test_text_mode_reports_every_invalid_speech_setting_not_just_the_first(checkout: Path) -> None:
+    ignored: list[str] = []
+    environ = {"JARVIS_TTS_ENGINE": "kokro", "JARVIS_VOICE_EN": "Bad"}
+
+    settings = load_settings(checkout, environ=environ, ignore_voice=ignored.append)
+
+    assert (settings.voice.tts_engine, settings.voice.voice_en) == ("qwen3", "jarvis-en")
+    assert [any(key in e for e in ignored) for key in ("JARVIS_TTS_ENGINE", "JARVIS_VOICE_EN")] == [True, True]

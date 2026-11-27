@@ -10,7 +10,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import tempfile
 import time
 from typing import Any, Protocol, TextIO, cast
@@ -136,12 +135,15 @@ def set_env(path: Path, key: str, value: str) -> None:
             placed = True
     if not placed:
         kept.append(f"{key}={value}")
-    # `.env` may hold secrets: replace it whole, so a crash never leaves it half written, and keep its permissions.
-    staging = path.with_name(f".{path.name}.partial")
-    staging.write_text("\n".join(kept) + "\n", encoding="utf-8")
-    if path.is_file():
-        shutil.copymode(path, staging)
-    os.replace(staging, path)
+    # `.env` may hold secrets: replace it whole, so a crash never leaves it half written, never readable by more
+    # people than before, and through a symlink to the file it points at.
+    target = path.resolve()
+    mode = target.stat().st_mode & 0o777 if target.is_file() else 0o600
+    staging = target.with_name(f".{target.name}.partial")
+    with os.fdopen(os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode), "w", encoding="utf-8") as out:
+        os.fchmod(out.fileno(), mode)
+        out.write("\n".join(kept) + "\n")
+    os.replace(staging, target)
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -229,7 +231,8 @@ class Studio:
 
     def trial(self, voice: str) -> None:
         path = Path(voice)
-        if path.suffix.lower() == ".wav" or path.exists():
+        # Voice names have no dots, so a .wav is always a take.
+        if path.suffix.lower() == ".wav":
             self._say(f"Cloning {path} with Jarvis's own model…")
             lines, trim = self._audition(read_take(path))
             self._say(f"It would speak at a {trim:+.1f} dB trim.")
@@ -259,7 +262,7 @@ class Studio:
         set_env(self._env, key, name)
         self._say(f"Saved {pack.folder} at a {pack.trim_db:+.1f} dB trim.\n"
                   f"Set {key}={name} in {self._env}. Restart Jarvis to hear it.")
-        if self._environ.get(key, name) != name:
+        if self._environ.get(key) and self._environ[key] != name:
             self._say(f"Your shell sets {key}={self._environ[key]}, which overrides .env: unset it to hear this voice.")
 
     def show(self) -> None:

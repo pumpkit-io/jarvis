@@ -550,7 +550,7 @@ async def _follow_devices(listener: Any, player: Any, notice: Callable[[str], No
 
 
 def _ignored_by_voice(error: str) -> None:
-    sys.stderr.write(f"jarvis-hub: {error}; the voice command uses the default instead.\n")
+    sys.stderr.write(f"jarvis-hub: warning: {error}.\n")
 
 
 def _ignored_in_text(error: str) -> None:

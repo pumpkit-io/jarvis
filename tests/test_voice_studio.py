@@ -214,3 +214,23 @@ def test_set_env_keeps_the_files_permissions(tmp_path: Path) -> None:
     set_env(env, "JARVIS_VOICE_EN", "c")
 
     assert env.stat().st_mode & 0o777 == 0o600
+
+
+def test_set_env_writes_through_a_symlinked_env_to_its_target(tmp_path: Path) -> None:
+    target = tmp_path / "dotfiles" / "jarvis.env"
+    target.parent.mkdir()
+    target.write_text("JARVIS_X=1\n")
+    env = tmp_path / ".env"
+    env.symlink_to(target)
+
+    set_env(env, "JARVIS_VOICE_EN", "c")
+
+    assert env.is_symlink() and target.read_text() == "JARVIS_X=1\nJARVIS_VOICE_EN=c\n"
+
+
+def test_an_empty_shell_variable_is_not_reported_as_an_override(rig: Rig) -> None:
+    rig.environ["JARVIS_VOICE_EN"] = ""
+    rig.run("design", "--lang", "en", "--takes", "1", "--no-play")
+    [take] = rig.takes.glob("*.wav")
+
+    assert "overrides" not in rig.run("use", str(take), "--name", "my-butler")

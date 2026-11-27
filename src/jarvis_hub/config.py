@@ -197,15 +197,16 @@ def load_settings(
 
     user_voices = main / ".jarvis" / "voices"
 
-    def speaking(*, lenient: bool = False) -> VoiceSettings:
-        """What speech needs; leniently, each invalid setting falls back to its own default and no other."""
+    def speaking(*, lenient: Callable[[str], None] | None = None) -> VoiceSettings:
+        """What speech needs; leniently, each invalid setting is reported and falls back to its own default alone."""
 
         def read(parse: Callable[[], _Choice], default: _Choice) -> _Choice:
-            if not lenient:
+            if lenient is None:
                 return parse()
             try:
                 return parse()
-            except ConfigError:
+            except ConfigError as e:
+                lenient(str(e))
                 return default
 
         return VoiceSettings(
@@ -248,15 +249,22 @@ def load_settings(
     if ignore_voice is None:
         voice = voice_settings()
     else:
+        reported: set[str] = set()
+
+        def report(error: str) -> None:
+            if error not in reported:
+                reported.add(error)
+                ignore_voice(error)
+
         try:
             configured_voice = voice_settings()
         except ConfigError as e:
-            ignore_voice(str(e))
+            report(str(e))
             configured_voice = None
         if values.get("JARVIS_REMOTE") == "on" and configured_voice is not None:
             voice = configured_voice
         else:
-            voice = speaking(lenient=True)
+            voice = speaking(lenient=report)
 
     def count(name: str, default: int) -> int:
         value = get(name, str(default))
