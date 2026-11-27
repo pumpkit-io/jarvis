@@ -85,7 +85,7 @@ struct ConversationView: View {
             .scrollBounceBehavior(.always, axes: .vertical)
             .scrollDismissesKeyboard(.interactively)
             .onScrollGeometryChange(for: Bool.self) { geometry in
-                geometry.contentSize.height - geometry.visibleRect.maxY <= 60
+                geometry.distanceFromLatest <= Self.latestTolerance
             } action: { _, atBottom in
                 isAtBottom = atBottom
                 // Streamed layout changes cannot reclaim a reader who has scrolled up.
@@ -93,7 +93,7 @@ struct ConversationView: View {
             }
             .onScrollPhaseChange { _, phase, context in
                 scrollPhase = phase
-                isAtBottom = context.geometry.contentSize.height - context.geometry.visibleRect.maxY <= 60
+                isAtBottom = context.geometry.distanceFromLatest <= Self.latestTolerance
                 if phase == .idle && !detailsChanging { followsLatest = isAtBottom }
             }
         }
@@ -102,7 +102,7 @@ struct ConversationView: View {
         .overlay(alignment: .bottomTrailing) {
             if showsScrollToLatest {
                 ScrollToLatestButton(action: scrollToLatest)
-                    .padding(.trailing, 18)
+                    .padding(.trailing, MessageInputBar.keyTrailingInset)
                     .padding(.bottom, 8)
                     .transition(reduceMotion ? .opacity : .scale(scale: 0.5).combined(with: .opacity))
             }
@@ -112,6 +112,9 @@ struct ConversationView: View {
             if showsInputBar { MessageInputBar(session: session, typingChanged: typingChanged) }
         }
     }
+
+    /// Roughly a line of text: scrolling up further than this counts as leaving the latest text.
+    private static let latestTolerance: CGFloat = 32
 
     /// A held Talk's lock capsule and the composer's notices fill the corner above the pill, so the button steps aside for them.
     private var showsScrollToLatest: Bool {
@@ -278,7 +281,7 @@ struct ConversationView: View {
 
 }
 
-/// Telegram's scroll-to-bottom button: a 40-point round, blurred dark disc with a down chevron, in a 44-point target.
+/// Telegram's scroll-to-bottom button: a round, blurred dark disc with a down chevron, the size of the Talk key at rest.
 private struct ScrollToLatestButton: View {
     let action: () -> Void
     private let theme = JarvisTheme()
@@ -288,16 +291,20 @@ private struct ScrollToLatestButton: View {
             Image(systemName: "chevron.down")
                 .font(.system(size: 17, weight: .semibold))
                 .foregroundStyle(theme.frost)
-                .frame(width: 40, height: 40)
+                .frame(width: TalkKey.diameter, height: TalkKey.diameter)
                 .background(.ultraThinMaterial, in: Circle())
                 .background(theme.deep.opacity(0.8), in: Circle())
                 .overlay { Circle().strokeBorder(theme.rim, lineWidth: 1) }
-                .frame(width: 44, height: 44)
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Scroll to latest message")
     }
+}
+
+private extension ScrollGeometry {
+    /// How far the reader is above the end of the script. The visible rectangle runs under the bottom inset (the input bar, the keyboard), so the inset is added back; without it the distance reads as negative by the inset's height at rest.
+    var distanceFromLatest: CGFloat { contentSize.height + contentInsets.bottom - visibleRect.maxY }
 }
 
 private struct OlderHistoryTrigger: Equatable {
