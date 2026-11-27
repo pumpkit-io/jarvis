@@ -52,6 +52,7 @@ The launcher follows symlinks before entering its checkout. In a git worktree, c
 ./jarvis stats --since 24h
 ./jarvis stats --bargein --since 24h
 ./jarvis stats --voice --since 24h
+./jarvis voice list              # the voices Jarvis can speak with
 ```
 
 Say “Hey Jarvis” and your request, in one breath if you wish. “Hi Jarvis”, “Ehi Jarvis” and “Jarvis” are intended wake phrases. When the Wake word model misses one, a short idle utterance that opens with “Jarvis” (as transcribed, however misheard) wakes Jarvis too, a moment after you stop speaking. After a reply, the Follow-up window lets you continue without the Wake word for 10 seconds; a short falling sound then tells you Jarvis is back to waiting for it. A whole end control such as “that's all”, “stand by” or “basta così” returns to idle silently. A longer utterance containing those words remains a request. When a conversational reply is appropriate, Jarvis generates its farewell and finishes speaking before returning idle.
@@ -71,6 +72,19 @@ Startup shows loading and ready notices for the conversation model, speech and l
 The Talker reads the saved Conversation in the background at startup, using one hidden subscription turn ([ADR 0006](docs/adr/0006-warm-up-in-the-background.md)). The Orchestrator connects without a prompt. Idle listening and stop phrases use no model call; pending work and Announcements may still need agent turns.
 
 Ask for status or to cancel a Task by name. Quiet mode holds routine Announcements until the next Wake word; news that needs you can still be announced. A direct action request grants permission for that action. You can also authorize a Task unattended, or explicitly authorize the whole session. Task permission survives restarts; session permission ends at restart. Each Boundary action still gets a concrete Approval, using existing permission without another question when it applies. Approval replies use natural language. The Hub runs approved merges and branch deletions; other approved actions go to a Subagent. See [ADR 0022](docs/adr/0022-natural-language-authorization.md) for the permission model and its limits.
+
+## Jarvis's voice
+
+Jarvis speaks English and Italian with cloned Qwen3-TTS voices, one voice pack per language. Anyone can give it a new voice without editing code:
+
+```bash
+./jarvis voice design --lang en --describe "A warm, low female voice, unhurried."   # candidate takes, played as they are made
+./jarvis voice try .jarvis/voice-takes/<take>.wav                                    # hear one speak as Jarvis
+./jarvis voice use .jarvis/voice-takes/<take>.wav --name my-voice                    # make it Jarvis's English voice
+./jarvis voice add me.wav --lang it --transcript "…" --name la-mia-voce              # or clone a recording
+```
+
+`use` and `add` measure the voice's level, save the pack under `.jarvis/voices/` and set `JARVIS_VOICE_EN` or `JARVIS_VOICE_IT` in `.env`; restart Jarvis to hear it. [The voice guide](assets/voice/README.md) covers every step, the pack format and sharing a voice ([ADR 0035](docs/adr/0035-voices-are-packs-chosen-in-configuration.md)).
 
 ## Remote access
 
@@ -124,6 +138,7 @@ This slice requires a terminal running `./jarvis` on a Mac that stays awake and 
 - Memory, in tokens: `JARVIS_MEMORY_FOLD_AT`, `JARVIS_MEMORY_TAIL` and `JARVIS_MEMORY_CEILING`, with `JARVIS_MEMORY_MODEL` and `JARVIS_MEMORY_EFFORT` for the Summariser, which writes the Memory a Fold swaps in. The Tail may be at most half of the trigger ([ADR 0028](docs/adr/0028-one-conversation-across-restarts-folded-into-memory.md)). Summaries are kept under `.jarvis/memory/`.
 - Listening windows: `JARVIS_FOLLOWUP_SECONDS`, `JARVIS_ANNOUNCE_FOLLOWUP_SECONDS`, `JARVIS_LISTEN_SECONDS`, `JARVIS_END_SILENCE_MS`, `JARVIS_END_EXTEND_MS`, `JARVIS_PREROLL_MS`, `JARVIS_ONSET_PAD_MS` and `JARVIS_MAX_TURN_SECONDS`.
 - Engines: `JARVIS_WAKE_ENGINE=openwakeword`, `JARVIS_STT_ENGINE=parakeet`, `JARVIS_TTS_ENGINE=qwen3` (the cloned voices of ADR 0029) or `kokoro` (the fallback), and `JARVIS_AEC=webrtc` or `off`. These are the currently supported choices; Porcupine and Whisper are not runtime alternatives yet. `--headphones` overrides echo cancellation to off.
+- Voice: `JARVIS_VOICE_EN` and `JARVIS_VOICE_IT` name the voice pack each language speaks with, `jarvis-en` and `jarvis-it` by default. See [Jarvis's voice](#jarviss-voice).
 - Detection: `JARVIS_WAKE_THRESHOLD`, `JARVIS_VAD_THRESHOLD`, `JARVIS_SMART_TURN_THRESHOLD`, `JARVIS_CHIME_GUARD_MS` and `JARVIS_WAKE_REFRACTORY_MS`. Lower wake thresholds trade fewer missed wakes for more false wakes.
 - Barge-in: `JARVIS_BARGEIN_MIN_SPEECH_MS`, `JARVIS_BARGEIN_DECIDE_MS` and `JARVIS_BARGEIN_GUARD_MS` control detection and decision timing; Jarvis keeps talking while it decides, and only an interrupt phrase (`lexicons/interrupt.txt`: stop, wait, no, Jarvis, shut up, aspetta…) stops it. `JARVIS_MIN_SPEECH_DB` ignores sound quieter than speech and `JARVIS_ECHO_TAIL_MS` drops speech that began in a reply's echo tail.
 - Audio clips: `JARVIS_AUDIO_CLIPS=on` opts in to WAVs and JSON sidecars in `.jarvis/clips/`. `JARVIS_CLIPS_MAX_COUNT`, `JARVIS_CLIPS_MAX_DAYS` and `JARVIS_CLIPS_MAX_MB` prune the oldest clips while saving is enabled. Saving is off by default; turning it off leaves existing clips in place. Logs contain transcripts even when clips are off. There is no voice-speed setting; speed stays at 1.0.

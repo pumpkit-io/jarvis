@@ -1,4 +1,4 @@
-"""Synthesize EN/IT setup probes with the real engines, without audio devices or conversational models.
+"""Synthesize EN/IT setup probes with the real engines and configured voices, without audio devices or conversational models.
 
     uv run python spikes/audio/check_tts_setup.py [qwen3|kokoro ...]
 
@@ -6,7 +6,9 @@ For each streamed sentence it reports when the first piece was ready and whether
 the audio ahead of it had played out, which is what keeps speech free of gaps.
 """
 
+from dataclasses import replace
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -15,7 +17,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'src'))
 from jarvis_hub.voice.language import Lang
-from jarvis_hub.voice.tts import TTS_ENGINES, TtsEngine
+from jarvis_hub.config import load_settings
+from jarvis_hub.voice.tts import TTS_ENGINES, TtsEngine, make_synthesizer
 
 PROBES: list[tuple[Lang, str]] = [
     ('en', 'The repository is ready, sir.'),
@@ -26,7 +29,8 @@ PROBES: list[tuple[Lang, str]] = [
 
 
 def check(engine: TtsEngine) -> dict[str, object]:
-    synth = TTS_ENGINES[engine]()
+    voice = load_settings(Path(__file__).resolve().parents[2], os.environ, ignore_voice=lambda error: None).voice
+    synth = make_synthesizer(replace(voice, tts_engine=engine))
     began = time.perf_counter()
     synth.load()
     for lang in ('en', 'it'):

@@ -4,9 +4,11 @@ import math
 import re
 import subprocess
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, TypeGuard, TypeVar, get_args
+
+from jarvis_hub.voice.packs import DEFAULT_VOICES, VOICE_NAME
 
 DEFAULT_ORG = "pumpkit-io"
 
@@ -57,6 +59,11 @@ class VoiceSettings:
     wake_threshold: float = 0.2
     stt_engine: Literal["parakeet"] = "parakeet"
     tts_engine: TtsEngine = "qwen3"
+    # The voice pack Qwen3-TTS speaks each language with (voice/packs.py). The User's own packs sit in the main
+    # checkout beside the `.env` that chooses them, so every worktree finds them.
+    voice_en: str = DEFAULT_VOICES["en"]
+    voice_it: str = DEFAULT_VOICES["it"]
+    user_voices: Path | None = None
     aec: Literal["webrtc", "off"] = "webrtc"
     vad_threshold: float = 0.5
     end_silence_ms: int = 500
@@ -182,15 +189,29 @@ def load_settings(
     def tts_engine() -> TtsEngine:
         return choice("JARVIS_TTS_ENGINE", "qwen3", get_args(TtsEngine))
 
-    def voice_settings() -> VoiceSettings:
+    def voice_name(name: str, default: str) -> str:
+        value = get(name, default)
+        if not VOICE_NAME.match(value):
+            raise ConfigError(f"{name}={value!r} is not a voice name; ./jarvis voice list shows them")
+        return value
+
+    def speaking() -> VoiceSettings:
         return VoiceSettings(
+            tts_engine=tts_engine(),
+            voice_en=voice_name("JARVIS_VOICE_EN", DEFAULT_VOICES["en"]),
+            voice_it=voice_name("JARVIS_VOICE_IT", DEFAULT_VOICES["it"]),
+            user_voices=main / ".jarvis" / "voices",
+        )
+
+    def voice_settings() -> VoiceSettings:
+        return replace(
+            speaking(),
             follow_up_s=number("JARVIS_FOLLOWUP_SECONDS", 10.0, 0, 120, low_open=True),
             announce_follow_up_s=number("JARVIS_ANNOUNCE_FOLLOWUP_SECONDS", 10.0, 0, 120, low_open=True),
             listen_s=number("JARVIS_LISTEN_SECONDS", 10.0, 0, 120, low_open=True),
             wake_engine=choice("JARVIS_WAKE_ENGINE", "openwakeword", ("openwakeword",)),
             wake_threshold=number("JARVIS_WAKE_THRESHOLD", 0.2, 0, 1, low_open=True),
             stt_engine=choice("JARVIS_STT_ENGINE", "parakeet", ("parakeet",)),
-            tts_engine=tts_engine(),
             aec=choice("JARVIS_AEC", "webrtc", ("webrtc", "off")),
             vad_threshold=number("JARVIS_VAD_THRESHOLD", 0.5, 0, 1, low_open=True),
             end_silence_ms=round(number("JARVIS_END_SILENCE_MS", 500, 0, 5000, low_open=True)),
@@ -224,9 +245,9 @@ def load_settings(
             voice = configured_voice
         else:
             try:
-                voice = VoiceSettings(tts_engine=tts_engine())
+                voice = speaking()
             except ConfigError:
-                voice = VoiceSettings()
+                voice = VoiceSettings(user_voices=main / ".jarvis" / "voices")
 
     def count(name: str, default: int) -> int:
         value = get(name, str(default))

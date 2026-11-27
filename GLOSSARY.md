@@ -124,6 +124,10 @@ _Avoid_: search, history lookup
 A phrase such as "Hey Jarvis", "Hi Jarvis", "Ehi Jarvis" or "Jarvis" that makes an idle Jarvis start listening. During playback it is evidence that speech addresses Jarvis, interpreted in context rather than treated as an unconditional Interruption.
 _Avoid_: hotword, trigger phrase
 
+**Voice pack**:
+The voice Jarvis speaks one language with: a reference clip, its exact transcript, its language and the trim to Jarvis's speech level. Qwen3-TTS clones it; `JARVIS_VOICE_EN` and `JARVIS_VOICE_IT` choose one per language, and `./jarvis voice` makes new ones.
+_Avoid_: voice model, speaker, preset
+
 **Spoken request**:
 An admitted User request with an identity that survives resumed speech or correction. Each accepted change creates a revision, preserving the opening and added words in order. The current revision owns its Talker generation and reply; replacing or retiring it makes old results stale.
 _Avoid_: treating every transcript fragment as a fresh request

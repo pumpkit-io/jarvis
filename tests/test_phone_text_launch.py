@@ -43,7 +43,7 @@ async def test_text_launch_hears_a_live_phone_and_replies_there_without_opening_
     monkeypatch.setattr(entry, 'SoundPlayer', no_mac)
     monkeypatch.setattr(entry, '_open_player', no_mac)
     monkeypatch.setattr(entry, '_load_engines', load)
-    def synthesizer(engine: str) -> FakeTts:
+    def synthesizer(voice: object) -> FakeTts:
         return FakeTts()
     def recording(path: Path) -> RecordingMetrics:
         return metrics

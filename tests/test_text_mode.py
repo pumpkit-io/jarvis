@@ -8,7 +8,7 @@ from typing import TextIO
 
 import pytest
 
-from jarvis_hub.config import RoleModel, Settings
+from jarvis_hub.config import RoleModel, Settings, VoiceSettings
 from jarvis_hub.main import Mouth, TerminalOutput, text_mode
 from jarvis_hub.read_only import check
 from tests.fakes import FakeBackend, FakeClock, FakeTts, Gate, RecordingPlayer, Text, Tool, Wait
@@ -501,8 +501,8 @@ def test_speaking_launches_build_the_configured_tts_engine(
     built: list[str] = []
     launched: dict[str, Any] = {}
 
-    def make(name: str) -> FakeTts:
-        built.append(name)
+    def make(voice: VoiceSettings) -> FakeTts:
+        built.append(voice.tts_engine)
         return FakeTts()
 
     async def launch(**kwargs: Any) -> None:

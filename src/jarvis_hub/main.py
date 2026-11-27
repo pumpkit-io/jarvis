@@ -28,7 +28,7 @@ from jarvis_hub.pairing import PairingStore, https_origin
 from jarvis_hub.agents.backend import AgentBackend, SessionSpec
 from jarvis_hub.agents.sdk import SdkBackend
 from jarvis_hub.clients import TERMINAL
-from jarvis_hub.config import ConfigError, Settings, VoiceSettings, load_settings
+from jarvis_hub.config import ConfigError, Settings, VoiceSettings, load_settings, main_checkout
 from jarvis_hub.hub import Clock, Hub, Line, Metrics, Output
 from jarvis_hub.live import LiveContext
 from jarvis_hub.memory import summariser_spec
@@ -45,7 +45,9 @@ from jarvis_hub.voice.player import NoLocalPlayer, Player, Samples, SoundPlayer
 from jarvis_hub.voice.speech import Speech, SpeechClock
 from jarvis_hub.voice.transcription import TranscriptionService
 from jarvis_hub.voice.state import Timing
-from jarvis_hub.voice.tts import Synthesizer, make_synthesizer
+from jarvis_hub.voice.studio import MlxDesigner, Studio, play_on_speakers
+from jarvis_hub.voice.studio import add_arguments as add_voice_arguments
+from jarvis_hub.voice.tts import MlxQwen3, Synthesizer, make_synthesizer
 from jarvis_hub.voice.voice_mode import AudioInput, VoiceMode, client_rows, merge
 from jarvis_hub.waits import WaitSetup
 from jarvis_hub.workspace import default_workspace
@@ -319,7 +321,7 @@ async def text_mode(
         speech = None
         local_voice = None
         if settings.remote:
-            tts = voice.tts if voice is not None else make_synthesizer(settings.voice.tts_engine)
+            tts = voice.tts if voice is not None else make_synthesizer(settings.voice)
             floor = VoiceMode(audio=None, tts=tts, player=player if player is not None else NoLocalPlayer(),
                                      clock=clock, timing=timing(settings.voice), metrics=metrics, notice=output.notice,
                                      ready_sound=local_speech,
@@ -593,7 +595,7 @@ def main() -> None:
     parser.add_argument("--speak", action="store_true", help="with --text, speak generated replies; readiness is nonverbal")
     parser.add_argument("--headphones", action="store_true", help="voice mode with echo cancellation off")
     parser.add_argument("--debug", action="store_true", help="show the voice state machine's transitions")
-    commands = parser.add_subparsers(dest="command", metavar="{stats,pair,clients,revoke}")
+    commands = parser.add_subparsers(dest="command", metavar="{stats,pair,clients,revoke,voice}")
     stats = commands.add_parser("stats", help="print usage and latency per role from the metrics log")
     stats.add_argument("--since", help="start of the range: a time ago like 24h or 7d, or a date like 2026-11-01")
     stats.add_argument(
@@ -609,7 +611,19 @@ def main() -> None:
     commands.add_parser("clients", help="list paired devices")
     revoke = commands.add_parser("revoke", help="revoke a paired device by its exact name")
     revoke.add_argument("name", help="exact device name, quoted if it contains spaces")
+    add_voice_arguments(commands.add_parser("voice", help="design, hear and choose the voice Jarvis speaks with"))
     args = parser.parse_args()
+
+    if args.command == "voice":
+        try:
+            repo = Path(__file__).resolve().parents[2]
+            settings = load_settings(repo, os.environ, ignore_voice=lambda error: None)
+            voices = settings.voice.user_voices or settings.runtime_dir / "voices"
+            Studio(settings.voice, voices.parent / "voice-takes", main_checkout(repo) / ".env", sys.stdout,
+                   MlxDesigner, MlxQwen3, play_on_speakers).run(args)
+        except (ConfigError, ValueError) as e:
+            sys.exit(f"jarvis-hub: {e}")
+        return
 
     if args.command in ("pair", "clients", "revoke"):
         try:
@@ -661,7 +675,7 @@ def main() -> None:
         )
     except ConfigError as e:
         sys.exit(f"jarvis-hub: {e}")
-    voice = Mouth(make_synthesizer(settings.voice.tts_engine), SoundPlayer) if args.speak else None
+    voice = Mouth(make_synthesizer(settings.voice), SoundPlayer) if args.speak else None
 
     # Ctrl-C reaches the claude CLI too (same process group), so it ends the conversation rather than a reply.
     try:
@@ -688,7 +702,7 @@ def main() -> None:
                     stdin=sys.stdin,
                     stdout=sys.stdout,
                     stderr=sys.stderr,
-                    ears=Ears(make_synthesizer(settings.voice.tts_engine), _open_player, _open_listener, _follow_devices),
+                    ears=Ears(make_synthesizer(settings.voice), _open_player, _open_listener, _follow_devices),
                     headphones=args.headphones,
                     debug=args.debug,
                 )
