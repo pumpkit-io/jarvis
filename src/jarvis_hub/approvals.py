@@ -55,6 +55,16 @@ REF_JQ = (
 KEEPING_RULES = frozenset({"deletion", "non_fast_forward", "update"})
 # GitHub's 403 for the rules of a private repo on GitHub Free, where no ruleset is enforced.
 _NO_RULESETS = "Upgrade to GitHub Pro or make this repository public"
+# What a merge read prints: the state, the head, GitHub's merge state, the base branch and the head branch.
+MERGE_JQ = (
+    '.state + " " + .headRefOid + " " + (.mergeStateStatus // "UNKNOWN") + " " + .baseRefName + " " + .headRefName'
+)
+# The merge states GitHub merges from: CLEAN, UNSTABLE (only checks the rules do not require are red) and HAS_HOOKS.
+MERGEABLE = frozenset({"CLEAN", "UNSTABLE", "HAS_HOOKS"})
+# A check that ended in one of these does not hold a merge back.
+PASSED = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})
+# The reviews of pumpkit's `review` check start with this workflow, which only a repository admin can run.
+REVIEW_WORKFLOW = "sdlc-review-llm.yml"
 
 
 def rules_argv(repo: str, branch: str) -> Argv:
@@ -63,6 +73,22 @@ def rules_argv(repo: str, branch: str) -> Argv:
     return (
         "gh", "api", "--paginate", f"repos/{repo}/rules/branches/{branch}", "--jq", '[.[].type] | unique | join(" ")'
     )
+
+
+def checks_argv(repo: str, number: int) -> Argv:
+    """The read-only gh command that lists the PR's checks as `name<TAB>result`, one per line; a check still going
+    shows its status."""
+    jq = (
+        '.statusCheckRollup[] | [(.name // .context), (if (.conclusion // "") != "" then .conclusion '
+        'else (.state // .status // "UNKNOWN") end)] | @tsv'
+    )
+    return ("gh", "pr", "view", str(number), "-R", repo, "--json", "statusCheckRollup", "--jq", jq)
+
+
+def required_checks_argv(repo: str, branch: str) -> Argv:
+    """The read-only gh command that lists the status checks the rules on `branch` require, one per line."""
+    jq = '.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context'
+    return ("gh", "api", "--paginate", f"repos/{repo}/rules/branches/{branch}", "--jq", jq)
 
 
 # GitHub deletes the ref only while it still points at beforeOid, so the tip the User approved is enforced server side.
@@ -170,6 +196,20 @@ class _Target:
     node: str = ""
     # The change is a branch the Hub never deletes, whatever its tip.
     forbidden: bool = False
+    # The change is that GitHub would refuse the merge now, whatever the User says: it holds what is missing.
+    blocked: bool = False
+
+
+def _how_to_start(check: str, repo: str, head: str) -> str:
+    """How to start a required check nobody triggered, when the Hub knows it: pumpkit's `review`, which starts only
+    by hand and spends the maintainer's usage, so starting it needs the User's yes."""
+    if check != "review":
+        return "; wait for CI, or start its workflow if it runs by hand"
+    return (
+        f"; it starts only by hand, with `gh workflow run {REVIEW_WORKFLOW} --ref {head} -R {repo}`, which spends the "
+        "User's usage and needs an admin, so request a subagent_action Approval to start it, then wait for "
+        "its verdict before asking to merge"
+    )
 
 
 def _x_post(task_id: str, spec: dict[str, Any], grants: list[str], repo: str, now: float) -> Approval | Refused:
@@ -288,7 +328,7 @@ class Approvals:
             return approval
         if approval.action in HUB_ACTIONS:
             target = await self._read(approval)
-            if target.forbidden:
+            if target.forbidden or target.blocked:
                 return Refused(f"Not asked: {target.change}.")
             if target.change is not None:
                 return Refused(f"Not asked: {target.change}. Look again and ask about what is there now.")
@@ -425,6 +465,13 @@ class Approvals:
                     return approval_event(approval, "held", refused.reason)
                 if authority_version is None or version == authority_version():
                     break
+            if target.blocked:
+                approval.state, approval.outcome = "lapsed", str(target.change)
+                text = (
+                    f"Not done: the User approved {approval.text}, but {target.change}. Nothing ran. Once it can "
+                    "merge, request a fresh concrete Approval, using applicable Authorization before asking the User."
+                )
+                return approval_event(approval, "lapsed", text)
             if target.change is not None:
                 approval.state, approval.outcome = "lapsed", target.change
                 text = (
@@ -456,7 +503,7 @@ class Approvals:
         if approval.action == "merge_pr":
             return (
                 "gh", "pr", "view", str(approval.number), "-R", approval.repo,
-                "--json", "headRefOid,state", "--jq", '.state + " " + .headRefOid',
+                "--json", "headRefOid,state,mergeStateStatus,baseRefName,headRefName", "--jq", MERGE_JQ,
             )
         owner, name = approval.repo.split("/", 1)
         return (
@@ -480,7 +527,7 @@ class Approvals:
         code, printed = await self._runner(self.check_argv(approval))
         words = printed.strip().splitlines()[-1].split() if printed.strip() else []
         what = f"{approval.repo}#{approval.number}" if approval.action == "merge_pr" else f"branch {approval.branch}"
-        if code != 0 or len(words) != (2 if approval.action == "merge_pr" else 4):
+        if code != 0 or len(words) != (5 if approval.action == "merge_pr" else 4):
             return _Target(f"the Hub could not read {what}: {printed.strip() or f'gh exited {code}'}")
         first, second = words[:2]
         sha = str(approval.sha)
@@ -489,7 +536,10 @@ class Approvals:
                 return _Target(f"{what} is {first.lower()} now")
             if second.lower() != sha:
                 return _Target(f"the head of {what} is now {second[:12]}, not {sha[:12]}")
-            return _Target(None)
+            merge_state, base, head = words[2:]
+            if merge_state in MERGEABLE:
+                return _Target(None)
+            return _Target(await self._held_back(approval, what, merge_state, base, head), blocked=True)
         if second == "none":
             return _Target(f"{what} no longer exists in {approval.repo}")
         default, rule = words[2:]
@@ -504,6 +554,39 @@ class Approvals:
         if second.lower() != sha:
             return _Target(f"{what} now points at {second[:12]}, not {sha[:12]}")
         return _Target(None, node=first)
+
+    async def _held_back(self, approval: Approval, what: str, merge_state: str, base: str, head: str) -> str:
+        """Why GitHub would refuse to merge `what` now, and what to do about it."""
+        if merge_state == "BLOCKED":
+            held = await self._unmet_checks(approval, base, head)
+            if held:
+                return f"{what} cannot merge yet: {'; '.join(held)}"
+            return (
+                f"{what} cannot merge yet: GitHub holds it back (merge state BLOCKED), such as a required review or "
+                "rule that is unmet. Read its checks and rules to find which, and have that done first"
+            )
+        why = {
+            "BEHIND": f"its branch is behind {base}; update it first",
+            "DIRTY": f"it conflicts with {base}; resolve the conflicts first",
+            "DRAFT": "it is a draft; mark it ready first",
+        }.get(merge_state, "GitHub has not finished working out whether it can merge; look again in a minute")
+        return f"{what} cannot merge yet: {why}"
+
+    async def _unmet_checks(self, approval: Approval, base: str, head: str) -> list[str]:
+        """The checks the base branch requires that have not run or have not passed, each with what to do."""
+        number = int(approval.number or 0)
+        code, printed = await self._runner(required_checks_argv(approval.repo, base))
+        required = sorted({line for line in printed.splitlines() if line.strip()}) if code == 0 else []
+        code, printed = await self._runner(checks_argv(approval.repo, number))
+        ran = dict(line.split("\t", 1) for line in printed.splitlines() if "\t" in line) if code == 0 else {}
+        held: list[str] = []
+        for check in required:
+            result = ran.get(check)
+            if result is None:
+                held.append(f"the required check `{check}` has not run{_how_to_start(check, approval.repo, head)}")
+            elif result not in PASSED:
+                held.append(f"the required check `{check}` is {result.lower().replace('_', ' ')}")
+        return held
 
     def grant(self, approval_id: object, task_id: str) -> Approval | str:
         """The approved Subagent action `approval_id` names, if a Subagent of `task_id` may take it."""

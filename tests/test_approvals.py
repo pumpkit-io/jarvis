@@ -592,6 +592,159 @@ async def test_a_request_outside_the_closed_set_of_actions_is_refused(
     assert str(results(session.backend, "orchestrator", "report")[0].result).startswith(refusal)
 
 
+PUMPKIT_42 = "pumpkit-io/pumpkit#42"
+REVIEW_HINT = "`gh workflow run sdlc-review-llm.yml --ref feat/pr-42 -R pumpkit-io/pumpkit`"
+
+
+def blocked_on_review(gh: StubGh) -> None:
+    """pumpkit's PR 42 as GitHub showed pumpkit#579: the ruleset requires `review`, which nobody started."""
+    gh.merge_states[PUMPKIT_42] = "BLOCKED"
+    gh.checks[PUMPKIT_42] = {"ci": "SUCCESS"}
+    gh.rulesets["pumpkit-io/pumpkit:main"] = [ruleset_rule("required_status_checks", ("ci", "review"))]
+
+
+def merge_approvals(clock: FakeClock, gh: StubGh) -> Approvals:
+    return Approvals(org="pumpkit-io", runner=gh, clock=clock, on_change=lambda: None, log=lambda entry: None)
+
+
+async def ask_to_merge(approvals: Approvals) -> Approval | Refused:
+    return await approvals.request("T1", {"action": "merge_pr", "repo": "pumpkit", "pr": 42, "sha": HEAD})
+
+
+async def test_a_merge_the_rules_hold_back_for_a_check_nobody_started_is_not_asked(
+    clock: FakeClock, gh: StubGh
+) -> None:
+    blocked_on_review(gh)
+    approvals = merge_approvals(clock, gh)
+
+    asked = await ask_to_merge(approvals)
+
+    assert isinstance(asked, Refused)
+    assert asked.reason.startswith("Not asked: pumpkit-io/pumpkit#42 cannot merge yet: the required check `review` has not run")
+    assert REVIEW_HINT in asked.reason
+    assert "subagent_action Approval" in asked.reason
+    assert "`ci`" not in asked.reason
+    assert approvals.pending() == []
+
+
+@pytest.mark.parametrize(
+    ("result", "said"),
+    [("FAILURE", "is failure"), ("IN_PROGRESS", "is in progress"), ("QUEUED", "is queued")],
+)
+async def test_a_merge_held_back_by_a_required_check_that_ran_names_how_it_stands(
+    clock: FakeClock, gh: StubGh, result: str, said: str
+) -> None:
+    blocked_on_review(gh)
+    gh.checks[PUMPKIT_42]["review"] = result
+
+    asked = await ask_to_merge(merge_approvals(clock, gh))
+
+    assert isinstance(asked, Refused)
+    assert f"the required check `review` {said}" in asked.reason
+    assert "has not run" not in asked.reason
+
+
+async def test_a_required_check_other_than_review_is_not_given_the_review_workflow(
+    clock: FakeClock, gh: StubGh
+) -> None:
+    blocked_on_review(gh)
+    gh.rulesets["pumpkit-io/pumpkit:main"] = [ruleset_rule("required_status_checks", ("ci", "deploy preview"))]
+
+    asked = await ask_to_merge(merge_approvals(clock, gh))
+
+    assert isinstance(asked, Refused)
+    assert "the required check `deploy preview` has not run; wait for CI, or start its workflow" in asked.reason
+    assert "sdlc-review-llm.yml" not in asked.reason
+
+
+async def test_a_merge_blocked_for_a_reason_the_hub_cannot_name_says_so(clock: FakeClock, gh: StubGh) -> None:
+    gh.merge_states[PUMPKIT_42] = "BLOCKED"
+    gh.checks[PUMPKIT_42] = {"ci": "SUCCESS"}
+    gh.rulesets["pumpkit-io/pumpkit:main"] = [ruleset_rule("pull_request")]
+
+    asked = await ask_to_merge(merge_approvals(clock, gh))
+
+    assert isinstance(asked, Refused)
+    assert asked.reason.startswith("Not asked: pumpkit-io/pumpkit#42 cannot merge yet: GitHub holds it back")
+
+
+async def test_a_merge_blocked_on_rules_the_hub_cannot_read_still_is_not_asked(clock: FakeClock, gh: StubGh) -> None:
+    gh.merge_states[PUMPKIT_42] = "BLOCKED"
+    gh.rules_result = (1, NO_RULESETS)
+
+    asked = await ask_to_merge(merge_approvals(clock, gh))
+
+    assert isinstance(asked, Refused)
+    assert "cannot merge yet: GitHub holds it back" in asked.reason
+
+
+@pytest.mark.parametrize(
+    ("merge_state", "said"),
+    [
+        ("BEHIND", "its branch is behind main; update it first"),
+        ("DIRTY", "it conflicts with main; resolve the conflicts first"),
+        ("DRAFT", "it is a draft; mark it ready first"),
+        ("UNKNOWN", "GitHub has not finished working out whether it can merge"),
+    ],
+)
+async def test_a_merge_state_github_would_refuse_is_not_asked(
+    clock: FakeClock, gh: StubGh, merge_state: str, said: str
+) -> None:
+    gh.merge_states[PUMPKIT_42] = merge_state
+
+    asked = await ask_to_merge(merge_approvals(clock, gh))
+
+    assert isinstance(asked, Refused)
+    assert asked.reason.startswith(f"Not asked: pumpkit-io/pumpkit#42 cannot merge yet: {said}")
+
+
+@pytest.mark.parametrize("merge_state", ["CLEAN", "UNSTABLE", "HAS_HOOKS"])
+async def test_a_merge_github_allows_is_asked(clock: FakeClock, gh: StubGh, merge_state: str) -> None:
+    gh.merge_states[PUMPKIT_42] = merge_state
+
+    asked = await ask_to_merge(merge_approvals(clock, gh))
+
+    assert isinstance(asked, Approval)
+
+
+async def test_a_merge_is_asked_once_the_review_has_run(clock: FakeClock, gh: StubGh) -> None:
+    blocked_on_review(gh)
+    approvals = merge_approvals(clock, gh)
+    assert isinstance(await ask_to_merge(approvals), Refused)
+
+    gh.merge_states[PUMPKIT_42] = "CLEAN"
+    gh.checks[PUMPKIT_42]["review"] = "SUCCESS"
+
+    assert isinstance(await ask_to_merge(approvals), Approval)
+
+
+async def test_a_yes_to_a_merge_that_became_blocked_runs_nothing_and_says_what_is_missing(
+    clock: FakeClock, gh: StubGh
+) -> None:
+    approvals = merge_approvals(clock, gh)
+    asked = await ask_to_merge(approvals)
+    assert isinstance(asked, Approval)
+    approvals.approve(asked, "Yes, merge 42.")
+    blocked_on_review(gh)
+
+    event = await approvals.carry_out(asked)
+
+    assert gh.actions == []
+    assert asked.state == "lapsed"
+    assert 'status="lapsed"' in event
+    assert "the required check `review` has not run" in event
+    assert "Nothing ran." in event
+
+
+async def test_the_merge_reads_ask_gh_only_to_read(clock: FakeClock, gh: StubGh) -> None:
+    blocked_on_review(gh)
+
+    await ask_to_merge(merge_approvals(clock, gh))
+
+    assert [argv[:3] for argv in gh.reads] == [("gh", "pr", "view"), ("gh", "api", "--paginate"), ("gh", "pr", "view")]
+    assert gh.actions == []
+
+
 async def test_an_approved_x_post_goes_to_a_subagent_whose_brief_carries_it_and_whose_tools_widen_once(
     clock: FakeClock, output: RecordingOutput, metrics: RecordingMetrics, gh: StubGh
 ) -> None:
