@@ -34,9 +34,15 @@ enum TalkAudioTrace {
 }
 
 final class NativeAudioSessionDriver: AudioSessionDriver {
+    init() {
+        #if os(iOS)
+        TalkAudioTrace.observeSession()
+        #endif
+    }
     func activate(_ setup: AudioSessionSetup) throws {
         #if os(iOS)
         let session = AVAudioSession.sharedInstance()
+        TalkAudioTrace.log.notice("activate \(String(describing: setup), privacy: .public) from: \(TalkAudioTrace.describe(session), privacy: .public)")
         let started = ContinuousClock.now
         let interval = TalkAudioTrace.signposter.beginInterval("activate")
         defer { TalkAudioTrace.signposter.endInterval("activate", interval) }
@@ -51,20 +57,77 @@ final class NativeAudioSessionDriver: AudioSessionDriver {
         try session.setActive(true)
         TalkAudioTrace.log.notice("""
             activate \(String(describing: setup), privacy: .public) took \(TalkAudioTrace.milliseconds(since: started)) ms; \
-            sample rate \(rate) -> \(session.sampleRate) Hz, IO buffer \(buffer * 1_000) -> \(session.ioBufferDuration * 1_000) ms
+            now: \(TalkAudioTrace.describe(session), privacy: .public)
             """)
         #endif
     }
     func deactivate() {
         #if os(iOS)
+        let session = AVAudioSession.sharedInstance()
+        TalkAudioTrace.log.notice("deactivate from: \(TalkAudioTrace.describe(session), privacy: .public)")
         let started = ContinuousClock.now
         let interval = TalkAudioTrace.signposter.beginInterval("deactivate")
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        try? session.setActive(false, options: .notifyOthersOnDeactivation)
         TalkAudioTrace.signposter.endInterval("deactivate", interval)
-        TalkAudioTrace.log.notice("deactivate took \(TalkAudioTrace.milliseconds(since: started)) ms")
+        TalkAudioTrace.log.notice("deactivate took \(TalkAudioTrace.milliseconds(since: started)) ms; now: \(TalkAudioTrace.describe(session), privacy: .public)")
         #endif
     }
 }
+
+#if os(iOS)
+extension TalkAudioTrace {
+    /// Category, route and hardware format of the shared session; ports are logged by type only, since a port name can carry the owner's name.
+    static func describe(_ session: AVAudioSession) -> String {
+        let route = session.currentRoute
+        func ports(_ list: [AVAudioSessionPortDescription]) -> String { list.map(\.portType.rawValue).joined(separator: ",") }
+        return "\(session.category.rawValue)/\(session.mode.rawValue) options 0x\(String(session.categoryOptions.rawValue, radix: 16)); "
+            + "out [\(ports(route.outputs))] in [\(ports(route.inputs))]; \(session.sampleRate) Hz, "
+            + "IO \(session.ioBufferDuration * 1_000) ms, \(session.outputNumberOfChannels) out channels; "
+            + "other audio \(session.isOtherAudioPlaying ? "playing" : "silent")"
+    }
+
+    static func describe(_ reason: AVAudioSession.RouteChangeReason) -> String {
+        switch reason {
+        case .newDeviceAvailable: "newDeviceAvailable"
+        case .oldDeviceUnavailable: "oldDeviceUnavailable"
+        case .categoryChange: "categoryChange"
+        case .override: "override"
+        case .wakeFromSleep: "wakeFromSleep"
+        case .noSuitableRouteForCategory: "noSuitableRouteForCategory"
+        case .routeConfigurationChange: "routeConfigurationChange"
+        default: "unknown(\(reason.rawValue))"
+        }
+    }
+
+    private static let observers: Void = {
+        let center = NotificationCenter.default
+        _ = center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: nil) { note in
+            let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 0
+            let reason = describe(AVAudioSession.RouteChangeReason(rawValue: raw) ?? .unknown)
+            let previous = note.userInfo?[AVAudioSessionRouteChangePreviousRouteKey] as? AVAudioSessionRouteDescription
+            let before = previous.map { "out [\($0.outputs.map(\.portType.rawValue).joined(separator: ","))] in [\($0.inputs.map(\.portType.rawValue).joined(separator: ","))]" } ?? "none"
+            log.notice("route change \(reason, privacy: .public) from \(before, privacy: .public) to: \(describe(AVAudioSession.sharedInstance()), privacy: .public)")
+        }
+        _ = center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: nil) { note in
+            let type = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+            let reason = note.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt
+            let options = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt
+            log.notice("interruption type \(type ?? 99) reason \(reason ?? 99) options \(options ?? 0)")
+        }
+        // Sent only while this app is in the foreground with an active session: another app's primary audio starting (1) or stopping (0).
+        _ = center.addObserver(forName: AVAudioSession.silenceSecondaryAudioHintNotification, object: nil, queue: nil) { note in
+            let type = note.userInfo?[AVAudioSessionSilenceSecondaryAudioHintTypeKey] as? UInt
+            log.notice("other app's audio \(type == 1 ? "started" : "stopped", privacy: .public)")
+        }
+        _ = center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: nil) { _ in
+            log.error("media services were reset")
+        }
+    }()
+
+    /// Logs the session's route changes, interruptions and media resets for the app's lifetime, so a gap can be lined up with them in Console.
+    static func observeSession() { _ = observers }
+}
+#endif
 
 /// Whether the session is active, known only on the audio queue, where every driver call runs.
 private final class AudioHardware: @unchecked Sendable {
@@ -151,6 +214,7 @@ private final class RecordingClaim: @unchecked Sendable {
         guard owner == .recording, let claim else { return }
         claim.end()
         self.claim = nil; owner = nil
+        TalkAudioTrace.log.notice("Talk released or cancelled")
         let deactivates = !live, hardware = hardware
         queue.async {
             guard claim.started else { return }
@@ -260,6 +324,7 @@ public protocol TalkCaptureSource: AnyObject, Sendable {
 /// Its engine is created, started and stopped only on the audio queue.
 public final class NativeTalkCaptureSource: TalkCaptureSource, @unchecked Sendable {
     private var engine: AVAudioEngine?
+    private var configurationObserver: (any NSObjectProtocol)?
     public init() {}
     public func start(buffer: TalkPCMBuffer, limitReached: @escaping @MainActor @Sendable () -> Void) throws {
         let started = ContinuousClock.now
@@ -270,9 +335,17 @@ public final class NativeTalkCaptureSource: TalkCaptureSource, @unchecked Sendab
         let handler = try Self.makeTapHandler(buffer: buffer, limitReached: limitReached, started: started)
         input.installTap(onBus: 0, bufferSize: 2048, format: nil, block: handler)
         self.engine = engine
+        // A configuration change means the hardware changed under a running microphone, a candidate for a music gap.
+        configurationObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { _ in
+            TalkAudioTrace.log.notice("microphone engine configuration changed")
+        }
         engine.prepare()
         try engine.start()
-        TalkAudioTrace.log.notice("microphone engine started in \(TalkAudioTrace.milliseconds(since: started)) ms")
+        let format = input.inputFormat(forBus: 0)
+        TalkAudioTrace.log.notice("""
+            microphone engine started in \(TalkAudioTrace.milliseconds(since: started)) ms; input \(format.sampleRate) Hz \
+            \(format.channelCount) channels, voice processing \(input.isVoiceProcessingEnabled ? "on" : "off", privacy: .public)
+            """)
     }
     // Core Audio invokes this closure on its render thread, outside the main actor.
     static func makeTapHandler(buffer: TalkPCMBuffer, limitReached: @escaping @MainActor @Sendable () -> Void,
@@ -284,6 +357,8 @@ public final class NativeTalkCaptureSource: TalkCaptureSource, @unchecked Sendab
         return { pcm, _ in first.mark(); sink.receive(pcm) }
     }
     public func stop() {
+        if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
+        configurationObserver = nil
         guard let engine else { return }
         self.engine = nil
         let started = ContinuousClock.now

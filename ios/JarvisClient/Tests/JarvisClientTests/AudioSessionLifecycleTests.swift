@@ -85,6 +85,21 @@ private final class LoggingCapture: TalkCaptureSource, @unchecked Sendable {
     #expect(log.onMainThread.isEmpty)
 }
 
+@MainActor @Test func aCancelledTalkStopsTheMicrophoneBeforeDeactivatingAllOffTheMainThread() async throws {
+    let log = SessionLog(), audio = NativeTalkAudioSession(driver: LoggingDriver(log: log))
+    let talk = TalkController(recorder: NativeTalkRecorder(session: audio, source: LoggingCapture(log: log)), permission: { true })
+    talk.configure(begin: { _ in true }, cancel: { _ in }, deliver: { _, _, _ in })
+    await talk.press()
+    audio.drain()
+    #expect(log.entries == [.activate(.recording), .microphoneStarted])
+    await talk.discard()
+    audio.drain()
+    #expect(talk.state == .cancelled)
+    #expect(log.entries == [.activate(.recording), .microphoneStarted, .microphoneStopped, .deactivate])
+    #expect(log.onMainThread.isEmpty)
+    #expect(!log.activatedWhileActive)
+}
+
 @MainActor @Test func aPressAndAReleaseReturnWhileTheAudioHardwareIsStillBusy() throws {
     let log = SessionLog(), driver = LoggingDriver(log: log), audio = NativeTalkAudioSession(driver: driver)
     let recorder = NativeTalkRecorder(session: audio, source: LoggingCapture(log: log))
