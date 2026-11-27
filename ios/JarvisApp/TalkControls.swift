@@ -164,6 +164,14 @@ struct MessageInputBar: View {
     }
 }
 
+extension AppSession {
+    /// Whether the input bar shows a status line above its pill; `MessageInputBar.messages` draws these.
+    var hasComposerNotice: Bool {
+        draftValidationMessage != nil || inputMessage != nil || voiceMessage != nil
+            || talk.message != nil || liveMode.message != nil
+    }
+}
+
 private struct TalkFeedbackKey: Equatable {
     let discards: Int
     let visible: Bool
