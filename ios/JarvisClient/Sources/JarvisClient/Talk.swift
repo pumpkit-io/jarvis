@@ -3,7 +3,8 @@ import Observation
 
 @MainActor public protocol TalkRecorder: AnyObject {
     var level: Double { get }
-    func start(limitReached: @escaping @MainActor @Sendable () -> Void) throws
+    /// May return before the microphone is on; `failed` runs if it then could not start.
+    func start(limitReached: @escaping @MainActor @Sendable () -> Void, failed: @escaping @MainActor @Sendable () -> Void) throws
     func stop() -> Data
 }
 
@@ -249,7 +250,7 @@ public enum TalkWaveform {
         guard !Task.isCancelled, generation == owner, state == .authorizing else { return }
         guard allowed else { state = .refused; holdCancelled = true; return }
         let id = UUID().uuidString
-        do { try startSegment(owner: owner) } catch { state = .failed; return }
+        do { try startSegment(owner: owner, resuming: false) } catch { state = .failed; return }
         talkID = id
         state = .recording
         runClock(owner: owner)
@@ -275,18 +276,33 @@ public enum TalkWaveform {
         await stopSpeech()
         guard generation == owner, state == .paused else { return }
         // A microphone that won't restart leaves the paused Talk as it was, still ready to send.
-        do { try startSegment(owner: owner) } catch { return }
+        do { try startSegment(owner: owner, resuming: true) } catch { return }
         state = .recording
         runClock(owner: owner)
     }
 
-    private func startSegment(owner: UInt64) throws {
-        try recorder.start { [weak self] in
+    private func startSegment(owner: UInt64, resuming: Bool) throws {
+        try recorder.start(limitReached: { [weak self] in
             Task {
                 guard let self, self.generation == owner, self.state == .recording else { return }
                 await self.release()
             }
-        }
+        }, failed: { [weak self] in
+            Task { await self?.segmentFailed(owner: owner, resuming: resuming) }
+        })
+    }
+
+    /// The microphone failed after the press already showed recording; a resumed Talk goes back to paused with what it had.
+    private func segmentFailed(owner: UInt64, resuming: Bool) async {
+        guard generation == owner, state == .recording else { return }
+        generation &+= 1
+        timer?.cancel(); timer = nil
+        if resuming { state = .paused; return }
+        let id = talkID
+        talkID = nil; recorded = Data(); recordedSeconds = 0
+        isLocked = false; lockProgress = 0; discardProgress = 0
+        state = .failed; holdCancelled = true
+        if let id { await endBegun(id) }
     }
 
     private func runClock(owner: UInt64) {
