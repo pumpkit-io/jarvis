@@ -20,6 +20,8 @@ class Task:
     created: float
     state: TaskState = "queued"
     last_report: str | None = None
+    # The id `read_report` reads the last report's details by, such as R12.
+    last_details: str | None = None
     reports: int = 0
     # Messages for this Task still in the Orchestrator's queue.
     waiting: int = 0
@@ -54,9 +56,9 @@ class Task:
         self.state = "working"
         return True
 
-    def report(self, spoken: str, *, needs_user: bool, live: bool) -> None:
+    def report(self, spoken: str, *, needs_user: bool, live: bool, details: str | None = None) -> None:
         """`live`: Subagents, Watchers or Checks of this Task still run, so it keeps working after the report."""
-        self.last_report = spoken
+        self.last_report, self.last_details = spoken, details
         self.reports += 1
         if self.waiting:
             self.state = "queued"
@@ -66,7 +68,7 @@ class Task:
             self.state = "working" if live else "done"
 
     def fail(self, reason: str, *, live: bool) -> None:
-        self.last_report = f"Failed: {reason}."
+        self.last_report, self.last_details = f"Failed: {reason}.", None
         if self.waiting:
             self.state = "queued"
         elif not live:
@@ -90,7 +92,7 @@ class Task:
         return self.state not in FINISHED or (bool(self.waiting) and not self.cancelled)
 
 
-_SAVED = Fields(("id", "request", "created", "state", "last_report", "reports", "words", "revision"), times=frozenset({"created"}))
+_SAVED = Fields(("id", "request", "created", "state", "last_report", "last_details", "reports", "words", "revision"), times=frozenset({"created"}))
 
 
 class Tasks:
@@ -114,7 +116,7 @@ class Tasks:
         message, so a queued one is working on it."""
         tasks: list[Task] = []
         for r in records:
-            task = Task(**_SAVED.load({"revision": 0, **r}, from_wall))
+            task = Task(**_SAVED.load({"revision": 0, "last_details": None, **r}, from_wall))
             numbered(task.id, "T")
             if one_of(task.state, get_args(TaskState)) == "queued":
                 task.state = "working"
@@ -150,6 +152,8 @@ class Tasks:
             line = f"{task.id} {task.state.replace('_', ' ')}, started {ago(now - task.created)} ago: {task.request}"
             if task.last_report:
                 line += f" | Last report: {task.last_report}"
+                if task.last_details:
+                    line += f" (details {task.last_details})"
             lines.append(line)
             lines += [f"  {sub}" for sub in subagents(task.id)]
         return lines

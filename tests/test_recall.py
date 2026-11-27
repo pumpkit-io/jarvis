@@ -86,7 +86,7 @@ def test_recall_searches_replies_shown_details_and_task_reports_but_not_partial_
         ("jarvis", "The harbour plan is ready.", None),
         ("task", "The harbour PR is open.\n\nPR 91 renames the harbour module.", "T3"),
     ]
-    assert '<match at="2026-11-22 12:00 Sunday" from="task" task="T3">' in found.render()
+    assert '<match at="2026-11-22 12:00 Sunday" from="task" task="T3" report="R5">' in found.render()
 
 
 def test_every_word_must_appear_and_a_quoted_phrase_as_written(tmp_path: Path) -> None:

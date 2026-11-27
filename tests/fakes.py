@@ -86,6 +86,14 @@ class Tool:
 
 
 @dataclass(frozen=True)
+class ToolFor:
+    """A tool call whose input is made from the message the turn answers, for an id the Hub assigned in it."""
+
+    name: str
+    input: Callable[[str], dict[str, Any]]
+
+
+@dataclass(frozen=True)
 class ResolveScope:
     disposition: str
     task_ids: tuple[str, ...] = ()
@@ -144,7 +152,7 @@ class NoContext:
     reason: str
 
 
-Step = Wait | Text | Tool | ResolveScope | AwaitInterrupt | Gate | Set | Fail | Raise | Abort | Limited | Usage | Context | NoContext
+Step = Wait | Text | Tool | ToolFor | ResolveScope | AwaitInterrupt | Gate | Set | Fail | Raise | Abort | Limited | Usage | Context | NoContext
 
 
 @dataclass(frozen=True)
@@ -195,13 +203,15 @@ class FakeSession:
                 in_text = True
                 yield TextDelta(step.text)
                 continue
-            if in_text and isinstance(step, (Tool, Fail, Abort, Limited)):
+            if in_text and isinstance(step, (Tool, ToolFor, Fail, Abort, Limited)):
                 in_text = False
                 yield TextEnd()
             match step:
                 case Wait(seconds):
                     self.backend.clock.advance(seconds)
-                case Tool(name, args):
+                case Tool() | ToolFor():
+                    name = step.name
+                    args = step.input(self.received[-1]) if isinstance(step, ToolFor) else step.input
                     yield ToolCall(name, args)
                     handler = next((t.handler for t in self.spec.tools if t.name == name), None)
                     result = await handler(args) if handler else None

@@ -108,7 +108,10 @@ def orchestrator_tools(
                 {
                     "task_id": STRING,
                     "spoken": {**STRING, "description": "One sentence as Jarvis, describing your own findings or work without internal handoff narration."},
-                    "details_markdown": {**STRING, "description": "Details for the screen."},
+                    "details_markdown": {**STRING, "description": "Details for the screen, which the User can also "
+                                         "have read aloud."},
+                    "details_file": {**STRING, "description": "An absolute path to a text file to attach whole "
+                                     "after details_markdown, instead of copying it."},
                     "needs_user": {"type": "boolean", "description": "True when the Task waits on the User."},
                     "approval": APPROVAL,
                     "authorization_id": {**STRING, "description": "Existing Authorization covering this exact action and its conditions. The Hub executes without asking again."},
