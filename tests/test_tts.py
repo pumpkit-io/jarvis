@@ -34,8 +34,8 @@ def voices(tmp_path: Path) -> dict[Lang, ClonedVoice]:
     for name in ("en", "it"):
         (tmp_path / f"{name}.wav").write_bytes(b"RIFF")
     return {
-        "en": ClonedVoice("clone-en", tmp_path / "en.wav", "An English transcript.", "English"),
-        "it": ClonedVoice("clone-it", tmp_path / "it.wav", "Una trascrizione italiana.", "Italian"),
+        "en": ClonedVoice("clone-en", tmp_path / "en.wav", "An English transcript.", "English", -2.0),
+        "it": ClonedVoice("clone-it", tmp_path / "it.wav", "Una trascrizione italiana.", "Italian", -4.3),
     }
 
 
@@ -71,6 +71,20 @@ def test_pieces_are_24khz_mono_float32_at_kokoros_level_and_say_every_word(tmp_p
     assert " ".join(words for words, _ in pieces if words).split() == text.split()
     # Words go out with the audio that says them, not all with the last piece.
     assert pieces[0][0] and pieces[0][0] != " ".join(text.split())
+
+
+def test_each_voice_is_trimmed_by_its_own_fixed_gain(tmp_path: Path) -> None:
+    synth = loaded(tmp_path, FakeCloner(pieces=1))
+
+    [(_, english)] = list(synth.stream("Evening.", "clone-en"))
+    [(_, italian)] = list(synth.stream("Sera.", "clone-it"))
+
+    assert np.allclose(english, 0.5 * 10 ** (-2.0 / 20))
+    assert np.allclose(italian, 0.5 * 10 ** (-4.3 / 20))
+
+
+def test_the_italian_clone_is_trimmed_further_than_the_english_one_to_meet_the_same_level() -> None:
+    assert QWEN3_VOICES["it"].trim_db < QWEN3_VOICES["en"].trim_db
 
 
 def test_words_the_audio_had_not_reached_ride_on_a_short_silent_tail(tmp_path: Path) -> None:

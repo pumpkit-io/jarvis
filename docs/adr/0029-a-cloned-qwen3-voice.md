@@ -8,6 +8,8 @@ A piece carries the words it is estimated to say, from the voices' measured spea
 
 The User decided this on 2026-11-22.
 
+Since ADR 0032, each cloned voice has its own fixed trim to one speech reference level, Kokoro's English level of -25 LUFS: -2 dB for English, as before, and -4.3 dB for Italian, whose reference clip is louder.
+
 ## Considered Options
 
 - One clip cloned into both languages. Rejected: the English accent carried into the Italian.

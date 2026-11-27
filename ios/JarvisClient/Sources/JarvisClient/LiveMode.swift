@@ -333,6 +333,8 @@ private struct LiveFrame: Sendable {
         }
         do {
             try engine.inputNode.setVoiceProcessingEnabled(true)
+            // Voice processing ducks other audio hard by default; the session's own duck is the level the User chose.
+            engine.inputNode.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: true, duckingLevel: .min)
             speech = NativeSpeechOutput(sharing: engine)
             engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: nil, block: handler)
             engine.prepare()

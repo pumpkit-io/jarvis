@@ -83,13 +83,13 @@ def _notes(sample_rate: int, notes: tuple[float, ...], seconds: float, gain: flo
 
 
 def chime(sample_rate: int) -> Samples:
-    """Two short rising notes."""
-    return _notes(sample_rate, (880.0, 1318.5), 0.09, 0.25)
+    """Two short rising notes, as loud while they sound as speech at `SPEECH_LUFS`."""
+    return _notes(sample_rate, (880.0, 1318.5), 0.09, 0.125)
 
 
 def closing(sample_rate: int) -> Samples:
-    """The chime turned around, falling and a little slower and softer: Jarvis has stopped listening."""
-    return _notes(sample_rate, (1318.5, 880.0), 0.12, 0.18)
+    """The chime turned around, falling, a little slower and 2 LU softer: Jarvis has stopped listening."""
+    return _notes(sample_rate, (1318.5, 880.0), 0.12, 0.1)
 
 
 @dataclass
