@@ -1,6 +1,5 @@
 import AVFoundation
 import Foundation
-import os
 
 @MainActor public protocol TalkAudioSession: AnyObject {
     /// Claims the session for a Talk and returns at once. On the audio queue it activates the session and then runs `start`; if either throws, it deactivates there and `failed` runs on the main actor.
@@ -23,29 +22,10 @@ protocol AudioSessionDriver: Sendable {
     func deactivate()
 }
 
-/// Timings of the Talk audio path, for diagnosing a stall on a device in Console or Instruments (ADR 0033).
-enum TalkAudioTrace {
-    static let log = Logger(subsystem: "io.pumpkit.jarvis", category: "TalkAudio")
-    static let signposter = OSSignposter(logger: log)
-    static func milliseconds(since start: ContinuousClock.Instant) -> Int {
-        let elapsed = ContinuousClock.now - start
-        return Int(elapsed.components.seconds * 1_000 + elapsed.components.attoseconds / 1_000_000_000_000_000)
-    }
-}
-
 final class NativeAudioSessionDriver: AudioSessionDriver {
-    init() {
-        #if os(iOS)
-        TalkAudioTrace.observeSession()
-        #endif
-    }
     func activate(_ setup: AudioSessionSetup) throws {
         #if os(iOS)
         let session = AVAudioSession.sharedInstance()
-        TalkAudioTrace.log.notice("activate \(String(describing: setup), privacy: .public) from: \(TalkAudioTrace.describe(session), privacy: .public)")
-        let started = ContinuousClock.now
-        let interval = TalkAudioTrace.signposter.beginInterval("activate")
-        defer { TalkAudioTrace.signposter.endInterval("activate", interval) }
         let rate = session.sampleRate, buffer = session.ioBufferDuration
         switch setup {
         case .recording: try session.setCategory(.playAndRecord, mode: .default, options: NativeTalkAudioSession.recordingOptions)
@@ -55,79 +35,14 @@ final class NativeAudioSessionDriver: AudioSessionDriver {
         if rate > 0 { try? session.setPreferredSampleRate(rate) }
         if buffer > 0 { try? session.setPreferredIOBufferDuration(buffer) }
         try session.setActive(true)
-        TalkAudioTrace.log.notice("""
-            activate \(String(describing: setup), privacy: .public) took \(TalkAudioTrace.milliseconds(since: started)) ms; \
-            now: \(TalkAudioTrace.describe(session), privacy: .public)
-            """)
         #endif
     }
     func deactivate() {
         #if os(iOS)
-        let session = AVAudioSession.sharedInstance()
-        TalkAudioTrace.log.notice("deactivate from: \(TalkAudioTrace.describe(session), privacy: .public)")
-        let started = ContinuousClock.now
-        let interval = TalkAudioTrace.signposter.beginInterval("deactivate")
-        try? session.setActive(false, options: .notifyOthersOnDeactivation)
-        TalkAudioTrace.signposter.endInterval("deactivate", interval)
-        TalkAudioTrace.log.notice("deactivate took \(TalkAudioTrace.milliseconds(since: started)) ms; now: \(TalkAudioTrace.describe(session), privacy: .public)")
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         #endif
     }
 }
-
-#if os(iOS)
-extension TalkAudioTrace {
-    /// Category, route and hardware format of the shared session; ports are logged by type only, since a port name can carry the owner's name.
-    static func describe(_ session: AVAudioSession) -> String {
-        let route = session.currentRoute
-        func ports(_ list: [AVAudioSessionPortDescription]) -> String { list.map(\.portType.rawValue).joined(separator: ",") }
-        return "\(session.category.rawValue)/\(session.mode.rawValue) options 0x\(String(session.categoryOptions.rawValue, radix: 16)); "
-            + "out [\(ports(route.outputs))] in [\(ports(route.inputs))]; \(session.sampleRate) Hz, "
-            + "IO \(session.ioBufferDuration * 1_000) ms, \(session.outputNumberOfChannels) out channels; "
-            + "other audio \(session.isOtherAudioPlaying ? "playing" : "silent")"
-    }
-
-    static func describe(_ reason: AVAudioSession.RouteChangeReason) -> String {
-        switch reason {
-        case .newDeviceAvailable: "newDeviceAvailable"
-        case .oldDeviceUnavailable: "oldDeviceUnavailable"
-        case .categoryChange: "categoryChange"
-        case .override: "override"
-        case .wakeFromSleep: "wakeFromSleep"
-        case .noSuitableRouteForCategory: "noSuitableRouteForCategory"
-        case .routeConfigurationChange: "routeConfigurationChange"
-        default: "unknown(\(reason.rawValue))"
-        }
-    }
-
-    private static let observers: Void = {
-        let center = NotificationCenter.default
-        _ = center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: nil) { note in
-            let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 0
-            let reason = describe(AVAudioSession.RouteChangeReason(rawValue: raw) ?? .unknown)
-            let previous = note.userInfo?[AVAudioSessionRouteChangePreviousRouteKey] as? AVAudioSessionRouteDescription
-            let before = previous.map { "out [\($0.outputs.map(\.portType.rawValue).joined(separator: ","))] in [\($0.inputs.map(\.portType.rawValue).joined(separator: ","))]" } ?? "none"
-            log.notice("route change \(reason, privacy: .public) from \(before, privacy: .public) to: \(describe(AVAudioSession.sharedInstance()), privacy: .public)")
-        }
-        _ = center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: nil) { note in
-            let type = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
-            let reason = note.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt
-            let options = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt
-            log.notice("interruption type \(type ?? 99) reason \(reason ?? 99) options \(options ?? 0)")
-        }
-        // Sent only while this app is in the foreground with an active session: another app's primary audio starting (1) or stopping (0).
-        _ = center.addObserver(forName: AVAudioSession.silenceSecondaryAudioHintNotification, object: nil, queue: nil) { note in
-            let type = note.userInfo?[AVAudioSessionSilenceSecondaryAudioHintTypeKey] as? UInt
-            log.notice("other app's audio \(type == 1 ? "started" : "stopped", privacy: .public)")
-        }
-        _ = center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: nil) { _ in
-            log.error("media services were reset")
-        }
-    }()
-
-    /// Logs the session's route changes, interruptions and media resets for the app's lifetime, so a gap can be lined up with them in Console.
-    static func observeSession() { _ = observers }
-}
-#endif
 
 /// Whether the session is active, known only on the audio queue, where every driver call runs.
 private final class AudioHardware: @unchecked Sendable {
@@ -192,11 +107,9 @@ private final class RecordingClaim: @unchecked Sendable {
         guard owner == nil else { throw HubProtocolError.invalidFrame }
         let claim = RecordingClaim(), activates = !live, hardware = hardware
         owner = .recording; self.claim = claim
-        let pressed = ContinuousClock.now
         queue.async { [weak self] in
             guard !claim.ended else { return }
             claim.started = true
-            TalkAudioTrace.log.notice("Talk start waited \(TalkAudioTrace.milliseconds(since: pressed)) ms for the audio queue")
             do {
                 if activates { try hardware.activate(.recording) }
                 try start()
@@ -214,7 +127,6 @@ private final class RecordingClaim: @unchecked Sendable {
         guard owner == .recording, let claim else { return }
         claim.end()
         self.claim = nil; owner = nil
-        TalkAudioTrace.log.notice("Talk released or cancelled")
         let deactivates = !live, hardware = hardware
         queue.async {
             guard claim.started else { return }
@@ -324,58 +236,27 @@ public protocol TalkCaptureSource: AnyObject, Sendable {
 /// Its engine is created, started and stopped only on the audio queue.
 public final class NativeTalkCaptureSource: TalkCaptureSource, @unchecked Sendable {
     private var engine: AVAudioEngine?
-    private var configurationObserver: (any NSObjectProtocol)?
     public init() {}
     public func start(buffer: TalkPCMBuffer, limitReached: @escaping @MainActor @Sendable () -> Void) throws {
-        let started = ContinuousClock.now
-        let interval = TalkAudioTrace.signposter.beginInterval("microphone start")
-        defer { TalkAudioTrace.signposter.endInterval("microphone start", interval) }
         let engine = AVAudioEngine()
         let input = engine.inputNode
-        let handler = try Self.makeTapHandler(buffer: buffer, limitReached: limitReached, started: started)
+        let handler = try Self.makeTapHandler(buffer: buffer, limitReached: limitReached)
         input.installTap(onBus: 0, bufferSize: 2048, format: nil, block: handler)
         self.engine = engine
-        // A configuration change means the hardware changed under a running microphone, a candidate for a music gap.
-        configurationObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { _ in
-            TalkAudioTrace.log.notice("microphone engine configuration changed")
-        }
         engine.prepare()
         try engine.start()
-        let format = input.inputFormat(forBus: 0)
-        TalkAudioTrace.log.notice("""
-            microphone engine started in \(TalkAudioTrace.milliseconds(since: started)) ms; input \(format.sampleRate) Hz \
-            \(format.channelCount) channels, voice processing \(input.isVoiceProcessingEnabled ? "on" : "off", privacy: .public)
-            """)
     }
     // Core Audio invokes this closure on its render thread, outside the main actor.
-    static func makeTapHandler(buffer: TalkPCMBuffer, limitReached: @escaping @MainActor @Sendable () -> Void,
-                               started: ContinuousClock.Instant = .now) throws -> AVAudioNodeTapBlock {
+    static func makeTapHandler(buffer: TalkPCMBuffer, limitReached: @escaping @MainActor @Sendable () -> Void) throws -> AVAudioNodeTapBlock {
         let sink = try NativePCMConverter { bytes in
             if buffer.append(bytes) { Task { @MainActor in limitReached() } }
         }
-        let first = FirstBufferTrace(started: started)
-        return { pcm, _ in first.mark(); sink.receive(pcm) }
+        return { pcm, _ in sink.receive(pcm) }
     }
     public func stop() {
-        if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
-        configurationObserver = nil
         guard let engine else { return }
         self.engine = nil
-        let started = ContinuousClock.now
         engine.inputNode.removeTap(onBus: 0); engine.stop()
-        TalkAudioTrace.log.notice("microphone engine stopped in \(TalkAudioTrace.milliseconds(since: started)) ms")
-    }
-}
-
-/// Logs once how long after the microphone start the first buffer arrived; the render thread calls it, one call at a time.
-private final class FirstBufferTrace: @unchecked Sendable {
-    private let started: ContinuousClock.Instant
-    private var marked = false
-    init(started: ContinuousClock.Instant) { self.started = started }
-    func mark() {
-        guard !marked else { return }
-        marked = true
-        TalkAudioTrace.log.notice("first microphone buffer \(TalkAudioTrace.milliseconds(since: self.started)) ms after the microphone start")
     }
 }
 

@@ -94,8 +94,8 @@ Restart between rows after changing `.env`; do not run concurrent Hubs against t
 | E5: [20 Wi-Fi + 20 LTE real-provider runs](iphone-latency-e5.md), medians/spread, upload and physical first-audio boundaries. Target median release-to-first-audio ≤2.5 s; a miss requires a compression/streaming decision, not an invented passing number. | Waiting on User |
 | Physical Voice off, interruption and playback completion behavior through the cases above; preserve actual routes and observations. | Waiting on User |
 | ADR 0032 music ducking, -16 LUFS speech level, AirPods A2DP with the iPhone's microphone, and Live mode echo at the new level, using the [music and speech level checks](../../ios/README.md#music-and-speech-level-device-checks). | Waiting on User |
-| ADR 0033 per-use session, iPhone 15 Pro, iOS 26.7.3, route not recorded: the orb no longer freezes and a reply ducks and restores music with no gap. A Talk's press, cancel and release still stop music for a fraction of a second before the duck or the return. | Confirmed on device (commit 2b621d6) |
-| ADR 0033 remaining gap: a press, release and cancel during Live mode, on the speaker and on AirPods, with the music app named, and the `TalkAudio` Console lines (route changes, session before and after each activation and deactivation) for a press, release and cancel outside Live mode, using the matching checks in the same list. | Waiting on User |
+| ADR 0033 per-use session, iPhone 15 Pro, iOS 26.7.3: the orb no longer freezes and a reply ducks and restores music with no gap. A Talk's press, cancel and release still gap music for a fraction of a second; accepted (ADR 0033). | Confirmed on device |
+| ADR 0033 device checks: music ducks on a press and returns on a release and a cancel with no tap in the music app, on the speaker and on AirPods; the orb never freezes; Live mode has no gap on a Talk, per the matching checks in the same list. | Waiting on User |
 
 ## Automated evidence and its limits
 
