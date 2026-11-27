@@ -84,3 +84,11 @@ def test_the_summariser_prompt_asks_for_the_sections_the_hub_checks() -> None:
 
     prompt = (ROOT / "prompts" / "memory.md").read_text()
     assert re.findall(r"^## (.+)$", prompt, flags=re.MULTILINE) == list(SECTIONS)
+
+
+def test_the_orchestrator_reports_blocked_work_with_its_reason_and_an_action() -> None:
+    text = (ROOT / "prompts" / "orchestrator.md").read_text()
+    section = text.split("## Reporting\n", 1)[1].split("\n## ", 1)[0]
+    assert "Blocked work comes with its reason" in section
+    assert "read-only Subagent" in section and "`merge_pr`" in section
+    assert "concrete reason" in section and "one proposed action" in section
